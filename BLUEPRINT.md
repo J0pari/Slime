@@ -9,346 +9,329 @@
 5. **GPU-Native**: 100% device execution, zero CPU synchronization
 6. **DRY Principle**: Single source of truth for each concept
 
-## Complete File Structure
+## Dependency DAG (Strict Hierarchy)
 
 ```
-slime/
-├── __init__.py                    # Public API exports
-│
-├── proto/                         # Protocol definitions (interfaces)
-│   ├── __init__.py
-│   ├── kernel.py                  # Kernel protocol (attention, correlation, rank)
-│   ├── memory.py                  # Memory protocol (store, recall)
-│   └── model.py                   # Model protocols (Organism, Pseudopod, Chemotaxis)
-│
-├── kernels/                       # GPU kernel implementations
-│   ├── __init__.py
-│   ├── utils.py                   # ✓ Validation, grid config, safety
-│   ├── triton_impl.py             # Triton kernels (implements proto.kernel.Kernel)
-│   │   - fused_attention_kernel
-│   │   - correlation_kernel
-│   │   - effective_rank_kernel
-│   └── torch_fallback.py          # CPU/PyTorch fallback (same interface)
-│
-├── memory/                        # Memory and lifecycle systems
-│   ├── __init__.py
-│   ├── archive.py                 # ✓ MAP-Elites behavioral archive
-│   ├── pool.py                    # ✓ Dynamic component pools with apoptosis
-│   └── tubes.py                   # Tube network (temporal memory with decay)
-│
-├── core/                          # Core components
-│   ├── __init__.py
-│   ├── state.py                   # ✓ FlowState dataclass
-│   ├── pseudopod.py               # ✓ Pseudopod implementation
-│   ├── organism.py                # ✓ Main Organism (Plasmodium)
-│   └── chemotaxis.py              # FoodSource (behavioral space navigation)
-│
-├── observability/                 # SRE infrastructure
-│   ├── __init__.py
-│   ├── metrics.py                 # MetricsCollector (latency, throughput, memory)
-│   ├── slo.py                     # SLO definitions and error budgets
-│   └── tracing.py                 # Distributed tracing (span context)
-│
-├── api/                           # External interfaces
-│   ├── __init__.py
-│   ├── torch_compat.py            # ✓ SlimeMoldEncoder (nn.TransformerEncoder API)
-│   └── native.py                  # ✓ SlimeModel (direct API)
-│
-├── training/                      # Training infrastructure
-│   ├── __init__.py
-│   ├── trainer.py                 # Training loop with observability
-│   ├── losses.py                  # Multi-objective losses
-│   └── optimizer.py               # Optimizer factory with metabolic rate
-│
-├── config/                        # Configuration schemas
-│   ├── __init__.py
-│   ├── loader.py                  # YAML config loader with validation
-│   ├── model.yaml                 # Model architecture defaults
-│   ├── training.yaml              # Training hyperparameters
-│   ├── slo.yaml                   # SLO definitions
-│   └── deployment.yaml            # Deployment settings
-│
-├── bench/                         # Benchmarking
-│   ├── __init__.py
-│   ├── transformer.py             # Benchmark vs standard Transformer
-│   ├── datasets.py                # Data loaders (CIFAR10, ImageNet, WikiText)
-│   └── profile.py                 # GPU profiling utilities
-│
-├── tests/                         # Test suite
-│   ├── __init__.py
-│   ├── unit/
-│   │   ├── test_archive.py
-│   │   ├── test_pool.py
-│   │   ├── test_pseudopod.py
-│   │   ├── test_organism.py
-│   │   └── test_kernels.py
-│   ├── integration/
-│   │   ├── test_api.py
-│   │   ├── test_training.py
-│   │   └── test_end_to_end.py
-│   └── slo/
-│       └── test_slo_compliance.py
-│
-└── tools/                         # Utilities
-    ├── __init__.py
-    ├── visualize.py               # Real-time CUDA-GL visualization
-    ├── export.py                  # Model export (ONNX, TorchScript)
-    └── package.py                 # Windows .exe builder
+Layer 0: Protocols (no dependencies)
+    proto/kernel.py
+    proto/memory.py
+    proto/model.py
+    proto/component.py  # NEW: Component lifecycle interface
 
-# Root level files
-├── setup.py                       # Package installation
-├── requirements.txt               # Python dependencies
-├── README.md                      # User documentation
-├── BLUEPRINT.md                   # This file
-├── .gitignore                     # ✓
-└── pyproject.toml                 # Modern Python packaging
+Layer 1: Implementations of protocols (depend only on Layer 0)
+    kernels/utils.py
+    kernels/triton_impl.py → proto.kernel
+    kernels/torch_fallback.py → proto.kernel
+    observability/metrics.py → (no proto, pure collection)
+    observability/slo.py → (no proto, pure validation)
+
+Layer 2: Data structures (depend on Layer 0-1)
+    memory/archive.py → proto.component
+    memory/pool.py → proto.component
+    memory/tubes.py → proto.memory
+    core/state.py → (no dependencies, plain dataclass)
+
+Layer 3: Components (depend on Layer 0-2)
+    core/pseudopod.py → proto.model, proto.kernel, kernels/*, observability/*
+    core/chemotaxis.py → proto.model, memory/archive
+
+Layer 4: Orchestration (depend on Layer 0-3)
+    core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
+
+Layer 5: API (depend on Layer 0-4)
+    api/torch_compat.py → core/organism
+    api/native.py → core/organism
+
+Layer 6: Applications (depend on Layer 0-5)
+    training/*
+    bench/*
+    tools/*
+    config/* → (reads Layer 5)
 ```
 
-## Dependency Graph
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         proto/*                             │
-│          (All interfaces, no dependencies)                  │
-└─────────────────────────────────────────────────────────────┘
-                           ▲
-                           │ implements
-          ┌────────────────┼────────────────┐
-          │                │                │
-┌─────────▼─────────┐ ┌───▼────────┐ ┌────▼─────────┐
-│   kernels/*       │ │  memory/*  │ │ observability│
-│  (GPU primitives) │ │ (Archive,  │ │  (Metrics,   │
-│                   │ │  Pools)    │ │   SLOs)      │
-└─────────┬─────────┘ └────┬───────┘ └──────┬───────┘
-          │                │                │
-          └────────────────┼────────────────┘
-                           │ uses
-                    ┌──────▼────────┐
-                    │    core/*     │
-                    │  (Pseudopod,  │
-                    │   Organism)   │
-                    └──────┬────────┘
-                           │ wraps
-                    ┌──────▼────────┐
-                    │    api/*      │
-                    │ (Public APIs) │
-                    └──────┬────────┘
-                           │ used by
-          ┌────────────────┼────────────────┐
-          │                │                │
-    ┌─────▼──────┐  ┌─────▼─────┐   ┌─────▼─────┐
-    │ training/* │  │  bench/*  │   │  tools/*  │
-    └────────────┘  └───────────┘   └───────────┘
-```
-
-## Interface Contracts
-
-### proto.kernel.Kernel
-```python
-Protocol:
-  - attention(q, k, v, temperature) -> output
-  - correlation(key, value) -> matrix
-  - effective_rank(matrix) -> scalar
-
-Implementations:
-  - kernels.triton_impl.TritonKernel (GPU)
-  - kernels.torch_fallback.TorchKernel (CPU)
-
-Contract:
-  - All tensors must be contiguous
-  - Device must match across inputs
-  - Returns same device/dtype as input
-```
-
-### proto.memory.Memory
-```python
-Protocol:
-  - store(data, weight) -> None
-  - recall() -> Optional[Tensor]
-  - clear() -> None
-  - __len__() -> int
-
-Implementations:
-  - memory.tubes.TubeNetwork (temporal decay)
-
-Contract:
-  - Thread-safe storage
-  - No strong references to external objects
-  - Automatic capacity management
-```
-
-### proto.model.Organism
-```python
-Protocol:
-  - forward(stimulus, state) -> (output, new_state)
-  - reset_state() -> None
-
-Implementations:
-  - core.organism.Organism
-
-Contract:
-  - Stateless forward pass (state passed explicitly)
-  - No side effects except metrics collection
-  - GPU memory managed internally
-```
-
-## Data Flow
+## Corrected Data Flow
 
 ```
 User Input
     │
     ▼
-┌───────────────────────┐
-│  api.SlimeMoldEncoder │
-│  or api.SlimeModel    │
-└──────────┬────────────┘
-           │
-           ▼
-    ┌─────────────┐
-    │  Organism   │◄────────┐
-    └──────┬──────┘         │
-           │                │
-    ┌──────▼──────────┐     │
-    │  Pseudopod Pool │     │
-    │  (Dynamic)      │     │
-    └──────┬──────────┘     │
-           │                │
-    ┌──────▼──────────┐     │
-    │  Kernels        │     │
-    │  (GPU)          │     │
-    └──────┬──────────┘     │
-           │                │
-    ┌──────▼──────────┐     │
-    │  Archive        │─────┘
-    │  (MAP-Elites)   │  bootstraps
-    └─────────────────┘
-           │
-           ▼
-    ┌─────────────┐
-    │ Observability│
-    │ (Metrics)    │
-    └─────────────┘
+┌─────────────────────┐
+│  API Layer          │
+│  (torch_compat,     │
+│   native)           │
+└──────┬──────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│  Organism           │ owns
+│  (Orchestrator)     ├──────┐
+└──────┬──────────────┘      │
+       │                     │
+       │ uses                │
+       ▼                     ▼
+┌─────────────────┐   ┌─────────────┐
+│ Pseudopod Pool  │   │  Archive    │
+│ (Dynamic)       │   │ (MAP-Elites)│
+└──────┬──────────┘   └──────▲──────┘
+       │                     │
+       │ delegates           │
+       ▼                     │ stores
+┌─────────────────┐          │
+│ Pseudopod       │──────────┘
+│ (Component)     │ adds self
+└──────┬──────────┘
+       │
+       │ calls
+       ▼
+┌─────────────────┐
+│ Kernels         │
+│ (GPU compute)   │
+└─────────────────┘
+       │
+       │ metrics collected by
+       ▼
+┌─────────────────┐
+│ Observability   │
+│ (side channel)  │
+└─────────────────┘
 ```
 
-## Critical Invariants
+**Key Fix**: No cycles. Archive doesn't call anything. Observability is passive collector.
 
-### 1. No Circular References
-- Archive stores **immutable snapshots** (dicts)
-- Components **read** from archive, never write to themselves
-- Pools **weakly reference** consumers
+## Protocol Corrections
 
-### 2. GPU Memory Safety
-- All allocations checked before execution
-- OOM triggers graceful degradation (pool culling)
-- Maximum memory budget enforced at organism level
+### proto.component.Component
+```python
+"""NEW: Base component protocol for pool management"""
 
-### 3. Lifecycle Management
-- Every component has `fitness` property
-- Automatic culling below `death_threshold`
-- No component lives forever (bounded lifetime)
+Protocol:
+  - fitness: float (property)
+  - reset() -> None
+  - to_dict() -> dict
+  - from_dict(data: dict) -> Component
 
-### 4. Observability
-- Every forward pass records metrics
-- SLO violations logged immediately
-- Distributed tracing spans all operations
-
-### 5. Determinism
-- Given same seed, same results
-- Archive iteration order stable
-- Pool spawning deterministic
-
-## Implementation Order
-
-### Phase 1: Foundation (CURRENT)
-- [x] Proto definitions
-- [x] Memory (archive, pools)
-- [x] Core (pseudopod, organism, state)
-- [x] API (torch_compat, native)
-- [ ] Kernels (triton_impl)
-- [ ] Memory (tubes)
-- [ ] Core (chemotaxis)
-
-### Phase 2: Training
-- [ ] Observability (metrics, slo, tracing)
-- [ ] Training (trainer, losses, optimizer)
-- [ ] Config (loader, YAML schemas)
-
-### Phase 3: Testing
-- [ ] Unit tests (all components)
-- [ ] Integration tests
-- [ ] SLO compliance tests
-- [ ] Benchmarks vs Transformer
-
-### Phase 4: Packaging
-- [ ] setup.py / pyproject.toml
-- [ ] Tools (visualize, export, package)
-- [ ] Documentation (README, examples)
-- [ ] Windows .exe distribution
-
-## Key Dependencies
-
-### Python Packages
-```
-torch >= 2.0.0
-triton >= 2.1.0
-numpy >= 1.24.0
-pyyaml >= 6.0
-pytest >= 7.4.0
-prometheus-client >= 0.17.0  # Metrics
-opentelemetry-api >= 1.20.0  # Tracing
+Purpose:
+  - Unified interface for ALL pooled components
+  - Archive stores any Component
+  - Pools manage any Component
 ```
 
-### System Requirements
+### proto.memory.Memory
+```python
+"""Temporal memory interface (NOT for pools)"""
+
+Protocol:
+  - store(data: Tensor, weight: float) -> None
+  - recall() -> Optional[Tensor]
+  - clear() -> None
+
+Implementations:
+  - memory.tubes.TubeNetwork (exponential decay)
+
+Purpose:
+  - ONLY for temporal memory with decay
+  - NOT for component lifecycle (that's pool.py)
 ```
-CUDA >= 12.0
-NVIDIA GPU with compute capability >= 7.5
-Windows 10/11 (for .exe packaging)
-Python >= 3.10
+
+### proto.model.Pseudopod
+```python
+"""Sensory probe interface"""
+
+Protocol:
+  - forward(latent, stimulus) -> output
+  - correlation: Tensor (property)
+  - effective_rank() -> Tensor
+  - coherence() -> Tensor
+
+Implementations:
+  - core.pseudopod.Pseudopod
+
+Dependencies:
+  - MUST use proto.kernel.Kernel for all compute
+  - MUST implement proto.component.Component
 ```
 
-## Testing Strategy
+### proto.model.Chemotaxis
+```python
+"""Behavioral space navigator"""
 
-### Unit Tests
-- Each component tested in isolation
-- Mock dependencies via protocols
-- Property-based testing (hypothesis)
+Protocol:
+  - add_source(nutrient, location, concentration) -> None
+  - sample(behavior, metabolic_rate, hunger) -> Optional[Tensor]
+  - clear() -> None
 
-### Integration Tests
-- Full forward/backward passes
-- Archive/pool interaction
-- Multi-GPU scenarios
+Implementations:
+  - core.chemotaxis.Chemotaxis
 
-### SLO Tests
-- Latency percentiles (p95, p99)
-- Memory usage bounds
-- Throughput targets
+Dependencies:
+  - Uses memory.archive for spatial indexing
+  - NO direct component management
+```
 
-### Benchmarks
-- vs nn.Transformer (speed, memory, accuracy)
-- Scaling curves (batch size, seq length)
-- GPU utilization metrics
+### proto.model.Organism
+```python
+"""Top-level orchestrator"""
 
-## Success Metrics
+Protocol:
+  - forward(stimulus, state) -> (output, new_state)
+  - reset_state() -> None
+  - stats() -> dict
 
-### Functional
-- Drop-in replacement for nn.TransformerEncoder ✓
-- Training converges on standard benchmarks
-- Archive coverage > 50% after training
+Implementations:
+  - core.organism.Organism
 
-### Performance
-- p95 latency < 100ms (batch=32, seq=512)
-- GPU memory < 5GB (RTX 3060)
-- Throughput > 1000 samples/sec
+Dependencies:
+  - Owns: Pool[Pseudopod], Archive, Chemotaxis
+  - Uses: Kernels via Pseudopods
+  - Records: Observability metrics
+```
 
-### Quality
-- All tests pass
-- SLO compliance > 99%
-- No memory leaks (long-running tests)
+## File Structure (Corrected)
 
-## Open Questions
+```
+slime/
+├── proto/
+│   ├── __init__.py
+│   ├── component.py        # NEW: Base component interface
+│   ├── kernel.py           # ✓ Kernel compute interface
+│   ├── memory.py           # ✓ Temporal memory interface (tubes only)
+│   └── model.py            # ✓ Model component interfaces
+│
+├── kernels/
+│   ├── __init__.py
+│   ├── utils.py            # ✓ Validation utilities
+│   ├── triton_impl.py      # Triton kernels
+│   └── torch_fallback.py   # PyTorch fallback
+│
+├── observability/
+│   ├── __init__.py
+│   ├── metrics.py          # Passive metrics collector
+│   ├── slo.py              # SLO definitions
+│   └── tracing.py          # Distributed tracing
+│
+├── memory/
+│   ├── __init__.py
+│   ├── archive.py          # ✓ MAP-Elites (stores Component protocol)
+│   ├── pool.py             # ✓ Dynamic pools (manages Component protocol)
+│   └── tubes.py            # TubeNetwork (implements Memory protocol)
+│
+├── core/
+│   ├── __init__.py
+│   ├── state.py            # ✓ FlowState dataclass
+│   ├── pseudopod.py        # ✓ Pseudopod (implements Component + Model.Pseudopod)
+│   ├── chemotaxis.py       # Chemotaxis (implements Model.Chemotaxis)
+│   └── organism.py         # ✓ Organism (implements Model.Organism)
+│
+├── api/
+│   ├── __init__.py
+│   ├── torch_compat.py     # ✓ SlimeMoldEncoder
+│   └── native.py           # ✓ SlimeModel
+│
+├── training/
+│   ├── __init__.py
+│   ├── trainer.py
+│   ├── losses.py
+│   └── optimizer.py
+│
+├── config/
+│   ├── __init__.py
+│   ├── loader.py           # ✓ (partial)
+│   ├── model.yaml          # ✓ (partial)
+│   ├── training.yaml
+│   └── slo.yaml
+│
+├── bench/
+│   ├── __init__.py
+│   ├── datasets.py         # ✓ (partial)
+│   ├── transformer.py
+│   └── profile.py
+│
+├── tests/
+│   ├── __init__.py
+│   ├── unit/
+│   ├── integration/
+│   └── slo/
+│
+└── tools/
+    ├── __init__.py
+    ├── visualize.py
+    ├── export.py
+    └── package.py
+```
 
-1. **Spatial indexing for large pools**: Current O(n) scan, need O(log n) kd-tree?
-2. **Multi-GPU partitioning**: Partition by behavioral space or random?
-3. **Kernel fusion opportunities**: Can we fuse attention+correlation+rank?
-4. **Archive persistence**: Store to disk? How to handle large archives?
-5. **Visualization**: Real-time or post-hoc? 2D projection of behavior space?
+## Critical Invariants (Refined)
+
+### 1. Dependency Direction (DAG Enforcement)
+- Lower layers NEVER import from higher layers
+- Protocols NEVER import implementations
+- Components NEVER import API layer
+- **Violation = compilation error**
+
+### 2. Ownership Hierarchy
+```
+Organism owns:
+  - Pool[Pseudopod]
+  - Archive
+  - Chemotaxis
+
+Pool owns:
+  - List[Component]
+
+Archive owns:
+  - Dict[cell, Elite] where Elite.genome = dict (NO object refs)
+
+NO CYCLES
+```
+
+### 3. Protocol Compliance
+- Every component MUST declare which protocols it implements
+- Archive stores via `Component.to_dict()` (immutable serialization)
+- Pools manage via `Component.fitness` (no type checking at runtime)
+
+### 4. GPU Memory Safety
+- Kernels check allocation before launch
+- Organism enforces total memory budget
+- Pool culling triggered by OOM
+
+### 5. Observability Injection
+- Metrics collector passed to Organism.__init__()
+- All forward passes record to metrics
+- NO global state for metrics
+
+## Implementation Checklist
+
+### MUST FIX NOW:
+- [ ] Add proto/component.py (Component protocol)
+- [ ] Fix memory/archive.py to use Component protocol
+- [ ] Fix memory/pool.py to use Component protocol
+- [ ] Fix core/pseudopod.py to inject Kernel via __init__
+- [ ] Add core/chemotaxis.py
+- [ ] Add memory/tubes.py
+- [ ] Fix observability/* to be injected, not global
+
+### Phase 1 Completion:
+- [ ] kernels/triton_impl.py
+- [ ] kernels/torch_fallback.py
+- [ ] observability/* (all 3 files)
+
+### Phase 2:
+- [ ] training/* (all 3 files)
+- [ ] config/* (complete YAML schemas)
+
+### Phase 3:
+- [ ] tests/unit/* (all components)
+- [ ] tests/integration/*
+- [ ] bench/transformer.py
+
+### Phase 4:
+- [ ] tools/* (all 3 files)
+- [ ] setup.py
+- [ ] README.md
+
+## Open Questions (Refined)
+
+1. **Kernel injection**: Constructor injection or factory pattern?
+2. **Multi-GPU**: Partition archive by behavioral space hash?
+3. **Determinism**: Archive dict ordering via OrderedDict or sort keys?
+4. **Memory limits**: Hard limit or soft limit with culling?
+5. **Metrics injection**: Pass collector to each component or singleton?
