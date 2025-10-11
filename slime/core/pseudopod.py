@@ -5,20 +5,39 @@ import torch.nn as nn
 from typing import Optional
 import logging
 
+from slime.proto.kernel import Kernel
+from slime.proto.component import Component
+
 logger = logging.getLogger(__name__)
 
 
 class Pseudopod(nn.Module):
     """Sensory probe that explores information space.
 
-    Implements proto.model.Pseudopod protocol.
+    Implements:
+    - proto.model.Pseudopod (model interface)
+    - proto.component.Component (lifecycle interface)
+
     Supports serialization for archive storage.
     Tracks fitness for pool lifecycle management.
     """
 
-    def __init__(self, head_dim: int, device: torch.device = None):
+    def __init__(
+        self,
+        head_dim: int,
+        kernel: Kernel,
+        device: Optional[torch.device] = None,
+    ):
+        """Initialize pseudopod.
+
+        Args:
+            head_dim: Dimension of attention head
+            kernel: Injected kernel for GPU compute
+            device: Computation device
+        """
         super().__init__()
         self.head_dim = head_dim
+        self.kernel = kernel  # INJECTED (Decision #1)
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Learnable parameters (evolved via backprop)
@@ -63,15 +82,8 @@ class Pseudopod(nn.Module):
         return output
 
     def _compute_correlation(self, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """Compute normalized correlation matrix"""
-        # Normalize
-        k_norm = k / (torch.norm(k, dim=-1, keepdim=True) + 1e-10)
-        v_norm = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-10)
-
-        # Correlation
-        corr = k_norm @ v_norm.T
-
-        return corr
+        """Compute normalized correlation matrix via injected kernel"""
+        return self.kernel.correlation(k, v)
 
     def _update_fitness(self, attn: torch.Tensor) -> None:
         """Update fitness based on attention pattern.
@@ -93,17 +105,8 @@ class Pseudopod(nn.Module):
         return self._correlation
 
     def effective_rank(self) -> torch.Tensor:
-        """Compute effective rank via entropy of singular values"""
-        s = torch.linalg.svdvals(self.correlation)
-        s = s[s > 1e-6]
-
-        if s.numel() == 0:
-            return torch.tensor(1.0, device=self.device)
-
-        s_norm = s / (s.sum() + 1e-10)
-        entropy = -torch.sum(s_norm * torch.log(s_norm + 1e-10))
-
-        return torch.exp(entropy)
+        """Compute effective rank via injected kernel"""
+        return self.kernel.effective_rank(self.correlation)
 
     def coherence(self) -> torch.Tensor:
         """Measure correlation structure preservation under inversion"""
@@ -136,9 +139,18 @@ class Pseudopod(nn.Module):
         }
 
     @classmethod
-    def from_dict(cls, data: dict, device: torch.device = None) -> 'Pseudopod':
-        """Deserialize from archive"""
-        pod = cls(data['head_dim'], device)
+    def from_dict(cls, data: dict, kernel: Kernel, device: Optional[torch.device] = None) -> 'Pseudopod':
+        """Deserialize from archive.
+
+        Args:
+            data: Serialized state
+            kernel: Injected kernel (required for reconstruction)
+            device: Target device
+
+        Returns:
+            Reconstructed pseudopod
+        """
+        pod = cls(data['head_dim'], kernel, device)
         pod.key_weight.data = torch.tensor(data['key_weight'], device=pod.device)
         pod.value_weight.data = torch.tensor(data['value_weight'], device=pod.device)
         pod.query_weight.data = torch.tensor(data['query_weight'], device=pod.device)
