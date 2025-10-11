@@ -328,10 +328,34 @@ NO CYCLES
 - [ ] setup.py
 - [ ] README.md
 
-## Open Questions (Refined)
+## Architectural Decisions (COMMITTED)
 
-1. **Kernel injection**: Constructor injection or factory pattern?
-2. **Multi-GPU**: Partition archive by behavioral space hash?
-3. **Determinism**: Archive dict ordering via OrderedDict or sort keys?
-4. **Memory limits**: Hard limit or soft limit with culling?
-5. **Metrics injection**: Pass collector to each component or singleton?
+### 1. Kernel injection: Constructor Injection ✓
+**Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
+```python
+Pseudopod.__init__(head_dim, kernel: Kernel, device)
+```
+
+### 2. Multi-GPU: Hash-based partitioning ✓
+**Reasoning (Bitter Lesson):** Hash function scales arbitrarily. No hand-coded spatial assumptions.
+```python
+device_id = hash(behavior_coords) % num_gpus
+```
+
+### 3. Determinism: Sort keys on iteration ✓
+**Reasoning (Architecture):** Spatial structure over temporal accidents. Reproducible science.
+```python
+for key in sorted(archive.keys()):
+```
+
+### 4. Memory limits: Soft limit with graceful degradation ✓
+**Reasoning (SRE + Bitter Lesson):** Adapt to constraints, don't crash. Trade quality for capacity automatically.
+```python
+if memory > budget: pool.cull_worst(fraction=0.2)
+```
+
+### 5. Metrics injection: Dependency injection ✓
+**Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
+```python
+Organism.__init__(metrics_collector: Optional[MetricsCollector])
+```
