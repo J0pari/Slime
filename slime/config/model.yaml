@@ -1,0 +1,22 @@
+# Model architecture configuration
+
+model:
+  sensory_dim: 512
+  latent_dim: 512
+  head_dim: 64
+
+  pool:
+    min_size: 4
+    max_size: 32
+    birth_threshold: 0.8
+    death_threshold: 0.1
+    cull_interval: 100
+
+  archive:
+    dimensions:
+      - rank
+      - coherence
+    bounds:
+      - [0.0, 1.0]
+      - [0.0, 1.0]
+    resolution: 50
