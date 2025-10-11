@@ -1,25 +1,14 @@
 """MAP-Elites behavioral archive for quality-diversity optimization"""
 
 import torch
-from typing import Dict, Tuple, Optional, List, Protocol
+from typing import Dict, Tuple, Optional, List
 from dataclasses import dataclass
 import weakref
 import logging
 
+from slime.proto.component import Component
+
 logger = logging.getLogger(__name__)
-
-
-class Component(Protocol):
-    """Protocol for archived components"""
-
-    def to_dict(self) -> dict:
-        """Serialize to dictionary"""
-        ...
-
-    @classmethod
-    def from_dict(cls, data: dict):
-        """Deserialize from dictionary"""
-        ...
 
 
 @dataclass
