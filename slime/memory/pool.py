@@ -1,25 +1,14 @@
 """Dynamic component pools with lifecycle management"""
 
 import torch
-from typing import List, Optional, Callable, Tuple, Protocol
+from typing import List, Optional, Callable, Tuple
 from dataclasses import dataclass
 import logging
 import weakref
 
+from slime.proto.component import Component
+
 logger = logging.getLogger(__name__)
-
-
-class PooledComponent(Protocol):
-    """Protocol for components managed by pool"""
-
-    @property
-    def fitness(self) -> float:
-        """Current fitness metric"""
-        ...
-
-    def reset(self) -> None:
-        """Reset component state"""
-        ...
 
 
 @dataclass
@@ -48,7 +37,7 @@ class DynamicPool:
 
     def __init__(
         self,
-        component_factory: Callable[[], PooledComponent],
+        component_factory: Callable[[], Component],
         config: PoolConfig,
         archive: Optional['BehavioralArchive'] = None,
     ):
@@ -64,7 +53,7 @@ class DynamicPool:
         self.archive = archive
 
         # Active components
-        self._components: List[PooledComponent] = []
+        self._components: List[Component] = []
 
         # Initialize to min_size
         for _ in range(config.min_size):
@@ -81,7 +70,7 @@ class DynamicPool:
     def _spawn_component(
         self,
         behavior_location: Optional[Tuple[float, ...]] = None,
-    ) -> PooledComponent:
+    ) -> Component:
         """Spawn new component, optionally bootstrapping from archive"""
 
         if self.archive is not None and behavior_location is not None:
@@ -97,7 +86,7 @@ class DynamicPool:
         # Create from scratch
         return self.factory()
 
-    def get_all(self) -> List[PooledComponent]:
+    def get_all(self) -> List[Component]:
         """Get all active components"""
         return list(self._components)
 
@@ -105,7 +94,7 @@ class DynamicPool:
         self,
         behavior_location: Tuple[float, ...],
         max_count: Optional[int] = None,
-    ) -> List[PooledComponent]:
+    ) -> List[Component]:
         """Get components relevant to behavioral location.
 
         For now, returns all components. Future: spatial indexing.
