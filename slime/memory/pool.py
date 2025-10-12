@@ -4,6 +4,14 @@ from dataclasses import dataclass
 import logging
 import weakref
 from slime.proto.component import Component
+from slime.core.comonad import (
+    SpatialContext,
+    behavioral_distance,
+    extract_relative_fitness,
+    extract_behavioral_divergence,
+    extract_gradient_magnitude_rank,
+    extract_attention_coherence
+)
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -106,3 +114,27 @@ class DynamicPool:
         self._step = 0
         self._total_spawned = 0
         self._total_culled = 0
+
+    def extract_component_context(self, component: Component) -> SpatialContext:
+        neighborhood = [c for c in self._components if c is not component]
+        return SpatialContext(
+            focus=component,
+            neighborhood=neighborhood,
+            distance_fn=behavioral_distance
+        )
+
+    def compute_contextual_fitness(self, component: Component) -> float:
+        ctx = self.extract_component_context(component)
+        return extract_relative_fitness(ctx)
+
+    def compute_behavioral_divergence(self, component: Component) -> torch.Tensor:
+        ctx = self.extract_component_context(component)
+        return extract_behavioral_divergence(ctx)
+
+    def compute_gradient_rank(self, component: Component) -> float:
+        ctx = self.extract_component_context(component)
+        return extract_gradient_magnitude_rank(ctx)
+
+    def compute_attention_coherence(self, component: Component) -> float:
+        ctx = self.extract_component_context(component)
+        return extract_attention_coherence(ctx)

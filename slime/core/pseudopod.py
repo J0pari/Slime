@@ -8,16 +8,19 @@ logger = logging.getLogger(__name__)
 
 class Pseudopod(nn.Module):
 
-    def __init__(self, head_dim: int, kernel: Kernel, device: Optional[torch.device]=None):
+    def __init__(self, head_dim: int, kernel: Kernel, device: Optional[torch.device]=None, component_id: int = 0):
         super().__init__()
         self.head_dim = head_dim
         self.kernel = kernel
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.component_id = component_id
         self.key_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
         self.value_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
         self.query_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
         self._correlation: Optional[torch.Tensor] = None
         self._fitness = 0.0
+        self.last_behavior: Optional[torch.Tensor] = None
+        self._last_attention_pattern: Optional[torch.Tensor] = None
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
         k = latent @ self.key_weight
@@ -27,6 +30,10 @@ class Pseudopod(nn.Module):
         scores = q @ k.T / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
         attn = torch.softmax(scores, dim=-1)
         output = attn @ v
+
+        self._last_attention_pattern = attn.detach()
+        self.last_behavior = self.get_behavioral_coordinates(attn, output)
+
         self._update_fitness(attn)
         return output
 
