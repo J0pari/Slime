@@ -124,20 +124,23 @@ class Trainer:
             if batch_idx % self.config.log_interval == 0:
                 logger.info(f"Epoch {epoch} Step {batch_idx}: loss={step_result['loss']:.4f} phase={step_result['phase']}")
 
-            # Checkpoint every 5 steps
-            if self.checkpoint_results and batch_idx % 5 == 0:
+            # Checkpoint every 50 steps - minimal data only
+            if self.checkpoint_results and batch_idx % 50 == 0:
+                # Only save essential metrics, not full stats hierarchy
+                organism_stats = self.model.encoder.organism.get_stats()
                 step_checkpoint = {
+                    'step': self._step,
                     'epoch': epoch,
-                    'step': batch_idx,
-                    'global_step': self._step,
                     'loss': step_result['loss'],
                     'phase': step_result['phase'],
-                    'stats': self.get_stats()
+                    'pool_size': organism_stats['pool_stats']['size'],
+                    'archive_size': organism_stats['archive_size'],
+                    'avg_fitness': organism_stats['pool_stats'].get('avg_fitness', 0.0),
                 }
                 self.results_checkpoint.checkpoint_test_result(
                     f"step_{self._step:06d}",
                     step_checkpoint,
-                    message=f"Step {self._step} checkpoint"
+                    message=f"Step {self._step}"
                 )
         return {'avg_loss': sum(epoch_losses) / len(epoch_losses), 'min_loss': min(epoch_losses), 'max_loss': max(epoch_losses)}
 

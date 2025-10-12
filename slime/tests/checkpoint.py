@@ -10,7 +10,7 @@ import difflib
 from datetime import datetime, timezone
 
 class TestResultCheckpointSystem:
-    def __init__(self, repo_dir: Path = Path.cwd(), checkpoint_type: str = 'test'):
+    def __init__(self, repo_dir: Path = Path.cwd(), checkpoint_type: str = 'test', run_name: Optional[str] = None):
         self.repo_dir = repo_dir
         self.checkpoint_type = checkpoint_type
         if checkpoint_type == 'test':
@@ -19,18 +19,26 @@ class TestResultCheckpointSystem:
             self.checkpoint_dir = repo_dir / ".results_checkpoints"
         else:
             self.checkpoint_dir = repo_dir / f".{checkpoint_type}_checkpoints"
+
+        # Human-readable run organization
+        if run_name is None:
+            run_name = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        self.run_name = run_name
+        self.run_dir = self.checkpoint_dir / "runs" / run_name
+
         self.objects_dir = self.checkpoint_dir / "objects"
-        self.refs_dir = self.checkpoint_dir / "refs"
-        self.logs_dir = self.checkpoint_dir / "logs"
-        self.head_file = self.checkpoint_dir / "HEAD"
-        self.index_file = self.checkpoint_dir / "index.json"
+        self.refs_dir = self.run_dir / "refs"  # Per-run refs
+        self.logs_dir = self.run_dir / "logs"  # Per-run logs
+        self.head_file = self.run_dir / "HEAD"
+        self.index_file = self.run_dir / "index.json"
         self._init_repo()
 
     def _init_repo(self):
         self.checkpoint_dir.mkdir(exist_ok=True)
-        self.objects_dir.mkdir(exist_ok=True)
-        self.refs_dir.mkdir(exist_ok=True)
-        self.logs_dir.mkdir(exist_ok=True)
+        self.objects_dir.mkdir(exist_ok=True)  # Shared objects across all runs
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.refs_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.head_file.exists():
             self.head_file.write_text("ref: refs/heads/main\n")
