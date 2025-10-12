@@ -5,6 +5,7 @@ import logging
 import weakref
 from slime.proto.component import Component
 from slime.core.stencil import SpatialStencil
+from slime.config.dimensions import ArchitectureConfig
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -18,7 +19,7 @@ class PoolConfig:
 
 class DynamicPool:
 
-    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None, device: Optional[torch.device]=None):
+    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, arch_config: ArchitectureConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None, device: Optional[torch.device]=None):
         self.factory = component_factory
         self.bootstrap_factory = bootstrap_factory if bootstrap_factory is not None else component_factory
         self.config = config
@@ -31,7 +32,7 @@ class DynamicPool:
         self._total_spawned = config.min_size
         self._total_culled = 0
         self._consumers = weakref.WeakSet()
-        self.stencil = SpatialStencil(k_neighbors=5, distance_metric='euclidean', device=self.device)
+        self.stencil = SpatialStencil(k_neighbors=arch_config.k_neighbors, distance_metric='euclidean', device=self.device)
 
     def _spawn_component(self, behavior_location: Optional[Tuple[float, ...]]=None) -> Component:
         if self.archive is not None and behavior_location is not None:
@@ -50,7 +51,7 @@ class DynamicPool:
         else:
             components_with_dist = []
             for comp in self._components:
-                if hasattr(comp, 'last_behavior'):
+                if hasattr(comp, 'last_behavior') and comp.last_behavior is not None:
                     dist = sum(((a - b) ** 2 for a, b in zip(comp.last_behavior, behavior_location)))
                     components_with_dist.append((dist, comp))
                 else:

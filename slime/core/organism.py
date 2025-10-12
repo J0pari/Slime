@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 import logging
+import numpy as np
 from slime.core.pseudopod import Pseudopod
 from slime.core.state import FlowState
 from slime.core.chemotaxis import Chemotaxis
@@ -10,6 +11,7 @@ from slime.memory.pool import DynamicPool, PoolConfig
 from slime.proto.kernel import Kernel
 from slime.kernels.torch_fallback import TorchKernel
 from slime.observability.metrics import MetricsCollector
+from slime.config.dimensions import ArchitectureConfig
 import os
 from pathlib import Path
 try:
@@ -25,11 +27,12 @@ logger = logging.getLogger(__name__)
 
 class Organism(nn.Module):
 
-    def __init__(self, sensory_dim: int, latent_dim: int, head_dim: int, device: Optional[torch.device]=None, kernel: Optional[Kernel]=None, pool_config: Optional[PoolConfig]=None, metrics_collector: Optional[MetricsCollector]=None):
+    def __init__(self, sensory_dim: int, latent_dim: int, head_dim: int, arch_config: ArchitectureConfig, device: Optional[torch.device]=None, kernel: Optional[Kernel]=None, pool_config: Optional[PoolConfig]=None, metrics_collector: Optional[MetricsCollector]=None):
         super().__init__()
         self.sensory_dim = sensory_dim
         self.latent_dim = latent_dim
         self.head_dim = head_dim
+        self.arch_config = arch_config
         self.device = device or torch.device('cuda')
         if kernel is not None:
             self.kernel = kernel
@@ -37,7 +40,7 @@ class Organism(nn.Module):
             self.kernel = TritonKernel(self.device)
             logger.info('Using Triton GPU kernels for maximum performance')
         else:
-            self.kernel = TorchKernel(self.device)
+            self.kernel = TorchKernel(arch_config.numerical, self.device)
             logger.warning('Triton not available, using PyTorch fallback')
         self.metrics = metrics_collector
         self.encode = nn.Sequential(nn.Linear(sensory_dim, latent_dim), nn.LayerNorm(latent_dim), nn.Tanh()).to(self.device)
@@ -45,49 +48,56 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
-        self.archive = CVTArchive(num_raw_metrics=15, variance_threshold=0.85, min_dims=3, max_dims=7, num_centroids=100, low_rank_k=32, delta_rank=8, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel_selection='auto', gc_interval=100, seed=42)
+        self.archive = CVTArchive(config=arch_config, variance_threshold=0.85, device=self.device, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel_selection='auto', gc_interval=100, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
         if pool_config is None:
             pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)
-        self.pseudopod_pool = DynamicPool(component_factory=lambda: Pseudopod(head_dim, self.kernel, self.device), config=pool_config, bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, self.device), archive=self.archive)
+        self.pseudopod_pool = DynamicPool(component_factory=lambda: Pseudopod(head_dim, self.kernel, arch_config.fitness, arch_config.numerical, self.device, latent_dim=head_dim, stimulus_dim=head_dim, num_heads=arch_config.dimensions.num_heads), config=pool_config, arch_config=arch_config, bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, arch_config.fitness, arch_config.numerical, self.device), archive=self.archive, device=self.device)
         self._generation = 0
 
     def forward(self, stimulus: torch.Tensor, state: Optional[FlowState]=None) -> Tuple[torch.Tensor, FlowState]:
         if self.metrics:
             self.metrics.start_step()
         batch_size = stimulus.shape[0]
-        body = self.encode(stimulus)
+        body = self.encode(stimulus).unsqueeze(1)
         if state is not None:
             body = 0.7 * body + 0.3 * state.body
-        rank = torch.sigmoid(self.predict_rank(body.mean(0, keepdim=True))).item()
-        coherence = torch.sigmoid(self.predict_coherence(body.mean(0, keepdim=True))).item()
+        body_for_prediction = body.mean(dim=(0, 1))
+        rank = torch.sigmoid(self.predict_rank(body_for_prediction.unsqueeze(0))).squeeze().item()
+        coherence = torch.sigmoid(self.predict_coherence(body_for_prediction.unsqueeze(0))).squeeze().item()
         behavior = (rank, coherence)
         pseudopods = self.pseudopod_pool.get_at(behavior, max_count=8)
         if not pseudopods:
             logger.warning('Empty pseudopod pool, spawning emergency pseudopod')
-            pseudopods = [Pseudopod(self.head_dim, self.kernel, self.device)]
+            pseudopods = [Pseudopod(self.head_dim, self.kernel, self.arch_config.fitness, self.arch_config.numerical, self.device, latent_dim=self.head_dim, stimulus_dim=self.head_dim, num_heads=self.arch_config.dimensions.num_heads)]
         outputs = []
         max_rank = torch.tensor(0.0, device=self.device)
         min_coherence = torch.tensor(1.0, device=self.device)
         for pod in pseudopods:
-            pod_input = body[:, :self.head_dim]
-            stim_input = stimulus[:, :self.head_dim]
+            pod_input = body[:, :, :self.head_dim]
+            stim_input = stimulus[:, :self.head_dim].unsqueeze(1)
             output = pod(pod_input, stim_input)
             outputs.append(output)
-            pod_rank = pod.effective_rank()
-            pod_coherence = pod.coherence()
+            pod_rank = pod.effective_rank().mean()
+            pod_coherence = pod.coherence().mean()
             max_rank = torch.maximum(max_rank, pod_rank)
             min_coherence = torch.minimum(min_coherence, pod_coherence)
         merged = torch.stack(outputs).mean(0)
-        merged_latent = self.project_heads(merged)
+        merged_sum_heads = merged.sum(dim=1)
+        merged_latent = self.project_heads(merged_sum_heads)
         fitness = (max_rank * min_coherence).item()
 
         if not self.archive._discovered:
-            raw_metrics = torch.cat([max_rank.unsqueeze(0), min_coherence.unsqueeze(0),
-                                     body.mean(0)[:13]]).detach().cpu().numpy().astype(np.float32)
+            num_body_features = self.arch_config.behavioral_space.num_raw_metrics - 2
+            body_features = body.mean(0)[:, :num_body_features]
+            max_rank_expanded = max_rank.unsqueeze(0).expand(body_features.shape[0], 1)
+            min_coherence_expanded = min_coherence.unsqueeze(0).expand(body_features.shape[0], 1)
+            raw_metrics_per_seq = torch.cat([max_rank_expanded, min_coherence_expanded, body_features], dim=1)
+            raw_metrics = raw_metrics_per_seq.mean(0).detach().cpu().numpy().astype(np.float32)
             self.archive.add_raw_metrics(raw_metrics)
-            if len(self.archive._raw_metrics_samples) >= 150:
-                logger.info("Warmup complete, discovering behavioral dimensions...")
+            warmup_samples = self.arch_config.behavioral_space.num_centroids * 3
+            if len(self.archive._raw_metrics_samples) >= warmup_samples:
+                logger.info(f"Warmup complete ({warmup_samples} samples), discovering behavioral dimensions...")
                 self.archive.discover_dimensions()
         else:
             for pod in pseudopods:

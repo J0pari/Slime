@@ -227,3 +227,38 @@ def create_visualization_suite(output_dir: Path, archive_data: Optional[Dict]=No
         if 'correlation' in architecture_data:
             viz.plot_correlation_matrix(architecture_data['correlation'], save_path=output_dir / 'correlation_matrix.png')
     logger.info(f'Visualization suite saved to {output_dir}')
+
+def visualize_behavioral_space(archive, save_path: Optional[Path]=None):
+    """Convenience function to visualize archive behavioral space."""
+    if not HAS_MATPLOTLIB:
+        logger.warning("matplotlib not available - skipping visualization")
+        return
+
+    # Create simple 2D projection of behavioral space
+    viz = BehavioralSpaceVisualizer()
+
+    # Get archive data - if CVT archive, extract elite positions and fitness
+    if hasattr(archive, 'get_all_elites'):
+        elites = archive.get_all_elites()
+        if not elites:
+            logger.warning("Archive is empty - no visualization")
+            return
+
+        # Create simple grid visualization
+        grid_size = (50, 50)
+        archive_grid = np.zeros(grid_size)
+        fitness_grid = np.zeros(grid_size)
+
+        for elite_data in elites:
+            if 'behavior' in elite_data and 'fitness' in elite_data:
+                behavior = elite_data['behavior']
+                # Map to grid (simple 2D projection of first 2 dims)
+                if len(behavior) >= 2:
+                    x = int(np.clip(behavior[0] * grid_size[0], 0, grid_size[0]-1))
+                    y = int(np.clip(behavior[1] * grid_size[1], 0, grid_size[1]-1))
+                    archive_grid[x, y] = 1
+                    fitness_grid[x, y] = elite_data['fitness']
+
+        viz.plot_archive_heatmap(archive_grid, fitness_grid, save_path=save_path)
+    else:
+        logger.warning(f"Archive type {type(archive)} not supported for visualization")

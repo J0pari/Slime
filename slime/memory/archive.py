@@ -8,6 +8,7 @@ import json
 import logging
 import numpy as np
 from scipy.spatial import distance
+from slime.config.dimensions import ArchitectureConfig
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -38,14 +39,14 @@ class Elite:
 
 class CVTArchive:
 
-    def __init__(self, num_raw_metrics: int=15, variance_threshold: float=0.85, min_dims: int=3, max_dims: int=7, num_centroids: int=1000, low_rank_k: int=64, delta_rank: int=8, device: torch.device=None, kmo_threshold: float=0.6, reconstruction_error_threshold: float=0.5, kernel_selection: str='auto', gc_interval: int=100, seed: int=42):
-        self.num_raw_metrics = num_raw_metrics
+    def __init__(self, config: ArchitectureConfig, variance_threshold: float=0.85, device: torch.device=None, kmo_threshold: float=0.6, reconstruction_error_threshold: float=0.5, kernel_selection: str='auto', gc_interval: int=100, seed: int=42):
+        self.num_raw_metrics = config.behavioral_space.num_raw_metrics
         self.variance_threshold = variance_threshold
-        self.min_dims = min_dims
-        self.max_dims = max_dims
-        self.num_centroids = num_centroids
-        self.low_rank_k = low_rank_k
-        self.delta_rank = delta_rank
+        self.min_dims = config.behavioral_space.min_dims
+        self.max_dims = config.behavioral_space.max_dims
+        self.num_centroids = config.behavioral_space.num_centroids
+        self.low_rank_k = config.compression.low_rank_k
+        self.delta_rank = config.compression.delta_rank
         self.device = device or torch.device('cuda')
         self.kmo_threshold = kmo_threshold
         self.reconstruction_error_threshold = reconstruction_error_threshold

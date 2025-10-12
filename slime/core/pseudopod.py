@@ -4,35 +4,51 @@ from typing import Optional
 import logging
 from slime.proto.kernel import Kernel
 from slime.proto.component import Component
+from slime.config.dimensions import FitnessConfig, NumericalConfig
 logger = logging.getLogger(__name__)
 
 class Pseudopod(nn.Module):
 
-    def __init__(self, head_dim: int, kernel: Kernel, device: Optional[torch.device]=None, component_id: int=0):
+    def __init__(self, head_dim: int, kernel: Kernel, fitness_config: FitnessConfig, numerical_config: NumericalConfig, device: Optional[torch.device]=None, component_id: int=0, latent_dim: int=None, stimulus_dim: int=None, num_heads: int=1):
         super().__init__()
         self.head_dim = head_dim
+        self.num_heads = num_heads
         self.kernel = kernel
+        self.fitness_config = fitness_config
+        self.numerical_config = numerical_config
         self.device = device or torch.device('cuda')
         self.component_id = component_id
-        self.key_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
-        self.value_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
-        self.query_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
+        self.latent_dim = latent_dim if latent_dim is not None else head_dim
+        self.stimulus_dim = stimulus_dim if stimulus_dim is not None else head_dim
+        self.input_dim = self.latent_dim + self.stimulus_dim
+        self.key_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
+        self.value_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
+        self.query_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
+        self.output_proj = nn.Parameter(torch.randn(self.num_heads, head_dim, head_dim, device=self.device))
         self._correlation: Optional[torch.Tensor] = None
         self._fitness = 0.0
         self.last_behavior: Optional[torch.Tensor] = None
         self._last_attention_pattern: Optional[torch.Tensor] = None
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
-        k = latent @ self.key_weight
-        v = latent @ self.value_weight
-        q = stimulus @ self.query_weight
+        x = torch.cat([latent, stimulus], dim=-1)
+        batch_size, seq_len, input_dim = x.shape
+        x_expanded = x.unsqueeze(1).expand(batch_size, self.num_heads, seq_len, input_dim)
+        k = torch.einsum('bhsi,hid->bhsd', x_expanded, self.key_weight)
+        v = torch.einsum('bhsi,hid->bhsd', x_expanded, self.value_weight)
+        q = torch.einsum('bhsi,hid->bhsd', x_expanded, self.query_weight)
         self._correlation = self._compute_correlation(k, v)
-        scores = q @ k.T / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
+        scores = torch.einsum('bhqd,bhkd->bhqk', q, k) / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32, device=x.device))
         attn = torch.softmax(scores, dim=-1)
-        output = attn @ v
+        output = torch.einsum('bhqk,bhvd->bhqd', attn, v)
+        output = torch.einsum('bhqd,hdo->bhqo', output, self.output_proj)
         self._last_attention_pattern = attn.detach()
         self.last_behavior = self.get_behavioral_coordinates(attn, output)
-        self._update_fitness(attn)
+        attention_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean()
+        output_magnitude = torch.norm(output) / torch.sqrt(torch.tensor(output.numel(), dtype=torch.float32, device=output.device))
+        fitness_signal = (self.fitness_config.entropy_weight * attention_entropy +
+                         self.fitness_config.magnitude_weight * output_magnitude)
+        self._fitness = self.fitness_config.ema_decay * self._fitness + (1.0 - self.fitness_config.ema_decay) * fitness_signal.item()
         return output
 
     def _compute_correlation(self, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -127,13 +143,14 @@ class Pseudopod(nn.Module):
         self._fitness = 0.0
 
     def to_dict(self) -> dict:
-        return {'head_dim': self.head_dim, 'key_weight': self.key_weight.detach().cpu().numpy().tolist(), 'value_weight': self.value_weight.detach().cpu().numpy().tolist(), 'query_weight': self.query_weight.detach().cpu().numpy().tolist(), 'fitness': self._fitness}
+        return {'head_dim': self.head_dim, 'num_heads': self.num_heads, 'key_weight': self.key_weight.detach().cpu().numpy().tolist(), 'value_weight': self.value_weight.detach().cpu().numpy().tolist(), 'query_weight': self.query_weight.detach().cpu().numpy().tolist(), 'output_proj': self.output_proj.detach().cpu().numpy().tolist(), 'fitness': self._fitness}
 
     @classmethod
-    def from_dict(cls, data: dict, kernel: Kernel, device: Optional[torch.device]=None) -> 'Pseudopod':
-        pod = cls(data['head_dim'], kernel, device)
+    def from_dict(cls, data: dict, kernel: Kernel, fitness_config: FitnessConfig, numerical_config: NumericalConfig, device: Optional[torch.device]=None) -> 'Pseudopod':
+        pod = cls(data['head_dim'], kernel, fitness_config, numerical_config, device, num_heads=data['num_heads'])
         pod.key_weight.data = torch.tensor(data['key_weight'], device=pod.device)
         pod.value_weight.data = torch.tensor(data['value_weight'], device=pod.device)
         pod.query_weight.data = torch.tensor(data['query_weight'], device=pod.device)
+        pod.output_proj.data = torch.tensor(data['output_proj'], device=pod.device)
         pod._fitness = data['fitness']
         return pod

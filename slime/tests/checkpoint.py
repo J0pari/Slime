@@ -10,9 +10,15 @@ import difflib
 from datetime import datetime, timezone
 
 class TestResultCheckpointSystem:
-    def __init__(self, repo_dir: Path = Path.cwd()):
+    def __init__(self, repo_dir: Path = Path.cwd(), checkpoint_type: str = 'test'):
         self.repo_dir = repo_dir
-        self.checkpoint_dir = repo_dir / ".test_checkpoints"
+        self.checkpoint_type = checkpoint_type
+        if checkpoint_type == 'test':
+            self.checkpoint_dir = repo_dir / ".test_checkpoints"
+        elif checkpoint_type == 'results':
+            self.checkpoint_dir = repo_dir / ".results_checkpoints"
+        else:
+            self.checkpoint_dir = repo_dir / f".{checkpoint_type}_checkpoints"
         self.objects_dir = self.checkpoint_dir / "objects"
         self.refs_dir = self.checkpoint_dir / "refs"
         self.logs_dir = self.checkpoint_dir / "logs"

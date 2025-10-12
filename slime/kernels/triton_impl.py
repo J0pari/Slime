@@ -116,23 +116,46 @@ class TritonKernel(Kernel):
         return output
 
     def correlation(self, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        B, N, D = key.shape
-        assert key.is_cuda and value.is_cuda
-        corr = torch.empty(B, N, N, device=self.device, dtype=key.dtype)
-        BLOCK_SIZE = 32
-        grid = (B, triton.cdiv(N, BLOCK_SIZE), triton.cdiv(N, BLOCK_SIZE))
-        correlation_kernel[grid](key, value, corr, key.stride(0), key.stride(1), key.stride(2), value.stride(0), value.stride(1), value.stride(2), corr.stride(0), corr.stride(1), corr.stride(2), B, N, BLOCK_SIZE=BLOCK_SIZE, D=D)
-        return corr
+        if key.ndim == 4:
+            B, H, N, D = key.shape
+            assert key.is_cuda and value.is_cuda
+            corr = torch.empty(B, H, N, N, device=self.device, dtype=key.dtype)
+            BLOCK_SIZE = 32
+            key_reshaped = key.reshape(B * H, N, D)
+            value_reshaped = value.reshape(B * H, N, D)
+            corr_reshaped = torch.empty(B * H, N, N, device=self.device, dtype=key.dtype)
+            grid = (B * H, triton.cdiv(N, BLOCK_SIZE), triton.cdiv(N, BLOCK_SIZE))
+            correlation_kernel[grid](key_reshaped, value_reshaped, corr_reshaped, key_reshaped.stride(0), key_reshaped.stride(1), key_reshaped.stride(2), value_reshaped.stride(0), value_reshaped.stride(1), value_reshaped.stride(2), corr_reshaped.stride(0), corr_reshaped.stride(1), corr_reshaped.stride(2), B * H, N, BLOCK_SIZE=BLOCK_SIZE, D=D)
+            return corr_reshaped.reshape(B, H, N, N)
+        else:
+            B, N, D = key.shape
+            assert key.is_cuda and value.is_cuda
+            corr = torch.empty(B, N, N, device=self.device, dtype=key.dtype)
+            BLOCK_SIZE = 32
+            grid = (B, triton.cdiv(N, BLOCK_SIZE), triton.cdiv(N, BLOCK_SIZE))
+            correlation_kernel[grid](key, value, corr, key.stride(0), key.stride(1), key.stride(2), value.stride(0), value.stride(1), value.stride(2), corr.stride(0), corr.stride(1), corr.stride(2), B, N, BLOCK_SIZE=BLOCK_SIZE, D=D)
+            return corr
 
     def effective_rank(self, matrix: torch.Tensor) -> torch.Tensor:
-        B, N, _ = matrix.shape
-        assert matrix.is_cuda
-        assert matrix.shape[1] == matrix.shape[2]
-        rank = torch.empty(B, device=self.device, dtype=torch.float32)
-        BLOCK_SIZE = 128
-        grid = (B,)
-        effective_rank_kernel[grid](matrix, rank, matrix.stride(0), matrix.stride(1), matrix.stride(2), B, N, BLOCK_SIZE=BLOCK_SIZE)
-        return rank
+        if matrix.ndim == 4:
+            B, H, N, _ = matrix.shape
+            assert matrix.is_cuda
+            assert matrix.shape[2] == matrix.shape[3]
+            matrix_reshaped = matrix.reshape(B * H, N, N)
+            rank = torch.empty(B * H, device=self.device, dtype=torch.float32)
+            BLOCK_SIZE = 128
+            grid = (B * H,)
+            effective_rank_kernel[grid](matrix_reshaped, rank, matrix_reshaped.stride(0), matrix_reshaped.stride(1), matrix_reshaped.stride(2), B * H, N, BLOCK_SIZE=BLOCK_SIZE)
+            return rank.reshape(B, H).mean(dim=1)
+        else:
+            B, N, _ = matrix.shape
+            assert matrix.is_cuda
+            assert matrix.shape[1] == matrix.shape[2]
+            rank = torch.empty(B, device=self.device, dtype=torch.float32)
+            BLOCK_SIZE = 128
+            grid = (B,)
+            effective_rank_kernel[grid](matrix, rank, matrix.stride(0), matrix.stride(1), matrix.stride(2), B, N, BLOCK_SIZE=BLOCK_SIZE)
+            return rank
 
     def sparse_top_k(self, scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
         B, N = scores.shape

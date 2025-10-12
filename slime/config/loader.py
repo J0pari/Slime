@@ -28,17 +28,8 @@ class ModelConfig:
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
 
 @dataclass
-class TrainingConfig:
-    batch_size: int = 32
-    learning_rate: float = 0.0001
-    max_epochs: int = 100
-    gradient_clip: float = 1.0
-    checkpoint_interval: int = 1000
-
-@dataclass
 class ConfigSchema:
     model: ModelConfig = field(default_factory=ModelConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
 
 def load_config(config_path: Path) -> ConfigSchema:
     if not config_path.exists():

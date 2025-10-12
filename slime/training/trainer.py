@@ -10,11 +10,15 @@ from slime.training.lifecycle import LifecycleManager, LifecycleConfig
 from slime.training.losses import MultiObjectiveLoss, LossWeights
 from slime.training.fitness import FitnessComputer
 from slime.observability.metrics import MetricsCollector
+from slime.tests.checkpoint import TestResultCheckpointSystem
+from pathlib import Path
 logger = logging.getLogger(__name__)
 
 @dataclass
 class TrainingConfig:
+    # Training loop params
     num_epochs: int = 100
+    batch_size: int = 32
     device: str = 'cuda'
     gradient_clip_norm: float = 1.0
     log_interval: int = 10
@@ -22,10 +26,26 @@ class TrainingConfig:
     checkpoint_interval: int = 1000
     warmup_steps: int = 1000
     gentle_steps: int = 5000
+    # Optimizer params
+    learning_rate: float = 0.0001
+    weight_decay: float = 0.01
+    # Loss weights
+    reconstruction_weight: float = 1.0
+    rank_regularization_weight: float = 0.01
+    coherence_regularization_weight: float = 0.01
+    diversity_weight: float = 0.1
+    archive_coverage_weight: float = 0.05
+    fitness_variance_weight: float = 0.05
+    # Lifecycle config
+    max_pool_size: int = 64
+    max_archive_size: int = 1000
+    max_loss_ratio: float = 10.0
+    initial_temp: float = 1.0
+    min_temp: float = 0.01
 
 class Trainer:
 
-    def __init__(self, model: nn.Module, optimizer: Optimizer, config: Optional[TrainingConfig]=None, loss_weights: Optional[LossWeights]=None, lifecycle_config: Optional[LifecycleConfig]=None):
+    def __init__(self, model: nn.Module, optimizer: Optimizer, config: Optional[TrainingConfig]=None, loss_weights: Optional[LossWeights]=None, lifecycle_config: Optional[LifecycleConfig]=None, checkpoint_results: bool=True):
         self.model = model
         self.optimizer = optimizer
         self.config = config or TrainingConfig()
@@ -38,6 +58,9 @@ class Trainer:
         self.metrics = MetricsCollector()
         self._step = 0
         self._epoch = 0
+        self.checkpoint_results = checkpoint_results
+        if checkpoint_results:
+            self.results_checkpoint = TestResultCheckpointSystem(checkpoint_type='results')
 
     def train_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> Dict[str, float]:
         self.model.train()
@@ -107,10 +130,47 @@ class Trainer:
             epoch_result = self.train_epoch(train_loader, epoch)
             training_history.append(epoch_result)
             logger.info(f"Epoch {epoch} complete: avg_loss={epoch_result['avg_loss']:.4f}")
+
+            if self.checkpoint_results and epoch % 10 == 0:
+                epoch_checkpoint = {
+                    'epoch': epoch,
+                    'step': self._step,
+                    'avg_loss': epoch_result['avg_loss'],
+                    'min_loss': epoch_result['min_loss'],
+                    'max_loss': epoch_result['max_loss'],
+                    'stats': self.get_stats()
+                }
+                self.results_checkpoint.checkpoint_test_result(
+                    f"epoch_{epoch:04d}",
+                    epoch_checkpoint,
+                    message=f"Training epoch {epoch} complete"
+                )
+
             if val_loader and epoch % (self.config.eval_interval // len(train_loader)) == 0:
                 val_result = self.evaluate(val_loader)
                 logger.info(f"Validation: loss={val_result['avg_loss']:.4f}")
-        return {'training_history': training_history, 'final_stats': self.get_stats()}
+
+                if self.checkpoint_results:
+                    val_checkpoint = {
+                        'epoch': epoch,
+                        'validation': val_result
+                    }
+                    self.results_checkpoint.checkpoint_test_result(
+                        f"validation_epoch_{epoch:04d}",
+                        val_checkpoint,
+                        message=f"Validation at epoch {epoch}"
+                    )
+
+        final_results = {'training_history': training_history, 'final_stats': self.get_stats()}
+
+        if self.checkpoint_results:
+            self.results_checkpoint.checkpoint_test_result(
+                'training_final',
+                final_results,
+                message=f"Training complete after {self.config.num_epochs} epochs"
+            )
+
+        return final_results
 
     @torch.no_grad()
     def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:

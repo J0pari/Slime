@@ -291,7 +291,9 @@ def pytest_sessionfinish(session, exitstatus):
                         else:
                             violated_constraints += 1
     if results:
-        summary = {'run_timestamp': datetime.now(timezone.utc).isoformat(), 'exit_status': exitstatus, 'test_summary': {'total_tests': len(results), 'passed': sum((1 for r in results if r['outcome'] == 'passed')), 'failed': sum((1 for r in results if r['outcome'] == 'failed')), 'skipped': sum((1 for r in results if r['outcome'] == 'skipped'))}, 'constraint_summary': {'total_constraints': total_constraints, 'satisfied': satisfied_constraints, 'violated': violated_constraints, 'satisfaction_rate': satisfied_constraints / total_constraints if total_constraints > 0 else 0.0, 'avg_causal_depth': total_dag_depth / len([r for r in results if r.get('causal_dag')]) if results else 0.0}, 'results': results}
+        results_with_dag = [r for r in results if r.get('causal_dag')]
+        avg_depth = total_dag_depth / len(results_with_dag) if results_with_dag else 0.0
+        summary = {'run_timestamp': datetime.now(timezone.utc).isoformat(), 'exit_status': exitstatus, 'test_summary': {'total_tests': len(results), 'passed': sum((1 for r in results if r['outcome'] == 'passed')), 'failed': sum((1 for r in results if r['outcome'] == 'failed')), 'skipped': sum((1 for r in results if r['outcome'] == 'skipped'))}, 'constraint_summary': {'total_constraints': total_constraints, 'satisfied': satisfied_constraints, 'violated': violated_constraints, 'satisfaction_rate': satisfied_constraints / total_constraints if total_constraints > 0 else 0.0, 'avg_causal_depth': avg_depth}, 'results': results}
         for result in results:
             if result.get('causal_dag'):
                 has_violations = any((not n['satisfied'] for n in result['causal_dag']['nodes']))

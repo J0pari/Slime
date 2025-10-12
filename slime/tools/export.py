@@ -152,3 +152,13 @@ def load_checkpoint_with_optimizer(checkpoint_path: Path, model: nn.Module, opti
     else:
         logger.warning(f'No optimizer state in checkpoint {checkpoint_path}')
     return (model, optimizer)
+
+def export_to_onnx(model: nn.Module, example_input: torch.Tensor, save_path: Path, **kwargs) -> Path:
+    """Convenience function to export model to ONNX."""
+    exporter = ModelExporter(model)
+    return exporter.export_to_onnx(save_path, example_input=example_input, **kwargs)
+
+def export_to_torchscript(model: nn.Module, example_input: torch.Tensor, save_path: Path, **kwargs) -> Path:
+    """Convenience function to export model to TorchScript."""
+    exporter = ModelExporter(model)
+    return exporter.export_to_torchscript(save_path, example_input=example_input, **kwargs)

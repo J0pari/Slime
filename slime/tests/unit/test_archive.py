@@ -2,6 +2,7 @@ import pytest
 import torch
 import numpy as np
 from slime.memory.archive import CVTArchive
+from slime.config.dimensions import ArchitectureConfig, TINY
 
 def test_warmup_phase_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, seed=42)

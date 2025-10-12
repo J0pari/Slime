@@ -6,11 +6,12 @@ from slime.core.organism import Organism
 from slime.memory.pool import PoolConfig
 from slime.proto.kernel import Kernel
 from slime.kernels.torch_fallback import TorchKernel
+from slime.config.dimensions import ArchitectureConfig
 logger = logging.getLogger(__name__)
 
 class SlimeMoldEncoder(nn.Module):
 
-    def __init__(self, d_model: int, nhead: int=8, dim_feedforward: int=2048, dropout: float=0.1, activation: str='relu', layer_norm_eps: float=1e-05, batch_first: bool=False, norm_first: bool=False, device: Optional[torch.device]=None, dtype: Optional[torch.dtype]=None, pool_config: Optional[PoolConfig]=None, kernel: Optional[Kernel]=None):
+    def __init__(self, d_model: int, nhead: int=8, dim_feedforward: int=2048, dropout: float=0.1, activation: str='relu', layer_norm_eps: float=1e-05, batch_first: bool=False, norm_first: bool=False, device: Optional[torch.device]=None, dtype: Optional[torch.dtype]=None, pool_config: Optional[PoolConfig]=None, kernel: Optional[Kernel]=None, arch_config: Optional[ArchitectureConfig]=None):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -23,7 +24,9 @@ class SlimeMoldEncoder(nn.Module):
             pool_config = PoolConfig(min_size=nhead, max_size=nhead * 4, birth_threshold=0.8, death_threshold=0.1)
         if kernel is None:
             kernel = TorchKernel(self.device)
-        self.organism = Organism(sensory_dim=d_model, latent_dim=d_model, head_dim=head_dim, device=self.device, kernel=kernel, pool_config=pool_config)
+        if arch_config is None:
+            arch_config = ArchitectureConfig.TINY()
+        self.organism = Organism(sensory_dim=d_model, latent_dim=d_model, head_dim=head_dim, arch_config=arch_config, device=self.device, kernel=kernel, pool_config=pool_config)
         self._state: Optional[dict] = None
 
     def forward(self, src: torch.Tensor, mask: Optional[torch.Tensor]=None, src_key_padding_mask: Optional[torch.Tensor]=None, is_causal: bool=False) -> torch.Tensor:
