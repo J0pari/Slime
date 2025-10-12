@@ -354,7 +354,7 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **Learned embeddings:** Nonlinear projections preserving pairwise distances better than PCA/t-SNE/UMAP
 
-**Validation:** KMO ≥ 0.6 (intercorrelation), Bartlett's p < 0.05 (non-spherical), reconstruction error ≤ 0.5
+**Validation (2025 metrics):** Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15, reconstruction error ≤ 0.5
 
 ### 10a. DIRESA Adaptive Dimensionality
 **Question: How many dimensions should behavioral embeddings use?**
@@ -365,7 +365,7 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **Mechanism**: DIRESA encoder has gating layer that learns which dimensions to activate. Dimension count adapts via warp vote mechanism (2-10D range). System learns optimal dimensionality based on task, not predetermined.
 
-**Validation**: KMO ≥ 0.6 (intercorrelation), Bartlett's p < 0.05 (non-spherical), reconstruction error ≤ 0.5 ensure learned embeddings are factorable and distance-preserving.
+**Validation**: Trustworthiness ≥ 0.85 (neighbors preserved in low-D), Continuity ≥ 0.85 (neighborhoods preserved), Procrustes distance ≤ 0.15 (shape similarity), reconstruction error ≤ 0.5 ensure learned embeddings are factorable and distance-preserving.
 
 ### 10b. Content-Addressable Storage: Delta Protocol Specification
 **Question 3: What operations does delta compression support?**
