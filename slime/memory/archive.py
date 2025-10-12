@@ -415,8 +415,12 @@ class CVTArchive:
 
         kmo_all, kmo_model = calculate_kmo(raw_matrix)
         logger.info(f'KMO statistic: {kmo_model:.3f}')
-        if kmo_model < self.kmo_threshold:
-            raise ValueError(f'KMO {kmo_model:.3f} < {self.kmo_threshold}: raw metrics not factorable')
+
+        # Graceful handling of KMO threshold
+        if kmo_model < 0.5:
+            raise ValueError(f'KMO critically low ({kmo_model:.3f} < 0.5): metrics have insufficient correlation structure')
+        elif kmo_model < self.kmo_threshold:
+            logger.warning(f'KMO below threshold ({kmo_model:.3f} < {self.kmo_threshold}), proceeding with reduced confidence in dimension discovery')
 
         stat, p_value = bartlett(*[raw_matrix[:, i] for i in range(raw_matrix.shape[1])])
         logger.info(f"Bartlett's test: statistic={stat:.2f}, p-value={p_value:.4f}")
@@ -431,6 +435,26 @@ class CVTArchive:
 
         logger.info(f'Discovered {self.behavioral_dims} behavioral dimensions from {self.num_raw_metrics} raw metrics')
         return True
+
+    def transform_to_behavioral_space(self, raw_metrics: np.ndarray) -> np.ndarray:
+        """Transform raw metrics to discovered behavioral space using fitted Kernel PCA.
+
+        Args:
+            raw_metrics: (N, num_raw_metrics) array of raw metrics
+
+        Returns:
+            (N, num_dims) array of behavioral coordinates in discovered space
+        """
+        if not self._dimensions_discovered:
+            raise RuntimeError('Dimension discovery not yet complete - call discover_dimensions() first')
+        if self.kpca_transform is None:
+            raise RuntimeError('Kernel PCA not fitted')
+
+        # Apply same filtering as during discovery
+        filtered_metrics = raw_metrics[:, self._nonzero_variance_mask]
+
+        # Transform using fitted Kernel PCA
+        return self.kpca_transform.transform(filtered_metrics)
 
     def initialize_centroids(self, initial_samples: Optional[np.ndarray]=None):
         if initial_samples is not None and len(initial_samples) >= self.num_centroids:

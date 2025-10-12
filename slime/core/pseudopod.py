@@ -44,10 +44,22 @@ class Pseudopod(nn.Module):
         output = torch.einsum('bhqk,bhvd->bhqd', attn, v)
         output = torch.einsum('bhqd,hdo->bhqo', output, self.output_proj)
         self._last_attention_pattern = attn.detach()
-        # Store raw metrics for kernel PCA (50+ GPU-aware metrics)
+        # Store raw metrics for kernel PCA (62 GPU-aware metrics)
         self._raw_metrics = self.compute_raw_metrics(attn, output)
-        # Keep behavioral coordinates for backward compatibility during transition
-        self.last_behavior = self._raw_metrics[:5]  # Use first 5 metrics temporarily
+
+        # Use discovered behavioral dimensions if available, otherwise fallback to first 5 metrics
+        if hasattr(self, '_archive_ref') and self._archive_ref is not None:
+            try:
+                # Transform raw metrics using Kernel PCA to discovered behavioral space
+                raw_np = self._raw_metrics.detach().cpu().numpy().reshape(1, -1)
+                behavioral_coords = self._archive_ref.transform_to_behavioral_space(raw_np)[0]
+                self.last_behavior = torch.tensor(behavioral_coords, device=self.device, dtype=torch.float32)
+            except (AttributeError, RuntimeError):
+                # Archive not yet initialized or KernelPCA not fitted - use raw fallback
+                self.last_behavior = self._raw_metrics[:5]
+        else:
+            # Backward compatibility: use first 5 raw metrics before dimension discovery
+            self.last_behavior = self._raw_metrics[:5]
         attention_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean()
         output_magnitude = torch.norm(output) / torch.sqrt(torch.tensor(output.numel(), dtype=torch.float32, device=output.device))
         fitness_signal = (self.fitness_config.entropy_weight * attention_entropy +

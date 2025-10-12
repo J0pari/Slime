@@ -27,14 +27,23 @@ class Chemotaxis:
         import numpy as np
         behavior_array = np.array(behavior)
         center_centroid = self.archive._find_nearest_centroid(behavior_array)
+
+        # Get center position in behavioral space
+        center_pos = self.archive.centroids[center_centroid]
+
         weights = []
         nutrients_list = []
         for centroid_id, (nutrient, concentration) in self._sources.items():
-            distance = abs(centroid_id - center_centroid)
+            # Use Euclidean distance in behavioral space (NOT centroid ID difference)
+            source_pos = self.archive.centroids[centroid_id]
+            distance = np.linalg.norm(center_pos - source_pos)
+
+            # Weight by concentration and inverse distance
             weight = (concentration + hunger * 0.1) / (distance + 1.0)
             weight = weight / (metabolic_rate + 1e-10)
             weights.append(weight)
             nutrients_list.append(nutrient)
+
         if not nutrients_list:
             return None
         weights_tensor = torch.tensor(weights, device=self.device)
