@@ -37,16 +37,16 @@ def test_attention_temperature_extremes_constraint(constraint, kernel, device):
     K = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
     V = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
 
-    # Low temperature: sharp, focused CA patterns (low variance)
+    # Low temperature: sharp, peaked softmax (high variance output)
     cold = kernel.attention(Q, K, V, temperature=0.1)
-    # High temperature: diffuse, exploratory CA patterns (high variance)
+    # High temperature: smooth, uniform softmax (low variance output)
     hot = kernel.attention(Q, K, V, temperature=10.0)
 
     cold_var = cold.var().item()
     hot_var = hot.var().item()
 
-    # Temperature affects output distribution: hot should have higher variance
-    constraint('Low temp has lower variance than high temp', lambda: (cold_var < hot_var, cold_var, f'<{hot_var}', {}))
+    # Sharp softmax (low temp) produces higher variance than smooth softmax (high temp)
+    constraint('Low temp has higher variance than high temp', lambda: (cold_var > hot_var, cold_var, f'>{hot_var}', {}))
 
 def test_attention_single_head_constraint(constraint, kernel, device):
     Q = torch.randn(1, 1, 128, 64, device=device, dtype=torch.float16)
