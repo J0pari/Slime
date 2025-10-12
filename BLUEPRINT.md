@@ -304,16 +304,19 @@ Fast (every step):
   - Weight updates via backprop
   - Fitness tracking (EMA)
   - Metrics collection
+  - Loss monitoring
 
 Medium (every 100 steps):
   - Fitness assessment
   - Archive elite updates
   - Pool spawn decisions
+  - Loss gate check (halt if diverging)
 
 Slow (every 1000 steps):
   - Pool culling (apoptosis)
   - Memory budget enforcement
   - Behavioral space analysis
+  - Hard limit enforcement (max pool size, max archive)
 ```
 
 ### 7. Archive Bootstrapping Policy (NEW: Prevents Gradient Conflicts)
@@ -330,35 +333,85 @@ Fitness MUST correlate with loss reduction. Options:
 
 NOT attention entropy alone (doesn't correlate with task)
 
+### 9. Lifecycle Safety Guardrails (NEW: Prevent Training Collapse)
+```python
+# Hard limits (never exceed)
+MAX_POOL_SIZE = 64
+MAX_ARCHIVE_SIZE = 1000
+MAX_LOSS_RATIO = 10.0  # vs moving average
+
+# Loss gates (halt lifecycle if loss diverging)
+if current_loss > 10 * loss_ema:
+    freeze_lifecycle()  # Stop births/deaths, train normally
+
+# Phased training (gradually enable dynamics)
+if step < 1000:
+    phase = "warmup"  # Static pool, no lifecycle
+elif step < 5000:
+    phase = "gentle"  # Allow births, no deaths
+else:
+    phase = "full"    # Full dynamics
+```
+
 ## Implementation Checklist
 
-### MUST FIX NOW:
-- [ ] Add proto/component.py (Component protocol)
-- [ ] Fix memory/archive.py to use Component protocol
-- [ ] Fix memory/pool.py to use Component protocol
-- [ ] Fix core/pseudopod.py to inject Kernel via __init__
-- [ ] Add core/chemotaxis.py
-- [ ] Add memory/tubes.py
-- [ ] Fix observability/* to be injected, not global
+### COMPLETED ✓
+- [x] proto/component.py
+- [x] memory/archive.py (uses Component protocol)
+- [x] memory/pool.py (uses Component protocol)
+- [x] memory/tubes.py (implements Memory protocol)
+- [x] core/pseudopod.py (injects Kernel)
+- [x] core/state.py
+- [x] kernels/torch_fallback.py
+- [x] kernels/utils.py
+- [x] api/torch_compat.py
+- [x] api/native.py
+- [x] config/loader.py (partial)
 
-### Phase 1 Completion:
-- [ ] kernels/triton_impl.py
-- [ ] kernels/torch_fallback.py
-- [ ] observability/* (all 3 files)
+### MUST FIX NOW (BLOCKING BASIC FUNCTIONALITY)
+- [ ] **core/chemotaxis.py** - Behavioral space navigator
+- [ ] **core/organism.py** - Fix to inject metrics, kernel, use chemotaxis
+- [ ] **observability/metrics.py** - MetricsCollector (injectable)
+- [ ] **observability/slo.py** - SLO definitions
+- [ ] **observability/tracing.py** - Tracing spans
 
-### Phase 2:
-- [ ] training/* (all 3 files)
+### MUST ADD (BLOCKING TRAINING VIABILITY)
+- [ ] **training/stability.py** - Phased training protocol (warmup/gentle/full)
+- [ ] **training/fitness.py** - Gradient-based fitness computation
+- [ ] **training/losses.py** - Multi-objective loss functions
+- [ ] **training/trainer.py** - Training loop with lifecycle timescales
+- [ ] **training/lifecycle.py** - Hard limits, loss gates, safety checks
+
+### MUST TEST (BLOCKING VALIDATION)
+- [ ] **tests/integration/test_training_stability.py** - Convergence with lifecycle
+- [ ] **tests/integration/test_gradient_flow.py** - Gradients through dynamic pools
+- [ ] **tests/ablations/test_static_vs_dynamic.py** - Prove dynamic helps
+- [ ] **tests/ablations/test_with_without_archive.py** - Prove archive helps
+- [ ] **bench/toy_tasks.py** - Simple tasks (y=sin(x), XOR, parity)
+
+### Phase 1 Completion (REVISED)
+- [ ] kernels/triton_impl.py (Triton optimizations)
+- [ ] tests/unit/test_archive.py
+- [ ] tests/unit/test_pool.py
+- [ ] tests/unit/test_pseudopod.py
+- [ ] tests/unit/test_kernels.py
+
+### Phase 2 (REVISED - FOCUS ON PROVING IT WORKS)
+- [ ] bench/toy_tasks.py ✓ (validate on simple tasks first)
+- [ ] tests/ablations/test_fitness_metrics.py (which fitness works?)
+- [ ] tests/integration/test_behavioral_space.py (coverage, gradients)
+- [ ] tools/visualize.py (behavioral space plots)
+
+### Phase 3 (SCALE UP AFTER VALIDATION)
+- [ ] bench/transformer.py (vs baseline on real tasks)
+- [ ] tests/integration/test_optimization_landscape.py
 - [ ] config/* (complete YAML schemas)
 
-### Phase 3:
-- [ ] tests/unit/* (all components)
-- [ ] tests/integration/*
-- [ ] bench/transformer.py
-
-### Phase 4:
-- [ ] tools/* (all 3 files)
-- [ ] setup.py
-- [ ] README.md
+### Phase 4 (PACKAGING)
+- [ ] tools/export.py (ONNX, TorchScript)
+- [ ] tools/package.py (Windows .exe)
+- [ ] setup.py / pyproject.toml
+- [ ] README.md with examples
 
 ## Architectural Decisions (COMMITTED)
 
