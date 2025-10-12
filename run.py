@@ -144,7 +144,7 @@ def create_full_system(config: ArchitectureConfig, device: torch.device):
         config=config,
         variance_threshold=0.85,
         device=device,
-        kmo_threshold=0.6,
+        trustworthiness_threshold=0.85,
         reconstruction_error_threshold=0.5,
         kernel_selection='auto',
         gc_interval=100,

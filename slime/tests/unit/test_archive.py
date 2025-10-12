@@ -15,7 +15,7 @@ def test_warmup_phase_constraint(constraint):
     constraint('Behavioral dims not yet set', lambda: (archive.behavioral_dims is None, archive.behavioral_dims, None, {}))
 
 def test_dimension_discovery_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -30,7 +30,7 @@ def test_dimension_discovery_constraint(constraint):
     constraint('Archive marked as discovered', lambda: (archive._discovered == True, archive._discovered, True, {}))
 
 def test_add_after_discovery_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -51,7 +51,7 @@ def test_add_after_discovery_constraint(constraint):
     constraint('Elite has correct behavior', lambda: (elite.behavior == (0.1, 0.2, 0.3), elite.behavior, (0.1, 0.2, 0.3), {}))
 
 def test_low_rank_compression_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=32, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=32, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -94,7 +94,7 @@ def test_centroid_determinism_constraint(constraint):
     constraint('Deterministic centroid initialization (seed=42)', lambda: (np.allclose(archive1.centroids, archive2.centroids, atol=0.01), 'centroids_match', 'centroids_match', {'max_diff': float(np.max(np.abs(archive1.centroids - archive2.centroids))), 'mean_diff': float(np.mean(np.abs(archive1.centroids - archive2.centroids)))}))
 
 def test_warmup_phase_errors_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -119,7 +119,7 @@ def test_add_before_discovery_errors_constraint(constraint):
         constraint('Cannot add elites before discovery', lambda: (True, 'ValueError', 'ValueError', {'error_msg': str(e)}))
 
 def test_elite_replacement_consistency_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -154,7 +154,7 @@ def test_elite_replacement_consistency_constraint(constraint):
     constraint('Elite still has SHA from generation 2', lambda: (elite3.elite_sha == sha2, elite3.elite_sha, sha2, {}))
 
 def test_centroid_voronoi_partitioning_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=2, max_dims=2, num_centroids=4, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=2, max_dims=2, num_centroids=4, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 2).astype(np.float32)
     mixing_matrix = rng.randn(2, 10).astype(np.float32)
@@ -175,7 +175,7 @@ def test_centroid_voronoi_partitioning_constraint(constraint):
         constraint(f'Behavior {behavior} maps to nearest centroid', lambda cid=centroid_id, mid=min_dist_id: (cid == mid, cid, mid, {}))
 
 def test_content_addressable_deduplication_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -203,7 +203,7 @@ def test_content_addressable_deduplication_constraint(constraint):
     constraint('No new objects stored (deduplicated by SHA)', lambda: (objects_after == objects_before, objects_after, objects_before, {}))
 
 def test_metadata_preservation_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -225,7 +225,7 @@ def test_metadata_preservation_constraint(constraint):
     constraint('Elite metadata has custom_field', lambda: (elite.metadata.get('custom_field') == 42, elite.metadata.get('custom_field'), 42, {}))
 
 def test_behavioral_dimension_bounds_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=2, max_dims=5, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=2.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=2, max_dims=5, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=2.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -239,7 +239,7 @@ def test_behavioral_dimension_bounds_constraint(constraint):
 
 def test_archive_deterministic_across_operations_constraint(constraint):
     def build_and_fill_archive(seed):
-        archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=seed)
+        archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, trustworthiness_threshold=0.5, reconstruction_error_threshold=1.0, seed=seed)
         rng = np.random.RandomState(seed)
         latent = rng.randn(150, 3).astype(np.float32)
         mixing_matrix = rng.randn(3, 10).astype(np.float32)
