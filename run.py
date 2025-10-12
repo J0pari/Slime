@@ -69,7 +69,7 @@ from slime.training.lifecycle import LifecycleManager, LifecycleConfig
 import slime.bench.datasets as bench_datasets
 import slime.bench.profile as bench_profile
 import slime.bench.transformer as bench_transformer
-from slime.bench.datasets import SinDataset, XORDataset, ParityDataset
+from slime.bench.datasets import MNISTDataset
 
 # Layer 6: Config
 from slime.config.loader import load_config, ConfigSchema
@@ -186,7 +186,7 @@ def create_full_system(config: ArchitectureConfig, device: torch.device):
 
     # Layer 4: Organism (orchestrator)
     logger.info("\n[Layer 4: Orchestration]")
-    sensory_dim = 1  # Will be overridden by dataset
+    sensory_dim = 784  # MNIST flattened (28x28)
     latent_dim = config.dimensions.hidden_dim
     head_dim = config.dimensions.head_dim
 
@@ -409,8 +409,8 @@ def main():
     logger.info("DATASET LOADING")
     logger.info("=" * 80 + "\n")
 
-    train_dataset = SinDataset(num_samples=1000, seq_len=config.test.seq_len, noise_std=0.01, seed=42)
-    val_dataset = SinDataset(num_samples=200, seq_len=config.test.seq_len, noise_std=0.01, seed=123)
+    train_dataset = MNISTDataset(root='./data', train=True, download=True, flatten=True)
+    val_dataset = MNISTDataset(root='./data', train=False, download=True, flatten=True)
 
     train_loader = DataLoader(train_dataset, batch_size=config.test.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=config.test.batch_size, shuffle=False)
@@ -418,7 +418,7 @@ def main():
     logger.info(f"  ✓ Train dataset: {len(train_dataset)} samples")
     logger.info(f"  ✓ Val dataset: {len(val_dataset)} samples")
     logger.info(f"  ✓ Batch size: {config.test.batch_size}")
-    logger.info(f"  ✓ Sequence length: {config.test.seq_len}\n")
+    logger.info(f"  ✓ Input dimension: 784 (28x28 flattened MNIST)\n")
 
     # Phase 3: Training
     training_config = TrainingConfig(
