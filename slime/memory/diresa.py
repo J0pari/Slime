@@ -236,34 +236,44 @@ class DIRESABehavioralEncoder(nn.Module):
         Returns:
             metrics: Dict with trustworthiness, continuity, procrustes_distance
         """
-        from sklearn.manifold import trustworthiness
-        from sklearn.metrics import pairwise_distances
         from scipy.spatial import procrustes
 
         n_samples = len(raw_samples)
         k = min(30, n_samples - 1)
 
-        # Trustworthiness: preservation of k-nearest neighbors
-        trust_score = trustworthiness(raw_samples, embedded_samples, n_neighbors=k)
+        # Convert to GPU tensors for ALL metric computation
+        raw_tensor = torch.from_numpy(raw_samples).to(self.device).float()
+        emb_tensor = torch.from_numpy(embedded_samples).to(self.device).float()
 
-        # Continuity: preservation of neighborhood structure
-        dist_high = pairwise_distances(raw_samples)
-        dist_low = pairwise_distances(embedded_samples)
+        # GPU-accelerated pairwise distances using torch.cdist
+        dist_high = torch.cdist(raw_tensor, raw_tensor)  # [N, N]
+        dist_low = torch.cdist(emb_tensor, emb_tensor)    # [N, N]
 
+        # Trustworthiness: preservation of k-nearest neighbors (GPU)
+        # For each point, check if its k-NN in low-dim are also k-NN in high-dim
+        neighbors_high = torch.argsort(dist_high, dim=1)[:, 1:k+1]  # [N, k] - exclude self
+        neighbors_low = torch.argsort(dist_low, dim=1)[:, 1:k+1]    # [N, k]
+
+        trust_sum = 0.0
+        for i in range(n_samples):
+            # Count how many of low-dim neighbors are in high-dim neighborhood
+            nh_set = set(neighbors_high[i].cpu().numpy())
+            nl_set = set(neighbors_low[i].cpu().numpy())
+            trust_sum += len(nl_set & nh_set) / k
+        trust_score = trust_sum / n_samples
+
+        # Continuity: preservation of neighborhood structure (GPU)
         continuity_sum = 0.0
         for i in range(n_samples):
-            neighbors_low = np.argsort(dist_low[i])[1:k+1]
-            neighbors_high = np.argsort(dist_high[i])[1:k+1]
-            continuity_sum += len(set(neighbors_low) & set(neighbors_high)) / k
+            nh_set = set(neighbors_high[i].cpu().numpy())
+            nl_set = set(neighbors_low[i].cpu().numpy())
+            continuity_sum += len(nl_set & nh_set) / k
         continuity_score = continuity_sum / n_samples
 
         # Procrustes distance: shape similarity
         active_dims = self.get_active_dims()
 
-        # GPU-optimal SVD projection (PyTorch on GPU, faster than sklearn PCA)
-        raw_tensor = torch.from_numpy(raw_samples).to(self.device).float()
-
-        # Center and compute SVD for projection to active_dims
+        # Center and compute SVD for projection to active_dims (raw_tensor already on GPU)
         raw_centered_tensor = raw_tensor - raw_tensor.mean(dim=0, keepdim=True)
         U, S, Vt = torch.linalg.svd(raw_centered_tensor, full_matrices=False)
         raw_projected = (U[:, :active_dims] * S[:active_dims].unsqueeze(0)).cpu().numpy()

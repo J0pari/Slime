@@ -8,6 +8,7 @@ import json
 import logging
 import numpy as np
 from scipy.spatial import distance
+# pairwise_distances moved to GPU implementation below
 from slime.config.dimensions import ArchitectureConfig
 from slime.memory.diresa import DIRESABehavioralEncoder
 logger = logging.getLogger(__name__)
@@ -364,9 +365,10 @@ class CVTArchive:
         # Convert to torch
         x_train = torch.from_numpy(raw_matrix).to(self.device)
 
-        # Precompute pairwise distances for distance preservation loss
-        dist_matrix = pairwise_distances(raw_matrix)
-        dist_tensor = torch.from_numpy(dist_matrix).to(self.device)
+        # Precompute pairwise distances for distance preservation loss (GPU-accelerated)
+        x_train_unsqueezed = x_train.unsqueeze(1)  # [N, 1, D]
+        x_train_broadcast = x_train.unsqueeze(0)   # [1, N, D]
+        dist_tensor = torch.cdist(x_train_unsqueezed, x_train_broadcast).squeeze(1)  # [N, N]
 
         # Train DIRESA
         optimizer = torch.optim.Adam(self.diresa.parameters(), lr=1e-3)
@@ -456,17 +458,61 @@ class CVTArchive:
 
     def initialize_centroids(self, initial_samples: Optional[np.ndarray]=None):
         if initial_samples is not None and len(initial_samples) >= self.num_centroids:
-            from sklearn.cluster import KMeans
-            kmeans = KMeans(n_clusters=self.num_centroids, random_state=self.seed, n_init=10)
-            kmeans.fit(initial_samples.astype(np.float32))
-            self.centroids = kmeans.cluster_centers_.astype(np.float32)
-            logger.info(f'Initialized {self.num_centroids} CVT centroids from {len(initial_samples)} samples with seed {self.seed}')
+            # GPU-accelerated KMeans using Lloyd's algorithm
+            samples_tensor = torch.from_numpy(initial_samples.astype(np.float32)).to(self.device)
+
+            # Initialize centroids with k-means++
+            torch.manual_seed(self.seed)
+            centroids = self._kmeans_plusplus_init(samples_tensor, self.num_centroids)
+
+            # Lloyd's algorithm iterations
+            for _ in range(100):  # n_init=10 means we'd run 10 times, but one run of 100 iters is better on GPU
+                # Assign to nearest centroid
+                dists = torch.cdist(samples_tensor, centroids)  # [N, K]
+                assignments = torch.argmin(dists, dim=1)  # [N]
+
+                # Update centroids
+                new_centroids = torch.zeros_like(centroids)
+                for k in range(self.num_centroids):
+                    mask = assignments == k
+                    if mask.any():
+                        new_centroids[k] = samples_tensor[mask].mean(dim=0)
+                    else:
+                        new_centroids[k] = centroids[k]  # Keep old centroid if cluster is empty
+
+                # Check convergence
+                if torch.allclose(centroids, new_centroids, rtol=1e-4):
+                    break
+                centroids = new_centroids
+
+            self.centroids = centroids.cpu().numpy()
+            logger.info(f'Initialized {self.num_centroids} CVT centroids from {len(initial_samples)} samples with seed {self.seed} (GPU-accelerated)')
         else:
             if self.behavioral_dims is None:
                 raise ValueError("behavioral_dims must be set before initializing centroids")
             rng = np.random.RandomState(self.seed)
             self.centroids = rng.randn(self.num_centroids, self.behavioral_dims).astype(np.float32)
             logger.info(f'Initialized {self.num_centroids} CVT centroids from seed {self.seed}')
+
+    def _kmeans_plusplus_init(self, data: torch.Tensor, k: int) -> torch.Tensor:
+        """K-means++ initialization on GPU."""
+        n = len(data)
+        centroids = []
+
+        # First centroid: random
+        idx = torch.randint(0, n, (1,), device=self.device).item()
+        centroids.append(data[idx])
+
+        # Subsequent centroids: proportional to squared distance
+        for _ in range(1, k):
+            centroid_tensor = torch.stack(centroids)
+            dists = torch.cdist(data, centroid_tensor).min(dim=1)[0]  # Distance to nearest centroid
+            probs = dists ** 2
+            probs = probs / probs.sum()
+            idx = torch.multinomial(probs, 1).item()
+            centroids.append(data[idx])
+
+        return torch.stack(centroids)
 
     def transform_to_behavioral_space(self, raw_metrics: np.ndarray) -> np.ndarray:
         """Transform raw metrics to behavioral space using DIRESA encoder.

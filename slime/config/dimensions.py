@@ -51,10 +51,20 @@ class FitnessConfig:
 class TestConfig:
     batch_size: int
     seq_len: int
+    pool_max_size: int
+    pool_min_size: int
+    test_pool_max_size: int  # Smaller pool size for unit tests
+    test_pool_min_size: int
 
     def __post_init__(self):
         assert self.batch_size > 0, f'batch_size must be positive, got {self.batch_size}'
         assert self.seq_len > 0, f'seq_len must be positive, got {self.seq_len}'
+        assert self.pool_max_size > 0, f'pool_max_size must be positive, got {self.pool_max_size}'
+        assert self.pool_min_size > 0, f'pool_min_size must be positive, got {self.pool_min_size}'
+        assert self.pool_min_size <= self.pool_max_size, f'pool_min_size ({self.pool_min_size}) must be <= pool_max_size ({self.pool_max_size})'
+        assert self.test_pool_max_size > 0, f'test_pool_max_size must be positive, got {self.test_pool_max_size}'
+        assert self.test_pool_min_size > 0, f'test_pool_min_size must be positive, got {self.test_pool_min_size}'
+        assert self.test_pool_min_size <= self.test_pool_max_size, f'test_pool_min_size ({self.test_pool_min_size}) must be <= test_pool_max_size ({self.test_pool_max_size})'
 
 @dataclass(frozen=True)
 class NumericalConfig:
@@ -86,7 +96,7 @@ TINY = ArchitectureConfig(
     behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=3, max_dims=5, num_centroids=50),
     compression=CompressionConfig(low_rank_k=16, delta_rank=8),
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
-    test=TestConfig(batch_size=2, seq_len=16),
+    test=TestConfig(batch_size=2, seq_len=16, pool_max_size=32, pool_min_size=4, test_pool_max_size=4, test_pool_min_size=2),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
     k_neighbors=5
 )
@@ -96,7 +106,7 @@ SMALL = ArchitectureConfig(
     behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=4, max_dims=6, num_centroids=200),
     compression=CompressionConfig(low_rank_k=32, delta_rank=16),
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
-    test=TestConfig(batch_size=4, seq_len=32),
+    test=TestConfig(batch_size=4, seq_len=32, pool_max_size=64, pool_min_size=8, test_pool_max_size=8, test_pool_min_size=4),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
     k_neighbors=10
 )
@@ -106,7 +116,7 @@ MEDIUM = ArchitectureConfig(
     behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=5, max_dims=7, num_centroids=500),
     compression=CompressionConfig(low_rank_k=64, delta_rank=16),
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
-    test=TestConfig(batch_size=8, seq_len=64),
+    test=TestConfig(batch_size=8, seq_len=64, pool_max_size=128, pool_min_size=16, test_pool_max_size=16, test_pool_min_size=8),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
     k_neighbors=10
 )
@@ -116,7 +126,7 @@ LARGE = ArchitectureConfig(
     behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=5, max_dims=7, num_centroids=1000),
     compression=CompressionConfig(low_rank_k=128, delta_rank=32),
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
-    test=TestConfig(batch_size=16, seq_len=128),
+    test=TestConfig(batch_size=16, seq_len=128, pool_max_size=256, pool_min_size=32, test_pool_max_size=32, test_pool_min_size=16),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
     k_neighbors=15
 )

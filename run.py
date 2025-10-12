@@ -200,7 +200,7 @@ def create_full_system(config: ArchitectureConfig, device: torch.device):
     )
     logger.info(f"  ✓ Organism initialized:")
     logger.info(f"    - sensory_dim={sensory_dim}, latent_dim={latent_dim}, head_dim={head_dim}")
-    logger.info(f"    - num_heads={config.dimensions.num_heads} (multi-head attention)")
+    logger.info(f"    - num_heads={config.dimensions.num_heads} (multi-head Neural CA)")
     logger.info(f"    - Pool size: {organism.pseudopod_pool.size()} pseudopods")
     logger.info(f"    - Archive: {organism.archive.size()} elites")
     logger.info(f"    - Chemotaxis injected")
