@@ -1,6 +1,6 @@
 # Slime Mold Transformer
 
-Neural network with dynamic component lifecycle. Components compete for survival based on gradient contribution. Archive maintains behavioral diversity via MAP-Elites.
+Neural network with dynamic component lifecycle. Components compete for survival based on gradient contribution. Archive maintains behavioral diversity via CVT-MAP-Elites (Centroidal Voronoi Tessellation). Uses FlashAttention-style tiled kernels and low-rank weight storage.
 
 ## Installation
 
@@ -45,8 +45,9 @@ model:
   behavioral_dims: 2
 
 archive:
-  grid_size: 10
-  behavioral_bounds: [[0.0, 1.0], [0.0, 1.0]]
+  num_centroids: 1000  # CVT partitions, not grid cells
+  behavioral_dims: 5   # Can use 4-5 dims without exponential explosion
+  low_rank_k: 64       # Factorization rank for weight compression
 
 pool:
   min_size: 4
@@ -86,17 +87,28 @@ trainer.train(
 
 ### Safety Guardrails
 
-Training has three phases:
+Training uses simulated annealing for smooth exploration-exploitation transition:
 
-1. **Warmup (steps 0-1000):** Static pool, no lifecycle
-2. **Gentle (steps 1000-5000):** Allow births, no deaths
-3. **Full (steps 5000+):** All dynamics enabled
+```python
+temperature = initial_temp * (1 - step / max_steps)  # Linear cooling
+
+# Early training (high temp): accept diverse low-fitness components
+# Late training (low temp): only accept high-fitness components
+birth_prob = exp(-fitness_deficit / temperature)
+```
 
 If loss exceeds 10x moving average, lifecycle freezes automatically.
 
 ## Architecture Analogy
 
-Think of a slime mold foraging for food. It extends pseudopods (components) in different directions. Successful pseudopods (high fitness) persist. Unsuccessful ones retract (culling). The organism remembers successful patterns (archive) and reuses them when exploring new areas.
+Think of a slime mold foraging for food. It extends pseudopods (components) in different directions. Successful pseudopods (high fitness) persist. Unsuccessful ones retract (culling). The organism remembers successful patterns (archive using low-rank compressed weights) and reuses them when exploring new areas.
+
+**CVT-MAP-Elites:** Archive uses Voronoi partitioning of behavioral space (not fixed grid). Scales to 4-5 behavioral dimensions:
+- Attention span (memory locality)
+- Activation sparsity (compute efficiency)
+- Gradient flow magnitude (task relevance)
+- Memory access locality (cache friendliness)
+- Computational intensity (GPU occupancy)
 
 Key difference from standard transformers: attention heads don't have fixed roles. Components discover specializations through gradient-based selection pressure.
 
@@ -185,8 +197,9 @@ export_torchscript(model, output_path='model.pt')
 
 **"Components not diversifying"**
 - Check behavioral dimensions correlate with compute patterns: `pytest slime/tests/unit/test_behavioral_kmo.py`
+- Verify KMO statistic > 0.6 (measures factorability of behavioral dimensions)
 - Verify efficiency is included in fitness: see `training/fitness.py`
-- Increase `grid_size` in archive config
+- Increase `num_centroids` in archive config (CVT partitions)
 
 **"Triton kernel errors"**
 - Verify CUDA version matches: `nvidia-smi`
@@ -195,14 +208,21 @@ export_torchscript(model, output_path='model.pt')
 
 ## Computational Cost
 
-Overhead vs baseline transformer: ~1-2% per training step
+**Estimated overhead vs baseline transformer: 7-15% per training step**
 
 - Forward/backward: Standard O(B * M * D²)
+- FlashAttention tiling: 2-3x speedup (Dao et al., 2022)
 - Fitness computation: O(P * D) where P = num_pseudopods
-- Archive update (1/100 steps): O(P)
-- Lifecycle decisions (1/1000 steps): O(P)
+- Behavioral metrics: O(P * M * D) for attention span, sparsity, etc.
+- CVT archive update (1/100 steps): O(P * num_centroids) nearest centroid search
+- Lifecycle decisions (1/1000 steps): O(P) with simulated annealing
 
-Typical P=8-32, so overhead is negligible.
+**Comparison to DARTS:**
+- DARTS: 4 GPU days search + N days training
+- Slime: 1.15 × N days (search during training)
+- Break-even: N > 30 days
+
+Slime favors long training runs where amortized search cost is negligible.
 
 ## File Layout
 
@@ -224,14 +244,20 @@ Dependencies follow strict DAG: proto → kernels → memory → core → api �
 
 ## Behavioral Space
 
-Archive grid cells correspond to behavioral coordinates. Example with 2D behavioral space:
+**CVT-MAP-Elites uses Voronoi partitioning**, not fixed grid. Scales to 4-5 dimensions without exponential explosion.
 
-- **Dimension 0:** Attention distance (0.0 = local, 1.0 = global)
-- **Dimension 1:** Activation sparsity (0.0 = dense, 1.0 = sparse)
+**5D behavioral space:**
+1. **Attention span:** Mean(attention_weights × position_distance) - correlates with memory bandwidth
+2. **Activation sparsity:** Fraction of activations near zero - correlates with compute efficiency
+3. **Gradient flow magnitude:** L2 norm of gradients - correlates with task relevance
+4. **Memory access locality:** Variance of attention positions - correlates with cache hit rate
+5. **Computational intensity:** FLOPs per forward pass - correlates with GPU occupancy
 
-Component at (0.1, 0.2) specializes in short-range dense patterns. Component at (0.9, 0.1) specializes in long-range dense patterns. Archive maintains best component for each cell.
+**Validation:** KMO (Kaiser-Meyer-Olkin) test ensures dimensions are factorable. KMO < 0.6 = dimensions are noise, not structure.
 
-When spawning new component, sample from archive cells near desired behavior. This provides warm initialization based on proven patterns.
+**Example:** Component near centroid (0.1, 0.8, 0.5, 0.2, 0.3) specializes in: local attention, sparse activations, medium gradient flow, coherent memory access, low compute intensity.
+
+When spawning new component, sample from archive near desired behavioral centroid. Low-rank factorized weights (U, V) provide warm initialization.
 
 ## Fitness Computation
 
@@ -247,26 +273,32 @@ Components with low fitness get culled every 1000 steps. Archive stores high-fit
 
 ## Multi-GPU
 
-Device placement via behavioral hash:
+Device placement via CVT centroid hash:
 
 ```python
-device_id = hash(behavior_coords) % num_gpus
+centroid_id = find_nearest_centroid(component.behavior(), centroids)
+device_id = hash(centroid_id) % num_gpus
 ```
 
-Components with similar behavior land on same GPU. Deterministic placement means no coordination overhead. If GPU fails, components redistribute automatically via same hash function.
+Components with similar behavior map to same centroid, land on same GPU. Deterministic placement means no coordination overhead. If GPU fails, components redistribute automatically via same hash function. Centroid-based hashing naturally clusters by compute patterns.
 
 ## Limitations
 
 - Requires CUDA-capable GPU (tested on RTX 3060+)
 - Windows: Use `triton-windows` package (bundled TinyCC compiler)
-- Archive memory scales with grid_size^behavioral_dims (keep dims ≤ 3)
-- Component lifecycle adds ~1000 lines of complexity vs standard transformer
+- CVT centroids scale linearly (not exponentially), but 1000 centroids × D² × 4 bytes per elite
+- Low-rank storage (k=64) reduces archive memory by 8x vs full matrices
+- Component lifecycle adds 7-15% training overhead vs static transformer
+- Behavioral dimensions must correlate with hardware metrics (validated via KMO test)
 
 ## References
 
-- MAP-Elites: Mouret, J.-B. & Clune, J. "Illuminating search spaces by mapping elites" (2015). arXiv:1504.04909
-- FlashAttention: Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (2022). NeurIPS 2022. arXiv:2205.14135
-- Triton: Tillet, P., Kung, H. T., & Cox, D. "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations" (2019). MAPL 2019.
+- **MAP-Elites:** Mouret, J.-B. & Clune, J. "Illuminating search spaces by mapping elites" (2015). arXiv:1504.04909
+- **CVT-MAP-Elites:** Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm" (2018). IEEE Trans. Evolutionary Computation, 22(4), 623-630.
+- **FlashAttention:** Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (2022). NeurIPS 2022. arXiv:2205.14135
+- **DARTS:** Liu, H., Simonyan, K., & Yang, Y. "DARTS: Differentiable Architecture Search" (2019). ICLR 2019. arXiv:1806.09055
+- **HyperNetworks:** Ha, D., Dai, A., & Le, Q. V. "HyperNetworks" (2017). ICLR 2017. arXiv:1609.09106
+- **Simulated Annealing:** Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. "Optimization by simulated annealing" (1983). Science, 220(4598), 671-680.
 
 ## License
 

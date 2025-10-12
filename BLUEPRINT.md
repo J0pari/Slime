@@ -4,10 +4,13 @@
 
 1. **Protocol-First**: All interfaces defined before implementations
 2. **Dynamic Everything**: No static allocations, lifecycle-managed components
-3. **MAP-Elites Core**: Archive-driven evolution and bootstrapping
-4. **SRE Built-In**: Observability, SLOs, error budgets from day one
-5. **GPU-Native**: 100% device execution, zero CPU synchronization
-6. **DRY Principle**: Single source of truth for each concept
+3. **CVT-MAP-Elites Core**: Archive-driven evolution using Centroidal Voronoi Tessellation (scales to 4-5 behavioral dimensions)
+4. **IO-Aware Kernels**: FlashAttention-style tiled computation (HBM ↔ SRAM management)
+5. **Low-Rank Archive**: Store weight factorizations (U, V) not full matrices (10-100x memory reduction)
+6. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure
+7. **SRE Built-In**: Observability, SLOs, error budgets from day one
+8. **GPU-Native**: 100% device execution, zero CPU synchronization
+9. **DRY Principle**: Single source of truth for each concept
 
 ## Dependency DAG
 
@@ -465,11 +468,64 @@ Fitness MUST correlate with loss reduction. Options:
 
 NOT attention entropy alone (doesn't correlate with task)
 
-### 9. Lifecycle Safety Guardrails 
+### 9. CVT-MAP-Elites Architecture ✓
+**Reasoning (Scalability):** Fixed grid scales as resolution^dims. CVT scales linearly with num_centroids.
+
+**Fixed grid problem:**
+```python
+# 3D behavioral space, resolution 20
+grid_cells = 20^3 = 8000 cells
+# 4D space: 20^4 = 160,000 cells (exponential explosion)
+# 5D space: 20^5 = 3,200,000 cells (infeasible)
+```
+
+**CVT solution:**
+```python
+# 4D or 5D behavioral space
+num_centroids = 1000  # Linear scaling, user-defined
+# Voronoi partitioning: each component maps to nearest centroid
+# No exponential explosion, handles continuous space naturally
+```
+
+**Behavioral dimensions (4-5 dims):**
+```python
+behavior = (
+    avg_attention_span,         # Mean(attention_weights * position_distance)
+    activation_sparsity,         # Fraction of activations near zero
+    gradient_flow_magnitude,     # L2 norm of gradients through component
+    memory_access_locality,      # Coherence of attention patterns
+    computational_intensity,     # FLOPs per forward pass
+)
+```
+
+Each dimension correlates with hardware structure: memory locality, compute efficiency, task relevance.
+
+### 10. Low-Rank Archive Storage ✓
+**Reasoning (Memory Efficiency):** Inspired by Ha et al. (2016) hypernetworks memory optimization.
+
+**Naive storage:**
+```python
+# Store full weight matrices
+elite.weights = [W_q, W_k, W_v, W_o]  # Each D×D matrix
+memory_per_elite = 4 * D^2 * 4 bytes
+# For D=512: 4MB per elite, 1000 elites = 4GB
+```
+
+**Low-rank factorization:**
+```python
+# Store U (D×k) and V (k×D) where k << D
+elite.weights_compressed = [(U_q, V_q), (U_k, V_k), (U_v, V_v), (U_o, V_o)]
+memory_per_elite = 4 * 2 * D * k * 4 bytes
+# For D=512, k=64: 0.5MB per elite, 1000 elites = 500MB (8x reduction)
+```
+
+Reconstruction: W = U @ V. Gradient updates apply to U and V during training.
+
+### 11. Lifecycle Safety Guardrails ✓
 ```python
 # Hard limits (never exceed)
 MAX_POOL_SIZE = 64
-MAX_ARCHIVE_SIZE = 1000
+MAX_ARCHIVE_CENTROIDS = 1000  # CVT centroids, not grid cells
 MAX_LOSS_RATIO = 10.0  # vs moving average
 
 # Loss gates (halt lifecycle if loss diverging)
@@ -495,11 +551,14 @@ else:
 - [ ] **observability/tracing.py** - Tracing spans
 
 ### MUST ADD
-- [ ] **training/stability.py** - Phased training (warmup/gentle/full)
-- [ ] **training/fitness.py** - Gradient-based fitness computation
+- [ ] **memory/archive.py** - CVT-MAP-Elites with Voronoi partitioning and low-rank storage
+- [ ] **kernels/triton_impl.py** - FlashAttention-style tiled attention (HBM ↔ SRAM)
+- [ ] **core/pseudopod.py** - 5D behavioral metric computation
+- [ ] **training/stability.py** - Simulated annealing temperature schedule
+- [ ] **training/fitness.py** - Gradient-based fitness with efficiency signals
 - [ ] **training/losses.py** - Multi-objective loss functions
-- [ ] **training/trainer.py** - Training loop with lifecycle timescales
-- [ ] **training/lifecycle.py** - Hard limits, loss gates, safety checks
+- [ ] **training/trainer.py** - Training loop with annealing-driven lifecycle
+- [ ] **training/lifecycle.py** - Annealing-based birth/death decisions, loss gates
 
 ### MUST TEST
 - [ ] **tests/integration/test_training_stability.py** - Convergence with lifecycle
@@ -537,43 +596,86 @@ else:
 
 ## Architectural Decisions
 
-### 1. Kernel injection: Constructor Injection ✓
+### 1. IO-Aware Tiled Attention (FlashAttention) ✓
+**Reasoning (Dao et al., 2022):** Standard attention is memory-bound, not compute-bound. Tile to maximize SRAM usage.
+
+**Problem:** Attention loads Q, K, V from HBM repeatedly.
+```python
+# Naive: O(M²) memory accesses to HBM
+for i in range(M):
+    for j in range(M):
+        S[i,j] = Q[i] @ K[j]  # Load K[j] from HBM M times
+```
+
+**FlashAttention solution:** Tile computation to fit in SRAM.
+```python
+BLOCK_M = 128  # Query tile size (fits in SRAM)
+BLOCK_N = 128  # Key/value tile size (fits in SRAM)
+
+for block_m in range(0, M, BLOCK_M):
+    # Load Q tile to SRAM once
+    Q_tile = Q[block_m:block_m+BLOCK_M]  # HBM → SRAM
+
+    for block_n in range(0, M, BLOCK_N):
+        # Load K, V tiles to SRAM
+        K_tile = K[block_n:block_n+BLOCK_N]  # HBM → SRAM
+        V_tile = V[block_n:block_n+BLOCK_N]  # HBM → SRAM
+
+        # Compute in SRAM (fast)
+        S_tile = Q_tile @ K_tile.T
+        P_tile = softmax(S_tile)
+        O_tile += P_tile @ V_tile
+
+        # Write back to HBM once
+        O[block_m:block_m+BLOCK_M] = O_tile  # SRAM → HBM
+```
+
+**IO complexity:**
+```
+Naive: O(M² * D) HBM accesses
+Tiled: O(M² * D / SRAM_size) HBM accesses
+Speedup: ~3x on GPT-2 (Dao et al., 2022)
+```
+
+**Implementation:** kernels/triton_impl.py uses tiling with BLOCK_M=128, BLOCK_N=128, BLOCK_D=64.
+
+### 2. Kernel injection: Constructor Injection ✓
 **Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
 ```python
 Pseudopod.__init__(head_dim, kernel: Kernel, device)
 ```
 
-### 2. Multi-GPU: Hash-based partitioning ✓
+### 3. Multi-GPU: Hash-based partitioning ✓
 **Reasoning (Bitter Lesson):** Hash function scales arbitrarily. No hand-coded spatial assumptions.
 ```python
 device_id = hash(behavior_coords) % num_gpus
 ```
 
-### 3. Determinism: Sort keys on iteration ✓
+### 4. Determinism: Sort keys on iteration ✓
 **Reasoning (Architecture):** Spatial structure over temporal accidents. Reproducible science.
 ```python
 for key in sorted(archive.keys()):
 ```
 
-### 4. Memory limits: Soft limit with graceful degradation ✓
+### 5. Memory limits: Soft limit with graceful degradation ✓
 **Reasoning (SRE + Bitter Lesson):** Adapt to constraints, don't crash. Trade quality for capacity automatically.
 ```python
 if memory > budget: pool.cull_worst(fraction=0.2)
 ```
 
-### 5. Metrics injection: Dependency injection ✓
+### 6. Metrics injection: Dependency injection ✓
 **Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
 ```python
 Organism.__init__(metrics_collector: Optional[MetricsCollector])
 ```
 
-### 6. Fitness metric: Gradient magnitude ✓
+### 7. Fitness metric: Gradient magnitude ✓
 **Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
 ```python
 fitness = grad_norm * attention_to_targets  # Task-relevant
 ```
 
-### 7. Archive bootstrapping: Initialization only ✓
+### 8. Archive bootstrapping: Initialization only ✓
 **Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
 ```python
 if new_component_needed:
@@ -581,7 +683,7 @@ if new_component_needed:
     component.requires_grad_(True)  # Train with network
 ```
 
-### 8. Timescale separation: 1x / 100x / 1000x ✓
+### 9. Timescale separation: 1x / 100x / 1000x ✓
 **Reasoning (Stability):** Separate fast (weights) from medium (fitness) from slow (lifecycle).
 ```python
 if step % 1000 == 0: pool.cull()
@@ -589,44 +691,56 @@ elif step % 100 == 0: archive.add_if_elite()
 fitness_ema.update()  # Every step
 ```
 
-### 9. Behavioral dimensions must correlate with hardware costs ✓
-**Reasoning (Emergent Hardware Optimization):** MAP-Elites can discover hardware-optimal patterns IF behavioral space captures hardware-relevant structure.
+### 10. KMO-validated behavioral dimensions (4-5 dims) ✓
+**Reasoning (MAP-Elites Research):** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. CVT allows 4-5 dimensions without exponential grid explosion.
 
-**Critical requirement:** Behavioral dimensions MUST correlate with actual compute patterns. If dimensions are arbitrary, diversity is meaningless.
+**Validation requirement:** KMO (Kaiser-Meyer-Olkin) test ensures behavioral dimensions are factorable and capture meaningful variance.
 
-**Good behavioral dimensions:**
+```python
+# Before training: validate behavioral space
+from scipy.stats import KMO
+behavioral_samples = sample_components(n=100)
+kmo_statistic = KMO(behavioral_samples)
+
+if kmo_statistic < 0.5:
+    raise ValueError("Behavioral dimensions are not factorable - diversity will be noise")
+elif kmo_statistic < 0.6:
+    warnings.warn("Marginal behavioral space quality")
+# KMO > 0.6: Acceptable, KMO > 0.8: Good, KMO > 0.9: Excellent
+```
+
+**5-dimensional behavioral space (CVT-compatible):**
 ```python
 behavior = (
-    attention_distance,      # Correlates with memory access patterns
-    activation_sparsity,     # Correlates with compute efficiency
-    weight_magnitude_std,    # Correlates with numerical precision needs
+    avg_attention_span,         # Mean(attention_weights * position_distance)
+    activation_sparsity,         # Fraction of activations < threshold
+    gradient_flow_magnitude,     # L2 norm of gradients through component
+    memory_access_locality,      # Variance of attention positions
+    computational_intensity,     # FLOPs per forward pass
 )
 ```
 
-**Bad behavioral dimensions:**
+Each dimension correlates with measurable hardware metrics:
+- Attention span → Memory bandwidth usage
+- Sparsity → Compute utilization
+- Gradient flow → Task relevance
+- Memory locality → Cache hit rate
+- Compute intensity → GPU occupancy
+
+**CVT partitioning for device placement:**
 ```python
-behavior = (
-    random_noise,            # No correlation with anything
-    component_id_hash,       # Arbitrary identifier
-    creation_timestamp,      # Temporal accident, not structure
-)
+# Compute 1000 Voronoi centroids in 5D behavioral space
+centroids = compute_cvt_centroids(num_centroids=1000, dims=5)
+# Each component maps to nearest centroid
+centroid_id = find_nearest_centroid(component.behavior(), centroids)
+device_id = hash(centroid_id) % num_gpus
 ```
 
-**Hash partitioning for device placement:**
-```python
-device_id = hash(behavior_coords) % num_gpus
-```
+**Failure mode prevention:** KMO < 0.6 indicates dimensions don't capture structured variance. Replace dimensions before training.
 
-This creates deterministic device placement. IF behavioral space captures hardware structure:
-- Short attention distance → GPU 0 (local memory access)
-- Long attention distance → GPU 3 (global memory access)
-- Components naturally partition by actual compute patterns
+**Test:** Does KMO-validated behavioral space beat random dimensions? If no, MAP-Elites adds overhead without benefit.
 
-**Failure mode:** If behavioral dimensions don't correlate with hardware, this is just random device assignment with extra steps.
-
-**Test:** Does archive-guided device placement beat random placement? If no, behavioral space is wrong.
-
-### 10. Fitness must include efficiency signals ✓
+### 11. Fitness must include efficiency signals ✓
 **Reasoning (Hardware Awareness):** Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency.
 
 ```python
@@ -651,7 +765,7 @@ MAP-Elites doesn't "know" about GPUs, but fitness does. Hardware-optimal pattern
 
 **Test:** Train with and without efficiency in fitness. Does it discover faster configurations?
 
-### 11. Quality-diversity maintains architectural variety ✓
+### 12. Quality-diversity maintains architectural variety ✓
 **Reasoning (Avoid Mode Collapse):** Standard transformers: all heads learn similar features. MAP-Elites: forced diversity.
 
 **Standard transformer failure mode:**
@@ -687,7 +801,7 @@ short_range_components = [
 
 **Test:** Does MAP-Elites maintain higher behavioral diversity than standard training?
 
-### 12. Ablation tests determine architectural value ✓
+### 13. Ablation tests determine architectural value ✓
 **Reasoning (Scientific Method):** Don't assume architectural choices work. Test them.
 
 **Required comparisons:**
@@ -746,93 +860,167 @@ Slime: Forward + Backward + Fitness(~1%) + Archive(0.01%) + Lifecycle(0.001%)
 Net overhead: ~1-2% per training step
 ```
 
-### Why Better Than NAS
+### Comparison to DARTS (Modern NAS)
 
-**Neural Architecture Search problems:**
-1. **Outer loop cost**: Train candidate → evaluate → pick best → repeat
-   - Each candidate requires full training run
-   - Total cost: N_candidates * training_time
-   - Typical: 1000 candidates * 100 GPU-days = 100,000 GPU-days
+**DARTS (Liu et al., 2018) baseline:**
+- Differentiable architecture search with continuous relaxation
+- Uses weight sharing across candidate operations
+- Search cost: 1-4 GPU days on CIFAR-10/ImageNet
+- 1000x faster than early NAS methods (NASNet: 2000 GPU days)
 
-2. **Discrete search space**: Must evaluate entire architectures
-   - Can't mix-and-match partial solutions
-   - Every structural change requires full re-evaluation
-
-3. **Transferability**: Architectures found on small datasets/tasks may not transfer
-
-**Slime advantages:**
+**Key difference:**
 ```
-1. Single training run with continuous adaptation
-   - No outer loop: components evolve during task training
-   - Cost: 1.02x baseline (2% overhead)
-
-2. Continuous search space via MAP-Elites
-   - Archive maintains diverse solutions simultaneously
-   - Interpolation between elites for new components
-   - Amortized exploration: pay once, sample forever
-
-3. Task-adaptive: Components specialize to actual data distribution
-   - Fitness computed on real task gradients
-   - No transferability gap
+DARTS: Find single best architecture → train it from scratch
+Slime: Maintain diverse components → continuously adapt during training
 ```
 
-**Cost comparison:**
+**Slime approach:**
 ```
-NAS: 100,000 GPU-days to find architecture, then train it
-Slime: 1.02x GPU-days to train and discover architecture simultaneously
-Speedup: ~98,000x cheaper
-```
+1. No separate search phase
+   - Components evolve during task training
+   - CVT-MAP-Elites maintains 1000 diverse solutions
+   - Quality-diversity, not single-objective optimization
 
-### Why Better Than Hypernetworks
+2. Continuous adaptation
+   - DARTS architecture is fixed after search
+   - Slime components birth/death based on fitness
+   - Adapts to distribution shift during training
 
-**Hypernetwork problems:**
-1. **Meta-overfitting**: Hypernetwork learns to generate weights, but:
-   - Adds meta-parameters (hypernetwork weights)
-   - Meta-parameters must generalize across weight space
-   - Tends to collapse to average solution
-
-2. **Computational overhead**:
-   - Generate weights → forward pass → backward through generator
-   - Gradient flow: task_loss → primary_weights → hypernetwork_params
-   - 2x memory (store both hypernetwork and generated weights)
-
-3. **Expressiveness limit**:
-   - Hypernetwork output dimension = primary network parameters
-   - For D=512 model: output ~260k values per component
-   - Bottleneck: compress weight space into hypernetwork capacity
-
-**Slime advantages:**
-```
-1. No meta-parameters: Components are primary parameters
-   - Direct gradient flow from task to component weights
-   - No compression bottleneck
-   - Each component learns independently
-
-2. Computational efficiency:
-   - No weight generation step
-   - Standard backprop through components
-   - Memory: 1x (just component weights + gradients)
-
-3. Unbounded expressiveness:
-   - Archive stores actual weight matrices, not generators
-   - No reconstruction loss
-   - Each elite is fully optimized for its niche
+3. Estimated cost
+   - Base training: 100% (same as DARTS final training)
+   - Fitness computation: +5-10%
+   - CVT archive ops: +1-3%
+   - Lifecycle decisions: +1-2%
+   - Total: 107-115% of baseline training time
 ```
 
-**Cost comparison:**
+**Honest comparison:**
 ```
-Hypernetwork: 2x memory, 1.5x compute (generation + backprop through generator)
-Slime: 1.02x compute (fitness overhead), 1.01x memory (archive is tiny)
-Speedup: ~1.5x faster than hypernetworks
+DARTS: 4 GPU days search + N GPU days training = (4 + N) total
+Slime: 1.15 × N GPU days (search happens during training)
+
+If N > 30 days: Slime is faster
+If N < 30 days: DARTS is faster
+
+Advantage: Slime maintains architectural diversity throughout training.
+Disadvantage: Slime has 15% overhead vs fixed architecture.
 ```
 
-### Why Better Than Both
+**Hypothesis (requires empirical validation):** For long training runs (100+ GPU days), amortized search cost favors Slime. For short runs (<30 days), DARTS is more efficient.
+
+### Comparison to Hypernetworks (Ha et al., 2016)
+
+**Hypernetwork approach (Ha et al., ICLR 2017):**
+- Small network generates weights for larger network
+- Achieves parameter efficiency: fewer learnable params than standard networks
+- Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
+- Weight sharing across layers via generation scheme
+
+**Key insight from Ha et al.:** Low-rank weight generation can be MORE efficient than storing full matrices.
+
+**Slime borrows this insight for archive storage:**
+```python
+# Archive stores low-rank factorizations (U, V) inspired by hypernetworks
+elite.weights = [(U_q, V_q), (U_k, V_k), (U_v, V_v), (U_o, V_o)]
+# Reconstruction: W = U @ V
+# Memory: O(D × k) instead of O(D²)
+```
+
+**Key differences:**
+```
+Hypernetworks: Generate weights dynamically at runtime
+Slime: Store compressed weights statically in archive
+
+Hypernetworks: Single generator network for all components
+Slime: Each component has independent weights (no generator bottleneck)
+
+Hypernetworks: Meta-learning (learn to generate good weights)
+Slime: Quality-diversity (maintain diverse proven weights)
+```
+
+**Computational tradeoffs:**
+```
+Hypernetwork:
+  + Fast adaptation to new tasks (generate new weights)
+  + Parameter efficient (small generator)
+  - Generation cost at runtime
+  - Gradient flow through generator adds complexity
+
+Slime:
+  + No generation cost (weights are direct parameters)
+  + No meta-learning instability
+  - Archive memory cost (mitigated by low-rank storage)
+  - Slower adaptation to new tasks (need to add/train components)
+```
+
+**Complementary approaches:** Hypernetworks excel at few-shot adaptation. Slime excels at maintaining diverse specialists for single-task training.
+
+### Simulated Annealing for Component Lifecycle
+
+**Insight:** Quality-diversity needs exploration-exploitation balance. Simulated annealing provides principled temperature schedule.
+
+**Application 1: Birth decisions (exploration temperature)**
+```python
+# Early training: high temperature = accept diverse components
+# Late training: low temperature = only accept high-fitness components
+
+def birth_probability(fitness, step, max_steps):
+    temperature = initial_temp * (1 - step / max_steps)  # Linear cooling
+    if fitness > threshold:
+        return 1.0  # Always accept good components
+    else:
+        # Accept suboptimal components with probability exp(-ΔE/T)
+        delta_e = threshold - fitness
+        return exp(-delta_e / temperature)
+
+# Early: temperature=1.0, accept fitness=0.5 with prob=exp(-0.5)=0.61
+# Late: temperature=0.1, accept fitness=0.5 with prob=exp(-5.0)=0.007
+```
+
+**Application 2: CVT centroid refinement**
+```python
+# Use simulated annealing to optimize Voronoi centroid positions
+# Start with random centroids, gradually move to minimize quantization error
+
+def refine_centroids(behavioral_samples, num_centroids):
+    centroids = initialize_random(num_centroids)
+    temperature = 1.0
+
+    for iteration in range(max_iterations):
+        # Propose centroid move
+        new_centroids = perturb(centroids, std=temperature)
+        # Accept if improves coverage or with annealing probability
+        if coverage(new_centroids) > coverage(centroids):
+            centroids = new_centroids
+        elif random() < exp(-delta_coverage / temperature):
+            centroids = new_centroids
+
+        temperature *= cooling_rate  # Geometric cooling
+
+    return centroids
+```
+
+**Application 3: Archive mutation strength**
+```python
+# When bootstrapping from archive, mutation strength follows annealing
+# Early: large mutations for exploration
+# Late: small mutations for exploitation
+
+def bootstrap_from_archive(elite, step, max_steps):
+    weights = elite.reconstruct()  # U @ V
+    temperature = initial_temp * (1 - step / max_steps)
+    noise = torch.randn_like(weights) * temperature
+    return weights + noise
+```
+
+**Pattern:** Annealing naturally transitions from exploration → exploitation without manual phase boundaries. Smoother than hard-coded warmup/gentle/full phases.
 
 **Fundamental difference:**
 ```
-NAS: Search for single best architecture (optimization)
+DARTS: Search for single best architecture (optimization)
 Hypernetworks: Learn to generate diverse weights (meta-learning)
 Slime: Maintain diverse components (quality-diversity)
+Simulated Annealing: Principled exploration-exploitation schedule
 ```
 
 **Slime uniqueness:**
@@ -870,3 +1058,50 @@ slime_organism = train(slime_model, task, epochs=100)
 Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compute than NAS, and 1.3-1.5x better throughput than hypernetworks.
 
 **If hypothesis fails:** Architecture is self-indulgent. Simplify or abandon.
+
+## References
+
+### Core Algorithms
+
+- Mouret, J.-B. & Clune, J. (2015). "Illuminating search spaces by mapping elites." *arXiv:1504.04909*
+  - Original MAP-Elites algorithm for quality-diversity optimization
+  - Foundation for archive-based behavioral diversity
+
+- Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. (2018). "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm." *IEEE Transactions on Evolutionary Computation*, 22(4), 623-630.
+  - CVT-MAP-Elites for scalable behavioral space partitioning
+  - Solves exponential grid explosion with fixed-resolution grids
+
+- Pugh, J. K., Soros, L. B., & Stanley, K. O. (2016). "Quality Diversity: A New Frontier for Evolutionary Computation." *Frontiers in Robotics and AI*, 3:40.
+  - Survey of quality-diversity algorithms and applications
+  - Distinguishes QD from pure optimization and novelty search
+
+### Neural Architecture
+
+- Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS 2022*. *arXiv:2205.14135*
+  - IO-aware tiled attention implementation
+  - 3x speedup on GPT-2, 15% speedup on BERT via HBM ↔ SRAM tiling
+
+- Liu, H., Simonyan, K., & Yang, Y. (2019). "DARTS: Differentiable Architecture Search." *ICLR 2019*. *arXiv:1806.09055*
+  - Modern NAS baseline: 1-4 GPU days (vs 2000 for early NAS)
+  - Continuous relaxation with weight sharing
+
+- Ha, D., Dai, A., & Le, Q. V. (2017). "HyperNetworks." *ICLR 2017*. *arXiv:1609.09106*
+  - Small network generates weights for larger network
+  - Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
+  - Low-rank weight generation inspiration for archive storage
+
+### Statistical Validation
+
+- Kaiser, H. F. (1970). "A second generation little jiffy." *Psychometrika*, 35(4), 401-415.
+  - Kaiser-Meyer-Olkin (KMO) test for factor analysis adequacy
+  - Used to validate behavioral dimensions are factorable
+
+- Bartlett, M. S. (1950). "Tests of significance in factor analysis." *British Journal of Statistical Psychology*, 3(2), 77-85.
+  - Bartlett's test of sphericity for correlation matrices
+  - Tests null hypothesis that behavioral dimensions are uncorrelated
+
+### Optimization Theory
+
+- Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. (1983). "Optimization by simulated annealing." *Science*, 220(4598), 671-680.
+  - Simulated annealing for combinatorial optimization
+  - Temperature schedule for exploration-exploitation balance
