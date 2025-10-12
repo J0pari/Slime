@@ -1,6 +1,6 @@
 import pytest
 import torch
-from slime.core.stencil import pairwise_behavioral_distance, topk_neighbors_mask, vmap_relative_fitness, vmap_behavioral_divergence, vmap_gradient_rank, vmap_attention_coherence, SpatialStencil
+from slime.core.stencil import pairwise_behavioral_distance, topk_neighbors_mask, vmap_relative_fitness, vmap_behavioral_divergence, vmap_gradient_rank, vmap_ca_coherence, SpatialStencil
 
 def test_pairwise_behavioral_distance_euclidean_constraint(constraint):
     behaviors = torch.tensor([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], device='cuda')
@@ -49,11 +49,11 @@ def test_vmap_gradient_rank_constraint(constraint):
     constraint('Lowest gradient has low rank', lambda: (ranks[1] < 0.3, float(ranks[1]), '<0.3', {}))
     constraint('Ranks are in [0, 1]', lambda: ((ranks >= 0.0).all().item() and (ranks <= 1.0).all().item(), [float(ranks.min()), float(ranks.max())], '[0, 1]', {}))
 
-def test_vmap_attention_coherence_constraint(constraint):
+def test_vmap_ca_coherence_constraint(constraint):
     shared_pattern = torch.randn(1, 1, 8, 8, device='cuda')
-    attention_patterns = torch.stack([shared_pattern + torch.randn(1, 1, 8, 8, device='cuda') * 0.1 for _ in range(4)])
+    ca_patterns = torch.stack([shared_pattern + torch.randn(1, 1, 8, 8, device='cuda') * 0.1 for _ in range(4)])
     mask = torch.tensor([[False, True, True, True], [True, False, True, True], [True, True, False, True], [True, True, True, False]], device='cuda')
-    coherence = vmap_attention_coherence(attention_patterns, mask)
+    coherence = vmap_ca_coherence(ca_patterns, mask)
     constraint('Coherence shape matches N', lambda: (coherence.shape == (4,), coherence.shape, (4,), {}))
     constraint('High similarity patterns have high coherence', lambda: (coherence.mean() > 0.5, float(coherence.mean()), '>0.5', {}))
     constraint('Coherence is in [-1, 1]', lambda: ((coherence >= -1.0).all().item() and (coherence <= 1.0).all().item(), [float(coherence.min()), float(coherence.max())], '[-1, 1]', {}))
