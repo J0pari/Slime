@@ -38,6 +38,7 @@ class DynamicPool:
     def __init__(
         self,
         component_factory: Callable[[], Component],
+        bootstrap_factory: Optional[Callable[[dict], Component]] = None,
         config: PoolConfig,
         archive: Optional['BehavioralArchive'] = None,
     ):
@@ -45,10 +46,12 @@ class DynamicPool:
 
         Args:
             component_factory: Factory function to create new components
+            bootstrap_factory: Factory(genome) -> Component for archive spawns
             config: Pool configuration
             archive: Optional archive for bootstrapping
         """
         self.factory = component_factory
+        self.bootstrap_factory = bootstrap_factory if bootstrap_factory is not None else component_factory
         self.config = config
         self.archive = archive
 
@@ -57,7 +60,7 @@ class DynamicPool:
 
         # Initialize to min_size
         for _ in range(config.min_size):
-            self._components.append(self._spawn_component())
+            self._components.append(self.factory())
 
         # Statistics
         self._step = 0
@@ -74,9 +77,9 @@ class DynamicPool:
         """Spawn new component, optionally bootstrapping from archive"""
 
         if self.archive is not None and behavior_location is not None:
-            # Try bootstrapping from archive
+            # Try bootstrapping from archive using bootstrap_factory
             component = self.archive.bootstrap_component(
-                self.factory.__self__.__class__,  # Get class from bound method
+                self.bootstrap_factory,
                 behavior_location,
             )
             if component is not None:

@@ -1,6 +1,6 @@
 """Component lifecycle protocol for pool management"""
 
-from typing import Protocol, ClassVar
+from typing import Protocol
 
 
 class Component(Protocol):
@@ -8,11 +8,11 @@ class Component(Protocol):
 
     All pooled components (Pseudopods, etc.) must implement this interface.
     Enables:
-    - Archive serialization (via to_dict/from_dict)
+    - Archive serialization (via to_dict)
     - Pool lifecycle management (via fitness)
     - State reset between uses (via reset)
 
-    This is the base abstraction that makes MAP-Elites + pools generic.
+    Reconstruction handled by factories, not protocol (varying dependencies).
     """
 
     @property
@@ -44,19 +44,5 @@ class Component(Protocol):
 
         Returns:
             Dictionary with all state needed to reconstruct component
-        """
-        ...
-
-    @classmethod
-    def from_dict(cls, data: dict) -> 'Component':
-        """Deserialize from dictionary.
-
-        Inverse of to_dict(). Must reconstruct component from plain dict.
-
-        Args:
-            data: Dictionary from to_dict()
-
-        Returns:
-            New component instance with state from data
         """
         ...

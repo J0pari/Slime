@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 from slime.core.organism import Organism
 from slime.core.state import FlowState
 from slime.memory.pool import PoolConfig
+from slime.proto.kernel import Kernel
+from slime.kernels.torch_fallback import TorchKernel
 
 
 class SlimeModel(nn.Module):
@@ -23,18 +25,9 @@ class SlimeModel(nn.Module):
         output_dim: int,
         head_dim: int = 64,
         pool_config: Optional[PoolConfig] = None,
+        kernel: Optional[Kernel] = None,
         device: Optional[torch.device] = None,
     ):
-        """Initialize SlimeModel.
-
-        Args:
-            input_dim: Input feature dimension
-            latent_dim: Internal latent dimension
-            output_dim: Output dimension
-            head_dim: Pseudopod head dimension
-            pool_config: Dynamic pool configuration
-            device: Computation device
-        """
         super().__init__()
 
         self.input_dim = input_dim
@@ -42,16 +35,18 @@ class SlimeModel(nn.Module):
         self.output_dim = output_dim
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Core organism
+        if kernel is None:
+            kernel = TorchKernel(self.device)
+
         self.organism = Organism(
             sensory_dim=input_dim,
             latent_dim=latent_dim,
             head_dim=head_dim,
             device=self.device,
+            kernel=kernel,
             pool_config=pool_config,
         )
 
-        # Output projection
         self.project_out = nn.Linear(latent_dim, output_dim).to(self.device)
 
     def forward(

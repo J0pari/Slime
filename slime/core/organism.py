@@ -7,8 +7,12 @@ import logging
 
 from slime.core.pseudopod import Pseudopod
 from slime.core.state import FlowState
+from slime.core.chemotaxis import Chemotaxis
 from slime.memory.archive import BehavioralArchive
 from slime.memory.pool import DynamicPool, PoolConfig
+from slime.proto.kernel import Kernel
+from slime.kernels.torch_fallback import TorchKernel
+from slime.observability.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +34,10 @@ class Organism(nn.Module):
         sensory_dim: int,
         latent_dim: int,
         head_dim: int,
-        device: torch.device = None,
+        device: Optional[torch.device] = None,
+        kernel: Optional[Kernel] = None,
         pool_config: Optional[PoolConfig] = None,
+        metrics_collector: Optional[MetricsCollector] = None,
     ):
         super().__init__()
 
@@ -40,24 +46,23 @@ class Organism(nn.Module):
         self.head_dim = head_dim
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Sensory encoding
+        self.kernel = kernel if kernel is not None else TorchKernel(self.device)
+        self.metrics = metrics_collector
+
         self.encode = nn.Sequential(
             nn.Linear(sensory_dim, latent_dim),
             nn.LayerNorm(latent_dim),
             nn.Tanh(),
         ).to(self.device)
 
-        # Decoding for reconstruction
         self.decode = nn.Sequential(
             nn.Linear(latent_dim, sensory_dim),
             nn.Tanh(),
         ).to(self.device)
 
-        # Behavioral space predictors (learned)
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
 
-        # MAP-Elites archive
         self.archive = BehavioralArchive(
             dimensions=['rank', 'coherence'],
             bounds=[(0.0, 1.0), (0.0, 1.0)],
@@ -65,7 +70,8 @@ class Organism(nn.Module):
             device=self.device,
         )
 
-        # Dynamic pseudopod pool
+        self.chemotaxis = Chemotaxis(self.archive, self.device)
+
         if pool_config is None:
             pool_config = PoolConfig(
                 min_size=4,
@@ -76,12 +82,12 @@ class Organism(nn.Module):
             )
 
         self.pseudopod_pool = DynamicPool(
-            component_factory=lambda: Pseudopod(head_dim, self.device),
+            component_factory=lambda: Pseudopod(head_dim, self.kernel, self.device),
+            bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, self.device),
             config=pool_config,
             archive=self.archive,
         )
 
-        # State
         self._generation = 0
 
     def forward(
@@ -89,64 +95,47 @@ class Organism(nn.Module):
         stimulus: torch.Tensor,
         state: Optional[FlowState] = None,
     ) -> Tuple[torch.Tensor, FlowState]:
-        """Single forward pass through organism.
+        if self.metrics:
+            self.metrics.start_step()
 
-        Args:
-            stimulus: Input [batch, sensory_dim]
-            state: Optional previous state
-
-        Returns:
-            (output, new_state): Output and updated state
-        """
         batch_size = stimulus.shape[0]
 
-        # Encode stimulus
         body = self.encode(stimulus)
 
         if state is not None:
-            # Integrate with previous body state
             body = 0.7 * body + 0.3 * state.body
 
-        # Predict behavioral coordinates
         rank = torch.sigmoid(self.predict_rank(body.mean(0, keepdim=True))).item()
         coherence = torch.sigmoid(self.predict_coherence(body.mean(0, keepdim=True))).item()
         behavior = (rank, coherence)
 
-        # Get active pseudopods for this location
         pseudopods = self.pseudopod_pool.get_at(behavior, max_count=8)
 
         if not pseudopods:
-            # Emergency: spawn if pool is empty
             logger.warning("Empty pseudopod pool, spawning emergency pseudopod")
-            pseudopods = [Pseudopod(self.head_dim, self.device)]
+            pseudopods = [Pseudopod(self.head_dim, self.kernel, self.device)]
 
-        # Extend pseudopods
         outputs = []
         max_rank = torch.tensor(0.0, device=self.device)
         min_coherence = torch.tensor(1.0, device=self.device)
 
         for pod in pseudopods:
-            # Slice body for this head
             pod_input = body[:, :self.head_dim]
             stim_input = stimulus[:, :self.head_dim]
 
             output = pod(pod_input, stim_input)
             outputs.append(output)
 
-            # Track behavioral metrics
             pod_rank = pod.effective_rank()
             pod_coherence = pod.coherence()
 
             max_rank = torch.maximum(max_rank, pod_rank)
             min_coherence = torch.minimum(min_coherence, pod_coherence)
 
-        # Merge pseudopod outputs
         merged = torch.stack(outputs).mean(0)
 
-        # Compute fitness (information-theoretic)
         fitness = (max_rank * min_coherence).item()
 
-        # Archive best pseudopods
         for pod in pseudopods:
             pod_behavior = (
                 torch.clamp(pod.effective_rank(), 0, 1).item(),
@@ -154,10 +143,8 @@ class Organism(nn.Module):
             )
             self.archive.add(pod, pod_behavior, pod.fitness)
 
-        # Pool lifecycle step
         self.pseudopod_pool.step(behavior)
 
-        # Create new state
         new_state = FlowState(
             body=merged,
             behavior=behavior,
@@ -165,11 +152,19 @@ class Organism(nn.Module):
             fitness=fitness,
         )
 
-        # Decode output
         output = self.decode(merged)
 
         self._generation += 1
         self.archive.increment_generation()
+
+        if self.metrics:
+            self.metrics.end_step(
+                batch_size=batch_size,
+                pool_size=self.pseudopod_pool.size(),
+                archive_size=self.archive.size(),
+                archive_coverage=self.archive.coverage(),
+                loss=None,
+            )
 
         return output, new_state
 

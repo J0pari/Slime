@@ -1,7 +1,7 @@
 """MAP-Elites behavioral archive for quality-diversity optimization"""
 
 import torch
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Callable
 from dataclasses import dataclass
 import weakref
 import logging
@@ -165,7 +165,7 @@ class BehavioralArchive:
 
     def bootstrap_component(
         self,
-        component_class,
+        component_factory: Callable[[dict], Component],
         behavior: Tuple[float, ...],
         search_radius: float = 0.2,
     ) -> Optional[Component]:
@@ -174,7 +174,7 @@ class BehavioralArchive:
         Samples nearby elites and creates new component from best.
 
         Args:
-            component_class: Class to instantiate
+            component_factory: Factory(genome_dict) -> Component
             behavior: Target behavioral location
             search_radius: Neighborhood radius to search
 
@@ -189,8 +189,8 @@ class BehavioralArchive:
         # Use best nearby elite
         best = max(nearby, key=lambda e: e.fitness)
 
-        # Deserialize immutable genome to create live component
-        component = component_class.from_dict(best.genome)
+        # Factory handles reconstruction with dependencies
+        component = component_factory(best.genome)
 
         # Track with weak reference
         self._live_components.add(component)

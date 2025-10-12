@@ -7,6 +7,8 @@ import logging
 
 from slime.core.organism import Organism
 from slime.memory.pool import PoolConfig
+from slime.proto.kernel import Kernel
+from slime.kernels.torch_fallback import TorchKernel
 
 logger = logging.getLogger(__name__)
 
@@ -40,24 +42,9 @@ class SlimeMoldEncoder(nn.Module):
         norm_first: bool = False,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-        # Slime-specific parameters
         pool_config: Optional[PoolConfig] = None,
+        kernel: Optional[Kernel] = None,
     ):
-        """Initialize SlimeMoldEncoder.
-
-        Args:
-            d_model: Dimension of model embeddings
-            nhead: Number of attention heads (maps to initial pseudopods)
-            dim_feedforward: FFN dimension (unused, for API compat)
-            dropout: Dropout rate (unused, for API compat)
-            activation: Activation function (unused, for API compat)
-            layer_norm_eps: LayerNorm epsilon (unused, for API compat)
-            batch_first: If True, input is (batch, seq, feature)
-            norm_first: If True, norm before attention (unused, for API compat)
-            device: Device for computation
-            dtype: Data type (unused, for API compat)
-            pool_config: Configuration for dynamic pools
-        """
         super().__init__()
 
         self.d_model = d_model
@@ -65,30 +52,30 @@ class SlimeMoldEncoder(nn.Module):
         self.batch_first = batch_first
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        # Head dimension
         if d_model % nhead != 0:
             raise ValueError(f"d_model ({d_model}) must be divisible by nhead ({nhead})")
         head_dim = d_model // nhead
 
-        # Default pool config based on nhead
         if pool_config is None:
             pool_config = PoolConfig(
                 min_size=nhead,
-                max_size=nhead * 4,  # Can grow to 4x initial heads
+                max_size=nhead * 4,
                 birth_threshold=0.8,
                 death_threshold=0.1,
             )
 
-        # Internal organism
+        if kernel is None:
+            kernel = TorchKernel(self.device)
+
         self.organism = Organism(
             sensory_dim=d_model,
             latent_dim=d_model,
             head_dim=head_dim,
             device=self.device,
+            kernel=kernel,
             pool_config=pool_config,
         )
 
-        # State management
         self._state: Optional[dict] = None
 
     def forward(
