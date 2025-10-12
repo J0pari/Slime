@@ -23,25 +23,147 @@
 
 ## Dependency DAG
 
+**Layer 0: Protocols** (no dependencies)
+- proto/kernel.py
+- proto/memory.py
+- proto/model.py
+- proto/component.py
+
+**Layer 1: Implementations** (depend only on Layer 0)
+- kernels/utils.py, kernels/triton_impl.py, kernels/torch_fallback.py → proto.kernel
+- observability/metrics.py, observability/slo.py (passive collection/validation)
+
+**Layer 2: Data structures** (depend on Layer 0-1)
+- memory/archive.py, memory/pool.py → proto.component
+- memory/tubes.py → proto.memory
+- core/state.py (FlowState dataclass, no dependencies)
+- core/stencil.py (GPU-parallel spatial ops, no dependencies)
+
+**Layer 3: Components** (depend on Layer 0-2)
+- core/pseudopod.py → proto.model, proto.kernel, kernels/*, observability/*
+- core/chemotaxis.py → proto.model, memory/archive
+- memory/pool.py → core/stencil (batched spatial computation)
+
+**Layer 4: Orchestration** (depend on Layer 0-3)
+- core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
+
+**Layer 5: API** (depend on Layer 0-4)
+- api/torch_compat.py, api/native.py → core/organism
+
+**Layer 6: Applications** (depend on Layer 0-5)
+- training/trainer.py, training/fitness.py, training/lifecycle.py
+- bench/profile.py, tools/export.py, tools/package.py
+- config/loader.py
+- tests/* (unit, integration, ablations, slo)
+
 
 ## Data Flow
 
+**User Input** → **API Layer** (torch_compat, native)
+    ↓
+**Organism** (orchestrator, owns Pool + Archive + Chemotaxis)
+    ↓ uses                    ↓ owns
+**Pseudopod Pool** ←→ **Archive** (MAP-Elites storage)
+    ↓ delegates
+**Pseudopod** (Component) → adds self to Archive
+    ↓ calls
+**Kernels** (GPU compute, warp-level execution)
+    ↓ metrics collected by
+**Observability** (passive side channel, no callbacks)
 
 No cycles. Archive doesn't call anything. Observability is passive collector.
 
 ## Protocols
 
 ### proto.component.Component
+**Purpose**: Unified interface for ALL pooled components
+
+**Interface**:
+- fitness: float (property) - Component quality metric
+- reset() → None - Reset internal state
+- to_dict() → dict - Immutable serialization for Archive storage
+- from_dict(data: dict) → Component - Reconstruction from serialized form
+
+**Usage**: Archive stores any Component via to_dict(), Pools manage any Component via fitness property
 
 ### proto.memory.Memory
+**Purpose**: Temporal memory interface with decay (NOT for component lifecycle - that's pool.py)
+
+**Interface**:
+- store(data: Tensor, weight: float) → None - Store with decay weight
+- recall() → Optional[Tensor] - Retrieve with temporal blending
+- clear() → None - Reset memory state
+
+**Implementations**: memory.tubes.TubeNetwork (flowing memory with exponential decay)
 
 ### proto.model.Pseudopod
+**Purpose**: Sensory probe with Neural CA update rule (Flow-Lenia substrate)
+
+**Interface**:
+- forward(latent, stimulus) → output - Learned CA update with Flow-Lenia dynamics
+- correlation: Tensor (property) - Mass conservation metric (∑ output = ∑ input)
+- effective_rank() → Tensor - Parameter localization metric (spatial variation of update rule)
+- coherence() → Tensor - Learning progress metric for curiosity-driven lifecycle
+
+**Neural CA Substrate**:
+- forward() implements learned continuous CA rule with mass conservation
+- Parameter localization: Spatial variation of update rule parameters (not global)
+- Learned via gradient descent on downstream task loss
+- Warp-level GPU execution via proto.kernel.Kernel
+
+**Dependencies**: MUST use proto.kernel.Kernel for all compute, MUST implement proto.component.Component
 
 ### proto.model.Chemotaxis
+**Purpose**: Behavioral space navigator with curiosity-driven search (Adaptive Voronoi MAP-Elites)
+
+**Interface**:
+- add_source(nutrient, location, concentration) → None - Add elite to archive (grow Voronoi cell)
+- sample(behavior, metabolic_rate, hunger) → Optional[Tensor] - Sample genome from archive
+- clear() → None - Reset archive state
+
+**Curiosity-Driven Lifecycle**:
+- hunger = learning_progress_deficit (intrinsic motivation via coherence() metric)
+- High coherence() (learning fast) → low hunger → survive
+- Low coherence() (plateaued) → high hunger → sample new genome from archive
+- Natural selection via intrinsic curiosity, not external reward
+
+**Dependencies**: Uses memory.archive for spatial indexing (Adaptive Voronoi cells), NO direct component management
 
 ### proto.model.Organism
+**Purpose**: Top-level orchestrator with comonadic GPU perception
+
+**Interface**:
+- forward(stimulus, state) → (output, new_state) - Collective Pseudopod updates
+- reset_state() → None - Reset organism state
+- stats() → dict - GPU occupancy, learning progress, archive coverage
+
+**Comonadic GPU Perception**:
+- GPU execution state AS comonad (not external orchestration)
+- extract(warp_id) → LocalObservation (warp occupancy, neighbor state, cache hits)
+- extend(decision_fn) → Apply context-aware decisions (spawn/retire Pseudopods based on whole field)
+- Whole computational field (warps/cache/tensor-cores) informs local decisions
+
+**Dependencies**: Owns Pool[Pseudopod] + Archive + Chemotaxis, Uses Kernels via Pseudopods, Records Observability metrics
 
 ## File Structure
+
+**Repository Layout**:
+- BLUEPRINT.md (system architecture), README.md (user documentation with examples)
+- setup.py, pyproject.toml, requirements.txt, .python-version
+- strip_docstrings.py (AST-based docstring removal tool)
+
+**slime/ package structure**:
+- **proto/** - Protocol definitions (component, kernel, memory, model interfaces)
+- **kernels/** - GPU compute implementations (triton_impl, torch_fallback, utils)
+- **observability/** - Passive metrics collection (metrics, slo, tracing)
+- **memory/** - Data structures (archive MAP-Elites storage, pool lifecycle, tubes temporal memory)
+- **core/** - Components (state FlowState dataclass, stencil GPU-parallel ops, pseudopod Neural CA, chemotaxis navigator, organism orchestrator)
+- **api/** - Public interfaces (torch_compat nn.Module, native SlimeModel)
+- **training/** - Training loop (trainer, losses, stability, fitness computation, lifecycle decisions)
+- **config/** - Configuration (loader with validation, YAML files for model/training/slo)
+- **bench/** - Benchmarking (datasets loaders, baseline transformer, profiling, toy tasks)
+- **tests/** - Test suites (unit/ protocol + implementation tests, integration/ end-to-end, ablations/ comparative studies, slo/ performance validation)
+- **tools/** - Utilities (visualize behavioral space, export ONNX/TorchScript, package .exe)
 
 
 ## Invariants
@@ -53,6 +175,19 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 - **Violation = compilation error**
 
 ### 2. Ownership Hierarchy
+
+**Organism owns:**
+- Pool[Pseudopod]
+- Archive
+- Chemotaxis
+
+**Pool owns:**
+- List[Component]
+
+**Archive owns:**
+- Dict[cell, Elite] where Elite.genome = dict (NO object refs)
+
+**NO CYCLES**
 
 ### 3. Protocol Compliance
 - Every component MUST declare which protocols it implements
@@ -70,6 +205,24 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 - NO global state for metrics
 
 ### 6. Timescale Separation
+
+**Fast (every step):**
+- Weight updates via backprop
+- Fitness tracking
+- Metrics collection
+- Loss monitoring
+
+**Medium (every 100 steps):**
+- Fitness assessment
+- Archive elite updates
+- Pool spawn decisions
+- Loss gate check
+
+**Slow (every 1000 steps):**
+- Pool culling
+- Memory budget enforcement
+- Behavioral space analysis
+- Hard limit enforcement (max pool size, max archive)
 
 ### 7. Ultrametric Topology
 
@@ -94,6 +247,8 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 **Reasoning (GPU Architecture):** GPU computation is spatial (SIMD, tiles, stencil convolution), not sequential. Batched operations on entire populations, not individual components.
 
 **JAX vmap pattern (push loops to primitives):**
+- BAD (sequential): Loop over pool computing per-component z-scores → O(N) sequential
+- GOOD (parallel): vmap_relative_fitness(fitnesses, neighbor_mask) → O(1) GPU call
 
 **SpatialStencil**: JAX vmap-inspired batched computation of contextual metrics (pairwise distances, k-nearest neighbors, vectorized metrics) - 100x-1000x speedup vs sequential
 
@@ -144,6 +299,9 @@ NOT attention entropy alone (doesn't correlate with task)
 **FlashAttention solution:** Tile computation to fit in SRAM.
 
 **IO complexity:**
+- Naive: O(M² × D) HBM accesses
+- Tiled: O(M² × D / SRAM_size) HBM accesses
+- Speedup: ~3x on GPT-2 (Dao et al., 2022)
 
 **Implementation:** kernels/triton_impl.py uses tiling with BLOCK_M=128, BLOCK_N=128, BLOCK_D=64.
 
