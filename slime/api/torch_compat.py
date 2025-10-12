@@ -30,15 +30,16 @@ class SlimeMoldEncoder(nn.Module):
         self._state: Optional[dict] = None
 
     def forward(self, src: torch.Tensor, mask: Optional[torch.Tensor]=None, src_key_padding_mask: Optional[torch.Tensor]=None, is_causal: bool=False) -> torch.Tensor:
-        # Handle 2D input (e.g. flattened images) by reshaping to 3D
+        # Handle 2D input [batch, features] as single-timestep sequence
         if src.dim() == 2:
-            batch_size, features = src.shape
-            # Reshape to [batch, seq_len, d_model] where seq_len * d_model <= features
-            seq_len = features // self.d_model
-            if seq_len * self.d_model < features:
-                src = src[:, :seq_len * self.d_model]  # Truncate to fit
-            src = src.reshape(batch_size, seq_len, self.d_model)
+            stimulus = src  # [batch, features]
+            output, new_state = self.organism(stimulus, None)
+            if self._state is None:
+                self._state = {}
+            self._state[0] = new_state
+            return output, new_state
 
+        # Handle 3D input [batch, seq_len, d_model] as sequence
         if not self.batch_first:
             src = src.transpose(0, 1)
         batch_size, seq_len, d_model = src.shape
