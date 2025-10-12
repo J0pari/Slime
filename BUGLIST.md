@@ -2,18 +2,6 @@
 
 This document tracks where the implementation doesn't match the blueprint architecture.
 
-## Comonadic GPU Orchestration (MEDIUM)
-
-**Blueprint**: GPU execution state AS comonad (extract/extend for context-aware decisions)
-**Current Implementation**: Manual Organism orchestration
-**Impact**: No GPU-aware resource allocation, missing 2x hardware utilization improvement
-
-**What needs to change**:
-- GPUContext: Warp occupancy, cache hits, tensor core utilization
-- extract(warp_id) → LocalObservation
-- extend(decision_fn) → Apply context-aware spawn/retire decisions
-- Polynesian navigator metaphor: whole field informs local decisions
-
 ## Warp-Level GPU Kernels (MEDIUM)
 
 **Blueprint**: Zero-global-memory CA updates via warp shuffles
