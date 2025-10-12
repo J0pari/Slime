@@ -15,18 +15,22 @@ class TestResultCheckpointSystem:
         self.checkpoint_dir = repo_dir / ".test_checkpoints"
         self.objects_dir = self.checkpoint_dir / "objects"
         self.refs_dir = self.checkpoint_dir / "refs"
+        self.logs_dir = self.checkpoint_dir / "logs"
         self.head_file = self.checkpoint_dir / "HEAD"
-        self.test_results_dir = repo_dir / "test_results"
+        self.index_file = self.checkpoint_dir / "index.json"
         self._init_repo()
 
     def _init_repo(self):
         self.checkpoint_dir.mkdir(exist_ok=True)
         self.objects_dir.mkdir(exist_ok=True)
         self.refs_dir.mkdir(exist_ok=True)
-        self.test_results_dir.mkdir(exist_ok=True)
+        self.logs_dir.mkdir(exist_ok=True)
 
         if not self.head_file.exists():
-            self.head_file.write_text("")
+            self.head_file.write_text("ref: refs/heads/main\n")
+
+        if not self.index_file.exists():
+            self.index_file.write_text("{}")
 
     def _hash_object(self, content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
@@ -213,12 +217,7 @@ class TestResultCheckpointSystem:
             return None
         return ref_content
 
-    def checkpoint_test_result(self, json_file: Path, message: str = None) -> str:
-        if not json_file.exists():
-            raise FileNotFoundError(f"Test result file {json_file} not found")
-
-        test_name = json_file.stem
-        json_data = json.loads(json_file.read_text(encoding='utf-8'))
+    def checkpoint_test_result(self, test_name: str, json_data: dict, message: str = None) -> str:
 
         parent_sha = self._get_current_checkpoint(test_name)
 
@@ -258,12 +257,11 @@ class TestResultCheckpointSystem:
 
     def checkpoint_all_test_results(self) -> Dict[str, str]:
         results = {}
-        for json_file in self.test_results_dir.glob("*.json"):
-            try:
-                checkpoint_sha = self.checkpoint_test_result(json_file)
-                results[json_file.stem] = checkpoint_sha
-            except Exception as e:
-                print(f"Error checkpointing {json_file.stem}: {e}")
+        for ref_file in self.refs_dir.glob("*.ref"):
+            test_name = ref_file.stem
+            checkpoint_sha = ref_file.read_text().strip()
+            if checkpoint_sha:
+                results[test_name] = checkpoint_sha
         return results
 
     def restore(self, test_name: str, checkpoint_sha: str = None, output_path: Path = None):
@@ -290,13 +288,12 @@ class TestResultCheckpointSystem:
 
         json_data = self._get_content(checkpoint_sha)
 
-        if output_path:
-            output_file = output_path
+        if not output_path:
+            print(f"Restored {test_name} checkpoint {checkpoint_sha[:8]}")
+            print(json.dumps(json_data, indent=2))
         else:
-            output_file = self.test_results_dir / f"{test_name}_restored_{checkpoint_sha[:8]}.json"
-
-        output_file.write_text(json.dumps(json_data, indent=2))
-        print(f"Restored {test_name} checkpoint {checkpoint_sha[:8]} to {output_file}")
+            output_path.write_text(json.dumps(json_data, indent=2))
+            print(f"Restored {test_name} checkpoint {checkpoint_sha[:8]} to {output_path}")
 
     def log(self, test_name: str, limit: int = 10):
         checkpoint_sha = self._get_current_checkpoint(test_name)
@@ -319,40 +316,22 @@ class TestResultCheckpointSystem:
                 break
 
     def status(self):
-        print("\nTest Result Checkpoint Status:\n")
-        for ref_file in self.refs_dir.glob("*.ref"):
+        print("\nTest Checkpoint Status:\n")
+        for ref_file in sorted(self.refs_dir.glob("*.ref")):
             test_name = ref_file.stem
             checkpoint_sha = ref_file.read_text().strip()
-
-            json_file = self.test_results_dir / f"{test_name}.json"
-            if json_file.exists():
-                try:
-                    current_json = json.loads(json_file.read_text())
-                    checkpoint_json = self._get_content(checkpoint_sha)
-
-                    if current_json == checkpoint_json:
-                        print(f"{test_name}: clean (HEAD at {checkpoint_sha[:8]})")
-                    else:
-                        current_lines = self._json_to_lines(current_json)
-                        checkpoint_lines = self._json_to_lines(checkpoint_json)
-                        diff = list(difflib.unified_diff(checkpoint_lines, current_lines, n=0))
-                        changes = len([l for l in diff if l.startswith(('+', '-')) and not l.startswith(('+++', '---'))])
-                        print(f"{test_name}: modified ({changes} line changes since {checkpoint_sha[:8]})")
-                except Exception as e:
-                    print(f"{test_name}: error ({e})")
-            else:
-                print(f"{test_name}: missing file (last checkpoint {checkpoint_sha[:8]})")
+            try:
+                checkpoint = self._read_checkpoint(checkpoint_sha)
+                timestamp = checkpoint['timestamp']
+                print(f"{test_name}: {checkpoint_sha[:8]} ({timestamp})")
+            except Exception as e:
+                print(f"{test_name}: {checkpoint_sha[:8]} (error: {e})")
 
     def diff(self, test_name: str, checkpoint_sha1: str = None, checkpoint_sha2: str = None):
         if not checkpoint_sha2:
             checkpoint_sha2 = self._get_current_checkpoint(test_name)
-            json_file = self.test_results_dir / f"{test_name}.json"
-            if json_file.exists():
-                json2 = json.loads(json_file.read_text())
-            else:
-                json2 = self._get_content(checkpoint_sha2)
-        else:
-            json2 = self._get_content(checkpoint_sha2)
+
+        json2 = self._get_content(checkpoint_sha2)
 
         if checkpoint_sha1:
             json1 = self._get_content(checkpoint_sha1)

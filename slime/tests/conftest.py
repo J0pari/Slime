@@ -203,8 +203,6 @@ def restore_previous_test(request, checkpoint_system):
     return _restore
 
 def pytest_configure(config):
-    archive_dir = Path('test_results')
-    archive_dir.mkdir(exist_ok=True)
     config._test_item = None
     config._checkpoint_system = TestResultCheckpointSystem(Path.cwd())
     config._test_run_shas = {}
@@ -240,11 +238,10 @@ def pytest_runtest_makereport(item, call):
 
         checkpoint_system = item.config._checkpoint_system
         test_name = item.nodeid.replace('::', '_').replace('/', '_').replace('.py', '')
-        individual_test_file = Path('test_results') / f'{test_name}.json'
-        individual_test_file.write_text(json.dumps(_make_serializable_standalone(test_result), indent=2))
 
         try:
-            checkpoint_sha = checkpoint_system.checkpoint_test_result(individual_test_file, message=f'{item.nodeid} {report.outcome}')
+            serialized_result = _make_serializable_standalone(test_result)
+            checkpoint_sha = checkpoint_system.checkpoint_test_result(test_name, serialized_result, message=f'{item.nodeid} {report.outcome}')
             test_result['checkpoint_sha'] = checkpoint_sha
             item.config._test_run_shas[test_name] = checkpoint_sha
         except Exception as e:
@@ -274,7 +271,6 @@ def _make_serializable_standalone(obj: Any) -> Any:
         return str(obj)
 
 def pytest_sessionfinish(session, exitstatus):
-    archive_dir = Path('test_results')
     timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
     results = []
     total_constraints = 0
@@ -295,7 +291,6 @@ def pytest_sessionfinish(session, exitstatus):
                         else:
                             violated_constraints += 1
     if results:
-        output_file = archive_dir / f'test_run_{timestamp}.json'
         summary = {'run_timestamp': datetime.now(timezone.utc).isoformat(), 'exit_status': exitstatus, 'test_summary': {'total_tests': len(results), 'passed': sum((1 for r in results if r['outcome'] == 'passed')), 'failed': sum((1 for r in results if r['outcome'] == 'failed')), 'skipped': sum((1 for r in results if r['outcome'] == 'skipped'))}, 'constraint_summary': {'total_constraints': total_constraints, 'satisfied': satisfied_constraints, 'violated': violated_constraints, 'satisfaction_rate': satisfied_constraints / total_constraints if total_constraints > 0 else 0.0, 'avg_causal_depth': total_dag_depth / len([r for r in results if r.get('causal_dag')]) if results else 0.0}, 'results': results}
         for result in results:
             if result.get('causal_dag'):
@@ -308,20 +303,16 @@ def pytest_sessionfinish(session, exitstatus):
         serializable_summary = _make_serializable_standalone(summary)
         serializable_summary['checkpoint_shas'] = session.config._test_run_shas
 
-        with open(output_file, 'w') as f:
-            json.dump(serializable_summary, f, indent=2)
-
         checkpoint_system = session.config._checkpoint_system
-        summary_checkpoint_sha = checkpoint_system.checkpoint_test_result(output_file, message=f'Test run summary {timestamp}')
+        summary_checkpoint_sha = checkpoint_system.checkpoint_test_result(f'test_run_{timestamp}', serializable_summary, message=f'Test run summary {timestamp}')
 
         print(f'\n=== CAUSAL CONSTRAINT REPORT ===')
         print(f"Tests: {summary['test_summary']['passed']}/{summary['test_summary']['total_tests']} passed")
         print(f"Constraints: {satisfied_constraints}/{total_constraints} satisfied ({summary['constraint_summary']['satisfaction_rate']:.1%})")
         print(f"Avg causal depth: {summary['constraint_summary']['avg_causal_depth']:.1f}")
-        print(f'Results: {output_file}')
         print(f'Summary checkpoint: {summary_checkpoint_sha[:8]}')
         print(f'\n=== CONTENT-ADDRESSABLE TEST CHECKPOINTS ===')
-        for test_name, sha in session.config._test_run_shas.items():
+        for test_name, sha in sorted(session.config._test_run_shas.items()):
             print(f'{test_name}: {sha[:8]}')
         print(f'\nTotal checkpoints: {len(session.config._test_run_shas)}')
         total_objects = len(list(checkpoint_system.objects_dir.rglob('*'))) - len(list(checkpoint_system.objects_dir.rglob('*/')
