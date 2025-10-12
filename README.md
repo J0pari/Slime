@@ -264,9 +264,9 @@ Components with similar behavior land on same GPU. Deterministic placement means
 
 ## References
 
-- MAP-Elites: Mouret & Clune, "Illuminating the Search Space" (2015)
-- Flash Attention: Dao et al., "FlashAttention" (2022)
-- Triton: Tillet et al., "Triton: GPU Programming for Neural Networks" (2019)
+- MAP-Elites: Mouret, J.-B. & Clune, J. "Illuminating search spaces by mapping elites" (2015). arXiv:1504.04909
+- FlashAttention: Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (2022). NeurIPS 2022. arXiv:2205.14135
+- Triton: Tillet, P., Kung, H. T., & Cox, D. "Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations" (2019). MAPL 2019.
 
 ## License
 
