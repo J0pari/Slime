@@ -85,11 +85,11 @@ class Pseudopod(nn.Module):
         mean_grad = sum(grad_norms) / len(grad_norms)
         self._fitness = 0.9 * self._fitness + 0.1 * mean_grad
 
-    def get_attention_distance(self, attn: torch.Tensor) -> float:
-        seq_len = attn.shape[-1]
-        positions = torch.arange(seq_len, device=attn.device, dtype=torch.float32)
+    def get_ca_pattern_distance(self, ca_pattern: torch.Tensor) -> float:
+        seq_len = ca_pattern.shape[-1]
+        positions = torch.arange(seq_len, device=ca_pattern.device, dtype=torch.float32)
         distances = torch.abs(positions.unsqueeze(-1) - positions.unsqueeze(0))
-        weighted_distances = (attn * distances).sum(dim=-1).mean()
+        weighted_distances = (ca_pattern * distances).sum(dim=-1).mean()
         normalized = weighted_distances / seq_len
         return normalized.item()
 
@@ -109,12 +109,12 @@ class Pseudopod(nn.Module):
             return 0.0
         return sum(grad_norms) / len(grad_norms)
 
-    def get_memory_access_locality(self, attn: torch.Tensor) -> float:
-        seq_len = attn.shape[-1]
-        positions = torch.arange(seq_len, device=attn.device, dtype=torch.float32)
+    def get_memory_access_locality(self, ca_pattern: torch.Tensor) -> float:
+        seq_len = ca_pattern.shape[-1]
+        positions = torch.arange(seq_len, device=ca_pattern.device, dtype=torch.float32)
         position_variance = []
         for i in range(seq_len):
-            attn_weights = attn[..., i, :]
+            attn_weights = ca_pattern[..., i, :]
             mean_pos = (attn_weights * positions).sum(dim=-1)
             variance = (attn_weights * (positions - mean_pos.unsqueeze(-1)) ** 2).sum(dim=-1)
             position_variance.append(variance.mean().item())
@@ -125,13 +125,13 @@ class Pseudopod(nn.Module):
     def get_computational_intensity(self, output: torch.Tensor, seq_len: int) -> float:
         batch_size = output.shape[0]
         d = self.head_dim
-        attn_flops = 2 * batch_size * seq_len * seq_len * d
+        ca_flops = 2 * batch_size * seq_len * seq_len * d
         linear_flops = 2 * batch_size * seq_len * d * d * 3
-        total_flops = attn_flops + linear_flops
+        total_flops = ca_flops + linear_flops
         normalized_flops = total_flops / 1000000000.0
         return min(1.0, normalized_flops)
 
-    def compute_raw_metrics(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+    def compute_raw_metrics(self, ca_pattern: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         """Compute comprehensive REAL system metrics using all available profiling tools.
 
         Uses Triton profiler, PyTorch CUDA events, scipy.stats, scikit-learn, psutil.
@@ -165,11 +165,11 @@ class Pseudopod(nn.Module):
             metrics.extend([0.0, 0.0, 0.0])
 
         # === Core metrics (adapted for CA) ===
-        ca_span = self.get_attention_distance(attn)
+        ca_span = self.get_ca_pattern_distance(ca_pattern)
         activation_sparsity = self.get_activation_sparsity(output)
         gradient_flow = self.get_gradient_flow_magnitude()
-        memory_locality = self.get_memory_access_locality(attn)
-        compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
+        memory_locality = self.get_memory_access_locality(ca_pattern)
+        compute_intensity = self.get_computational_intensity(output, ca_pattern.shape[-1])
         metrics.extend([ca_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity])
 
         # === REAL GPU Memory Telemetry (12 metrics) ===
@@ -287,7 +287,7 @@ class Pseudopod(nn.Module):
                 gpu_power = 0.0
 
             # Memory bandwidth estimation
-            bytes_transferred = (attn.numel() + output.numel()) * attn.element_size()
+            bytes_transferred = (ca_pattern.numel() + output.numel()) * ca_pattern.element_size()
             memory_bandwidth_gbps = (bytes_transferred / (kernel_time_ms / 1000.0)) / 1e9 if kernel_time_ms > 0 else 0.0
 
             metrics.extend([kernel_time_ms, gpu_util, gpu_temp, gpu_power, memory_bandwidth_gbps])
@@ -296,9 +296,9 @@ class Pseudopod(nn.Module):
 
         # === scipy.stats - Statistical Tests (5 metrics) ===
         try:
-            # Normality test on attention distribution
-            attn_flat = attn.flatten().cpu().numpy()[:5000]  # Sample for speed
-            _, attn_normality_p = stats.normaltest(attn_flat)
+            # Normality test on CA pattern distribution
+            ca_pattern_flat = ca_pattern.flatten().cpu().numpy()[:5000]  # Sample for speed
+            _, ca_pattern_normality_p = stats.normaltest(ca_pattern_flat)
 
             # Skewness and kurtosis of outputs
             output_flat = output.flatten().cpu().numpy()[:5000]
@@ -306,34 +306,39 @@ class Pseudopod(nn.Module):
             output_kurtosis = stats.kurtosis(output_flat)
 
             # Entropy estimation
-            attn_differential_entropy = stats.differential_entropy(attn_flat)
+            ca_differential_entropy = stats.differential_entropy(ca_pattern_flat)
 
             # Kolmogorov-Smirnov test vs uniform
-            _, attn_ks_p = stats.kstest(attn_flat, 'uniform')
+            _, ca_ks_p = stats.kstest(ca_pattern_flat, 'uniform')
 
-            metrics.extend([attn_normality_p, output_skewness, output_kurtosis, attn_differential_entropy, attn_ks_p])
+            metrics.extend([ca_pattern_normality_p, output_skewness, output_kurtosis, ca_differential_entropy, ca_ks_p])
         except:
             metrics.extend([0.0] * 5)
 
         # === scikit-learn - Feature Importance (5 metrics) ===
         try:
-            # Mutual information between attention and output
-            attn_sample = attn.flatten().cpu().numpy()[:1000].reshape(-1, 1)
+            # Mutual information between CA pattern and output
+            ca_pattern_sample = ca_pattern.flatten().cpu().numpy()[:1000].reshape(-1, 1)
             output_sample = output.flatten().cpu().numpy()[:1000]
-            mi = mutual_info_regression(attn_sample, output_sample, random_state=42)[0]
+            mi = mutual_info_regression(ca_pattern_sample, output_sample, random_state=42)[0]
 
-            # Attention pattern entropy (sklearn entropy)
+            # CA pattern entropy (sklearn entropy)
             from sklearn.preprocessing import normalize
-            attn_norm = normalize(attn.mean(dim=0).cpu().numpy().reshape(1, -1))
-            attn_normalized_entropy = stats.entropy(attn_norm.flatten() + 1e-10)
+            ca_norm = normalize(ca_pattern.mean(dim=0).cpu().numpy().reshape(1, -1))
+            ca_normalized_entropy = stats.entropy(ca_norm.flatten() + 1e-10)
 
             # Feature variance ratios
             output_features = output.mean(dim=(0, 1)).cpu().numpy()
             feature_variance_ratio = np.var(output_features) / (np.mean(output_features)**2 + 1e-10)
 
             # Gradient signal-to-noise ratio
-            if self.query_weight.grad is not None:
-                grad_snr = (self.query_weight.grad.abs().mean() / (self.query_weight.grad.std() + 1e-10)).item()
+            # Gradient SNR from neural_ca parameters
+            ca_params_with_grad = [p for p in self.neural_ca.parameters() if p.grad is not None]
+            if ca_params_with_grad:
+                grad_means = [p.grad.abs().mean() for p in ca_params_with_grad]
+                grad_stds = [p.grad.std() for p in ca_params_with_grad]
+                grad_snr = (sum(grad_means) / len(grad_means)) / (sum(grad_stds) / len(grad_stds) + 1e-10)
+                grad_snr = grad_snr.item()
             else:
                 grad_snr = 0.0
 
@@ -341,7 +346,7 @@ class Pseudopod(nn.Module):
             all_params = torch.cat([p.flatten() for p in self.parameters()])
             param_effective_dim = (all_params.var() / (all_params.mean()**2 + 1e-10)).item()
 
-            metrics.extend([mi, attn_normalized_entropy, feature_variance_ratio, grad_snr, param_effective_dim])
+            metrics.extend([mi, ca_normalized_entropy, feature_variance_ratio, grad_snr, param_effective_dim])
         except:
             metrics.extend([0.0] * 5)
 

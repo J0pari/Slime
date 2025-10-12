@@ -13,7 +13,7 @@ class Chemotaxis:
                  distance_metric: Optional[DistanceMetric] = None):
         self.archive = archive
         self.device = device or torch.device('cuda')
-        # Default to Mahalanobis after Kernel PCA, Euclidean before
+        # Default to Mahalanobis after dimension discovery, Euclidean before
         if distance_metric is None:
             self.distance_metric = 'mahalanobis' if archive._discovered else 'euclidean'
         else:

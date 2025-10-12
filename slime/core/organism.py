@@ -96,7 +96,7 @@ class Organism(nn.Module):
         fitness = (max_rank * min_coherence).item()
 
         if not self.archive._discovered:
-            # Collect 10D raw metrics from ALL active pseudopods for kernel PCA
+            # Collect 10D raw metrics from ALL active pseudopods for DIRESA
             pseudopod_raw_metrics = []
             for pod in pseudopods:
                 if hasattr(pod, '_raw_metrics'):

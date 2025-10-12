@@ -1,13 +1,10 @@
 """
 Neural Cellular Automaton with Flow-Lenia dynamics.
 
-This is a COMPLETE replacement for multi-head attention that preserves ALL the
-expressiveness and nuance of attention while using CA dynamics instead.
-
 Evolution path: Conway → Lenia → Flow-Lenia → Neural Flow-Lenia (ours)
 
 Key properties:
-- Multi-head CA (like multi-head attention)
+- Multi-head CA
 - Q/K/V-style projections for perception/interaction/update
 - Mass conservation: ∑ output = ∑ input
 - Parameter localization: CA rule parameters vary spatially per head

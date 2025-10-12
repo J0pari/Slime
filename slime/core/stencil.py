@@ -54,11 +54,11 @@ def vmap_gradient_rank(grad_norms: torch.Tensor, neighbor_mask: torch.Tensor) ->
     percentile = rank_sum / neighbor_counts.squeeze(1)
     return percentile
 
-def vmap_attention_coherence(attention_patterns: torch.Tensor, neighbor_mask: torch.Tensor, eps: float=1e-8) -> torch.Tensor:
-    N, *attn_dims = attention_patterns.shape
-    flat_attn = attention_patterns.reshape(N, -1)
-    attn_norm = torch.nn.functional.normalize(flat_attn, p=2, dim=-1)
-    cosine_sim = torch.matmul(attn_norm, attn_norm.T)
+def vmap_ca_coherence(ca_patterns: torch.Tensor, neighbor_mask: torch.Tensor, eps: float=1e-8) -> torch.Tensor:
+    N, *ca_dims = ca_patterns.shape
+    flat_ca = ca_patterns.reshape(N, -1)
+    ca_norm = torch.nn.functional.normalize(flat_ca, p=2, dim=-1)
+    cosine_sim = torch.matmul(ca_norm, ca_norm.T)
     neighbor_sim = cosine_sim * neighbor_mask.float()
     neighbor_counts = neighbor_mask.sum(dim=1).clamp(min=1)
     coherence = neighbor_sim.sum(dim=1) / neighbor_counts
@@ -71,10 +71,10 @@ class SpatialStencil:
         self.distance_metric = distance_metric
         self.device = device or torch.device('cuda')
 
-    def compute_all_contexts(self, behaviors: torch.Tensor, fitnesses: torch.Tensor, grad_norms: Optional[torch.Tensor]=None, attention_patterns: Optional[torch.Tensor]=None) -> dict:
+    def compute_all_contexts(self, behaviors: torch.Tensor, fitnesses: torch.Tensor, grad_norms: Optional[torch.Tensor]=None, ca_patterns: Optional[torch.Tensor]=None) -> dict:
         N = behaviors.shape[0]
         if N == 0:
-            return {'relative_fitness': torch.tensor([], device=self.device), 'behavioral_divergence': torch.zeros((0, behaviors.shape[-1]), device=self.device), 'gradient_rank': torch.tensor([], device=self.device), 'attention_coherence': torch.tensor([], device=self.device)}
+            return {'relative_fitness': torch.tensor([], device=self.device), 'behavioral_divergence': torch.zeros((0, behaviors.shape[-1]), device=self.device), 'gradient_rank': torch.tensor([], device=self.device), 'ca_coherence': torch.tensor([], device=self.device)}
         distances = pairwise_behavioral_distance(behaviors, metric=self.distance_metric)
         neighbor_mask = topk_neighbors_mask(distances, k=min(self.k_neighbors, N - 1), include_self=False)
         relative_fitness = vmap_relative_fitness(fitnesses, neighbor_mask)
@@ -83,8 +83,8 @@ class SpatialStencil:
             gradient_rank = vmap_gradient_rank(grad_norms, neighbor_mask)
         else:
             gradient_rank = torch.zeros(N, device=self.device)
-        if attention_patterns is not None:
-            attention_coherence = vmap_attention_coherence(attention_patterns, neighbor_mask)
+        if ca_patterns is not None:
+            ca_coherence = vmap_ca_coherence(ca_patterns, neighbor_mask)
         else:
-            attention_coherence = torch.zeros(N, device=self.device)
-        return {'relative_fitness': relative_fitness, 'behavioral_divergence': behavioral_divergence, 'gradient_rank': gradient_rank, 'attention_coherence': attention_coherence, 'neighbor_mask': neighbor_mask, 'distances': distances}
+            ca_coherence = torch.zeros(N, device=self.device)
+        return {'relative_fitness': relative_fitness, 'behavioral_divergence': behavioral_divergence, 'gradient_rank': gradient_rank, 'ca_coherence': ca_coherence, 'neighbor_mask': neighbor_mask, 'distances': distances}

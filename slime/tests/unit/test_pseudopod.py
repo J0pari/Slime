@@ -35,11 +35,11 @@ def test_forward_pass_shape(pseudopod, config, device):
     output = pseudopod(latent, stimulus)
     assert output.shape == (batch_size, num_heads, seq_len, head_dim)
 
-def test_attention_distance_metric(pseudopod, config, device):
+def test_ca_pattern_distance_metric(pseudopod, config, device):
     batch_size = config.test.batch_size
     seq_len = config.test.seq_len
     attn = torch.softmax(torch.randn(batch_size, 1, seq_len, seq_len, device=device), dim=-1)
-    distance = pseudopod.get_attention_distance(attn)
+    distance = pseudopod.get_ca_pattern_distance(attn)
     assert isinstance(distance, float)
     assert 0.0 <= distance <= seq_len
 
@@ -146,7 +146,7 @@ def test_behavioral_diversity_different_inputs(pseudopod, config, device):
     distance = torch.norm(behavior1 - behavior2)
     assert distance > 0.01
 
-def test_attention_pattern_storage(pseudopod, config, device):
+def test_ca_pattern_storage(pseudopod, config, device):
     batch_size = config.test.batch_size
     seq_len = config.test.seq_len
     head_dim = config.dimensions.head_dim
@@ -154,9 +154,9 @@ def test_attention_pattern_storage(pseudopod, config, device):
     latent = torch.randn(batch_size, seq_len, head_dim, device=device)
     stimulus = torch.randn(batch_size, seq_len, head_dim, device=device)
     pseudopod(latent, stimulus)
-    assert pseudopod._last_attention_pattern is not None
-    assert pseudopod._last_attention_pattern.ndim == 4
-    assert pseudopod._last_attention_pattern.shape == (batch_size, num_heads, seq_len, seq_len)
+    assert pseudopod._last_ca_pattern is not None
+    assert pseudopod._last_ca_pattern.ndim == 4
+    assert pseudopod._last_ca_pattern.shape == (batch_size, num_heads, seq_len, seq_len)
 
 def test_different_pseudopod_ids(config, kernel, device):
     head_dim = config.dimensions.head_dim
@@ -183,7 +183,7 @@ def test_behavioral_metrics_deterministic(pseudopod, config, device):
     behavior2 = pseudopod.last_behavior.clone()
     assert torch.allclose(behavior1, behavior2, atol=1e-05)
 
-def test_attention_span_local_vs_global(config, kernel, device):
+def test_ca_span_local_vs_global(config, kernel, device):
     head_dim = config.dimensions.head_dim
     num_heads = config.dimensions.num_heads
     fitness_config = config.fitness

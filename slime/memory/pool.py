@@ -117,7 +117,7 @@ class DynamicPool:
         behaviors = []
         fitnesses = []
         grad_norms = []
-        attention_patterns = []
+        ca_patterns = []
         for comp in self._components:
             if hasattr(comp, 'last_behavior') and comp.last_behavior is not None:
                 behaviors.append(comp.last_behavior)
@@ -129,19 +129,19 @@ class DynamicPool:
                 if param.grad is not None:
                     grad_norm_list.append(torch.norm(param.grad).item())
             grad_norms.append(sum(grad_norm_list) / len(grad_norm_list) if grad_norm_list else 0.0)
-            if hasattr(comp, '_last_attention_pattern') and comp._last_attention_pattern is not None:
-                attention_patterns.append(comp._last_attention_pattern)
+            if hasattr(comp, '_last_ca_pattern') and comp._last_ca_pattern is not None:
+                ca_patterns.append(comp._last_ca_pattern)
             else:
-                attention_patterns.append(torch.zeros(1, 1, 16, 16, device=self.device))
+                ca_patterns.append(torch.zeros(1, 1, 16, 16, device=self.device))
         behaviors_tensor = torch.stack(behaviors)
         fitnesses_tensor = torch.tensor(fitnesses, device=self.device, dtype=torch.float32)
         grad_norms_tensor = torch.tensor(grad_norms, device=self.device, dtype=torch.float32)
-        attention_tensor = torch.stack(attention_patterns)
-        return (behaviors_tensor, fitnesses_tensor, grad_norms_tensor, attention_tensor)
+        ca_pattern_tensor = torch.stack(ca_patterns)
+        return (behaviors_tensor, fitnesses_tensor, grad_norms_tensor, ca_pattern_tensor)
 
     def compute_all_contextual_metrics(self) -> dict:
-        behaviors, fitnesses, grad_norms, attention_patterns = self._gather_component_tensors()
-        return self.stencil.compute_all_contexts(behaviors, fitnesses, grad_norms, attention_patterns)
+        behaviors, fitnesses, grad_norms, ca_patterns = self._gather_component_tensors()
+        return self.stencil.compute_all_contexts(behaviors, fitnesses, grad_norms, ca_patterns)
 
     def compute_contextual_fitness(self, component: Component) -> float:
         results = self.compute_all_contextual_metrics()
@@ -158,7 +158,7 @@ class DynamicPool:
         component_idx = self._components.index(component)
         return results['gradient_rank'][component_idx].item()
 
-    def compute_attention_coherence(self, component: Component) -> float:
+    def compute_ca_coherence(self, component: Component) -> float:
         results = self.compute_all_contextual_metrics()
         component_idx = self._components.index(component)
-        return results['attention_coherence'][component_idx].item()
+        return results['ca_coherence'][component_idx].item()
