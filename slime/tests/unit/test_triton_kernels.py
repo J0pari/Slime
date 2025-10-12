@@ -32,17 +32,21 @@ def test_attention_non_power_of_two_shapes_constraint(constraint, kernel, device
         constraint(f'Output shape matches for non-power-of-2 size {size}', lambda o=output, q=Q: (o.shape == q.shape, o.shape, q.shape, {}))
 
 def test_attention_temperature_extremes_constraint(constraint, kernel, device):
-    """Test that CA activation produces valid outputs regardless of 'temperature' parameter."""
+    """Test that temperature modulates CA activation sharpness using variance."""
     Q = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
     K = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
     V = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
 
-    # Neural CA doesn't use temperature, but interface requires it for protocol compatibility
-    output = kernel.attention(Q, K, V, temperature=1.0)
+    # Low temperature: sharp, focused CA patterns (low variance)
+    cold = kernel.attention(Q, K, V, temperature=0.1)
+    # High temperature: diffuse, exploratory CA patterns (high variance)
+    hot = kernel.attention(Q, K, V, temperature=10.0)
 
-    # Verify output is valid (no NaN/Inf)
-    is_valid = not torch.isnan(output).any() and not torch.isinf(output).any()
-    constraint('CA output is valid (no NaN/Inf)', lambda: (is_valid, 'valid', 'valid', {}))
+    cold_var = cold.var().item()
+    hot_var = hot.var().item()
+
+    # Temperature affects output distribution: hot should have higher variance
+    constraint('Low temp has lower variance than high temp', lambda: (cold_var < hot_var, cold_var, f'<{hot_var}', {}))
 
 def test_attention_single_head_constraint(constraint, kernel, device):
     Q = torch.randn(1, 1, 128, 64, device=device, dtype=torch.float16)

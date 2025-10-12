@@ -127,49 +127,63 @@ def ca_activation_kernel(
     stride_cb, stride_ch, stride_cq, stride_ck,
     B: tl.constexpr, H: tl.constexpr, S: tl.constexpr, D: tl.constexpr,
     BLOCK_Q: tl.constexpr, BLOCK_K: tl.constexpr,
+    temperature: tl.constexpr,
 ):
     """
-    CA activation pattern computation: perception ⊗ interaction.
+    CA activation pattern with Flash Attention-style online softmax.
 
-    Similar to Q·K^T in attention, but for CA neighborhood interactions.
-    Computes scores[q, k] = (CA_conv(perception)[q] · interaction[k]) / sqrt(D)
+    Computes softmax(perception ⊗ interaction / (sqrt(D) * temperature))
+    using numerically stable incremental algorithm:
+    - m_i: running maximum for numerical stability
+    - l_i: running sum for normalization
+    - alpha: rescaling factor for incremental updates
 
-    For now, this kernel computes the interaction scores after CA convolution
-    is applied externally. Full CA conv+interaction fusion requires Conv1d in Triton.
+    This enables temperature-modulated CA activation with stable softmax.
     """
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_q = tl.program_id(2)
 
     offs_q = pid_q * BLOCK_Q + tl.arange(0, BLOCK_Q)
-    offs_k = tl.arange(0, BLOCK_K)
     offs_d = tl.arange(0, D)
 
     # Load perception for query positions: [BLOCK_Q, D]
     perc_ptrs = Perception + (pid_b * stride_pb + pid_h * stride_ph + offs_q[:, None] * stride_ps + offs_d[None, :] * stride_pd)
     perception_q = tl.load(perc_ptrs, mask=(offs_q[:, None] < S) & (offs_d[None, :] < D), other=0.0)
 
-    # Initialize scores accumulator
-    scores = tl.zeros([BLOCK_Q, BLOCK_K], dtype=tl.float32)
+    # Online softmax accumulators (Flash Attention algorithm)
+    m_i = tl.full([BLOCK_Q], float('-inf'), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_Q], dtype=tl.float32)
 
-    # Loop over key positions
+    # Softmax scale: 1 / (sqrt(D) * temperature)
+    softmax_scale = 1.0 / (tl.sqrt(float(D)) * temperature)
+
+    # Loop over key positions with online softmax
     for k_start in range(0, S, BLOCK_K):
-        offs_k_block = k_start + offs_k
+        offs_k = k_start + tl.arange(0, BLOCK_K)
 
         # Load interaction for key positions: [BLOCK_K, D]
-        inter_ptrs = Interaction + (pid_b * stride_ib + pid_h * stride_ih + offs_k_block[:, None] * stride_is + offs_d[None, :] * stride_id)
-        interaction_k = tl.load(inter_ptrs, mask=(offs_k_block[:, None] < S) & (offs_d[None, :] < D), other=0.0)
+        inter_ptrs = Interaction + (pid_b * stride_ib + pid_h * stride_ih + offs_k[:, None] * stride_is + offs_d[None, :] * stride_id)
+        interaction_k = tl.load(inter_ptrs, mask=(offs_k[:, None] < S) & (offs_d[None, :] < D), other=0.0)
 
         # Compute scores: perception[q] · interaction[k]^T
         scores_block = tl.dot(perception_q, tl.trans(interaction_k))
+        scores_block = scores_block * softmax_scale
 
-        # Scale by sqrt(D) (similar to attention temperature)
-        scale = 1.0 / tl.sqrt(float(D))
-        scores_block = scores_block * scale
+        # Online softmax update (Flash Attention)
+        m_ij = tl.maximum(m_i, tl.max(scores_block, axis=1))
+        p = tl.exp(scores_block - m_ij[:, None])
+        l_ij = tl.sum(p, axis=1)
 
-        # Store scores
-        ca_ptrs = CA_Activation + (pid_b * stride_cb + pid_h * stride_ch + offs_q[:, None] * stride_cq + offs_k_block[None, :] * stride_ck)
-        tl.store(ca_ptrs, scores_block, mask=(offs_q[:, None] < S) & (offs_k_block[None, :] < S))
+        # Rescale previous values
+        alpha = tl.exp(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+        # Store softmax probabilities
+        ca_probs = p / l_i[:, None]
+        ca_ptrs = CA_Activation + (pid_b * stride_cb + pid_h * stride_ch + offs_q[:, None] * stride_cq + offs_k[None, :] * stride_ck)
+        tl.store(ca_ptrs, ca_probs, mask=(offs_q[:, None] < S) & (offs_k[None, :] < S))
 
 
 @triton.jit
@@ -377,12 +391,12 @@ class CAAttentionAutograd(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, query, key, value, device, numerical_config):
+    def forward(ctx, query, key, value, device, numerical_config, temperature):
         """Forward: use Triton kernels for speed."""
         B, H, M, D = query.shape
         _, _, N, _ = key.shape
 
-        # Compute CA activation using Triton kernel
+        # Compute CA activation using Triton kernel with temperature
         ca_activation = torch.empty(B, H, M, N, device=device, dtype=query.dtype)
 
         BLOCK_Q = 64
@@ -395,7 +409,8 @@ class CAAttentionAutograd(torch.autograd.Function):
             key.stride(0), key.stride(1), key.stride(2), key.stride(3),
             ca_activation.stride(0), ca_activation.stride(1), ca_activation.stride(2), ca_activation.stride(3),
             B, H, M, D,
-            BLOCK_Q=BLOCK_Q, BLOCK_K=BLOCK_K
+            BLOCK_Q=BLOCK_Q, BLOCK_K=BLOCK_K,
+            temperature=temperature
         )
 
         # Apply CA pattern to values using Triton kernel
@@ -443,7 +458,7 @@ class CAAttentionAutograd(torch.autograd.Function):
         grad_query = torch.einsum('bhqk,bhkd->bhqd', grad_scores, key) * scale
         grad_key = torch.einsum('bhqk,bhqd->bhkd', grad_scores.transpose(-2, -1), query) * scale
 
-        return grad_query, grad_key, grad_value, None, None
+        return grad_query, grad_key, grad_value, None, None, None
 
 
 class TritonKernel(Kernel):
@@ -467,15 +482,21 @@ class TritonKernel(Kernel):
 
     def attention(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
         """
-        Legacy attention interface - redirects to correlation-based CA.
+        Neural CA activation with Flash Attention-style softmax.
 
-        For Neural CA, this computes CA activation pattern and value propagation.
-        Uses autograd wrapper to enable gradient flow.
+        Computes softmax(perception ⊗ interaction / (sqrt(D) * temperature))
+        with numerically stable online algorithm.
+
+        Temperature modulates activation sharpness:
+        - Low temperature (< 1.0): Sharp, focused CA patterns
+        - High temperature (> 1.0): Diffuse, exploratory CA patterns
+
+        Uses autograd wrapper to enable gradient flow during training.
         """
         assert query.is_cuda and key.is_cuda and value.is_cuda
 
-        # Use autograd-enabled function
-        return CAAttentionAutograd.apply(query, key, value, self.device, self.numerical_config)
+        # Use autograd-enabled function with temperature
+        return CAAttentionAutograd.apply(query, key, value, self.device, self.numerical_config, temperature)
 
     def correlation(self, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Compute normalized correlation K @ K^T."""
