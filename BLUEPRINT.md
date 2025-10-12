@@ -308,26 +308,42 @@ NOT attention entropy alone (doesn't correlate with task)
 ### 2. Kernel injection: Constructor Injection
 **Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
 
+**Pattern**: Pseudopod constructor accepts Kernel interface, allowing user to provide compute capability (Triton GPU, PyTorch CPU fallback, custom implementations). Kernel is injected at construction time, not hardcoded.
+
 ### 3. Multi-GPU: Hash-based partitioning
 **Reasoning (Bitter Lesson):** Hash function scales arbitrarily. No hand-coded spatial assumptions.
+
+**Pattern**: Device assignment via hash function: device_id = hash(behavior_coords) modulo num_gpus. Scales to arbitrary GPU counts without manual partitioning logic.
 
 ### 4. Determinism: Sort keys on iteration
 **Reasoning (Architecture):** Spatial structure over temporal accidents. Reproducible science.
 
+**Pattern**: Archive iteration uses sorted keys to ensure deterministic order. Prevents non-deterministic behavior from hash table iteration order.
+
 ### 5. Memory limits: Soft limit with graceful degradation
 **Reasoning (SRE + Bitter Lesson):** Adapt to constraints, don't crash. Trade quality for capacity automatically.
+
+**Pattern**: When memory exceeds budget, pool culls worst-performing components (fraction=0.2). System degrades quality gracefully rather than crashing on OOM.
 
 ### 6. Metrics injection: Dependency injection
 **Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
 
+**Pattern**: Organism constructor accepts optional MetricsCollector parameter. Metrics are injected as explicit dependencies, not accessed via global state.
+
 ### 7. Fitness metric: Gradient magnitude
 **Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
+
+**Formula**: fitness = gradient_norm × attention_to_targets. Combines gradient magnitude (task impact) with attention alignment (relevance).
 
 ### 8. Archive bootstrapping: Initialization only
 **Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
 
+**Pattern**: When new component needed, archive provides initialization (bootstrap_component), then component is trained with full gradient flow (requires_grad=True). No frozen weights injected.
+
 ### 9. Timescale separation: 1x / 100x / 1000x
 **Reasoning (Stability):** Separate fast (weights) from medium (fitness) from slow (lifecycle).
+
+**Schedule**: Every step (1x) - update fitness EMA. Every 100 steps - check archive elite conditions. Every 1000 steps - pool culling. Prevents lifecycle churn from interfering with gradient updates.
 
 ### 10. DIRESA Behavioral Dimension Learning
 **Reasoning:** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. Hardcoded dimensions are arbitrary. DIRESA learns distance-preserving nonlinear embeddings online with adaptive dimensionality.
@@ -340,23 +356,31 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **Validation:** KMO ≥ 0.6 (intercorrelation), Bartlett's p < 0.05 (non-spherical), reconstruction error ≤ 0.5
 
-### 10a. Dimension Discovery: Principled Hyperparameter Selection
-**Question 1: Why 5 dimensions? Why not 3 or 10?**
+### 10a. DIRESA Adaptive Dimensionality
+**Question: How many dimensions should behavioral embeddings use?**
 
-**WRONG (arbitrary):** `n_components=5  # seems reasonable`
+**WRONG (arbitrary fixed):** hardcode 5 dimensions
 
-**RIGHT (principled via scree plot):**
+**RIGHT (adaptive learned):** DIRESA autoencoder with learned gating determines dimensionality online
 
-**Question 2: Why RBF kernel? What about poly, sigmoid, cosine?**
+**Mechanism**: DIRESA encoder has gating layer that learns which dimensions to activate. Dimension count adapts via warp vote mechanism (2-10D range). System learns optimal dimensionality based on task, not predetermined.
 
-**WRONG (assume one kernel):** `kernel='rbf'  # default`
-
-**RIGHT (test multiple, select best):**
+**Validation**: KMO ≥ 0.6 (intercorrelation), Bartlett's p < 0.05 (non-spherical), reconstruction error ≤ 0.5 ensure learned embeddings are factorable and distance-preserving.
 
 ### 10b. Content-Addressable Storage: Delta Protocol Specification
 **Question 3: What operations does delta compression support?**
 
 **Delta format (structured operations, NOT raw byte diffs):**
+
+**Operations**: Delta is list of structured weight-level operations:
+- **sparse_add**: Add values at specified 2D indices (for sparse updates with >95% sparsity)
+- **low_rank**: Low-rank update W += dU @ dV where dU is D×r, dV is r×D, r << k (for dense medium-sparsity updates)
+- **dense**: Full replacement (for small tensors like biases)
+- **scale_add**: Scalar multiplication plus sparse add (for small perturbations)
+
+**Application**: apply_delta reconstructs weights by applying operations sequentially to base weights. Each operation modifies specific weight matrix.
+
+**Compression strategy**: Choose operation based on sparsity and size. Sparsity >95% → sparse_add. Small tensors → dense. Otherwise → low_rank SVD with rank r=8.
 
 ### 10c. Content-Addressable Storage: Garbage Collection Policy
 **Question 4: When are unreferenced objects deleted?**
@@ -425,7 +449,7 @@ NOT attention entropy alone (doesn't correlate with task)
 - If worse on all dimensions: architecture is a failure, simplify
 - If better on some dimensions: document tradeoffs, make configurable
 
-**Phase 2 implementation:** Create tests/ablations/ with automated comparisons.
+**Testing approach:** tests/ablations/ contains automated comparisons.
 
 ## Computational Cost Analysis
 
