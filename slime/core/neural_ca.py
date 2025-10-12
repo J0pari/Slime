@@ -24,22 +24,16 @@ from slime.proto.kernel import Kernel
 
 class MultiHeadNeuralCA(nn.Module):
     """
-    Multi-head Neural CA that replaces attention with CA dynamics.
+    Multi-head Neural Cellular Automaton with Flow-Lenia dynamics.
 
-    Preserves ALL the sophistication of multi-head attention:
-    - Separate Q/K/V-style projections per head
-    - Multi-head architecture for multiple interaction patterns
-    - Learned spatial interactions via CA neighborhood
+    Architecture:
+    - Perception/Interaction/Value fields (per head)
+    - Multi-head for parallel CA update rules
+    - Learned spatial interactions via CA neighborhood convolution
     - Output projection per head
-    - Correlation computation between perception fields
-
-    But uses CA dynamics instead of attention:
-    - Q → Perception field (what cell perceives from neighbors)
-    - K → Interaction kernel (how neighbors influence cell)
-    - V → Value field (what information to propagate)
-    - Attention pattern → CA neighborhood activation pattern
-    - Softmax → Growth function (Flow-Lenia bell curve)
-    - Mass conservation replaces attention normalization
+    - Correlation computation between fields
+    - Flow-Lenia growth function (bell curve modulation)
+    - Mass conservation: ∑ output = ∑ input
 
     Args:
         head_dim: Dimensionality per head
@@ -67,19 +61,19 @@ class MultiHeadNeuralCA(nn.Module):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.kernel = kernel
 
-        # Multi-head Q/K/V-style projections (exactly like attention)
+        # Multi-head Perception/Interaction/Value projections
         # Shape: [num_heads, input_dim, head_dim] - separate per head
         self.perception_weight = nn.Parameter(
             torch.randn(num_heads, input_dim, head_dim, device=self.device)
-        )  # Like query_weight
+        )
 
         self.interaction_weight = nn.Parameter(
             torch.randn(num_heads, input_dim, head_dim, device=self.device)
-        )  # Like key_weight
+        )
 
         self.value_weight = nn.Parameter(
             torch.randn(num_heads, input_dim, head_dim, device=self.device)
-        )  # Like value_weight
+        )
 
         # Per-head CA convolution kernels for neighborhood perception
         # Each head has its own spatially-localized interaction pattern
@@ -93,7 +87,7 @@ class MultiHeadNeuralCA(nn.Module):
             torch.randn(num_heads, head_dim, head_dim, device=self.device)
         )
 
-        # Output projection per head (exactly like attention)
+        # Output projection per head
         self.output_proj = nn.Parameter(
             torch.randn(num_heads, head_dim, head_dim, device=self.device)
         )
@@ -127,38 +121,38 @@ class MultiHeadNeuralCA(nn.Module):
             correlation: Correlation tensor for kernel.correlation()
             ca_metrics: Dict with CA_mass_conservation, CA_parameter_localization, CA_neighborhood_coherence
         """
-        # Concatenate latent + stimulus (exactly like attention version)
+        # Concatenate latent + stimulus
         x = torch.cat([latent, stimulus], dim=-1)  # [batch, seq_len, input_dim]
         batch_size, seq_len, input_dim = x.shape
 
-        # Expand for multi-head processing (exactly like attention)
+        # Expand for multi-head processing
         x_expanded = x.unsqueeze(1).expand(batch_size, self.num_heads, seq_len, input_dim)
         # [batch, num_heads, seq_len, input_dim]
 
-        # Multi-head projections (exactly like attention Q/K/V)
+        # Multi-head projections
         perception = torch.einsum('bhsi,hid->bhsd', x_expanded, self.perception_weight)
         interaction = torch.einsum('bhsi,hid->bhsd', x_expanded, self.interaction_weight)
         values = torch.einsum('bhsi,hid->bhsd', x_expanded, self.value_weight)
         # Each: [batch, num_heads, seq_len, head_dim]
 
-        # Compute correlation (exactly like attention version)
+        # Compute correlation
         self._correlation = self._compute_correlation(interaction, values)
 
-        # CA Neighborhood Perception (replaces attention scores)
+        # CA Neighborhood Perception
         # For each head, convolve perception field with learned CA kernel
         ca_activation = self._compute_ca_neighborhood(perception, interaction)
-        # [batch, num_heads, seq_len, seq_len] - like attention scores
+        # [batch, num_heads, seq_len, seq_len]
 
-        # Flow-Lenia growth function (replaces softmax normalization)
+        # Flow-Lenia growth function
         # Compute potential field from interaction kernel
         potential = interaction.mean(dim=-1, keepdim=True)  # [batch, num_heads, seq_len, 1]
         growth = self._growth_function(potential)  # [batch, num_heads, seq_len, 1]
 
-        # Apply growth modulation to CA activation (like attention weights)
+        # Apply growth modulation to CA activation
         ca_pattern = ca_activation * growth  # [batch, num_heads, seq_len, seq_len]
         self._ca_pattern = ca_pattern.detach()
 
-        # CA value propagation (like attention value aggregation)
+        # CA value propagation
         ca_output = torch.einsum('bhqk,bhvd->bhqd', ca_pattern, values)
         # [batch, num_heads, seq_len, head_dim]
 
@@ -166,7 +160,7 @@ class MultiHeadNeuralCA(nn.Module):
         spatial_mod = torch.einsum('bhsd,hdo->bhso', ca_output, self.spatial_modulation)
         ca_output_modulated = ca_output * torch.tanh(spatial_mod)
 
-        # Output projection per head (exactly like attention)
+        # Output projection per head
         output = torch.einsum('bhqd,hdo->bhqo', ca_output_modulated, self.output_proj)
         # [batch, num_heads, seq_len, head_dim]
 
@@ -194,7 +188,7 @@ class MultiHeadNeuralCA(nn.Module):
         """
         Compute CA neighborhood activation pattern.
 
-        This replaces scaled dot-product attention with CA convolution.
+        Compute CA neighborhood activation via learned convolution kernels.
         Each head has its own CA kernel for computing neighbor interactions.
 
         Args:
@@ -229,11 +223,11 @@ class MultiHeadNeuralCA(nn.Module):
             # Transpose back: [batch, seq_len, head_dim]
             ca_conv_seq = ca_conv.transpose(1, 2)
 
-            # Interaction scores (like attention scores)
+            # Interaction scores
             scores_h = torch.einsum('bqd,bkd->bqk', ca_conv_seq, i_h)
             # [batch, seq_len, seq_len]
 
-            # Scale by head_dim (like attention scaling)
+            # Scale by head_dim
             scores_h = scores_h / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32, device=self.device))
 
             ca_activation_list.append(scores_h)
@@ -247,7 +241,7 @@ class MultiHeadNeuralCA(nn.Module):
         """
         Flow-Lenia growth function: bell curve per head.
 
-        This replaces softmax normalization with Flow-Lenia dynamics.
+        Flow-Lenia growth function with learned per-head parameters.
 
         Args:
             potential: [batch, num_heads, seq_len, 1]
@@ -267,7 +261,7 @@ class MultiHeadNeuralCA(nn.Module):
 
     def _compute_correlation(self, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
-        Compute correlation using kernel (exactly like attention version).
+        Compute correlation using kernel.
 
         Args:
             k: Interaction field [batch, num_heads, seq_len, head_dim]
@@ -307,7 +301,7 @@ class MultiHeadNeuralCA(nn.Module):
         spatial_var = torch.var(spatial_mod_weights)
         parameter_localization = torch.sigmoid(spatial_var)  # Normalize to [0,1]
 
-        # Neighborhood coherence: entropy of CA pattern (like attention entropy)
+        # Neighborhood coherence: entropy of CA pattern
         # Low entropy = focused interactions, High entropy = diffuse interactions
         ca_pattern_normalized = ca_pattern / (ca_pattern.sum(dim=-1, keepdim=True) + 1e-10)
         ca_entropy = -(ca_pattern_normalized * torch.log(ca_pattern_normalized + 1e-10)).sum(dim=-1).mean()
@@ -320,12 +314,12 @@ class MultiHeadNeuralCA(nn.Module):
         }
 
     def get_ca_pattern(self) -> Optional[torch.Tensor]:
-        """Get last CA activation pattern (like attention pattern)."""
+        """Get last CA activation pattern."""
         return self._ca_pattern
 
     @property
     def correlation(self) -> torch.Tensor:
-        """Get correlation (exactly like attention version)."""
+        """Get correlation."""
         if self._correlation is None:
             raise RuntimeError('Must call forward() before accessing correlation')
         return self._correlation

@@ -23,7 +23,7 @@ class Pseudopod(nn.Module):
         self.stimulus_dim = stimulus_dim if stimulus_dim is not None else head_dim
         self.input_dim = self.latent_dim + self.stimulus_dim
 
-        # Multi-head Neural CA (replaces attention)
+        # Multi-head Neural CA
         self.neural_ca = MultiHeadNeuralCA(
             head_dim=head_dim,
             num_heads=num_heads,
@@ -36,12 +36,12 @@ class Pseudopod(nn.Module):
         self._correlation: Optional[torch.Tensor] = None
         self._fitness = 0.0
         self.last_behavior: Optional[torch.Tensor] = None
-        self._last_ca_pattern: Optional[torch.Tensor] = None  # CA pattern (was attention pattern)
+        self._last_ca_pattern: Optional[torch.Tensor] = None
         self._raw_metrics: Optional[torch.Tensor] = None
         self._ca_metrics: Optional[dict] = None  # CA-specific metrics
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
-        # Neural CA update (replaces attention)
+        # Neural CA update
         output, correlation, ca_metrics = self.neural_ca(latent, stimulus)
         # output: [batch, num_heads, seq_len, head_dim]
 
@@ -65,7 +65,7 @@ class Pseudopod(nn.Module):
             # Backward compatibility: use first 5 raw metrics before dimension discovery
             self.last_behavior = self._raw_metrics[:5]
 
-        # Fitness from CA pattern entropy + output magnitude (same as attention)
+        # Fitness from CA pattern entropy + output magnitude
         ca_pattern_normalized = self._ca_pattern / (self._ca_pattern.sum(dim=-1, keepdim=True) + self.numerical_config.epsilon)
         ca_entropy = -(ca_pattern_normalized * torch.log(ca_pattern_normalized + self.numerical_config.epsilon)).sum(dim=-1).mean()
         output_magnitude = torch.norm(output) / torch.sqrt(torch.tensor(output.numel(), dtype=torch.float32, device=output.device))
@@ -165,10 +165,10 @@ class Pseudopod(nn.Module):
             metrics.extend([0.0, 0.0, 0.0])
 
         # === Core metrics (adapted for CA) ===
-        ca_span = self.get_attention_distance(attn)  # CA pattern distance
+        ca_span = self.get_attention_distance(attn)
         activation_sparsity = self.get_activation_sparsity(output)
         gradient_flow = self.get_gradient_flow_magnitude()
-        memory_locality = self.get_memory_access_locality(attn)  # CA pattern locality
+        memory_locality = self.get_memory_access_locality(attn)
         compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
         metrics.extend([ca_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity])
 
