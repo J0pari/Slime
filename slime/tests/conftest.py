@@ -118,8 +118,10 @@ class CausalConstraintChecker:
             return {str(k): self._make_serializable(v) for k, v in obj.items()}
         elif isinstance(obj, set):
             return list(obj)
-        elif isinstance(obj, np.ndarray):
+        elif np and isinstance(obj, np.ndarray):
             return obj.tolist()
+        elif hasattr(obj, 'cpu') and hasattr(obj, 'detach'):
+            return obj.detach().cpu().tolist()
         elif hasattr(obj, '__dict__'):
             return str(obj)
         else:
