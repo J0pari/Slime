@@ -21,3 +21,4 @@ checkpoints/
 *.pt
 *.ckpt
 wandb/
+.claude/
