@@ -38,24 +38,6 @@ This document tracks where the implementation doesn't match the blueprint archit
 - Loss: Reconstruction + distance preservation + KL regularization
 - Online training alongside main model
 
-n## Validation Metrics (MEDIUM)
-
-**Blueprint**: Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15
-**Current Implementation**: KMO ≥ 0.6, Bartlett's p < 0.05
-**Impact**: Using 1970s factor analysis metrics instead of modern distance-preservation metrics
-
-**Files affected**:
-- slime/memory/archive.py (lines 338-339, 382-386, 417-429, 599-615)
-- slime/core/organism.py (line 51)
-- run.py (line 147)
-- slime/tests/unit/test_archive.py (all CVTArchive instantiations)
-
-**What needs to change**:
-- Replace calculate_kmo() with compute_trustworthiness()
-- Replace bartlett() with compute_continuity()
-- Add compute_procrustes_distance()
-- Update all kmo_threshold parameters to trustworthiness_threshold
-- Remove factor_analyzer dependency, add scikit-learn.manifold
 ## Adaptive Voronoi Archive (HIGH)
 
 **Blueprint**: Archive cells grow/shrink based on density
