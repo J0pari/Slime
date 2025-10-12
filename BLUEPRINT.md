@@ -1,130 +1,27 @@
-# Slime Mold Transformer - System Blueprint (2025 Edition)
-
-**Philosophy**: Late 2025 cutting-edge: Flow-Lenia-based, GPU-native from warps up, algebraic effects, learned everything, comonadic perception.
-
-**Vision**: The first production-ready, self-organizing, CA-based transformer with learned architecture at every level.
-
----
-
-## Core Principles
-
-### 1. **Conway → Lenia → Flow-Lenia → Neural Flow-Lenia**
-
-Evolution from discrete CA to learned continuous CA with parameter localization:
-
-```
-Level 1 (Conway):     Fixed rules, discrete states, deterministic
-Level 2 (Lenia):      Fixed rules, continuous states, continuous time
-Level 3 (Flow-Lenia): Localized rules, mass conservation, multi-species
-Level 4 (Ours):       Learned rules, adaptive parameters, intrinsic motivation
-```
-
-**Target**: Level 4 with GPU-native warp-level computation
-
-### 2. **GPU-Native: Warps to Flow-Lenia**
-
-Like a Polynesian navigator reading ocean/stars/birds as unified field, we read GPU warps/cache/tensor cores as unified computational substrate:
-
-```cuda
-// NO CPU abstractions - pure GPU thinking
-__global__ void neural_ca_warp_kernel(...) {
-    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
-    int lane_id = threadIdx.x % 32;
-
-    // Perception via warp shuffles (no global memory!)
-    float4 neighbor = __shfl_sync(0xffffffff, state, (lane_id + 1) % 32);
-
-    // Update entirely in registers
-    state.x += learned_rule(neighbor.x);
-}
-```
-
-**Key insight**: Warp execution patterns ARE learning progress metrics. GPU occupancy IS fitness.
-
-### 3. **Algebraic Effect Handlers (Comonadic Composition)**
-
-Features are optional, composable capabilities requested via effects:
-
-```python
-# Phase 0-2 (Built)
-GetHierarchy: Effect['BehavioralHierarchy']
-GetGenealogy: Effect['Genealogy']
-UsePAdicDistance: Effect[bool]
-
-# Phase 7 (Roadmap)
-GetLocalUpdateRule: Effect['CAParameters']  # Flow-Lenia parameter localization
-GetLearningProgress: Effect[float]          # Curiosity-driven lifecycle
-```
-
-**Pattern**: Context (warp state) → Extract (local observation) → Extend (context-aware decision). GPU AS comonad.
-
-### 4. **Everything Learned, Nothing Fixed**
-
-| Component | Current (Phase 3) | Target (Phases 4-8) |
-|-----------|-------------------|---------------------|
-| Dimensions | Kernel PCA (offline, once) | DIRESA (online, continuous) |
-| Archive | Fixed CVT centroids | Adaptive Voronoi (grow/shrink) |
-| Metrics | Hardcoded (Euclidean/Mahalanobis) | Learned embedding |
-| Update Rules | Manual transformer | Neural CA (warp-level) |
-| Parameters | Fixed per pseudopod | Flow-Lenia localized (spatial) |
-| Lifecycle | Manual schedule | Curiosity-driven (intrinsic) |
-
-### 5. **Test-Driven Everything**
-
-100% constraint satisfaction, always:
-
-```python
-constraint(
-    'Ultrametric property holds',
-    lambda: (dist_xz <= max(dist_xy, dist_yz) + 1e-6, dist_xz, max_dist, {...})
-)
-# Result: 39/39 constraints satisfied (100%)
-```
-
-**Current**: Phase 3 complete with true ultrametric dendrogram distance
-
----
+# Slime Mold Transformer - System Blueprint
 
 ## Architecture Philosophy
 
-### The "z² + c" Principle (Mandelbrot Generalized)
+**Foundation**: Conway → Lenia → Flow-Lenia → Neural Flow-Lenia evolution path. Our Slime Mold Transformer is a **Neural Flow-Lenia organism** where Pseudopods are learned CA update rules with spatially-localized parameters, mass-conservative dynamics, and intrinsic curiosity-driven lifecycle.
 
-```python
-# Mandelbrot set
-z_{n+1} = z_n^2 + c  # Simple rule, emergent complexity
+### Core Principles (2025 Substrate)
 
-# Flow-Lenia (our target)
-state_{n+1} = F(state_n, params_local)  # Learned rule F
-params_{n+1} = G(params_n, state_n)     # Parameters EVOLVE
+1. **Protocol-First**: All interfaces defined before implementations (algebraic effect handlers for optional capabilities)
+2. **Dynamic Everything**: No static allocations, lifecycle-managed components (curiosity-driven birth/death via learning progress)
+3. **Flow-Lenia Neural CA Substrate**: Pseudopod updates are learned continuous CA rules with mass conservation, parameter localization, warp-level GPU execution
+   - Conway (Level 1): Fixed rules, discrete states → Lenia (Level 2): Fixed rules, continuous states → Flow-Lenia (Level 3): Localized parameters, mass conservation → **Ours (Level 4)**: Learned rules, adaptive parameters, intrinsic motivation
+4. **Adaptive Voronoi MAP-Elites Core**: Archive-driven evolution with cells that grow/shrink based on density, DIRESA learned embeddings (adaptive 2-10D)
+5. **Warp-Native GPU Kernels**: Like Polynesian navigator reading ocean/stars/birds as unified field, read warps/cache/tensor-cores as unified substrate
+   - FlashAttention-style tiling (HBM ↔ SRAM), warp shuffles for zero-global-memory neighbor access, tensor cores for 256 FLOPs/cycle convolutions
+6. **Content-Addressable Low-Rank Archive**: SVD factorization + content-addressed delta compression (80-160x memory reduction)
+7. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure (ultrametric topology via p-adic/genealogy/hierarchy)
+8. **DIRESA Learned Embeddings**: Adaptive dimensionality via distance-preserving nonlinear autoencoders, learns online, dimension count adapts via warp vote (2-10D)
+9. **Deterministic Random**: Hash-based seeded random for reproducibility
+10. **SRE Built-In**: Observability, SLOs, error budgets from day one (100% constraint satisfaction always)
+11. **GPU-Native Comonadic Perception**: GPU execution state AS comonad (extract local observation, extend with context-aware decisions)
+12. **DRY Principle**: Single source of truth for each concept
 
-# Where:
-# - F is Neural CA update (learned, not designed)
-# - params_local varies spatially (like c varies spatially)
-# - params evolve slowly (meta-dynamics)
-```
-
-**Key insight**: Make parameters PART of the CA state. They evolve based on local dynamics.
-
-### Comonadic GPU Perception
-
-The GPU's execution state is a comonad:
-
-```haskell
-extract   :: W a -> a           -- Get local value (warp shuffle)
-duplicate :: W a -> W (W a)     -- Multi-scale context (warp/block/device)
-extend    :: (W a -> b) -> W a -> W b  -- Context-aware decision
-```
-
-**Practical meaning**:
-- **extract**: Each thread sees neighbors via `__shfl_sync` (no global memory)
-- **duplicate**: View execution at warp/block/device scales simultaneously
-- **extend**: Make lifecycle decisions based on full GPU state context
-
-Like the navigator reading **one unified field** (wave+wind+star), not separate measurements.
-
----
-
-## Dependency DAG (Extended for Phases 4-8)
+## Dependency DAG
 
 ```
 Layer 0: Protocols (no dependencies)
@@ -132,488 +29,86 @@ Layer 0: Protocols (no dependencies)
     proto/memory.py
     proto/model.py
     proto/component.py
-    effects/__init__.py         # NEW (Phase 0): Algebraic effect substrate
 
-Layer 1: Core Infrastructure
+Layer 1: Implementations of protocols (depend only on Layer 0)
     kernels/utils.py
-    kernels/triton_impl.py
-    kernels/torch_fallback.py
-    observability/metrics.py
-    observability/slo.py
-    topology/__init__.py        # NEW (Phase 1): Effect declarations
-    topology/p_adic.py          # NEW (Phase 2): p-adic distances
-    topology/genealogy.py       # NEW (Phase 2): Lineage tracking
-    topology/hierarchy.py       # NEW (Phase 2, Phase 3): GMM + dendrogram
-    topology/hybrid_metric.py   # NEW (Phase 2): Ultrametric + Mahalanobis
+    kernels/triton_impl.py → proto.kernel
+    kernels/torch_fallback.py → proto.kernel
+    observability/metrics.py → (no proto, pure collection)
+    observability/slo.py → (no proto, pure validation)
 
-Layer 2: Learned Components (Phases 4-8 Roadmap)
-    behavioral/diresa.py        # Phase 4: Learned dimensionality encoder
-    behavioral/adaptive_voronoi.py  # Phase 5: Growing/shrinking cells
-    nca/update_rules.py         # Phase 6: Neural CA learned dynamics
-    nca/flow_lenia.py           # Phase 7: Parameter localization
-    lifecycle/curiosity.py      # Phase 8: Learning progress tracker
+Layer 2: Data structures (depend on Layer 0-1)
+    memory/archive.py → proto.component
+    memory/pool.py → proto.component
+    memory/tubes.py → proto.memory
+    core/state.py → (no dependencies, plain dataclass)
+    core/stencil.py → (GPU-parallel spatial ops, no dependencies)
 
-Layer 3: Data Structures (depend on Layer 0-2)
-    memory/archive.py → DIRESA, AdaptiveVoronoi
-    memory/pool.py → Curiosity, NCA
-    memory/tubes.py
-    core/state.py
-    core/stencil.py
+Layer 3: Components (depend on Layer 0-2)
+    core/pseudopod.py → proto.model, proto.kernel, kernels/*, observability/*
+    core/chemotaxis.py → proto.model, memory/archive
+    memory/pool.py → core/stencil (for batched spatial computation)
 
-Layer 4: Components (depend on Layer 0-3)
-    core/pseudopod.py → NCA update rules
-    core/chemotaxis.py → HybridMetric
-    core/organism.py → CuriosityLifecycle
+Layer 4: Orchestration (depend on Layer 0-3)
+    core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
 
-Layer 5-6: API and Applications (unchanged)
-    ...
+Layer 5: API (depend on Layer 0-4)
+    api/torch_compat.py → core/organism
+    api/native.py → core/organism
+
+Layer 6: Applications (depend on Layer 0-5)
+    training/fitness.py → proto.component
+    training/trainer.py → core/organism, observability/*, memory/archive
+    bench/profile.py → core/organism
+    tools/export.py → core/organism
+    tools/package.py → (standalone, no deps)
+    config/loader.py → (reads Layer 5)
+
+    tests/unit/test_protocol_component.py → proto.component
+    tests/unit/test_protocol_kernel.py → proto.kernel
+    tests/unit/test_protocol_memory.py → proto.memory
+    tests/unit/test_protocol_model.py → proto.model
+    tests/unit/test_triton_kernels.py → kernels/triton_impl
+    tests/unit/test_torch_fallback.py → kernels/torch_fallback
+    tests/unit/test_kernel_equivalence.py → kernels/*, proto.kernel
+    tests/unit/test_archive_operations.py → memory/archive
+    tests/unit/test_pool_lifecycle.py → memory/pool
+    tests/unit/test_tubes_memory.py → memory/tubes
+    tests/unit/test_stencil.py → core/stencil
+    tests/unit/test_pseudopod_component.py → core/pseudopod
+    tests/unit/test_chemotaxis_selection.py → core/chemotaxis
+    tests/unit/test_organism_orchestration.py → core/organism
+    tests/unit/test_dag_enforcement.py → (all layers, import analysis)
+    tests/unit/test_ownership_hierarchy.py → core/organism, core/pseudopod, memory/*
+    tests/unit/test_timescale_separation.py → training/trainer, memory/archive
+    tests/unit/test_gpu_memory_safety.py → kernels/*, memory/*
+    tests/unit/test_behavioral_kmo.py → memory/archive, scipy.stats
+    tests/unit/test_behavioral_bartlett.py → memory/archive, scipy.stats
+    tests/unit/test_behavioral_kernel_pca.py → memory/archive, sklearn
+    tests/unit/test_race_conditions.py → core/organism, memory/pool
+    tests/unit/test_gradient_flow_edge_cases.py → core/pseudopod, kernels/*
+    tests/unit/test_attention_numerical_limits.py → kernels/triton_impl
+    tests/unit/test_archive_elite_replacement.py → memory/archive
+    tests/unit/test_fitness_stability.py → training/fitness
+    tests/unit/test_device_placement_determinism.py → memory/archive, core/organism
+    tests/unit/test_bootstrap_interpolation.py → memory/archive
+    tests/unit/test_multi_gpu_partitioning.py → memory/archive, core/organism
+    tests/unit/test_memory_budget_enforcement.py → memory/pool
+    tests/unit/test_lifecycle_birth_death.py → memory/pool, core/pseudopod
+    tests/unit/test_metrics_collection.py → observability/metrics
+    tests/unit/test_slo_validation.py → observability/slo
+    tests/unit/test_torch_compat_api.py → api/torch_compat
+    tests/unit/test_native_api.py → api/native
+    tests/unit/test_config_validation.py → config/loader
+    tests/integration/test_end_to_end_training.py → training/trainer, all layers
+    tests/ablations/test_vs_baseline_transformer.py → training/trainer
+    tests/ablations/test_with_without_archive.py → training/trainer, memory/archive
+    tests/ablations/test_with_without_lifecycle.py → training/trainer, memory/pool
+    tests/ablations/test_behavioral_vs_random_placement.py → core/organism
+    tests/ablations/test_efficiency_in_fitness.py → training/fitness
 ```
 
----
-
-## Flow-Lenia Implementation Roadmap
-
-### Phase 4: DIRESA Behavioral Encoder (2 weeks)
-
-**Goal**: Replace Kernel PCA with online learned dimensionality
-
-```python
-class DIRESABehavioralEncoder(nn.Module):
-    """
-    Distance-preserving adaptive encoder.
-    Learns optimal D continuously from archive evolution.
-    """
-
-    def __init__(self, input_dim=62, min_dims=2, max_dims=10):
-        self.encoder = nn.Sequential(...)
-        self.decoder = nn.Sequential(...)
-        self.dim_selector = nn.Parameter(torch.ones(max_dims))  # Learned gating
-
-    def forward(self, raw_metrics):
-        z_full = self.encoder(raw_metrics)
-        dim_weights = torch.sigmoid(self.dim_selector)
-        return z_full * dim_weights  # Soft dimension selection
-
-    def loss(self, x1, x2):
-        # Distance preservation + reconstruction + sparsity
-        dist_input = torch.norm(x1 - x2)
-        z1, z2 = self.forward(x1), self.forward(x2)
-        dist_latent = torch.norm(z1 - z2)
-
-        return (
-            F.mse_loss(dist_latent, dist_input) +  # Preserve distances
-            F.mse_loss(self.decoder(z1), x1) +     # Reconstruction
-            torch.sum(torch.sigmoid(self.dim_selector))  # Sparsity (fewer dims)
-        )
-```
-
-**GPU-Native Implementation**:
-```cuda
-// Warp-level distance computation (no shared memory)
-__global__ void warp_distance_kernel(...) {
-    int lane_id = threadIdx.x % 32;
-    float local_dist = 0.0f;
-
-    for (int i = lane_id; i < dim; i += 32) {
-        float diff = x1[i] - x2[i];
-        local_dist += diff * diff;
-    }
-
-    // Warp shuffle reduction (zero global memory!)
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_dist += __shfl_down_sync(0xffffffff, local_dist, offset);
-    }
-}
-```
-
-**Tests**: 100% constraint satisfaction for distance preservation, sparsity, reconstruction
-
----
-
-### Phase 5: Adaptive Voronoi Archive (2 weeks)
-
-**Goal**: Cells split when crowded, merge when empty
-
-```python
-class AdaptiveVoronoiArchive:
-    """
-    Voronoi cells grow/shrink based on density.
-    High-density regions get more centroids.
-    """
-
-    def __init__(self, min_centroids=20, max_centroids=200):
-        self.centroids = self._initialize_centroids(min_centroids)
-        self.density = {}  # centroid_id -> elite count
-
-    def add(self, behavior, fitness, state_dict):
-        centroid_id = self._find_nearest_centroid(behavior)
-        self.density[centroid_id] += 1
-
-        # Adaptive cell management every 100 additions
-        if len(self.elites) % 100 == 0:
-            self._adapt_cells()
-
-    def _adapt_cells(self):
-        # Split high-density cells (>10 elites)
-        for cid, count in self.density.items():
-            if count > 10 and len(self.centroids) < self.max_centroids:
-                self._split_cell(cid)  # K-means k=2
-
-        # Merge low-density cells (<1 elite)
-        for cid, count in self.density.items():
-            if count < 1 and len(self.centroids) > self.min_centroids:
-                self._merge_cell(cid)
-```
-
-**GPU-Native Implementation**:
-```cuda
-// Warp-parallel cell assignment + K-means split
-__global__ void split_cell_kernel(...) {
-    int lane_id = threadIdx.x % 32;
-
-    // Initialize centroids (lanes 0-15 = centroid 1, lanes 16-31 = centroid 2)
-    float centroid[8];
-    if (lane_id < 16) {
-        // Load from first half of elites
-    } else {
-        // Load from second half
-    }
-
-    // 10 K-means iterations (all via warp shuffles, no global memory)
-    #pragma unroll
-    for (int iter = 0; iter < 10; iter++) {
-        // Assignment and update steps via shuffles
-    }
-}
-```
-
-**Key Insight**: Cell density ≈ warp occupancy. Adaptive cells = adaptive parallelism.
-
----
-
-### Phase 6: Neural CA Update Rules (3 weeks)
-
-**Goal**: Replace transformer attention with learned CA
-
-```python
-class NeuralCAPseudopod(nn.Module):
-    """
-    Pseudopod with learned update rule.
-    Each cell = one thread lane.
-    """
-
-    def __init__(self, state_dim=64):
-        self.perception = nn.Conv2d(state_dim, 128, kernel_size=3)
-        self.update = nn.Sequential(
-            nn.Conv2d(128, 128, 1),
-            nn.ReLU(),
-            nn.Conv2d(128, state_dim, 1)
-        )
-
-    def forward(self, state, steps=10):
-        """Run CA for N steps (like slime mold exploring)"""
-        for _ in range(steps):
-            perceived = self.perception(state)
-            delta = self.update(perceived)
-            state = state + delta  # Residual
-        return state
-```
-
-**GPU-Native Implementation**:
-```cuda
-// Pure warp computation (entire CA runs in registers!)
-__global__ void neural_ca_warp_kernel(...) {
-    int lane_id = threadIdx.x % 32;
-    float4 state = states[cell_id];  // Load once
-
-    // Run N steps WITHOUT touching global memory
-    #pragma unroll
-    for (int step = 0; step < N; step++) {
-        // 1. Perceive neighbors (warp shuffle)
-        float4 left = __shfl_sync(0xffffffff, state, (lane_id - 1 + 32) % 32);
-        float4 right = __shfl_sync(0xffffffff, state, (lane_id + 1) % 32);
-
-        // 2. Learned update (MLP in registers)
-        float4 perceived = (left + state + right) / 3.0f;
-        float hidden[8];
-        for (int h = 0; h < 8; h++) {
-            hidden[h] = perceived.x * W[h*4+0] + ...;  // Matrix multiply
-        }
-
-        // 3. Output
-        state.x += hidden[0] * W_out[0] + ...;
-    }
-
-    states[cell_id] = state;  // Write once
-}
-```
-
-**Revolutionary**: Zero global memory access during N steps. Entire CA in registers + warp shuffles.
-
-**Connection to Transformer**: Attention IS perceive-update cycle. NCA makes it explicit and learnable.
-
----
-
-### Phase 7: Flow-Lenia Parameter Localization (3 weeks)
-
-**Goal**: Update rule parameters stored IN the CA state
-
-```python
-class FlowLeniaPseudopod(nn.Module):
-    """
-    Neural CA + Flow-Lenia: parameters part of state.
-    state_dims = actual state (e.g., 64 channels)
-    param_dims = parameters (e.g., 8 channels: μ, σ, growth_rate, etc.)
-    total_channels = state_dims + param_dims
-    """
-
-    def __init__(self, state_dim=64, param_dim=8):
-        self.state_dim = state_dim
-        self.param_dim = param_dim
-
-        # Perception sees BOTH state and local parameters
-        self.perception = nn.Conv2d(state_dim + param_dim, 128, 3)
-
-        # Two update networks
-        self.state_update = nn.Sequential(...)  # Fast dynamics
-        self.param_update = nn.Sequential(...)  # Slow dynamics (100x slower)
-
-    def forward(self, state_with_params, steps=10):
-        for _ in range(steps):
-            state = state_with_params[:, :self.state_dim]
-            params = state_with_params[:, self.state_dim:]
-
-            # Perceive (sees both)
-            features = self.perception(state_with_params)
-
-            # Update state (fast)
-            state_delta = self.state_update(features)
-            next_state = state + state_delta
-
-            # Update params (slow, 100x slower)
-            param_delta = self.param_update(features)
-            next_params = params + 0.01 * param_delta
-
-            state_with_params = torch.cat([next_state, next_params], dim=1)
-
-        return state_with_params
-
-    def spawn_offspring(self, parent_state):
-        """
-        Child inherits parent's parameters + mutation.
-        This is how UPDATE RULES evolve!
-        """
-        parent_params = parent_state[:, self.state_dim:]
-        mutation = torch.randn_like(parent_params) * 0.1
-        child_params = parent_params + mutation
-
-        child_state = torch.randn_like(parent_state[:, :self.state_dim])
-        return torch.cat([child_state, child_params], dim=1)
-```
-
-**GPU-Native Implementation**:
-```cuda
-// Tensor core native Flow-Lenia (16x16 patches)
-#include <mma.h>
-using namespace nvcuda;
-
-__global__ void flow_lenia_tensor_core_kernel(...) {
-    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_frag;
-
-    // Each warp processes 16x16 CA patch
-    int warp_id = threadIdx.x / 32;
-
-    // Tensor core convolution (256 FLOPs per instruction!)
-    for (int ky = -1; ky <= 1; ky++) {
-        for (int kx = -1; kx <= 1; kx++) {
-            wmma::load_matrix_sync(a_frag, &state[...]);
-            wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
-        }
-    }
-
-    // Extract local parameters for this patch
-    float local_mu = params[patch_idx];
-    float local_sigma = params[patch_idx + 1];
-
-    // Apply Flow-Lenia growth function (localized!)
-    for (int i = 0; i < 16; i++) {
-        float growth = acc_frag.x[i];
-        float delta = expf(-powf(growth - local_mu, 2) / (2*local_sigma*local_sigma));
-        acc_frag.x[i] = delta;
-    }
-
-    wmma::store_matrix_sync(&next_state[...], acc_frag, ...);
-}
-```
-
-**Why Tensor Cores**: 16x16 convolutions = native size. 256 FLOPs/cycle vs 1 FLOP/cycle.
-
-**Multi-Species**: Different spatial regions have different parameters → different update rules → multi-species co-evolution (like Flow-Lenia).
-
----
-
-### Phase 8: Curiosity-Driven Lifecycle (2 weeks)
-
-**Goal**: Replace manual spawning schedule with intrinsic motivation
-
-```python
-class LearningProgressTracker:
-    """
-    Tracks learning progress = novelty + improvement.
-    High LP = productive exploration (keep alive).
-    Low LP = stagnation (retire).
-    """
-
-    def compute_learning_progress(self, pod_id):
-        events = self.history[pod_id][-100:]  # Recent window
-
-        # Count novel discoveries
-        novelty = sum(1 for e in events if e['type'] == 'novel')
-
-        # Sum fitness improvements
-        improvement = sum(e['fitness_delta'] for e in events if e['fitness_delta'] > 0)
-
-        # Learning progress = novelty + improvement
-        return (novelty / len(events)) + (improvement / 10.0)
-
-class CuriosityDrivenLifecycle:
-    """
-    Manages lifecycle via learning progress.
-    Spawn when unexplored, retire when stagnant.
-    """
-
-    def should_spawn(self):
-        coverage = self.archive.coverage()
-        if coverage < 0.7:
-            return True  # Lots of unexplored space
-
-        avg_lp = np.mean([self.lp_tracker.compute_lp(i) for i in range(len(self.pool))])
-        if avg_lp < 0.1:
-            return True  # All pods stagnating, need diversity
-
-        return False
-
-    def should_retire(self, pod_id):
-        lp = self.lp_tracker.compute_lp(pod_id)
-        return lp < 0.05  # Near-zero progress for N generations
-
-    def allocate_compute(self, lp_scores):
-        """
-        High-LP pods get more update steps.
-        Compute follows learning progress.
-        """
-        total_lp = sum(lp_scores.values())
-        return {
-            i: int(5 + 45 * (lp / total_lp))  # Min 5, max 50 steps
-            for i, lp in lp_scores.items()
-        }
-```
-
-**GPU-Native Implementation**:
-```cuda
-// Learning progress FROM warp behavior (no explicit tracking!)
-__global__ void curiosity_kernel(...) {
-    int lane_id = threadIdx.x % 32;
-
-    // Each warp evaluates 32 recent elites
-    float novelty = compute_novelty(elite_behaviors[lane_id]);
-
-    // Warp vote: How diverse is this warp?
-    int is_novel = (novelty > 0.5f) ? 1 : 0;
-    unsigned novel_mask = __ballot_sync(0xffffffff, is_novel);
-    int diversity = __popc(novel_mask);  // Population count
-
-    // Learning progress = diversity / 32
-    float lp = (float)diversity / 32.0f;
-
-    if (lane_id == 0) {
-        atomicAdd(&pod_learning_progress[pod_id], lp);
-    }
-}
-```
-
-**Key Insight**: Warp divergence = exploration diversity = learning progress. **Read LP from GPU execution patterns**, don't compute separately.
-
----
-
-## Comonadic Integration: GPU State as Context
-
-### The Deep Insight
-
-The GPU's execution state IS a comonad:
-
-```python
-class GPUContext:
-    """Entire GPU state at one moment"""
-    warp_occupancy: dict[int, float]      # Utilization per warp
-    register_pressure: dict[int, int]     # Registers used
-    l2_cache_hits: float                  # Cache efficiency
-    tensor_core_util: float               # Tensor core usage
-
-    def extract(self, warp_id: int) -> LocalObservation:
-        """
-        Get local observation for one warp.
-        Like navigator: "Wave period is 8 seconds from SW"
-        """
-        return LocalObservation(
-            occupancy=self.warp_occupancy[warp_id],
-            neighbors=self.get_neighbor_warps(warp_id)
-        )
-
-    def duplicate(self) -> 'GPUContext[GPUContext]':
-        """
-        Multi-scale context view.
-        Like navigator: local wave + regional current + global weather
-        """
-        return GPUContext(
-            local=self.get_warp_state(),
-            regional=self.get_block_state(),
-            global_ctx=self.get_device_state()
-        )
-
-    def extend(self, f: Callable[[GPUContext], Decision]) -> 'GPUContext':
-        """
-        Context-aware decisions.
-        Like: "Given full wave/wind/star field, where to sail?"
-        """
-        for warp_id in self.active_warps:
-            local = self.extract(warp_id)
-            decision = f(local)  # Spawn/retire/adapt
-            self.apply(decision)
-        return self
-```
-
-### Warp Shuffle AS Comonadic Extract
-
-```cuda
-__device__ float comonadic_extract(float my_value, int lane_id) {
-    // The ENTIRE WARP is context W
-    // my_value is local observation
-    // Warp shuffles see FULL CONTEXT
-
-    float left = __shfl_sync(0xffffffff, my_value, (lane_id - 1 + 32) % 32);
-    float right = __shfl_sync(0xffffffff, my_value, (lane_id + 1) % 32);
-
-    // Warp reduction (context summary)
-    float sum = my_value;
-    for (int offset = 16; offset > 0; offset /= 2) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    }
-    float mean = __shfl_sync(0xffffffff, sum, 0) / 32.0f;
-
-    // Decision based on CONTEXT + LOCAL
-    float deviation = my_value - mean;
-    return (deviation > 0.0f) ? 2.0f * my_value : 0.5f * my_value;
-}
-```
-
-**Like the Navigator**: Feel boat heel → Know wind/current/sail → Adjust angle. **One integrated perception**, not separate measurements.
-
----
-
-## Data Flow (Phases 4-8)
+## Data Flow
 
 ```
 User Input
@@ -628,381 +123,1109 @@ User Input
        ▼
 ┌─────────────────────┐
 │  Organism           │ owns
-│  (Orchestrator)     ├────────┐
-└──────┬──────────────┘        │
-       │ uses                  │
-       ▼                       ▼
-┌─────────────────────┐  ┌──────────────────┐
-│ CuriosityLifecycle  │  │ Adaptive Voronoi │
-│ (intrinsic          │  │ Archive          │
-│  motivation)        │  │ (DIRESA encoder) │
-└──────┬──────────────┘  └────────▲─────────┘
-       │                          │
-       │ manages                  │
-       ▼                          │
-┌─────────────────────┐           │
-│ NCA Pseudopod Pool  │           │
-│ (Flow-Lenia         │───────────┘
-│  parameters)        │ stores elites
-└──────┬──────────────┘
+│  (Orchestrator)     ├──────┐
+└──────┬──────────────┘      │
+       │                     │
+       │ uses                │
+       ▼                     ▼
+┌─────────────────┐   ┌─────────────┐
+│ Pseudopod Pool  │   │  Archive    │
+│ (Dynamic)       │   │ (MAP-Elites)│
+└──────┬──────────┘   └──────▲──────┘
+       │                     │
+       │ delegates           │
+       ▼                     │ stores
+┌─────────────────┐          │
+│ Pseudopod       │──────────┘
+│ (Component)     │ adds self
+└──────┬──────────┘
        │
        │ calls
        ▼
-┌─────────────────────┐
-│ Warp-Native Kernels │
-│ (tensor cores)      │
-└─────────────────────┘
+┌─────────────────┐
+│ Kernels         │
+│ (GPU compute)   │
+└─────────────────┘
        │
-       │ observability
+       │ metrics collected by
        ▼
-┌─────────────────────┐
-│ GPU Context Comonad │
-│ (warp occupancy,    │
-│  cache hits, etc.)  │
-└─────────────────────┘
+┌─────────────────┐
+│ Observability   │
+│ (side channel)  │
+└─────────────────┘
 ```
 
-**Key Change**: GPU context is OBSERVED for decisions (comonadic), not just measured for metrics.
+No cycles. Archive doesn't call anything. Observability is passive collector.
 
----
+## Protocols
 
-## Protocols (Extended)
-
-### proto.component.Component (Unchanged)
+### proto.component.Component
 ```python
+"""Base component protocol for pool management"""
+
 Protocol:
-  - fitness: float
+  - fitness: float (property)
   - reset() -> None
   - to_dict() -> dict
+  - from_dict(data: dict) -> Component
+
+Purpose:
+  - Unified interface for ALL pooled components
+  - Archive stores any Component
+  - Pools manage any Component
 ```
 
-### proto.effects.Effect[T] (NEW - Phase 0)
+### proto.memory.Memory
 ```python
-"""Algebraic effect interface"""
+"""Temporal memory interface (NOT for pools)"""
 
 Protocol:
-  - perform() -> T
-  - handler(implementation) -> ContextManager
-  - extract() -> T  # Comonadic extract
+  - store(data: Tensor, weight: float) -> None
+  - recall() -> Optional[Tensor]
+  - clear() -> None
+
+Implementations:
+  - memory.tubes.TubeNetwork
+
+Purpose:
+  - ONLY for temporal memory with decay
+  - NOT for component lifecycle (that's pool.py)
 ```
 
-### proto.model.NeuralCAPseudopod (NEW - Phase 6)
+### proto.model.Pseudopod
 ```python
-"""Learned CA update rule interface"""
+"""Sensory probe interface (Neural CA update rule)"""
 
 Protocol:
-  - forward(state, steps) -> state
-  - perceive(state) -> features
-  - update_state(state) -> next_state
+  - forward(latent, stimulus) -> output  # Learned CA update (Flow-Lenia substrate)
+  - correlation: Tensor (property)       # Mass conservation metric
+  - effective_rank() -> Tensor           # Parameter localization metric
+  - coherence() -> Tensor                # Learning progress (for curiosity-driven lifecycle)
+
+Implementations:
+  - core.pseudopod.Pseudopod
+
+Dependencies:
+  - MUST use proto.kernel.Kernel for all compute (warp-level GPU execution)
+  - MUST implement proto.component.Component
+
+Neural CA Substrate:
+  - forward() is learned CA update with Flow-Lenia dynamics
+  - Mass conservation: ∑ output = ∑ input (via correlation metric)
+  - Parameter localization: Spatial variation of update rule parameters
+  - Learned via gradient descent on downstream task loss
 ```
 
-### proto.model.FlowLeniaPseudopod (NEW - Phase 7)
+### proto.model.Chemotaxis
 ```python
-"""Flow-Lenia with parameter localization"""
+"""Behavioral space navigator (curiosity-driven search)"""
 
 Protocol:
-  - forward(state_with_params, steps) -> next_state_with_params
-  - spawn_offspring(parent_state) -> child_state
-  - parameter_evolution(state, params) -> next_params
+  - add_source(nutrient, location, concentration) -> None  # Add elite to archive
+  - sample(behavior, metabolic_rate, hunger) -> Optional[Tensor]  # Sample genome from archive
+  - clear() -> None
+
+Implementations:
+  - core.chemotaxis.Chemotaxis
+
+Dependencies:
+  - Uses memory.archive for spatial indexing (Adaptive Voronoi cells)
+  - NO direct component management
+
+Curiosity-Driven Lifecycle:
+  - hunger = learning_progress_deficit (intrinsic motivation)
+  - Pseudopods with high coherence() (learning fast) → low hunger → survive
+  - Pseudopods with low coherence() (plateaued) → high hunger → sample new genome
+  - Natural selection via intrinsic curiosity
 ```
 
----
+### proto.model.Organism
+```python
+"""Top-level orchestrator (comonadic GPU context)"""
 
-## File Structure (Phases 4-8)
+Protocol:
+  - forward(stimulus, state) -> (output, new_state)  # Collective Pseudopod updates
+  - reset_state() -> None
+  - stats() -> dict  # GPU occupancy, learning progress, archive coverage
+
+Implementations:
+  - core.organism.Organism
+
+Dependencies:
+  - Owns: Pool[Pseudopod], Archive, Chemotaxis
+  - Uses: Kernels via Pseudopods (warp-level execution)
+  - Records: Observability metrics (warp occupancy, cache hits, tensor core utilization)
+
+Comonadic GPU Perception:
+  - GPU execution state AS comonad
+  - extract(warp_id) → LocalObservation (occupancy, neighbors, cache)
+  - extend(decision_fn) → Apply context-aware decisions (spawn/retire Pseudopods)
+  - Like Polynesian navigator: whole computational field (warps/cache/tensor-cores) informs local decisions
+```
+
+## File Structure
 
 ```
+./
+├── BLUEPRINT.md            # System architecture (this file)
+├── README.md               # User documentation with examples
+├── setup.py                # Python package setup
+├── pyproject.toml          # Modern Python project configuration
+├── requirements.txt        # Python dependencies
+├── .python-version         # Python version specification
+└── strip_docstrings.py     # AST-based docstring removal tool
+
 slime/
-├── effects/                 # Phase 0 (COMPLETE)
-│   └── __init__.py         # Effect substrate, Kleisli composition
-│
-├── topology/                # Phases 1-3 (COMPLETE)
-│   ├── __init__.py         # Effect declarations
-│   ├── p_adic.py           # p-adic distances
-│   ├── genealogy.py        # Lineage tracking
-│   ├── hierarchy.py        # GMM + dendrogram (ultrametric!)
-│   └── hybrid_metric.py    # Ultrametric + Mahalanobis
-│
-├── behavioral/              # Phase 4-5 (ROADMAP)
+├── proto/
 │   ├── __init__.py
-│   ├── diresa.py           # Adaptive dimensionality encoder
-│   └── adaptive_voronoi.py # Growing/shrinking cells
+│   ├── component.py        # Base component interface
+│   ├── kernel.py           # Kernel compute interface
+│   ├── memory.py           # Temporal memory interface (tubes only)
+│   └── model.py            # Model component interfaces
 │
-├── nca/                     # Phases 6-7 (ROADMAP)
+├── kernels/
 │   ├── __init__.py
-│   ├── update_rules.py     # Neural CA learned dynamics
-│   └── flow_lenia.py       # Parameter localization
+│   ├── utils.py            # Validation utilities
+│   ├── triton_impl.py      # Triton GPU kernels (attention, correlation, effective_rank)
+│   └── torch_fallback.py   # PyTorch CPU/GPU fallback implementations
 │
-├── lifecycle/               # Phase 8 (ROADMAP)
+├── observability/
 │   ├── __init__.py
-│   ├── curiosity.py        # Learning progress tracker
-│   └── comonadic.py        # GPU context observation
+│   ├── metrics.py          # Passive metrics collector (latency, throughput, memory)
+│   ├── slo.py              # SLO definitions and validation
+│   └── tracing.py          # Distributed tracing (spans, contexts)
 │
-├── kernels/                 # GPU-native implementations
-│   ├── warp_shuffle.cu     # Warp-level primitives
-│   ├── tensor_core.cu      # Flow-Lenia convolutions
-│   └── comonadic.cu        # Context extraction kernels
+├── memory/
+│   ├── __init__.py
+│   ├── archive.py          # MAP-Elites archive (stores Component protocol)
+│   ├── pool.py             # Dynamic component pools (manages Component protocol)
+│   └── tubes.py            # TubeNetwork temporal memory (implements Memory protocol)
 │
-└── tests/
-    ├── unit/
-    │   ├── test_effects.py              # Phase 0 (23/23 ✓)
-    │   ├── test_topology_chemotaxis.py  # Phase 3 (10/10 ✓, 39/39 constraints ✓)
-    │   ├── test_diresa_encoder.py       # Phase 4
-    │   ├── test_adaptive_voronoi.py     # Phase 5
-    │   ├── test_neural_ca.py            # Phase 6
-    │   ├── test_flow_lenia.py           # Phase 7
-    │   └── test_curiosity.py            # Phase 8
-    └── integration/
-        └── test_comonadic_flow.py       # End-to-end GPU-native
+├── core/
+│   ├── __init__.py
+│   ├── state.py            # FlowState dataclass (input, hidden, residual)
+│   ├── stencil.py          # GPU-parallel spatial stencil ops (JAX vmap-inspired)
+│   ├── pseudopod.py        # Pseudopod component (implements Component + Model.Pseudopod)
+│   ├── chemotaxis.py       # Chemotaxis selection (implements Model.Chemotaxis)
+│   └── organism.py         # Organism orchestrator (implements Model.Organism)
+│
+├── api/
+│   ├── __init__.py
+│   ├── torch_compat.py     # SlimeMoldEncoder (nn.Module interface)
+│   └── native.py           # SlimeModel (native API)
+│
+├── training/
+│   ├── __init__.py
+│   ├── trainer.py          # Training loop orchestrator
+│   ├── losses.py           # Loss functions (cross-entropy, contrastive)
+│   ├── stability.py        # Gradient clipping, numerical stability checks
+│   ├── fitness.py          # Fitness computation (gradient magnitude, task correlation)
+│   └── lifecycle.py        # Component birth/death decisions (hard limits, loss gates)
+│
+├── config/
+│   ├── __init__.py
+│   ├── loader.py           # YAML configuration loader with validation
+│   ├── model.yaml          # Model architecture configuration
+│   ├── training.yaml       # Training hyperparameters
+│   └── slo.yaml            # SLO thresholds and error budgets
+│
+├── bench/
+│   ├── __init__.py
+│   ├── datasets.py         # Dataset loaders (TinyStories, WikiText)
+│   ├── transformer.py      # Baseline transformer for ablations
+│   ├── profile.py          # Performance profiling (latency, memory, FLOPS)
+│   └── toy_tasks.py        # Simple tasks (y=sin(x), XOR, parity) for validation
+│
+├── tests/
+│   ├── __init__.py
+│   ├── unit/
+│   │   ├── __init__.py
+│   │   ├── test_protocol_component.py
+│   │   ├── test_protocol_kernel.py
+│   │   ├── test_protocol_memory.py
+│   │   ├── test_protocol_model.py
+│   │   ├── test_triton_kernels.py
+│   │   ├── test_torch_fallback.py
+│   │   ├── test_kernel_equivalence.py
+│   │   ├── test_kernel_utils.py
+│   │   ├── test_archive_operations.py
+│   │   ├── test_archive_elite_replacement.py
+│   │   ├── test_archive_serialization.py
+│   │   ├── test_pool_lifecycle.py
+│   │   ├── test_pool_culling.py
+│   │   ├── test_tubes_memory.py
+│   │   ├── test_tubes_temporal_access.py
+│   │   ├── test_state_dataclass.py
+│   │   ├── test_stencil.py
+│   │   ├── test_pseudopod_component.py
+│   │   ├── test_pseudopod_fitness.py
+│   │   ├── test_chemotaxis_selection.py
+│   │   ├── test_chemotaxis_behavioral_search.py
+│   │   ├── test_organism_orchestration.py
+│   │   ├── test_organism_forward_pass.py
+│   │   ├── test_torch_compat_api.py
+│   │   ├── test_native_api.py
+│   │   ├── test_trainer_loop.py
+│   │   ├── test_losses.py
+│   │   ├── test_stability.py
+│   │   ├── test_fitness_computation.py
+│   │   ├── test_lifecycle_decisions.py
+│   │   ├── test_config_validation.py
+│   │   ├── test_config_yaml_parsing.py
+│   │   ├── test_datasets_loaders.py
+│   │   ├── test_baseline_transformer.py
+│   │   ├── test_profiling_metrics.py
+│   │   ├── test_metrics_collection.py
+│   │   ├── test_slo_validation.py
+│   │   ├── test_tracing_spans.py
+│   │   ├── test_visualize_behavioral_space.py
+│   │   ├── test_export_onnx.py
+│   │   ├── test_export_torchscript.py
+│   │   ├── test_package_windows.py
+│   │   ├── test_dag_enforcement.py
+│   │   ├── test_ownership_hierarchy.py
+│   │   ├── test_timescale_separation.py
+│   │   ├── test_gpu_memory_safety.py
+│   │   ├── test_behavioral_kmo.py
+│   │   ├── test_behavioral_bartlett.py
+│   │   ├── test_behavioral_kernel_pca.py
+│   │   ├── test_race_conditions.py
+│   │   ├── test_gradient_flow_edge_cases.py
+│   │   ├── test_attention_numerical_limits.py
+│   │   ├── test_fitness_stability.py
+│   │   ├── test_device_placement_determinism.py
+│   │   ├── test_bootstrap_interpolation.py
+│   │   ├── test_multi_gpu_partitioning.py
+│   │   ├── test_memory_budget_enforcement.py
+│   │   └── test_lifecycle_birth_death.py
+│   ├── integration/
+│   │   ├── __init__.py
+│   │   ├── test_end_to_end_training.py
+│   │   ├── test_training_stability.py
+│   │   ├── test_gradient_flow.py
+│   │   └── test_behavioral_space_coverage.py
+│   ├── ablations/
+│   │   ├── __init__.py
+│   │   ├── test_vs_baseline_transformer.py
+│   │   ├── test_with_without_archive.py
+│   │   ├── test_with_without_lifecycle.py
+│   │   ├── test_static_vs_dynamic.py
+│   │   ├── test_behavioral_vs_random_placement.py
+│   │   ├── test_efficiency_in_fitness.py
+│   │   └── test_fitness_metrics_comparison.py
+│   └── slo/
+│       ├── __init__.py
+│       ├── test_latency_slo.py
+│       ├── test_throughput_slo.py
+│       └── test_memory_slo.py
+│
+└── tools/
+    ├── __init__.py
+    ├── visualize.py        # Archive behavioral space visualization
+    ├── export.py           # ONNX/TorchScript export
+    └── package.py          # Windows .exe packaging
 ```
 
----
+## Invariants
 
-## Invariants (Extended for Phases 4-8)
-
-### 1. Dependency Direction (DAG Enforcement) - Unchanged
+### 1. Dependency Direction (DAG Enforcement)
 - Lower layers NEVER import from higher layers
 - Protocols NEVER import implementations
+- Components NEVER import API layer
+- **Violation = compilation error**
 
-### 2. GPU-Native Execution
-- **NO CPU orchestration during forward pass**
-- All decisions via warp votes, tensor core computation
-- CPU only for: initialization, logging, checkpointing
+### 2. Ownership Hierarchy
+```
+Organism owns:
+  - Pool[Pseudopod]
+  - Archive
+  - Chemotaxis
 
-### 3. Learned Everything
-```python
-# WRONG (hardcoded)
-dimensions = 5
-centroids = fixed_grid(resolution=20)
-distance = euclidean
+Pool owns:
+  - List[Component]
 
-# RIGHT (learned)
-dimensions = diresa.behavioral_dims  # Adaptive
-centroids = adaptive_voronoi.centroids  # Growing/shrinking
-distance = hybrid_metric(x, y)  # Ultrametric + Mahalanobis
+Archive owns:
+  - Dict[cell, Elite] where Elite.genome = dict (NO object refs)
+
+NO CYCLES
 ```
 
-### 4. Comonadic Observation
-- GPU state is CONTEXT, not just metrics
-- Lifecycle decisions extract from context (comonadic)
-- Warp divergence = learning progress signal
+### 3. Protocol Compliance
+- Every component MUST declare which protocols it implements
+- Archive stores via `Component.to_dict()` (immutable serialization)
+- Pools manage via `Component.fitness` (no type checking at runtime)
 
-### 5. Effect Handler Composition
-```python
-# Effects compose (Kleisli)
-with GetHierarchy.handler(lambda: hierarchy):
-    with GetGenealogy.handler(lambda: genealogy):
-        with GetLocalUpdateRule.handler(lambda: flow_lenia_params):
-            # All three effects available in this scope
-            result = pseudopod.forward(state)
+### 4. GPU Memory Safety
+- Kernels check allocation before launch
+- Organism enforces memory budget
+- Pool culling triggered by OOM
+
+### 5. Observability Injection
+- Metrics collector passed to Organism.__init__()
+- All forward passes record to metrics
+- NO global state for metrics
+
+### 6. Timescale Separation
+```
+Fast (every step):
+  - Weight updates via backprop
+  - Fitness tracking
+  - Metrics collection
+  - Loss monitoring
+
+Medium (every 100 steps):
+  - Fitness assessment
+  - Archive elite updates
+  - Pool spawn decisions
+  - Loss gate check
+
+Slow (every 1000 steps):
+  - Pool culling
+  - Memory budget enforcement
+  - Behavioral space analysis
+  - Hard limit enforcement (max pool size, max archive)
 ```
 
-### 6. Test-Driven Development (100% Constraints)
-- Every phase: write tests FIRST
-- Use TestResultCheckpointSystem
-- 100% constraint satisfaction required
+### 7. Ultrametric Topology
 
-### 7. Parameter Evolution (Flow-Lenia)
+**Strong triangle inequality**: d(x, z) ≤ max(d(x, y), d(y, z)) for all x, y, z
+
+**Implementation**: True dendrogram traversal via linkage matrix merge height
+
+**Topology Types**:
+- **p-Adic**: Distance based on common prefix length (hierarchical codes)
+- **Genealogy**: Distance based on common ancestor recency
+- **Hierarchy**: Distance via dendrogram merge height (ultrametric guarantee)
+
+**Chemotaxis Integration**: HybridMetric (ultrametric between clusters, Mahalanobis within), DIRESA preserves ultrametric in learned embeddings
+
+### 8. Archive Bootstrapping Policy 
+- Archive provides INITIALIZATION only
+- Bootstrapped components trained with rest of network
+- NO frozen parameters injected mid-training
+- Prevents mode collapse and gradient conflicts
+
+### 8. GPU-Parallel Spatial Stencil Computation
+**Reasoning (GPU Architecture):** GPU computation is spatial (SIMD, tiles, stencil convolution), not sequential. Batched operations on entire populations, not individual components.
+
+**JAX vmap pattern (push loops to primitives):**
 ```python
-# Parameters are PART of state, not external config
-state_channels = 64      # Fast dynamics
-param_channels = 8       # Slow dynamics (100x slower)
-total_channels = 72      # Both evolve together
+# BAD (sequential):
+for component in pool:
+    fitness_z_score = compute_zscore(component, neighbors)  # O(N) sequential
 
-# Parameters evolve spatially
-params[x, y] = update_params(state[x, y], neighbors[x, y])
+# GOOD (parallel):
+all_fitness_z_scores = vmap_relative_fitness(fitnesses, neighbor_mask)  # O(1) GPU call
 ```
 
-### 8. Curiosity-Driven Adaptation
-```python
-# NO manual schedules
-if step == 1000: enable_dynamics()  # WRONG
+**SpatialStencil**: JAX vmap-inspired batched computation of contextual metrics (pairwise distances, k-nearest neighbors, vectorized metrics) - 100x-1000x speedup vs sequential
 
-# YES intrinsic motivation
-if learning_progress < 0.05: retire_pod()  # RIGHT
-if archive.coverage() < 0.7: spawn_pod()   # RIGHT
-```
+**Pattern:** Stencil kernel applied to every component position (SIMD), matches GPU architecture perfectly.
 
----
+### 9. Fitness Correlation with Task
+Fitness MUST correlate with loss reduction. Options:
+- Gradient magnitude (components affecting loss)
+- Attention alignment with targets
+- Information bottleneck metrics (mutual information)
+- **Relative fitness** (gradient magnitude z-score vs k-nearest neighbors)
 
-## Expected Performance (GPU-Native vs Traditional)
+NOT attention entropy alone (doesn't correlate with task)
 
-| Operation | Traditional (CPU orch.) | GPU-Native (Warp) | Speedup |
-|-----------|------------------------|-------------------|---------|
-| Distance comp. | 100 μs (3 transfers) | 1 μs (warp shuffle) | 100x |
-| Cell assignment | 500 μs (Python loop) | 10 μs (warp parallel) | 50x |
-| CA update (100 steps) | 50 ms (100 kernel launches) | 500 μs (1 kernel, warp loop) | 100x |
-| Lifecycle decision | 1 ms (CPU→GPU→CPU) | 10 μs (warp vote) | 100x |
-| **Total throughput** | 10 gens/sec | **1000 gens/sec** | **100x** |
+### 9. CVT-MAP-Elites Architecture
+**Reasoning (Scalability):** Fixed grid scales as resolution^dims. CVT scales linearly with num_centroids.
 
-**Why 100x faster**:
-- Eliminate CPU↔GPU transfers (zero during forward pass)
-- Eliminate kernel launch overhead (one kernel, N internal steps)
-- Eliminate global memory (warp shuffle communication)
-- Use tensor cores (256 FLOPs/clock vs 1 FLOP/clock)
+**Fixed grid problem:** Exponential explosion (3D: 8k cells, 4D: 160k, 5D: 3.2M)
 
----
+**CVT solution:** Linear scaling (1000 centroids for any dimensionality)
 
-## Implementation Status
+**Behavioral dimensions:** DIRESA learns 2-10 nonlinear dimensions from 10-20 raw metrics online. KMO validation ensures factorability.
 
-### ✅ COMPLETE (Phases 0-3)
+### 10. Content-Addressable Low-Rank Archive Storage
+**Reasoning (Memory Efficiency):** SVD low-rank factorization with content-addressable delta compression.
 
-**Phase 0: Effect Handler Substrate**
-- ✅ `slime/effects/__init__.py` (280 lines)
-- ✅ Thread-safe handler stacks
-- ✅ Kleisli composition
-- ✅ 23/23 tests passing
+**Storage strategy:**
+1. SVD low-rank factorization: D×D → (D×k + k×D), 8x compression
+2. Content-addressable hashing: Deduplicate identical elites
+3. Delta compression: Store diffs vs parent in same centroid, 10-20x additional compression
 
-**Phase 1: Topology Effect Declarations**
-- ✅ `slime/topology/__init__.py` (203 lines)
-- ✅ GetHierarchy, GetGenealogy, UsePAdicDistance
-- ✅ Graceful degradation via EffectNotHandled
+**Result:** 80-160x memory reduction (D=512, k=64: 4MB → 25-50KB per elite)
 
-**Phase 2: Pure Topology Implementations**
-- ✅ `slime/topology/p_adic.py` (215 lines)
-- ✅ `slime/topology/genealogy.py` (327 lines)
-- ✅ `slime/topology/hierarchy.py` (278 lines)
-- ✅ `slime/topology/hybrid_metric.py` (296 lines)
-- ✅ Total: 1,233 lines, mypy strict clean
+**Key insight:** Elites in same centroid have similar behaviors → similar weights → tiny deltas
 
-**Phase 3: Topology-Aware Chemotaxis**
-- ✅ `slime/tests/unit/test_topology_chemotaxis.py`
-- ✅ True ultrametric via dendrogram traversal
-- ✅ 10/10 tests passing
-- ✅ **39/39 constraints satisfied (100%)**
-- ✅ HybridMetric: ultrametric between clusters, Mahalanobis within
-- ✅ Chemotaxis defaults to Mahalanobis after dimension discovery
-
-### 🔄 IN PROGRESS (Phase 4)
-
-**Phase 4: DIRESA Encoder**
-- 📋 Design complete (see MODERNIZATION_ROADMAP.md)
-- 📋 GPU-native warp implementation specified
-- ⏳ Implementation pending
-
-### 📋 ROADMAP (Phases 5-8)
-
-See [`docs/MODERNIZATION_ROADMAP.md`](docs/MODERNIZATION_ROADMAP.md) for full technical specifications.
-
-See [`docs/GPU_NATIVE_IMPLEMENTATION.md`](docs/GPU_NATIVE_IMPLEMENTATION.md) for warp-level implementations.
-
-**Phase 5**: Adaptive Voronoi (2 weeks)
-**Phase 6**: Neural CA Update Rules (3 weeks)
-**Phase 7**: Flow-Lenia Parameter Localization (3 weeks)
-**Phase 8**: Curiosity-Driven Lifecycle (2 weeks)
-**Phase 9**: End-to-End Integration (2 weeks)
-
-**Total**: ~14 weeks to production-ready Flow-Lenia transformer
-
----
+### 11. Lifecycle Safety Guardrails
+**Hard limits:** MAX_POOL_SIZE=64, MAX_ARCHIVE_CENTROIDS=1000, MAX_LOSS_RATIO=10.0
+**Loss gates:** Freeze lifecycle if loss > 10× moving average
+**Training:** DIRESA learns embeddings online, annealing schedule for exploration→exploitation, curiosity-driven lifecycle
 
 ## Architectural Decisions
 
-### 1. Flow-Lenia over Standard Lenia ✓
-**Reasoning**: Mass conservation + parameter localization enables multi-species co-evolution without manual design.
+### 1. IO-Aware Tiled Attention (FlashAttention)
+**Reasoning (Dao et al., 2022):** Standard attention is memory-bound, not compute-bound. Tile to maximize SRAM usage.
 
-Standard Lenia: Fixed rule parameters globally.
-Flow-Lenia: Rule parameters vary spatially and evolve.
+**Problem:** Attention loads Q, K, V from HBM repeatedly.
+```python
+# Naive: O(M²) memory accesses to HBM
+for i in range(M):
+    for j in range(M):
+        S[i,j] = Q[i] @ K[j]  # Load K[j] from HBM M times
+```
 
-**Result**: Emergent specialization of pseudopods with locally coherent update rules.
+**FlashAttention solution:** Tile computation to fit in SRAM.
+```python
+BLOCK_M = 128  # Query tile size (fits in SRAM)
+BLOCK_N = 128  # Key/value tile size (fits in SRAM)
 
-### 2. Warp-Native over CPU Orchestration ✓
-**Reasoning**: Like Polynesian navigator reading unified field, not separate instruments.
+for block_m in range(0, M, BLOCK_M):
+    # Load Q tile to SRAM once
+    Q_tile = Q[block_m:block_m+BLOCK_M]  # HBM → SRAM
 
-Traditional: CPU launches kernels, syncs, reads results (3+ transfers per operation).
-Warp-Native: Entire CA runs in registers + warp shuffles (0 global memory accesses per step).
+    for block_n in range(0, M, BLOCK_N):
+        # Load K, V tiles to SRAM
+        K_tile = K[block_n:block_n+BLOCK_N]  # HBM → SRAM
+        V_tile = V[block_n:block_n+BLOCK_N]  # HBM → SRAM
 
-**Result**: 100x speedup by eliminating orchestration overhead.
+        # Compute in SRAM (fast)
+        S_tile = Q_tile @ K_tile.T
+        P_tile = softmax(S_tile)
+        O_tile += P_tile @ V_tile
 
-### 3. Comonadic Observation over Explicit Metrics ✓
-**Reasoning**: GPU execution patterns ARE learning progress. Don't compute separately.
+        # Write back to HBM once
+        O[block_m:block_m+BLOCK_M] = O_tile  # SRAM → HBM
+```
 
-Traditional: Track fitness history, compute learning progress in Python.
-Comonadic: Extract learning progress from warp divergence patterns in real-time.
+**IO complexity:**
+```
+Naive: O(M² * D) HBM accesses
+Tiled: O(M² * D / SRAM_size) HBM accesses
+Speedup: ~3x on GPT-2 (Dao et al., 2022)
+```
 
-**Result**: Zero overhead for curiosity-driven decisions (already have GPU state).
+**Implementation:** kernels/triton_impl.py uses tiling with BLOCK_M=128, BLOCK_N=128, BLOCK_D=64.
 
-### 4. DIRESA over Fixed Kernel PCA ✓
-**Reasoning**: Behavioral manifold evolves during training. Encoder must adapt online.
+### 2. Kernel injection: Constructor Injection
+**Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
+```python
+Pseudopod.__init__(head_dim, kernel: Kernel, device)
+```
 
-Kernel PCA: Offline, once (step 1000), fixed thereafter.
-DIRESA: Online, continuous, adaptive dimensionality.
+### 3. Multi-GPU: Hash-based partitioning
+**Reasoning (Bitter Lesson):** Hash function scales arbitrarily. No hand-coded spatial assumptions.
+```python
+device_id = hash(behavior_coords) % num_gpus
+```
 
-**Result**: Encoder tracks distribution shift, dimensions grow/shrink as needed.
+### 4. Determinism: Sort keys on iteration
+**Reasoning (Architecture):** Spatial structure over temporal accidents. Reproducible science.
+```python
+for key in sorted(archive.keys()):
+```
 
-### 5. Tensor Cores for Flow-Lenia Convolution ✓
-**Reasoning**: 16x16 patches = native tensor core size. 256 FLOPs/instruction.
+### 5. Memory limits: Soft limit with graceful degradation
+**Reasoning (SRE + Bitter Lesson):** Adapt to constraints, don't crash. Trade quality for capacity automatically.
+```python
+if memory > budget: pool.cull_worst(fraction=0.2)
+```
 
-Traditional: Convolution via memory-bound loops (1 FLOP/cycle).
-Tensor Core: Convolution via matrix multiply (256 FLOPs/cycle).
+### 6. Metrics injection: Dependency injection
+**Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
+```python
+Organism.__init__(metrics_collector: Optional[MetricsCollector])
+```
 
-**Result**: 256x speedup for CA update (memory bandwidth becomes bottleneck, not compute).
+### 7. Fitness metric: Gradient magnitude
+**Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
+```python
+fitness = grad_norm * attention_to_targets  # Task-relevant
+```
 
-### 6. Effects over Inheritance ✓
-**Reasoning**: Topology features are optional, composable capabilities. Not IS-A relationships.
+### 8. Archive bootstrapping: Initialization only
+**Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
+```python
+if new_component_needed:
+    component = archive.bootstrap_component(...)  # Init from elite
+    component.requires_grad_(True)  # Train with network
+```
 
-Inheritance: PseudopodWithTopology extends Pseudopod (rigid hierarchy).
-Effects: Any pseudopod can request topology via GetHierarchy (flexible composition).
+### 9. Timescale separation: 1x / 100x / 1000x
+**Reasoning (Stability):** Separate fast (weights) from medium (fitness) from slow (lifecycle).
+```python
+if step % 1000 == 0: pool.cull()
+elif step % 100 == 0: archive.add_if_elite()
+fitness_ema.update()  # Every step
+```
 
-**Result**: Opt-in features without code duplication or fragile base class problem.
+### 10. DIRESA Behavioral Dimension Learning
+**Reasoning:** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. Hardcoded dimensions are arbitrary. DIRESA learns distance-preserving nonlinear embeddings online with adaptive dimensionality.
 
-### 7. Ultrametric Dendrogram over Euclidean Clusters ✓
-**Reasoning**: Hierarchical relationships require strong triangle inequality.
+**DIRESA Architecture:** Autoencoder with learned gating for adaptive dimensions (2-10D), distance preservation loss, online training
 
-Euclidean: d(x,z) ≤ d(x,y) + d(y,z) (weak triangle inequality).
-Ultrametric: d(x,z) ≤ max(d(x,y), d(y,z)) (strong triangle inequality).
+**Raw metrics (10-20 metrics):** avg_attention_span, activation_sparsity, gradient_flow_magnitude, memory_access_locality, computational_intensity, attention_entropy, weight_magnitude, gradient_variance, activation_magnitude, attention_coherence, etc.
 
-**Result**: True hierarchical structure, not just flat clusters.
+**Learned embeddings:** Nonlinear projections preserving pairwise distances better than PCA/t-SNE/UMAP
 
-**Test**: Phase 3 constraint: `d(x,z) ≤ max(d(x,y), d(y,z)) + 1e-6` ✓ (39/39 satisfied)
+**Validation:** KMO ≥ 0.6 (intercorrelation), Bartlett's p < 0.05 (non-spherical), reconstruction error ≤ 0.5
 
----
+### 10a. Dimension Discovery: Principled Hyperparameter Selection
+**Question 1: Why 5 dimensions? Why not 3 or 10?**
+
+**WRONG (arbitrary):** `n_components=5  # seems reasonable`
+
+**RIGHT (principled via scree plot):**
+```python
+# Run PCA with all components to get variance explained
+pca_full = PCA(n_components=None)
+pca_full.fit(raw_metrics_matrix)
+variance_ratios = pca_full.explained_variance_ratio_
+
+# Plot cumulative variance
+cumulative_variance = np.cumsum(variance_ratios)
+
+# Find elbow: first dimension where marginal variance < threshold
+n_dims = np.argmax(cumulative_variance > 0.85) + 1  # 85% variance explained
+n_dims = np.clip(n_dims, 3, 7)  # Constrain to [3, 7] for CVT feasibility
+
+# CVT scales poorly beyond 7 dims (curse of dimensionality)
+# Below 3 dims loses too much information
+```
+
+**Question 2: Why RBF kernel? What about poly, sigmoid, cosine?**
+
+**WRONG (assume one kernel):** `kernel='rbf'  # default`
+
+**RIGHT (test multiple, select best):**
+```python
+kernel_candidates = [
+    ('rbf', {'gamma': 1.0}),      # Local similarity (good for clustered behaviors)
+    ('rbf', {'gamma': 0.1}),      # Broader similarity (good for smooth manifolds)
+    ('poly', {'degree': 2}),      # Quadratic relationships
+    ('poly', {'degree': 3}),      # Cubic relationships
+    ('cosine', {}),               # Directional similarity (good for normalized metrics)
+]
+
+best_kernel, best_params, best_score = None, None, float('inf')
+
+for kernel_name, kernel_params in kernel_candidates:
+    kpca = KernelPCA(n_components=n_dims, kernel=kernel_name,
+                     fit_inverse_transform=True, **kernel_params)
+    transformed = kpca.fit_transform(raw_metrics_matrix)
+    reconstructed = kpca.inverse_transform(transformed)
+
+    recon_error = np.mean((raw_metrics_matrix - reconstructed) ** 2)
+    kmo_stat, _ = calculate_kmo(transformed)
+
+    # Score: minimize reconstruction error, maximize KMO
+    score = recon_error / (kmo_stat + 1e-6)  # Lower is better
+
+    if score < best_score:
+        best_kernel, best_params, best_score = kernel_name, kernel_params, score
+        best_kpca = kpca
+
+logger.info(f"Selected kernel: {best_kernel} with params {best_params} (score={best_score:.3f})")
+archive.kpca_transform = best_kpca
+```
+
+### 10b. Content-Addressable Storage: Delta Protocol Specification
+**Question 3: What operations does delta compression support?**
+
+**Delta format (structured operations, NOT raw byte diffs):**
+```python
+# Delta is list of weight-level operations
+delta_ops = [
+    {
+        'key': 'W_q',  # Weight matrix name
+        'op': 'sparse_add',  # Operation type
+        'indices': [[0, 1], [2, 3], ...],  # 2D indices
+        'values': [0.001, -0.002, ...]  # Values to add at indices
+    },
+    {
+        'key': 'W_k',
+        'op': 'low_rank',  # Low-rank update: W += dU @ dV
+        'dU': <tensor>,  # D×r where r << k
+        'dV': <tensor>   # r×D
+    },
+    {
+        'key': 'bias',
+        'op': 'dense',  # Full dense update (for small tensors)
+        'value': <tensor>
+    },
+    {
+        'key': 'W_v',
+        'op': 'scale_add',  # Scalar + sparse
+        'scale': 1.02,
+        'indices': [[5, 6]],
+        'values': [0.0001]
+    }
+]
+
+# Apply delta to base weights
+def apply_delta(base_weights: dict, delta_ops: list) -> dict:
+    weights = {k: v.clone() for k, v in base_weights.items()}
+
+    for op in delta_ops:
+        if op['op'] == 'sparse_add':
+            # Sparse update: only change specified indices
+            indices = torch.tensor(op['indices'])
+            values = torch.tensor(op['values'])
+            weights[op['key']][indices[:, 0], indices[:, 1]] += values
+
+        elif op['op'] == 'low_rank':
+            # Low-rank update: W += dU @ dV
+            weights[op['key']] += op['dU'] @ op['dV']
+
+        elif op['op'] == 'dense':
+            # Full replacement (small tensors only)
+            weights[op['key']] = op['value']
+
+        elif op['op'] == 'scale_add':
+            # Scalar multiplication + sparse add
+            weights[op['key']] *= op['scale']
+            indices = torch.tensor(op['indices'])
+            values = torch.tensor(op['values'])
+            weights[op['key']][indices[:, 0], indices[:, 1]] += values
+
+    return weights
+
+# Compute delta between consecutive elites
+def compute_weight_delta(current_weights: dict, parent_weights: dict) -> list:
+    delta_ops = []
+
+    for key in current_weights.keys():
+        diff = current_weights[key] - parent_weights[key]
+
+        # Choose operation based on sparsity and rank
+        sparsity = (torch.abs(diff) < 1e-4).float().mean()
+
+        if sparsity > 0.95:
+            # Sparse update: only changed entries
+            indices = torch.where(torch.abs(diff) >= 1e-4)
+            values = diff[indices]
+            delta_ops.append({
+                'key': key,
+                'op': 'sparse_add',
+                'indices': torch.stack(indices, dim=1).tolist(),
+                'values': values.tolist()
+            })
+
+        elif diff.numel() < 100:
+            # Small tensor: store full
+            delta_ops.append({
+                'key': key,
+                'op': 'dense',
+                'value': diff
+            })
+
+        else:
+            # Low-rank SVD of diff
+            U, S, Vt = torch.linalg.svd(diff, full_matrices=False)
+            r = min(8, len(S))  # Rank for delta (smaller than low_rank_k!)
+            dU = U[:, :r] @ torch.diag(torch.sqrt(S[:r]))
+            dV = torch.diag(torch.sqrt(S[:r])) @ Vt[:r, :]
+            delta_ops.append({
+                'key': key,
+                'op': 'low_rank',
+                'dU': dU,
+                'dV': dV
+            })
+
+    return delta_ops
+```
+
+### 10c. Content-Addressable Storage: Garbage Collection Policy
+**Question 4: When are unreferenced objects deleted?**
+
+**GC Policy: Reference Counting + Periodic Mark-and-Sweep**
+
+```python
+class CVTArchive:
+    def __init__(self, ...):
+        self.object_store: Dict[str, bytes] = {}  # SHA → compressed object
+        self.ref_counts: Dict[str, int] = {}      # SHA → reference count
+        self.centroid_refs: Dict[int, str] = {}   # centroid_id → elite_sha
+        self._gc_counter = 0
+        self._gc_interval = 100  # Run GC every 100 add() calls
+
+    def _incr_ref(self, sha: str):
+        self.ref_counts[sha] = self.ref_counts.get(sha, 0) + 1
+
+    def _decr_ref(self, sha: str):
+        if sha in self.ref_counts:
+            self.ref_counts[sha] -= 1
+            if self.ref_counts[sha] <= 0:
+                # Immediate deletion when ref count hits 0
+                self._delete_object(sha)
+
+    def add(self, behavior, fitness, state_dict, ...):
+        # ... store elite, get new_sha ...
+
+        # Update reference: decrement old, increment new
+        centroid_id = self._find_nearest_centroid(behavior)
+        if centroid_id in self.centroid_refs:
+            old_sha = self.centroid_refs[centroid_id]
+            self._decr_ref(old_sha)  # May trigger deletion
+
+        self.centroid_refs[centroid_id] = new_sha
+        self._incr_ref(new_sha)
+
+        # Periodic mark-and-sweep (safety check)
+        self._gc_counter += 1
+        if self._gc_counter >= self._gc_interval:
+            self._mark_and_sweep_gc()
+            self._gc_counter = 0
+
+    def _mark_and_sweep_gc(self):
+        # Mark phase: find all reachable objects
+        reachable = set()
+
+        # Mark from centroid refs
+        for elite_sha in self.centroid_refs.values():
+            self._mark_reachable(elite_sha, reachable)
+
+        # Sweep phase: delete unreachable objects
+        all_shas = set(self.object_store.keys())
+        unreachable = all_shas - reachable
+
+        for sha in unreachable:
+            self._delete_object(sha)
+            logger.debug(f"GC: deleted unreachable object {sha[:8]}")
+
+        if unreachable:
+            logger.info(f"GC: freed {len(unreachable)} unreachable objects")
+
+    def _mark_reachable(self, sha: str, reachable: set):
+        if sha in reachable:
+            return  # Already marked
+
+        reachable.add(sha)
+
+        # Follow delta chain
+        obj_type, content = self._read_object(sha)
+        if obj_type == 'delta':
+            delta_data = json.loads(content.decode('utf-8'))
+            self._mark_reachable(delta_data['base'], reachable)
+            for delta_sha in delta_data['deltas']:
+                self._mark_reachable(delta_sha, reachable)
+
+    def _delete_object(self, sha: str):
+        if sha in self.object_store:
+            del self.object_store[sha]
+        if sha in self.ref_counts:
+            del self.ref_counts[sha]
+```
+
+**GC guarantees:**
+1. **No premature deletion:** Reference counting prevents deletion while object is reachable
+2. **No memory leaks:** Mark-and-sweep catches orphaned delta chains
+3. **Bounded overhead:** GC runs every 100 add() calls, amortized O(1) per operation
+4. **Deterministic:** Same sequence of operations → same GC decisions (given same seed)
+
+### 11. Deterministic hash-based random
+**Reasoning (Reproducibility):** Non-deterministic random breaks reproducibility. Hash-based seeded random is cheap (~100ns) vs gradient computation (ms).
+
+**Deterministic random primitive:**
+**Implementation**: Hash-based seeded random: `hash(seed, step, context) → [0,1]` for all stochastic decisions
+
+**Benefits**: Reproducible training, debuggable birth/death sequences, ablation-ready
+
+**Pattern**: NO unseeded random. All decisions via `_deterministic_random(seed, step, context)`
+
+### 12. Fitness must include efficiency signals
+**Reasoning (Hardware Awareness):** Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency.
+
+**Fitness formula**: `task_performance (70%) + compute_efficiency (20%) + gradient_magnitude (10%)`
+
+**Result**: Hardware-optimal patterns emerge from selection pressure (fast components survive, slow components culled)
+
+### 12. Quality-diversity maintains architectural variety
+**Reasoning (Avoid Mode Collapse):** Standard transformers: all heads learn similar features. MAP-Elites: forced diversity.
+
+**Standard transformer**: All heads learn similar features (head_similarity > 0.9)
+**MAP-Elites**: Each archive cell requires behaviorally-distinct component (forced diversity, no mode collapse)
+
+**Benefit 1**: Graceful degradation under device loss (hash-based redistribution, no retraining)
+**Benefit 2**: Interpretability (query archive by behavioral coordinates)
+
+### 13. Ablation tests determine architectural value
+**Reasoning (Scientific Method):** Don't assume architectural choices work. Test them.
+
+**Required comparisons:**
+1. **Slime Mold vs Baseline Transformer** (same parameters, same compute)
+   - If slower or worse accuracy: architecture is self-indulgent
+   - If faster or better accuracy: investigate why
+
+2. **With Archive vs Without Archive** (dynamic pool only)
+   - Does archive-guided bootstrapping improve convergence?
+   - Or is it overhead with no benefit?
+
+3. **With Lifecycle vs Static Pool** (fixed number of components)
+   - Does birth/death improve over fixed architecture?
+   - Or does training instability hurt more than variety helps?
+
+4. **Behavioral Device Placement vs Random Placement**
+   - Does hash(behavior) % num_gpus beat random device assignment?
+   - Test requires: multi-GPU setup, measure cross-GPU communication
+
+5. **Efficiency in Fitness vs Accuracy Only**
+   - Does including compute_efficiency in fitness discover faster configurations?
+   - Measure: throughput (samples/sec), memory usage
+
+**Acceptance criteria:**
+- Must beat baseline transformer on at least one dimension (speed OR accuracy)
+- If worse on all dimensions: architecture is a failure, simplify
+- If better on some dimensions: document tradeoffs, make configurable
+
+**Phase 2 implementation:** Create tests/ablations/ with automated comparisons.
+
+## Computational Cost Analysis
+
+### Cost Structure
+
+**Training costs (per step):**
+```
+Forward pass: O(B * M * D^2)          B=batch, M=sequence, D=model_dim
+Backward pass: O(B * M * D^2)         Standard backprop
+Fitness computation: O(P * D)         P=num_pseudopods, per-component gradients
+Archive update (1/100 steps): O(P)    Insert/replace elite
+Pool lifecycle (1/1000 steps): O(P)   Birth/death decisions
+```
+
+**Memory costs:**
+```
+Pseudopod weights: P * D^2 * 4 bytes (fp32)
+Archive storage: C * D^2 * 4 bytes     C=num_cells (<1000 typical)
+Gradients: P * D^2 * 4 bytes
+Activations: B * M * D * 4 bytes
+```
+
+**Total overhead vs baseline transformer:**
+```
+Baseline: Forward + Backward
+Slime: Forward + Backward + Fitness(~1%) + Archive(0.01%) + Lifecycle(0.001%)
+Net overhead: ~1-2% per training step
+```
+
+### Comparison to DARTS (Modern NAS)
+
+**DARTS (Liu et al., 2018) baseline:**
+- Differentiable architecture search with continuous relaxation
+- Uses weight sharing across candidate operations
+- Search cost: 1-4 GPU days on CIFAR-10/ImageNet
+- 1000x faster than early NAS methods (NASNet: 2000 GPU days)
+
+**Key difference:**
+```
+DARTS: Find single best architecture → train it from scratch
+Slime: Maintain diverse components → continuously adapt during training
+```
+
+**Slime approach:**
+```
+1. No separate search phase
+   - Components evolve during task training
+   - CVT-MAP-Elites maintains 1000 diverse solutions
+   - Quality-diversity, not single-objective optimization
+
+2. Continuous adaptation
+   - DARTS architecture is fixed after search
+   - Slime components birth/death based on fitness
+   - Adapts to distribution shift during training
+
+3. Estimated cost
+   - Base training: 100% (same as DARTS final training)
+   - Fitness computation: +5-10%
+   - CVT archive ops: +1-3%
+   - Lifecycle decisions: +1-2%
+   - Total: 107-115% of baseline training time
+```
+
+**Honest comparison:**
+```
+DARTS: 4 GPU days search + N GPU days training = (4 + N) total
+Slime: 1.15 × N GPU days (search happens during training)
+
+If N > 30 days: Slime is faster
+If N < 30 days: DARTS is faster
+
+Advantage: Slime maintains architectural diversity throughout training.
+Disadvantage: Slime has 15% overhead vs fixed architecture.
+```
+
+**Hypothesis (requires empirical validation):** For long training runs (100+ GPU days), amortized search cost favors Slime. For short runs (<30 days), DARTS is more efficient.
+
+### Comparison to Hypernetworks (Ha et al., 2016)
+
+**Hypernetwork approach (Ha et al., ICLR 2017):**
+- Small network generates weights for larger network
+- Achieves parameter efficiency: fewer learnable params than standard networks
+- Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
+- Weight sharing across layers via generation scheme
+
+**Key insight from Ha et al.:** Low-rank weight generation can be MORE efficient than storing full matrices.
+
+**Slime borrows this insight for archive storage:**
+
+
+**Key differences:**
+```
+Hypernetworks: Generate weights dynamically at runtime
+Slime: Store compressed weights statically in archive
+
+Hypernetworks: Single generator network for all components
+Slime: Each component has independent weights (no generator bottleneck)
+
+Hypernetworks: Meta-learning (learn to generate good weights)
+Slime: Quality-diversity (maintain diverse proven weights)
+```
+
+**Computational tradeoffs:**
+```
+Hypernetwork:
+  + Fast adaptation to new tasks (generate new weights)
+  + Parameter efficient (small generator)
+  - Generation cost at runtime
+  - Gradient flow through generator adds complexity
+
+Slime:
+  + No generation cost (weights are direct parameters)
+  + No meta-learning instability
+  - Archive memory cost (mitigated by low-rank storage)
+  - Slower adaptation to new tasks (need to add/train components)
+```
+
+**Complementary approaches:** Hypernetworks excel at few-shot adaptation. Slime excels at maintaining diverse specialists for single-task training.
+
+### Simulated Annealing for Component Lifecycle
+
+**Insight:** Quality-diversity needs exploration-exploitation balance. Simulated annealing provides principled temperature schedule.
+
+**Applications**:
+- Birth decisions: Temperature schedule for accepting diverse vs high-fitness components
+- CVT centroid refinement: Annealing to minimize quantization error
+- Archive mutation strength: Large mutations (early) → small mutations (late)
+
+**Pattern:** Annealing naturally transitions from exploration → exploitation without manual phase boundaries.
+
+**Fundamental difference:**
+```
+DARTS: Search for single best architecture (optimization)
+Hypernetworks: Learn to generate diverse weights (meta-learning)
+Slime: Maintain diverse components (quality-diversity)
+Simulated Annealing: Principled exploration-exploitation schedule
+```
+
+**Slime uniqueness:**
+1. **No search vs exploitation tradeoff**: Archive maintains both
+   - Exploit: Use current best components for task
+   - Explore: Archive keeps diverse alternatives alive
+   - Switch cost: zero (deterministic bootstrap from archive)
+
+2. **Emergent specialization**: Components discover niches automatically
+   - No pre-specified roles (unlike multi-head attention with fixed heads)
+   - No manual architecture engineering
+   - Behavioral space captures relevant variance
+
+3. **Hardware co-optimization**: Fitness includes efficiency signals
+   - NAS: Architecture search is task-accuracy only
+   - Hypernetworks: No mechanism for hardware awareness
+   - Slime: Fast components have higher fitness → survive
+
+**Test this claim:**
+```python
+# Required test: Train all three approaches on same task, same budget
+baseline_transformer = train(model, task, epochs=100)
+nas_architecture = nas_search(search_space, task, budget=10000_gpu_hours)
+hypernetwork = train(hypernetwork_model, task, epochs=100)
+slime_organism = train(slime_model, task, epochs=100)
+
+# Compare:
+# 1. Final task accuracy
+# 2. Training throughput (samples/sec)
+# 3. Total GPU-hours to convergence
+# 4. Diversity of learned components (behavioral variance)
+# 5. Graceful degradation under component removal
+```
+
+Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compute than NAS, and 1.3-1.5x better throughput than hypernetworks.
+
+**If hypothesis fails:** Architecture is self-indulgent. Simplify or abandon.
+
+## System Components
+
+**Complete Architecture**: Algebraic effect handlers, Ultrametric topology, DIRESA learned embeddings (adaptive 2-10D), Adaptive Voronoi MAP-Elites, Neural CA Pseudopods (Flow-Lenia substrate), Curiosity-driven lifecycle (learning progress), Comonadic GPU orchestration
 
 ## References
 
-### Flow-Lenia & Cellular Automata
-- **Randazzo et al. (2023)**: "Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization." *Artificial Life Conference Proceedings*, MIT Press. [arXiv:2212.07906](https://arxiv.org/abs/2212.07906)
-  - Mass conservation + parameter localization for multi-species
+### Core Algorithms
 
-- **Béna (2025)**: "A Path to Universal Neural Cellular Automata." [arXiv:2505.13058](https://arxiv.org/abs/2505.13058)
-  - Learned CA update rules via gradient descent
-  - Universal computation in continuous dynamical systems
+- Mouret, J.-B. & Clune, J. (2015). "Illuminating search spaces by mapping elites." *arXiv:1504.04909*
+  - Original MAP-Elites algorithm for quality-diversity optimization
+  - Foundation for archive-based behavioral diversity
 
-### Learned Dimensionality
-- **DIRESA (2025)**: "Distance-preserving nonlinear dimension reduction via regularized autoencoders." [arXiv:2404.18314](https://arxiv.org/abs/2404.18314)
-  - Adaptive dimensionality with metric preservation
+- Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. (2018). "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm." *IEEE Transactions on Evolutionary Computation*, 22(4), 623-630.
+  - CVT-MAP-Elites for scalable behavioral space partitioning
+  - Solves exponential grid explosion with fixed-resolution grids
 
-### Curiosity & Intrinsic Motivation
-- **Gottlieb & Oudeyer (2021)**: "Humans monitor learning progress in curiosity-driven exploration." *Nature Communications*.
-  - Learning progress as intrinsic reward
-  - NeurIPS 2024 IMOL Workshop
+- Pugh, J. K., Soros, L. B., & Stanley, K. O. (2016). "Quality Diversity: A New Frontier for Evolutionary Computation." *Frontiers in Robotics and AI*, 3:40.
+  - Survey of quality-diversity algorithms and applications
+  - Distinguishes QD from pure optimization and novelty search
 
-### Quality-Diversity
-- **Mouret & Clune (2015)**: "Illuminating search spaces by mapping elites." [arXiv:1504.04909](https://arxiv.org/abs/1504.04909)
-  - Original MAP-Elites for quality-diversity
+### Neural Architecture
 
-- **Vassiliades et al. (2018)**: "Using Centroidal Voronoi Tessellations to Scale Up MAP-Elites." *IEEE Trans. Evolutionary Computation*.
-  - CVT-MAP-Elites for scalable behavioral spaces
+- Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS 2022*. *arXiv:2205.14135*
+  - IO-aware tiled attention implementation
+  - 3x speedup on GPT-2, 15% speedup on BERT via HBM ↔ SRAM tiling
 
-### GPU Architecture
-- **Dao et al. (2022)**: "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS 2022*. [arXiv:2205.14135](https://arxiv.org/abs/2205.14135)
-  - IO-aware tiled attention (HBM ↔ SRAM optimization)
+- Liu, H., Simonyan, K., & Yang, Y. (2019). "DARTS: Differentiable Architecture Search." *ICLR 2019*. *arXiv:1806.09055*
+  - Modern NAS baseline: 1-4 GPU days (vs 2000 for early NAS)
+  - Continuous relaxation with weight sharing
 
----
+- Ha, D., Dai, A., & Le, Q. V. (2017). "HyperNetworks." *ICLR 2017*. *arXiv:1609.09106*
+  - Small network generates weights for larger network
+  - Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
+  - Low-rank weight generation inspiration for archive storage
 
-## Next Steps
+### Flow-Lenia & Cellular Automata (2023-2025)
 
-**Immediate**: Begin Phase 4 (DIRESA encoder) with:
-1. Warp-native distance computation tests
-2. Adaptive dimensionality via warp vote
-3. Integration with CVTArchive
-4. 100% constraint satisfaction
+- Randazzo, E., Mordvintsev, A., Niklasson, E., Levin, M., & Greydanus, S. (2023). "Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization." *Artificial Life Conference Proceedings*, MIT Press. [arXiv:2212.07906](https://arxiv.org/abs/2212.07906)
+  - Mass-conservative continuous CA with spatially-localized parameters
+  - Multi-species dynamics without global rules
+  - **Foundation substrate for our Pseudopod update rules**
 
-**Vision**: Production-ready self-organizing CA transformer by Q2 2026.
+- Béna, G. (2025). "A Path to Universal Neural Cellular Automata." [arXiv:2505.13058](https://arxiv.org/abs/2505.13058)
+  - Learned CA update rules via gradient descent on downstream tasks
+  - Continuous state spaces, differentiable dynamics
+  - **Target: Pseudopods as learned Neural CA**
 
-**Philosophy**: Like a Polynesian navigator attuned to ocean/stars/birds, we attune to GPU warps/cache/tensor cores. **Not using GPU as accelerator. Attuning to GPU as computational substrate.**
+### Learned Embeddings & Dimension Reduction (2025)
 
----
+- Zhang, Y., et al. (2025). "DIRESA: Distance-preserving nonlinear dimension reduction via regularized autoencoders." [arXiv:2404.18314](https://arxiv.org/abs/2404.18314)
+  - Adaptive dimensionality via learned gating (2-10 dimensions)
+  - Preserves pairwise distances better than PCA/t-SNE/UMAP
+  - **Foundation for our behavioral embedding learning**
 
-**Blueprint Version**: 2.0 (2025 Edition - Flow-Lenia/GPU-Native/Comonadic)
-**Status**: Phase 3 Complete (100%), Phase 4 Ready to Begin
-**Last Updated**: 2025-10-12
+### Curiosity & Intrinsic Motivation (2021-2024)
+
+- Gottlieb, J., & Oudeyer, P.-Y. (2021). "Humans monitor learning progress in curiosity-driven exploration." *Nature Communications*, 12:5972.
+  - Learning progress (derivative of prediction error) drives exploration
+  - Intrinsic motivation via competence signals, not external rewards
+  - **Foundation: coherence() metric → curiosity-driven Pseudopod lifecycle**
+
+- NeurIPS 2024 Workshop: Intrinsic Motivation and Open-Ended Learning (IMOL)
+  - State-of-the-art intrinsic motivation research
+  - Connections to developmental psychology, meta-learning, open-endedness
+  - **Informs our curiosity-driven selection pressure**
+
+### Statistical Validation
+
+- Kaiser, H. F. (1970). "A second generation little jiffy." *Psychometrika*, 35(4), 401-415.
+  - Kaiser-Meyer-Olkin (KMO) test for factor analysis adequacy
+  - Used to validate behavioral dimensions are factorable
+
+- Bartlett, M. S. (1950). "Tests of significance in factor analysis." *British Journal of Statistical Psychology*, 3(2), 77-85.
+  - Bartlett's test of sphericity for correlation matrices
+  - Tests null hypothesis that behavioral dimensions are uncorrelated
+
+### Optimization Theory
+
+- Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. (1983). "Optimization by simulated annealing." *Science*, 220(4598), 671-680.
+  - Simulated annealing for combinatorial optimization
+  - Temperature schedule for exploration-exploitation balance
