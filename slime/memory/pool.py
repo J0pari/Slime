@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 import weakref
 from slime.proto.component import Component
-from slime.core.comonad import SpatialContext, behavioral_distance, extract_relative_fitness, extract_behavioral_divergence, extract_gradient_magnitude_rank, extract_attention_coherence
+from slime.core.stencil import SpatialStencil
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -18,11 +18,12 @@ class PoolConfig:
 
 class DynamicPool:
 
-    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None):
+    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None, device: Optional[torch.device]=None):
         self.factory = component_factory
         self.bootstrap_factory = bootstrap_factory if bootstrap_factory is not None else component_factory
         self.config = config
         self.archive = archive
+        self.device = device or torch.device('cuda')
         self._components: List[Component] = []
         for _ in range(config.min_size):
             self._components.append(self.factory())
@@ -30,6 +31,7 @@ class DynamicPool:
         self._total_spawned = config.min_size
         self._total_culled = 0
         self._consumers = weakref.WeakSet()
+        self.stencil = SpatialStencil(k_neighbors=5, distance_metric='euclidean', device=self.device)
 
     def _spawn_component(self, behavior_location: Optional[Tuple[float, ...]]=None) -> Component:
         if self.archive is not None and behavior_location is not None:
@@ -108,22 +110,54 @@ class DynamicPool:
         self._total_spawned = 0
         self._total_culled = 0
 
-    def extract_component_context(self, component: Component) -> SpatialContext:
-        neighborhood = [c for c in self._components if c is not component]
-        return SpatialContext(focus=component, neighborhood=neighborhood, distance_fn=behavioral_distance)
+    def _gather_component_tensors(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self._components:
+            return (torch.zeros((0, 5), device=self.device), torch.zeros(0, device=self.device), torch.zeros(0, device=self.device), torch.zeros((0, 1, 1, 16, 16), device=self.device))
+        behaviors = []
+        fitnesses = []
+        grad_norms = []
+        attention_patterns = []
+        for comp in self._components:
+            if hasattr(comp, 'last_behavior') and comp.last_behavior is not None:
+                behaviors.append(comp.last_behavior)
+            else:
+                behaviors.append(torch.zeros(5, device=self.device))
+            fitnesses.append(comp.fitness if hasattr(comp, 'fitness') else 0.0)
+            grad_norm_list = []
+            for param in comp.parameters():
+                if param.grad is not None:
+                    grad_norm_list.append(torch.norm(param.grad).item())
+            grad_norms.append(sum(grad_norm_list) / len(grad_norm_list) if grad_norm_list else 0.0)
+            if hasattr(comp, '_last_attention_pattern') and comp._last_attention_pattern is not None:
+                attention_patterns.append(comp._last_attention_pattern)
+            else:
+                attention_patterns.append(torch.zeros(1, 1, 16, 16, device=self.device))
+        behaviors_tensor = torch.stack(behaviors)
+        fitnesses_tensor = torch.tensor(fitnesses, device=self.device, dtype=torch.float32)
+        grad_norms_tensor = torch.tensor(grad_norms, device=self.device, dtype=torch.float32)
+        attention_tensor = torch.stack(attention_patterns)
+        return (behaviors_tensor, fitnesses_tensor, grad_norms_tensor, attention_tensor)
+
+    def compute_all_contextual_metrics(self) -> dict:
+        behaviors, fitnesses, grad_norms, attention_patterns = self._gather_component_tensors()
+        return self.stencil.compute_all_contexts(behaviors, fitnesses, grad_norms, attention_patterns)
 
     def compute_contextual_fitness(self, component: Component) -> float:
-        ctx = self.extract_component_context(component)
-        return extract_relative_fitness(ctx)
+        results = self.compute_all_contextual_metrics()
+        component_idx = self._components.index(component)
+        return results['relative_fitness'][component_idx].item()
 
     def compute_behavioral_divergence(self, component: Component) -> torch.Tensor:
-        ctx = self.extract_component_context(component)
-        return extract_behavioral_divergence(ctx)
+        results = self.compute_all_contextual_metrics()
+        component_idx = self._components.index(component)
+        return results['behavioral_divergence'][component_idx]
 
     def compute_gradient_rank(self, component: Component) -> float:
-        ctx = self.extract_component_context(component)
-        return extract_gradient_magnitude_rank(ctx)
+        results = self.compute_all_contextual_metrics()
+        component_idx = self._components.index(component)
+        return results['gradient_rank'][component_idx].item()
 
     def compute_attention_coherence(self, component: Component) -> float:
-        ctx = self.extract_component_context(component)
-        return extract_attention_coherence(ctx)
+        results = self.compute_all_contextual_metrics()
+        component_idx = self._components.index(component)
+        return results['attention_coherence'][component_idx].item()

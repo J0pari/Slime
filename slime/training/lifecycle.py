@@ -4,7 +4,7 @@ from typing import List, Optional, Callable
 import logging
 import hashlib
 from slime.core.pseudopod import Pseudopod
-from slime.memory.pool import ComponentPool
+from slime.memory.pool import DynamicPool
 from slime.memory.archive import CVTArchive
 logger = logging.getLogger(__name__)
 
