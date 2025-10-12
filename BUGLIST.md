@@ -26,18 +26,6 @@ This document tracks where the implementation doesn't match the blueprint archit
 - Low coherence → high hunger → sample archive
 - Remove manual fitness function
 
-## DIRESA Learned Embeddings (CRITICAL)
-
-**Blueprint**: DIRESA autoencoder learns behavioral embeddings online (adaptive 2-10D)
-**Current Implementation**: Offline Kernel PCA discovers dimensions once
-**Impact**: No online adaptation, fixed dimensionality, no distance preservation learning
-
-**What needs to change**:
-- Implement DIRESABehavioralEncoder (autoencoder + learned gating)
-- Warp-native distance computation (shuffle reductions)
-- Loss: Reconstruction + distance preservation + KL regularization
-- Online training alongside main model
-
 ## Adaptive Voronoi Archive (HIGH)
 
 **Blueprint**: Archive cells grow/shrink based on density
