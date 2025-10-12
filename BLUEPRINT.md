@@ -49,7 +49,7 @@ Layer 6: Applications (depend on Layer 0-5)
     config/* → (reads Layer 5)
 ```
 
-## Corrected Data Flow
+##Data Flow
 
 ```
 User Input
@@ -96,7 +96,7 @@ User Input
 └─────────────────┘
 ```
 
-**Key Fix**: No cycles. Archive doesn't call anything. Observability is passive collector.
+**Features**: No cycles. Archive doesn't call anything. Observability is passive collector.
 
 ## Protocol Corrections
 
@@ -186,13 +186,13 @@ Dependencies:
   - Records: Observability metrics
 ```
 
-## File Structure (Corrected)
+## File Structure
 
 ```
 slime/
 ├── proto/
 │   ├── __init__.py
-│   ├── component.py        # NEW: Base component interface
+│   ├── component.py        # Base component interface
 │   ├── kernel.py           # ✓ Kernel compute interface
 │   ├── memory.py           # ✓ Temporal memory interface (tubes only)
 │   └── model.py            # ✓ Model component interfaces
@@ -259,7 +259,7 @@ slime/
     └── package.py
 ```
 
-## Critical Invariants (Refined)
+## Critical Invariants
 
 ### 1. Dependency Direction (DAG Enforcement)
 - Lower layers NEVER import from higher layers
@@ -298,7 +298,7 @@ NO CYCLES
 - All forward passes record to metrics
 - NO global state for metrics
 
-### 6. Timescale Separation (NEW: Critical for Training Stability)
+### 6. Timescale Separation
 ```
 Fast (every step):
   - Weight updates via backprop
@@ -319,13 +319,13 @@ Slow (every 1000 steps):
   - Hard limit enforcement (max pool size, max archive)
 ```
 
-### 7. Archive Bootstrapping Policy (NEW: Prevents Gradient Conflicts)
+### 7. Archive Bootstrapping Policy 
 - Archive provides INITIALIZATION only
 - Bootstrapped components trained with rest of network
 - NO frozen parameters injected mid-training
 - Prevents mode collapse and gradient conflicts
 
-### 8. Fitness Correlation with Task (NEW: Essential for Meaningful Evolution)
+### 8. Fitness Correlation with Task
 Fitness MUST correlate with loss reduction. Options:
 - Gradient magnitude (components affecting loss)
 - Attention alignment with targets
@@ -333,7 +333,7 @@ Fitness MUST correlate with loss reduction. Options:
 
 NOT attention entropy alone (doesn't correlate with task)
 
-### 9. Lifecycle Safety Guardrails (NEW: Prevent Training Collapse)
+### 9. Lifecycle Safety Guardrails 
 ```python
 # Hard limits (never exceed)
 MAX_POOL_SIZE = 64
@@ -389,14 +389,14 @@ else:
 - [ ] **tests/ablations/test_with_without_archive.py** - Prove archive helps
 - [ ] **bench/toy_tasks.py** - Simple tasks (y=sin(x), XOR, parity)
 
-### Phase 1 Completion (REVISED)
+### Phase 1 Completion 
 - [ ] kernels/triton_impl.py (Triton optimizations)
 - [ ] tests/unit/test_archive.py
 - [ ] tests/unit/test_pool.py
 - [ ] tests/unit/test_pseudopod.py
 - [ ] tests/unit/test_kernels.py
 
-### Phase 2 (REVISED - FOCUS ON PROVING IT WORKS)
+### Phase 2 
 - [ ] bench/toy_tasks.py ✓ (validate on simple tasks first)
 - [ ] tests/ablations/test_fitness_metrics.py (which fitness works?)
 - [ ] tests/integration/test_behavioral_space.py (coverage, gradients)
@@ -413,7 +413,7 @@ else:
 - [ ] setup.py / pyproject.toml
 - [ ] README.md with examples
 
-## Architectural Decisions (COMMITTED)
+## Architectural Decisions
 
 ### 1. Kernel injection: Constructor Injection ✓
 **Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
