@@ -333,7 +333,7 @@ NOT attention entropy alone (doesn't correlate with task)
 ### 7. Fitness metric: Gradient magnitude
 **Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
 
-**Formula**: fitness = gradient_norm × attention_to_targets. Combines gradient magnitude (task impact) with attention alignment (relevance).
+**Formula**: fitness = gradient_norm × correlation_with_targets. Combines gradient magnitude (task impact) with CA mass conservation metric (relevance).
 
 ### 8. Archive bootstrapping: Initialization only
 **Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
@@ -350,7 +350,7 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **DIRESA Architecture:** Autoencoder with learned gating for adaptive dimensions (2-10D), distance preservation loss, online training
 
-**Raw metrics (10-20 metrics):** avg_attention_span, activation_sparsity, gradient_flow_magnitude, memory_access_locality, computational_intensity, attention_entropy, weight_magnitude, gradient_variance, activation_magnitude, attention_coherence, etc.
+**Raw metrics (10-20 metrics):** CA_mass_conservation, activation_sparsity, gradient_flow_magnitude, memory_access_locality, computational_intensity, CA_parameter_localization, weight_magnitude, gradient_variance, activation_magnitude, CA_neighborhood_coherence, etc.
 
 **Learned embeddings:** Nonlinear projections preserving pairwise distances better than PCA/t-SNE/UMAP
 
