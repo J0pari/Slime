@@ -52,8 +52,8 @@ def test_low_rank_compression_constraint(constraint):
     fitness = 0.8
     archive.add(behavior, fitness, state_dict)
     centroid_id = archive._find_nearest_centroid(np.array(behavior))
-    elite = archive._archive[centroid_id]
-    reconstructed = elite.reconstruct_weights()
+    elite = archive.elites[centroid_id]
+    reconstructed = elite.reconstruct_weights(archive)
     constraint('Reconstructed weights have same keys as original', lambda: (set(reconstructed.keys()) == set(state_dict.keys()), set(reconstructed.keys()), set(state_dict.keys()), {}))
     for key in state_dict.keys():
         orig = state_dict[key]
@@ -62,12 +62,12 @@ def test_low_rank_compression_constraint(constraint):
         constraint(f'Reconstruction error for {key} < 0.5 (low-rank k=8)', lambda e=error, k=key: (e < 0.5, float(e), '<0.5', {'key': k, 'relative_error': float(e), 'orig_norm': float(torch.norm(orig)), 'recon_norm': float(torch.norm(recon))}))
 
 def test_centroid_determinism_constraint(constraint):
-    archive1 = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, seed=42)
+    archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
     for i in range(150):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive1.add_raw_metrics(raw_metrics)
     archive1.discover_dimensions()
-    archive2 = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, seed=42)
+    archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
     for i in range(150):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive2.add_raw_metrics(raw_metrics)
@@ -75,7 +75,7 @@ def test_centroid_determinism_constraint(constraint):
     constraint('Deterministic centroid initialization (seed=42)', lambda: (np.allclose(archive1.centroids, archive2.centroids, atol=0.01), 'centroids_match', 'centroids_match', {'max_diff': float(np.max(np.abs(archive1.centroids - archive2.centroids))), 'mean_diff': float(np.mean(np.abs(archive1.centroids - archive2.centroids)))}))
 
 def test_warmup_phase_errors_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
     for i in range(100):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
@@ -87,7 +87,7 @@ def test_warmup_phase_errors_constraint(constraint):
         constraint('Cannot add raw metrics after discovery', lambda: (True, 'ValueError', 'ValueError', {'error_msg': str(e)}))
 
 def test_add_before_discovery_errors_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
     state_dict = {'W_q': torch.randn(64, 64)}
     try:
         archive.add((0.1, 0.2, 0.3), 0.8, state_dict)
