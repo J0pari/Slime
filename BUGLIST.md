@@ -2,18 +2,6 @@
 
 This document tracks where the implementation doesn't match the blueprint architecture.
 
-## Curiosity-Driven Lifecycle (CRITICAL)
-
-**Blueprint**: hunger = learning_progress_deficit (intrinsic motivation)
-**Current Implementation**: hunger = manual schedule
-**Impact**: Missing self-organizing component pool, no emergent specialization
-
-**What needs to change**:
-- coherence() metric → learning progress (Δ prediction error)
-- High coherence → low hunger → survive
-- Low coherence → high hunger → sample archive
-- Remove manual fitness function
-
 ## Adaptive Voronoi Archive (HIGH)
 
 **Blueprint**: Archive cells grow/shrink based on density
