@@ -1,6 +1,7 @@
 import pytest
 import torch
 from slime.kernels.triton_impl import TritonKernel
+from slime.config.dimensions import TINY
 
 @pytest.fixture
 def device():
@@ -10,7 +11,7 @@ def device():
 
 @pytest.fixture
 def kernel(device):
-    return TritonKernel(device)
+    return TritonKernel(device, TINY.numerical)
 
 def test_attention_power_of_two_shapes_constraint(constraint, kernel, device):
     for size in [64, 128, 256, 512]:
