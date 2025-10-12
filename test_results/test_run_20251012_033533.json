@@ -1,0 +1,96 @@
+{
+  "run_timestamp": "2025-10-12T03:35:33.686217",
+  "exit_status": 1,
+  "total_tests": 14,
+  "passed": 12,
+  "failed": 2,
+  "skipped": 0,
+  "results": [
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_power_of_two_shapes",
+      "outcome": "passed",
+      "duration_seconds": 0.9231859999708831,
+      "timestamp": "2025-10-12T03:35:28.953134"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_non_power_of_two_shapes",
+      "outcome": "passed",
+      "duration_seconds": 0.5859228996559978,
+      "timestamp": "2025-10-12T03:35:29.540648"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_temperature_extremes",
+      "outcome": "failed",
+      "duration_seconds": 0.5277019999921322,
+      "timestamp": "2025-10-12T03:35:30.135049",
+      "error": "slime\\tests\\unit\\test_triton_kernels.py:44: in test_attention_temperature_extremes\n    assert cold_entropy < hot_entropy\nE   AssertionError: assert tensor(nan, device='cuda:0', dtype=torch.float16) < tensor(nan, device='cuda:0', dtype=torch.float16)"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_single_head",
+      "outcome": "passed",
+      "duration_seconds": 0.5762939001433551,
+      "timestamp": "2025-10-12T03:35:30.712531"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_many_heads",
+      "outcome": "passed",
+      "duration_seconds": 0.4797817999497056,
+      "timestamp": "2025-10-12T03:35:31.193290"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_asymmetric_query_key",
+      "outcome": "passed",
+      "duration_seconds": 0.0004221000708639622,
+      "timestamp": "2025-10-12T03:35:31.194661"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_correlation_symmetry",
+      "outcome": "passed",
+      "duration_seconds": 0.39478209987282753,
+      "timestamp": "2025-10-12T03:35:31.590327"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_correlation_bounds",
+      "outcome": "passed",
+      "duration_seconds": 0.0007301000878214836,
+      "timestamp": "2025-10-12T03:35:31.592009"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_correlation_large_batch",
+      "outcome": "passed",
+      "duration_seconds": 0.40571830002591014,
+      "timestamp": "2025-10-12T03:35:31.998566"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_effective_rank_range",
+      "outcome": "passed",
+      "duration_seconds": 0.5781753002665937,
+      "timestamp": "2025-10-12T03:35:32.577713"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_effective_rank_batch",
+      "outcome": "passed",
+      "duration_seconds": 0.4360889997333288,
+      "timestamp": "2025-10-12T03:35:33.015171"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_gradient_flow",
+      "outcome": "failed",
+      "duration_seconds": 0.6216474999673665,
+      "timestamp": "2025-10-12T03:35:33.680272",
+      "error": "slime\\tests\\unit\\test_triton_kernels.py:109: in test_attention_gradient_flow\n    loss.backward()\nC:\\Users\\tmdru\\AppData\\Roaming\\Python\\Python313\\site-packages\\torch\\_tensor.py:648: in backward\n    torch.autograd.backward(\nC:\\Users\\tmdru\\AppData\\Roaming\\Python\\Python313\\site-packages\\torch\\autograd\\__init__.py:353: in backward\n    _engine_run_backward(\nC:\\Users\\tmdru\\AppData\\Roaming\\Python\\Python313\\site-packages\\torch\\autograd\\graph.py:824: in _engine_run_backward\n    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass\nE   RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_numerical_stability_zeros",
+      "outcome": "passed",
+      "duration_seconds": 0.0007589999586343765,
+      "timestamp": "2025-10-12T03:35:33.682224"
+    },
+    {
+      "test_name": "slime/tests/unit/test_triton_kernels.py::test_attention_numerical_stability_large_values",
+      "outcome": "passed",
+      "duration_seconds": 0.0007420997135341167,
+      "timestamp": "2025-10-12T03:35:33.683876"
+    }
+  ]
+}

@@ -25,7 +25,7 @@ class PoolConfig:
 
 class DynamicPool:
 
-    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['BehavioralArchive']=None):
+    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None):
         self.factory = component_factory
         self.bootstrap_factory = bootstrap_factory if bootstrap_factory is not None else component_factory
         self.config = config

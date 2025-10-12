@@ -1,0 +1,71 @@
+{
+  "run_timestamp": "2025-10-12T03:44:17.181796+00:00",
+  "exit_status": 0,
+  "test_summary": {
+    "total_tests": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "constraint_summary": {
+    "total_constraints": 2,
+    "satisfied": 2,
+    "violated": 0,
+    "satisfaction_rate": 1.0,
+    "avg_causal_depth": 0.0
+  },
+  "results": [
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_archive_initialization_constraint",
+      "outcome": "passed",
+      "duration_seconds": 0.022408700082451105,
+      "timestamp": "2025-10-12T03:44:17.180346+00:00",
+      "causal_dag": {
+        "nodes": [
+          {
+            "id": "Archive centroids exist with shape (num_centroids, behavioral_dims)_0",
+            "constraint": "Archive centroids exist with shape (num_centroids, behavioral_dims)",
+            "satisfied": true,
+            "expected": [
+              100,
+              5
+            ],
+            "actual": [
+              100,
+              5
+            ],
+            "details": {
+              "centroids_dtype": "float32"
+            },
+            "context": {},
+            "timestamp": "2025-10-12T03:44:17.180058+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Archive starts with zero elites_1",
+            "constraint": "Archive starts with zero elites",
+            "satisfied": true,
+            "expected": 0,
+            "actual": 0,
+            "details": {},
+            "context": {},
+            "timestamp": "2025-10-12T03:44:17.180087+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          }
+        ],
+        "topology": {
+          "total_nodes": 2,
+          "max_depth": 0,
+          "connected_components": 2
+        }
+      },
+      "root_cause": null
+    }
+  ]
+}

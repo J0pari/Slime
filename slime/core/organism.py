@@ -5,7 +5,7 @@ import logging
 from slime.core.pseudopod import Pseudopod
 from slime.core.state import FlowState
 from slime.core.chemotaxis import Chemotaxis
-from slime.memory.archive import BehavioralArchive
+from slime.memory.archive import CVTArchive
 from slime.memory.pool import DynamicPool, PoolConfig
 from slime.proto.kernel import Kernel
 from slime.kernels.torch_fallback import TorchKernel
@@ -45,7 +45,7 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
-        self.archive = BehavioralArchive(dimensions=['rank', 'coherence'], bounds=[(0.0, 1.0), (0.0, 1.0)], resolution=50, device=self.device)
+        self.archive = CVTArchive(behavioral_dims=5, num_centroids=100, low_rank_k=32, kmo_threshold=0.6, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
         if pool_config is None:
             pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)
