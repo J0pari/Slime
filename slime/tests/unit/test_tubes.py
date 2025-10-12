@@ -1,63 +1,46 @@
 import pytest
 import torch
-from slime.memory.tubes import InformationTubes, TubeConfig
-from slime.core.state import FlowState
+from slime.memory.tubes import TubeNetwork
+from slime.proto.memory import Memory
 
-class TestInformationTubes:
-
-    @pytest.fixture
-    def tube_config(self):
-        return TubeConfig(max_capacity=100, decay_rate=0.1)
+class TestTubeNetwork:
 
     @pytest.fixture
-    def tubes(self, tube_config):
-        return InformationTubes(config=tube_config)
+    def tubes(self):
+        return TubeNetwork(capacity=100, decay_rate=0.1)
 
     def test_initialization(self, tubes):
-        assert tubes.size() == 0
+        assert len(tubes._storage) == 0
 
-    def test_add_flow(self, tubes):
-        state = FlowState(batch_size=2, sequence_length=10, latent_dim=64, device=torch.device('cpu'))
-        state.information = torch.randn(2, 10, 64)
-        tubes.add(state)
-        assert tubes.size() == 1
-
-    def test_get_flow(self, tubes):
-        state = FlowState(batch_size=2, sequence_length=10, latent_dim=64, device=torch.device('cpu'))
-        state.information = torch.randn(2, 10, 64)
-        tubes.add(state)
-        retrieved = tubes.get_latest()
+    def test_store_retrieve(self, tubes):
+        data = torch.randn(64, 128)
+        tubes.store('test_key', data)
+        retrieved = tubes.recall('test_key')
         assert retrieved is not None
-        assert torch.equal(retrieved.information, state.information)
+        assert torch.allclose(retrieved, data, atol=1e-4)
 
     def test_capacity_enforcement(self):
-        config = TubeConfig(max_capacity=5)
-        tubes = InformationTubes(config=config)
+        tubes = TubeNetwork(capacity=5, decay_rate=0.0)
         for i in range(10):
-            state = FlowState(batch_size=2, sequence_length=10, latent_dim=64, device=torch.device('cpu'))
-            state.information = torch.randn(2, 10, 64)
-            tubes.add(state)
-        assert tubes.size() <= config.max_capacity
+            tubes.store(f'key_{i}', torch.randn(10))
+        assert len(tubes._storage) <= 5
+
+    def test_decay(self):
+        tubes = TubeNetwork(capacity=100, decay_rate=0.5)
+        data = torch.ones(10)
+        tubes.store('key', data)
+        tubes._apply_decay()
+        retrieved = tubes.recall('key')
+        assert retrieved is not None
+        assert (retrieved < data).all()
+
+    def test_nonexistent_key(self, tubes):
+        retrieved = tubes.recall('nonexistent')
+        assert retrieved is None
 
     def test_clear(self, tubes):
-        for _ in range(5):
-            state = FlowState(batch_size=2, sequence_length=10, latent_dim=64, device=torch.device('cpu'))
-            state.information = torch.randn(2, 10, 64)
-            tubes.add(state)
-        assert tubes.size() == 5
+        for i in range(5):
+            tubes.store(f'key_{i}', torch.randn(10))
+        assert len(tubes._storage) > 0
         tubes.clear()
-        assert tubes.size() == 0
-
-    def test_flow_history(self, tubes):
-        for i in range(3):
-            state = FlowState(batch_size=2, sequence_length=10, latent_dim=64, device=torch.device('cpu'))
-            state.information = torch.randn(2, 10, 64) * i
-            tubes.add(state)
-        history = tubes.get_history(k=3)
-        assert len(history) == 3
-        assert history[0] is tubes.get_latest()
-
-    def test_empty_tubes_operations(self, tubes):
-        assert tubes.size() == 0
-        assert tubes.get_latest() is None
-        assert len(tubes.get_history(k=5)) == 0
+        assert len(tubes._storage) == 0

@@ -1,120 +1,121 @@
 import pytest
 import torch
-from slime.memory.archive import BehavioralArchive, ArchiveConfig
+from slime.memory.archive import BehavioralArchive
+from slime.core.pseudopod import Pseudopod
+from slime.kernels.torch_fallback import TorchKernel
 
 class TestBehavioralArchive:
 
     @pytest.fixture
+    def device(self):
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    @pytest.fixture
     def archive(self):
-        config = ArchiveConfig(grid_size=[10, 10], dimensions=2, max_size=100)
-        return BehavioralArchive(config)
+        return BehavioralArchive(
+            dimensions=['rank', 'coherence'],
+            bounds=[(0.0, 1.0), (0.0, 1.0)],
+            resolution=50
+        )
+
+    @pytest.fixture
+    def pseudopod(self, device):
+        kernel = TorchKernel(device)
+        return Pseudopod(head_dim=64, kernel=kernel, device=device)
 
     def test_initialization(self, archive):
         assert archive.size() == 0
-        assert archive.config.dimensions == 2
-        assert archive.config.grid_size == [10, 10]
+        assert len(archive.dimensions) == 2
+        assert archive.resolution == 50
 
-    def test_add_elite(self, archive):
-        component = torch.randn(64, 128)
-        behavior = torch.tensor([0.5, 0.5])
-        fitness = 1.0
-        added = archive.add(component, behavior, fitness)
+    def test_add_real_pseudopod(self, archive, pseudopod):
+        behavior = (0.5, 0.6)
+        added = archive.add(pseudopod, behavior, fitness=0.75)
         assert added is True
         assert archive.size() == 1
 
-    def test_replace_lower_fitness(self, archive):
-        component1 = torch.randn(64, 128)
-        component2 = torch.randn(64, 128)
-        behavior = torch.tensor([0.5, 0.5])
-        archive.add(component1, behavior, fitness=1.0)
-        assert archive.size() == 1
-        archive.add(component2, behavior, fitness=2.0)
+    def test_fitness_replacement(self, archive, device):
+        kernel = TorchKernel(device)
+        pod1 = Pseudopod(head_dim=64, kernel=kernel, device=device)
+        pod2 = Pseudopod(head_dim=64, kernel=kernel, device=device)
+        behavior = (0.5, 0.5)
+        archive.add(pod1, behavior, fitness=0.5)
+        archive.add(pod2, behavior, fitness=0.9)
         assert archive.size() == 1
         cell = archive.get_cell(behavior)
-        assert cell is not None
-        assert cell.fitness == 2.0
+        assert cell.fitness == 0.9
 
-    def test_keep_higher_fitness(self, archive):
-        component1 = torch.randn(64, 128)
-        component2 = torch.randn(64, 128)
-        behavior = torch.tensor([0.5, 0.5])
-        archive.add(component1, behavior, fitness=2.0)
-        added = archive.add(component2, behavior, fitness=1.0)
+    def test_fitness_rejection(self, archive, device):
+        kernel = TorchKernel(device)
+        pod1 = Pseudopod(head_dim=64, kernel=kernel, device=device)
+        pod2 = Pseudopod(head_dim=64, kernel=kernel, device=device)
+        behavior = (0.5, 0.5)
+        archive.add(pod1, behavior, fitness=0.9)
+        added = archive.add(pod2, behavior, fitness=0.5)
         assert added is False
-        assert archive.size() == 1
         cell = archive.get_cell(behavior)
-        assert cell.fitness == 2.0
+        assert cell.fitness == 0.9
 
-    def test_different_cells(self, archive):
-        component1 = torch.randn(64, 128)
-        component2 = torch.randn(64, 128)
-        behavior1 = torch.tensor([0.2, 0.3])
-        behavior2 = torch.tensor([0.7, 0.8])
-        archive.add(component1, behavior1, fitness=1.0)
-        archive.add(component2, behavior2, fitness=1.0)
-        assert archive.size() == 2
+    def test_grid_quantization(self, archive, pseudopod):
+        behavior1 = (0.501, 0.502)
+        behavior2 = (0.503, 0.504)
+        archive.add(pseudopod, behavior1, fitness=0.8)
+        cell = archive.get_cell(behavior2)
+        assert cell is not None
 
-    def test_get_neighbors(self, archive):
-        for i in range(5):
-            component = torch.randn(64, 128)
-            behavior = torch.tensor([0.5 + i * 0.05, 0.5])
-            archive.add(component, behavior, fitness=1.0)
-        query_behavior = torch.tensor([0.5, 0.5])
-        neighbors = archive.get_neighbors(query_behavior, k=3)
-        assert len(neighbors) <= 3
-        assert all((neighbor.fitness > 0 for neighbor in neighbors))
+    def test_boundary_behaviors(self, archive, device):
+        kernel = TorchKernel(device)
+        behaviors = [(0.0, 0.0), (1.0, 1.0), (0.0, 1.0), (1.0, 0.0)]
+        for i, behavior in enumerate(behaviors):
+            pod = Pseudopod(head_dim=64, kernel=kernel, device=device)
+            added = archive.add(pod, behavior, fitness=float(i))
+            assert added is True
+        assert archive.size() == 4
 
-    def test_coverage(self, archive):
+    def test_coverage_growth(self, archive, device):
+        kernel = TorchKernel(device)
         assert archive.coverage() == 0.0
-        for i in range(10):
-            component = torch.randn(64, 128)
-            behavior = torch.tensor([i * 0.1, i * 0.1])
-            archive.add(component, behavior, fitness=1.0)
+        for i in range(100):
+            pod = Pseudopod(head_dim=64, kernel=kernel, device=device)
+            behavior = (i / 100.0, (100 - i) / 100.0)
+            archive.add(pod, behavior, fitness=0.5)
         coverage = archive.coverage()
-        assert 0.0 < coverage <= 1.0
+        assert coverage > 0.01
 
-    def test_max_size_enforcement(self):
-        config = ArchiveConfig(grid_size=[5, 5], dimensions=2, max_size=10)
-        archive = BehavioralArchive(config)
-        for i in range(25):
-            component = torch.randn(64, 128)
-            row = i // 5
-            col = i % 5
-            behavior = torch.tensor([row * 0.2, col * 0.2])
-            archive.add(component, behavior, fitness=float(i))
-        assert archive.size() <= config.max_size
-
-    def test_get_elites(self, archive):
-        for i in range(5):
-            component = torch.randn(64, 128)
-            behavior = torch.tensor([i * 0.2, i * 0.2])
-            archive.add(component, behavior, fitness=float(i))
+    def test_elite_retrieval(self, archive, device):
+        kernel = TorchKernel(device)
+        fitnesses = [0.9, 0.5, 0.7, 0.3, 0.8]
+        for i, fitness in enumerate(fitnesses):
+            pod = Pseudopod(head_dim=64, kernel=kernel, device=device)
+            behavior = (i * 0.2, i * 0.2)
+            archive.add(pod, behavior, fitness=fitness)
         elites = archive.get_elites()
         assert len(elites) == 5
-        assert all((elite.fitness >= 0 for elite in elites))
+        assert max(e.fitness for e in elites) == 0.9
+        assert min(e.fitness for e in elites) == 0.3
 
-    def test_clear(self, archive):
-        for i in range(5):
-            component = torch.randn(64, 128)
-            behavior = torch.tensor([i * 0.2, i * 0.2])
-            archive.add(component, behavior, fitness=1.0)
-        assert archive.size() == 5
+    def test_clear(self, archive, pseudopod):
+        for i in range(10):
+            behavior = (i * 0.1, i * 0.1)
+            archive.add(pseudopod, behavior, fitness=0.5)
+        assert archive.size() == 10
         archive.clear()
         assert archive.size() == 0
 
-    def test_behavior_discretization(self, archive):
-        component = torch.randn(64, 128)
-        behavior_continuous = torch.tensor([0.23, 0.67])
-        archive.add(component, behavior_continuous, fitness=1.0)
-        behavior_similar = torch.tensor([0.24, 0.68])
-        cell = archive.get_cell(behavior_similar)
-        assert cell is not None
-        assert cell.fitness == 1.0
+    def test_out_of_bounds_behavior(self, archive, pseudopod):
+        behaviors = [(-0.1, 0.5), (1.1, 0.5), (0.5, -0.1), (0.5, 1.1)]
+        for behavior in behaviors:
+            added = archive.add(pseudopod, behavior, fitness=0.5)
+            assert added is True
 
-    def test_empty_archive_operations(self, archive):
+    def test_dimension_mismatch(self, archive, pseudopod):
+        with pytest.raises(ValueError):
+            archive.add(pseudopod, (0.5,), fitness=0.5)
+        with pytest.raises(ValueError):
+            archive.add(pseudopod, (0.5, 0.5, 0.5), fitness=0.5)
+
+    def test_empty_operations(self, archive):
         assert archive.size() == 0
         assert archive.coverage() == 0.0
         assert len(archive.get_elites()) == 0
-        behavior = torch.tensor([0.5, 0.5])
-        assert archive.get_cell(behavior) is None
-        assert len(archive.get_neighbors(behavior, k=5)) == 0
+        assert archive.get_cell((0.5, 0.5)) is None
