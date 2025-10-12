@@ -1,11 +1,22 @@
 """Kernel utilities for safe GPU execution"""
 
 import torch
-import triton
 from typing import Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division"""
+    return (a + b - 1) // b
+
+
+def next_power_of_2(n: int) -> int:
+    """Next power of 2 >= n"""
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 
 def validate_tensor(
@@ -42,11 +53,11 @@ def safe_grid_config(size: int, block_size: int, max_grid: int = 65535) -> Tuple
     if block_size <= 0 or (block_size & (block_size - 1)) != 0:
         raise ValueError(f"block_size must be power of 2, got {block_size}")
 
-    grid_size = triton.cdiv(size, block_size)
+    grid_size = cdiv(size, block_size)
 
     if grid_size > max_grid:
-        new_block_size = triton.next_power_of_2(triton.cdiv(size, max_grid))
-        grid_size = triton.cdiv(size, new_block_size)
+        new_block_size = next_power_of_2(cdiv(size, max_grid))
+        grid_size = cdiv(size, new_block_size)
         logger.warning(f"Adjusted block_size from {block_size} to {new_block_size}")
         block_size = new_block_size
 
@@ -56,5 +67,6 @@ def safe_grid_config(size: int, block_size: int, max_grid: int = 65535) -> Tuple
 def optimal_num_warps(block_size: int) -> int:
     """Determine optimal number of warps for given block size."""
     num_warps = max(1, block_size // 32)
-    num_warps = min(8, triton.next_power_of_2(num_warps))
+    num_warps = next_power_of_2(num_warps)
+    num_warps = min(8, num_warps)
     return num_warps

@@ -63,6 +63,8 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
 
+        self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
+
         self.archive = BehavioralArchive(
             dimensions=['rank', 'coherence'],
             bounds=[(0.0, 1.0), (0.0, 1.0)],
@@ -83,8 +85,8 @@ class Organism(nn.Module):
 
         self.pseudopod_pool = DynamicPool(
             component_factory=lambda: Pseudopod(head_dim, self.kernel, self.device),
-            bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, self.device),
             config=pool_config,
+            bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, self.device),
             archive=self.archive,
         )
 
@@ -134,6 +136,8 @@ class Organism(nn.Module):
 
         merged = torch.stack(outputs).mean(0)
 
+        merged_latent = self.project_heads(merged)
+
         fitness = (max_rank * min_coherence).item()
 
         for pod in pseudopods:
@@ -146,13 +150,13 @@ class Organism(nn.Module):
         self.pseudopod_pool.step(behavior)
 
         new_state = FlowState(
-            body=merged,
+            body=merged_latent,
             behavior=behavior,
             generation=self._generation,
             fitness=fitness,
         )
 
-        output = self.decode(merged)
+        output = self.decode(merged_latent)
 
         self._generation += 1
         self.archive.increment_generation()

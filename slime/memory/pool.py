@@ -38,8 +38,8 @@ class DynamicPool:
     def __init__(
         self,
         component_factory: Callable[[], Component],
-        bootstrap_factory: Optional[Callable[[dict], Component]] = None,
         config: PoolConfig,
+        bootstrap_factory: Optional[Callable[[dict], Component]] = None,
         archive: Optional['BehavioralArchive'] = None,
     ):
         """Initialize dynamic pool.
