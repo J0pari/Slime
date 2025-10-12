@@ -9,12 +9,26 @@ def _make_test_archive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids
                        low_rank_k=16, trustworthiness_threshold=0.85,
                        reconstruction_error_threshold=0.5, seed=42):
     """Helper to create test archive with specified parameters."""
-    config = ArchitectureConfig.from_preset('tiny')
-    config.behavioral_space.num_raw_metrics = num_raw_metrics
-    config.behavioral_space.min_dims = min_dims
-    config.behavioral_space.max_dims = max_dims
-    config.behavioral_space.num_centroids = num_centroids
-    config.compression.low_rank_k = low_rank_k
+    from slime.config.dimensions import TINY, BehavioralSpaceConfig, CompressionConfig
+    from dataclasses import replace
+
+    # Start with TINY preset and modify frozen dataclasses using replace()
+    behavioral_space = replace(
+        TINY.behavioral_space,
+        num_raw_metrics=num_raw_metrics,
+        min_dims=min_dims,
+        max_dims=max_dims,
+        num_centroids=num_centroids
+    )
+    compression = replace(
+        TINY.compression,
+        low_rank_k=low_rank_k
+    )
+    config = replace(
+        TINY,
+        behavioral_space=behavioral_space,
+        compression=compression
+    )
     return CVTArchive(
         config=config,
         trustworthiness_threshold=trustworthiness_threshold,
