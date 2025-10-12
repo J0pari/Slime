@@ -86,16 +86,21 @@ class Pseudopod(nn.Module):
         return self.kernel.correlation(k, v)
 
     def _update_fitness(self, attn: torch.Tensor) -> None:
-        """Update fitness based on attention pattern.
+        """Update fitness based on gradient magnitude (task-relevant).
 
-        High entropy = exploring diverse space = high fitness
-        Low entropy = collapsed to single point = low fitness
+        High gradient = component affects loss = high fitness
+        Low gradient = component irrelevant = low fitness
+
+        NOTE: Actual gradient computed externally during backward pass.
+        This is a proxy using attention variance as surrogate.
+        Real implementation should use: fitness = grad_norm of parameters.
         """
-        # Attention entropy
-        entropy = -torch.sum(attn * torch.log(attn + 1e-10), dim=-1).mean()
+        # Proxy: attention variance (high variance = diverse attention)
+        # TODO: Replace with actual gradient magnitude after backward pass
+        variance = torch.var(attn, dim=-1).mean()
 
         # Exponential moving average
-        self._fitness = 0.9 * self._fitness + 0.1 * entropy.item()
+        self._fitness = 0.9 * self._fitness + 0.1 * variance.item()
 
     @property
     def correlation(self) -> torch.Tensor:
