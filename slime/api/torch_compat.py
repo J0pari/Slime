@@ -15,7 +15,7 @@ class SlimeMoldEncoder(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
         self.batch_first = batch_first
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         if d_model % nhead != 0:
             raise ValueError(f'd_model ({d_model}) must be divisible by nhead ({nhead})')
         head_dim = d_model // nhead

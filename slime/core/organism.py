@@ -30,7 +30,7 @@ class Organism(nn.Module):
         self.sensory_dim = sensory_dim
         self.latent_dim = latent_dim
         self.head_dim = head_dim
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         if kernel is not None:
             self.kernel = kernel
         elif HAS_TRITON:

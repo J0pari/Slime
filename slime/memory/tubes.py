@@ -14,7 +14,7 @@ class TubeNetwork:
             raise ValueError(f'capacity must be >= 1, got {capacity}')
         self.decay = decay
         self.capacity = capacity
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self._tubes: Deque[tuple[torch.Tensor, float]] = deque(maxlen=capacity)
         self._decay_cache: Optional[torch.Tensor] = None
 

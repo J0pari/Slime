@@ -38,7 +38,7 @@ class ComparisonResult:
 class Profiler:
 
     def __init__(self, device: Optional[torch.device]=None, warmup_steps: int=10, profile_steps: int=100):
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self.warmup_steps = warmup_steps
         self.profile_steps = profile_steps
 

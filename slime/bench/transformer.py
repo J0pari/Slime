@@ -7,7 +7,7 @@ class TransformerBaseline(nn.Module):
     def __init__(self, d_model: int=128, nhead: int=8, num_layers: int=6, dim_feedforward: int=512, dropout: float=0.1, device: Optional[torch.device]=None):
         super().__init__()
         self.d_model = d_model
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True, device=self.device)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.embedding = nn.Linear(d_model, d_model, device=self.device)
@@ -29,7 +29,7 @@ class FlashAttentionBaseline(nn.Module):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self.embedding = nn.Linear(d_model, d_model, device=self.device)
         self.layers = nn.ModuleList([FlashAttentionLayer(d_model, nhead, dim_feedforward, dropout, self.device) for _ in range(num_layers)])
         self.output_proj = nn.Linear(d_model, d_model, device=self.device)

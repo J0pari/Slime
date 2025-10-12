@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 class TorchKernel:
 
     def __init__(self, device: Optional[torch.device]=None):
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
 
     def attention(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, temperature: float) -> torch.Tensor:
         batch_size, seq_len, dim = query.shape

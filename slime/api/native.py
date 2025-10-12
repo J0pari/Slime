@@ -14,7 +14,7 @@ class SlimeModel(nn.Module):
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         self.output_dim = output_dim
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         if kernel is None:
             kernel = TorchKernel(self.device)
         self.organism = Organism(sensory_dim=input_dim, latent_dim=latent_dim, head_dim=head_dim, device=self.device, kernel=kernel, pool_config=pool_config)

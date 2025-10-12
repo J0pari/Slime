@@ -4,7 +4,7 @@ from slime.core.pseudopod import Pseudopod
 
 @pytest.fixture
 def device():
-    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device('cuda')
 
 @pytest.fixture
 def pseudopod(device):

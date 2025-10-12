@@ -37,7 +37,8 @@ def test_add_after_discovery_constraint(constraint):
         raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
-    state_dict = {'W_q': torch.randn(64, 64), 'W_k': torch.randn(64, 64), 'W_v': torch.randn(64, 64), 'W_o': torch.randn(64, 64)}
+    torch.manual_seed(42)
+    state_dict = {'W_q': torch.randn(64, 64, device=archive.device), 'W_k': torch.randn(64, 64, device=archive.device), 'W_v': torch.randn(64, 64, device=archive.device), 'W_o': torch.randn(64, 64, device=archive.device)}
     behavior = (0.1, 0.2, 0.3)
     fitness = 0.8
     added = archive.add(behavior, fitness, state_dict, generation=1, metadata={'test': True})
@@ -57,7 +58,8 @@ def test_low_rank_compression_constraint(constraint):
         raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
-    state_dict = {'W_q': torch.randn(64, 64), 'W_k': torch.randn(64, 64), 'W_v': torch.randn(64, 64), 'W_o': torch.randn(64, 64)}
+    torch.manual_seed(42)
+    state_dict = {'W_q': torch.randn(64, 64, device=archive.device), 'W_k': torch.randn(64, 64, device=archive.device), 'W_v': torch.randn(64, 64, device=archive.device), 'W_o': torch.randn(64, 64, device=archive.device)}
     behavior = (0.1, 0.2, 0.3)
     fitness = 0.8
     archive.add(behavior, fitness, state_dict)
@@ -91,10 +93,12 @@ def test_centroid_determinism_constraint(constraint):
     constraint('Deterministic centroid initialization (seed=42)', lambda: (np.allclose(archive1.centroids, archive2.centroids, atol=0.01), 'centroids_match', 'centroids_match', {'max_diff': float(np.max(np.abs(archive1.centroids - archive2.centroids))), 'mean_diff': float(np.mean(np.abs(archive1.centroids - archive2.centroids)))}))
 
 def test_warmup_phase_errors_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
-    for i in range(100):
-        raw_metrics = rng.randn(10).astype(np.float32)
+    latent = rng.randn(150, 3).astype(np.float32)
+    mixing_matrix = rng.randn(3, 10).astype(np.float32)
+    for i in range(150):
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
     try:
@@ -105,7 +109,8 @@ def test_warmup_phase_errors_constraint(constraint):
 
 def test_add_before_discovery_errors_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
-    state_dict = {'W_q': torch.randn(64, 64)}
+    torch.manual_seed(42)
+    state_dict = {'W_q': torch.randn(64, 64, device=archive.device)}
     try:
         archive.add((0.1, 0.2, 0.3), 0.8, state_dict)
         constraint('Cannot add elites before discovery', lambda: (False, 'allowed', 'ValueError', {}))

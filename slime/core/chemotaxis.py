@@ -8,7 +8,7 @@ class Chemotaxis:
 
     def __init__(self, archive: CVTArchive, device: Optional[torch.device]=None):
         self.archive = archive
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self._sources: Dict[Tuple[int, ...], Tuple[torch.Tensor, float]] = {}
 
     def add_source(self, nutrient: torch.Tensor, location: Tuple[float, ...], concentration: float) -> None:

@@ -46,7 +46,7 @@ class CVTArchive:
         self.num_centroids = num_centroids
         self.low_rank_k = low_rank_k
         self.delta_rank = delta_rank
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self.kmo_threshold = kmo_threshold
         self.reconstruction_error_threshold = reconstruction_error_threshold
         self.kernel_selection = kernel_selection

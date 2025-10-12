@@ -10,7 +10,7 @@ class ModelExporter:
 
     def __init__(self, model: nn.Module, device: Optional[torch.device]=None):
         self.model = model
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self.model.to(self.device)
         self.model.eval()
 

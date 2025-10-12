@@ -12,7 +12,7 @@ class Pseudopod(nn.Module):
         super().__init__()
         self.head_dim = head_dim
         self.kernel = kernel
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device or torch.device('cuda')
         self.component_id = component_id
         self.key_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
         self.value_weight = nn.Parameter(torch.randn(head_dim, head_dim, device=self.device))
