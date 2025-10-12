@@ -182,7 +182,7 @@ class Pseudopod(nn.Module):
         metrics.append(attn_entropy)
 
         # Correlation rank - numerical stability indicator
-        corr_rank = torch.linalg.matrix_rank(self._correlation).item() if self._correlation is not None else 0.0
+        corr_rank = torch.linalg.matrix_rank(self._correlation).float().mean().item() if self._correlation is not None else 0.0
         metrics.append(corr_rank)
 
         # Attention head utilization
