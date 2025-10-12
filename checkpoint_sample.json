@@ -1,0 +1,38 @@
+{
+  "epoch": 0,
+  "global_step": 101,
+  "loss": 0.8292797803878784,
+  "phase": "gentle",
+  "stats": {
+    "epoch": 0,
+    "fitness": {
+      "avg_fitness": 6.226887052257855,
+      "max_fitness": 9.591126322746277,
+      "min_fitness": 1.133130893111229,
+      "num_components": 8,
+      "total_computations": 12
+    },
+    "lifecycle": {},
+    "organism": {
+      "archive_coverage": 0.0,
+      "archive_max_fitness": -Infinity,
+      "archive_size": 0,
+      "generation": 101,
+      "pool_stats": {
+        "avg_fitness": 3.7821241579272527,
+        "size": 11,
+        "step": 101,
+        "total_culled": 24,
+        "total_spawned": 35
+      }
+    },
+    "stability": {
+      "current_phase": "gentle",
+      "gentle_steps": 500,
+      "phase_changes": 2,
+      "warmup_steps": 100
+    },
+    "step": 101
+  },
+  "step": 100
+}

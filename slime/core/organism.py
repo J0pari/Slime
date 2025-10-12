@@ -104,7 +104,7 @@ class Organism(nn.Module):
                 self.archive.discover_dimensions()
         else:
             for pod in pseudopods:
-                pod_fitness = (pod.effective_rank() * pod.coherence()).item()
+                pod_fitness = (pod.effective_rank() * pod.coherence()).mean().item()
                 try:
                     self.archive.add(behavior, pod_fitness, pod.state_dict(), generation=self._generation)
                 except ValueError:

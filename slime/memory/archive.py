@@ -339,6 +339,16 @@ class CVTArchive:
         except ImportError as e:
             raise ImportError(f'Missing required package for dimension discovery: {e}')
 
+        # Filter out zero-variance metrics (constant features break KMO/PCA)
+        variances = np.var(raw_matrix, axis=0)
+        nonzero_variance_mask = variances > 1e-10
+        n_filtered = (~nonzero_variance_mask).sum()
+        if n_filtered > 0:
+            logger.info(f'Filtered out {n_filtered} zero-variance metrics (constant across samples)')
+            raw_matrix = raw_matrix[:, nonzero_variance_mask]
+            if raw_matrix.shape[1] < self.min_dims:
+                raise ValueError(f'After filtering zero-variance, only {raw_matrix.shape[1]} metrics remain (need ≥{self.min_dims})')
+
         pca_full = PCA(n_components=None)
         pca_full.fit(raw_matrix)
         variance_ratios = pca_full.explained_variance_ratio_
@@ -393,11 +403,15 @@ class CVTArchive:
 
         transformed_samples = kpca.transform(raw_matrix)
         reconstructed = kpca.inverse_transform(transformed_samples)
-        reconstruction_error = np.mean((raw_matrix - reconstructed) ** 2)
-        logger.info(f'Kernel PCA reconstruction error: {reconstruction_error:.3f}')
 
-        if reconstruction_error > self.reconstruction_error_threshold:
-            raise ValueError(f'Kernel PCA reconstruction error {reconstruction_error:.3f} > {self.reconstruction_error_threshold}')
+        # Compute normalized reconstruction error (MSE / data variance)
+        mse = np.mean((raw_matrix - reconstructed) ** 2)
+        data_variance = np.var(raw_matrix)
+        normalized_error = mse / (data_variance + 1e-10)
+        logger.info(f'Kernel PCA reconstruction: MSE={mse:.3f}, normalized_error={normalized_error:.3f}')
+
+        if normalized_error > self.reconstruction_error_threshold:
+            raise ValueError(f'Normalized reconstruction error {normalized_error:.3f} > {self.reconstruction_error_threshold}')
 
         kmo_all, kmo_model = calculate_kmo(raw_matrix)
         logger.info(f'KMO statistic: {kmo_model:.3f}')

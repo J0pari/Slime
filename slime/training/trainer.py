@@ -123,6 +123,22 @@ class Trainer:
             epoch_losses.append(step_result['loss'])
             if batch_idx % self.config.log_interval == 0:
                 logger.info(f"Epoch {epoch} Step {batch_idx}: loss={step_result['loss']:.4f} phase={step_result['phase']}")
+
+            # Checkpoint every 5 steps
+            if self.checkpoint_results and batch_idx % 5 == 0:
+                step_checkpoint = {
+                    'epoch': epoch,
+                    'step': batch_idx,
+                    'global_step': self._step,
+                    'loss': step_result['loss'],
+                    'phase': step_result['phase'],
+                    'stats': self.get_stats()
+                }
+                self.results_checkpoint.checkpoint_test_result(
+                    f"step_{self._step:06d}",
+                    step_checkpoint,
+                    message=f"Step {self._step} checkpoint"
+                )
         return {'avg_loss': sum(epoch_losses) / len(epoch_losses), 'min_loss': min(epoch_losses), 'max_loss': max(epoch_losses)}
 
     def train(self, train_loader: DataLoader, val_loader: Optional[DataLoader]=None) -> Dict:
@@ -189,7 +205,7 @@ class Trainer:
         return {'avg_loss': sum(eval_losses) / len(eval_losses), 'min_loss': min(eval_losses), 'max_loss': max(eval_losses)}
 
     def get_stats(self) -> Dict:
-        stats = {'step': self._step, 'epoch': self._epoch, 'stability': self.stability_manager.stats(), 'lifecycle': self.lifecycle_manager.stats(), 'fitness': self.fitness_computer.stats()}
+        stats = {'step': self._step, 'epoch': self._epoch, 'stability': self.stability_manager.stats(), 'lifecycle': self.lifecycle_manager.get_statistics(), 'fitness': self.fitness_computer.stats()}
         if hasattr(self.model, 'organism'):
             stats['organism'] = self.model.organism.stats()
         return stats
