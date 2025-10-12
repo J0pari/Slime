@@ -25,6 +25,7 @@ class LifecycleManager:
     def __init__(self, config: Optional[LifecycleConfig]=None):
         self.config = config or LifecycleConfig()
         self._lifecycle = None
+        self._lifecycle_frozen = False
 
     def initialize(self, pool: DynamicPool, archive: CVTArchive):
         self._lifecycle = SimulatedAnnealingLifecycle(pool=pool, archive=archive, initial_temp=self.config.initial_temp, min_temp=self.config.min_temp, cooling_schedule=self.config.cooling_schedule, max_pool_size=self.config.max_pool_size, min_pool_size=self.config.min_pool_size, max_loss_ratio=self.config.max_loss_ratio, loss_ema_alpha=self.config.loss_ema_alpha, seed=self.config.seed)
