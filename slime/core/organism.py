@@ -45,7 +45,7 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
-        self.archive = CVTArchive(num_raw_metrics=15, target_dims=5, num_centroids=100, low_rank_k=32, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel='rbf', gamma=1.0, seed=42)
+        self.archive = CVTArchive(num_raw_metrics=15, variance_threshold=0.85, min_dims=3, max_dims=7, num_centroids=100, low_rank_k=32, delta_rank=8, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel_selection='auto', gc_interval=100, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
         if pool_config is None:
             pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)
@@ -81,9 +81,22 @@ class Organism(nn.Module):
         merged = torch.stack(outputs).mean(0)
         merged_latent = self.project_heads(merged)
         fitness = (max_rank * min_coherence).item()
-        for pod in pseudopods:
-            pod_behavior = (torch.clamp(pod.effective_rank(), 0, 1).item(), torch.clamp(pod.coherence(), 0, 1).item())
-            self.archive.add(pod, pod_behavior, pod.fitness)
+
+        if not self.archive._discovered:
+            raw_metrics = torch.cat([max_rank.unsqueeze(0), min_coherence.unsqueeze(0),
+                                     body.mean(0)[:13]]).detach().cpu().numpy().astype(np.float32)
+            self.archive.add_raw_metrics(raw_metrics)
+            if len(self.archive._raw_metrics_samples) >= 150:
+                logger.info("Warmup complete, discovering behavioral dimensions...")
+                self.archive.discover_dimensions()
+        else:
+            for pod in pseudopods:
+                pod_fitness = (pod.effective_rank() * pod.coherence()).item()
+                try:
+                    self.archive.add(behavior, pod_fitness, pod.state_dict(), generation=self._generation)
+                except ValueError:
+                    pass
+
         self.pseudopod_pool.step(behavior)
         new_state = FlowState(body=merged_latent, behavior=behavior, generation=self._generation, fitness=fitness)
         output = self.decode(merged_latent)

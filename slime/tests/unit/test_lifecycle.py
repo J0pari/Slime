@@ -6,7 +6,11 @@ from slime.memory.archive import CVTArchive
 
 @pytest.fixture
 def archive():
-    return CVTArchive(behavioral_dims=5, num_centroids=50, low_rank_k=32, seed=42)
+    arc = CVTArchive(num_raw_metrics=10, min_dims=5, max_dims=5, num_centroids=50, low_rank_k=32, seed=42)
+    for i in range(150):
+        arc.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    arc.discover_dimensions()
+    return arc
 
 @pytest.fixture
 def lifecycle(archive):
@@ -146,7 +150,10 @@ def test_lifecycle_no_freeze_normal_loss(lifecycle):
     assert not lifecycle.frozen
 
 def test_lifecycle_warmup_phase():
-    archive = CVTArchive(behavioral_dims=3, num_centroids=10, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    for i in range(150):
+        archive.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    archive.discover_dimensions()
     lifecycle = SimulatedAnnealingLifecycle(archive=archive, seed=42)
     lifecycle.step = 50
     lifecycle.loss_history = [1.0]
@@ -156,7 +163,7 @@ def test_lifecycle_warmup_phase():
 def test_spawn_component_with_archive_elite(lifecycle, archive):
     state_dict = {'W': torch.randn(32, 32)}
     behavior = np.array([0.5, 0.5, 0.5, 0.5, 0.5])
-    archive.add(behavior, 0.8, state_dict, 0, {})
+    archive.add(behavior, 0.8, state_dict, generation=0, metadata={})
 
     class MockComponent:
 
@@ -191,10 +198,18 @@ def test_annealing_exploration_exploitation_transition(lifecycle):
     assert early_prob > late_prob
 
 def test_seed_reproducibility():
-    archive1 = CVTArchive(behavioral_dims=3, num_centroids=10, seed=42)
+    archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    for i in range(150):
+        archive1.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    archive1.discover_dimensions()
     lifecycle1 = SimulatedAnnealingLifecycle(archive=archive1, seed=42)
-    archive2 = CVTArchive(behavioral_dims=3, num_centroids=10, seed=42)
+
+    archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    for i in range(150):
+        archive2.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    archive2.discover_dimensions()
     lifecycle2 = SimulatedAnnealingLifecycle(archive=archive2, seed=42)
+
     lifecycle1.step = 123
     lifecycle2.step = 123
     val1 = lifecycle1._deterministic_random('test')
@@ -202,10 +217,18 @@ def test_seed_reproducibility():
     assert val1 == val2
 
 def test_different_seeds_different_behavior():
-    archive1 = CVTArchive(behavioral_dims=3, num_centroids=10, seed=42)
+    archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    for i in range(150):
+        archive1.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    archive1.discover_dimensions()
     lifecycle1 = SimulatedAnnealingLifecycle(archive=archive1, seed=42)
-    archive2 = CVTArchive(behavioral_dims=3, num_centroids=10, seed=99)
+
+    archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=99)
+    for i in range(150):
+        archive2.add_raw_metrics(np.random.randn(10).astype(np.float32))
+    archive2.discover_dimensions()
     lifecycle2 = SimulatedAnnealingLifecycle(archive=archive2, seed=99)
+
     lifecycle1.step = 123
     lifecycle2.step = 123
     val1 = lifecycle1._deterministic_random('test')
