@@ -108,10 +108,11 @@ class Trainer:
             elif self._step % 100 == 0:
                 if self.stability_manager.should_allow_birth(self._step):
                     organism.pseudopod_pool._spawn_batch(state.behavior if state else None)
-            if 'force_cull_pool' in lifecycle_result['actions']:
-                self.lifecycle_manager.force_cull_pool(organism.pseudopod_pool)
-            if 'cull_archive' in lifecycle_result['actions']:
-                self.lifecycle_manager.cull_archive(organism.archive)
+            if lifecycle_result and 'actions' in lifecycle_result:
+                if 'force_cull_pool' in lifecycle_result['actions']:
+                    self.lifecycle_manager.force_cull_pool(organism.pseudopod_pool)
+                if 'cull_archive' in lifecycle_result['actions']:
+                    self.lifecycle_manager.cull_archive(organism.archive)
         self._step += 1
         return {'loss': total_loss.item(), 'reconstruction_loss': losses['reconstruction'].item(), 'rank_loss': losses['rank_regularization'].item(), 'coherence_loss': losses['coherence_regularization'].item(), 'diversity_loss': losses['diversity'].item(), 'phase': phase.name.value, 'lifecycle_frozen': self.lifecycle_manager._lifecycle_frozen}
 
