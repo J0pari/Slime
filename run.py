@@ -241,10 +241,11 @@ def create_full_system(config: ArchitectureConfig, device: torch.device):
             self.tracer = encoder.tracer
 
         def forward(self, x):
-            features, state = self.encoder(x)
-            # features is [batch, latent_dim], flatten if needed
+            reconstruction, state = self.encoder(x)
+            # Use the latent from state, not the reconstruction
+            features = state.body  # [batch, latent_dim]
             if features.dim() > 2:
-                features = features.mean(dim=1)  # Pool over sequence
+                features = features.mean(dim=1)  # Pool over sequence if needed
             logits = self.classifier(features)
             return logits, state
 
