@@ -68,6 +68,7 @@ class CVTArchive:
         self._raw_metrics_samples: List[np.ndarray] = []
         self._discovered = False
         self._gc_counter = 0
+        self._discovery_callbacks: List[Callable[[], None]] = []
 
         self._elite_metadata: Dict[int, Tuple[float, int, dict]] = {}
 
@@ -434,6 +435,12 @@ class CVTArchive:
         self.initialize_centroids(transformed_samples)
 
         logger.info(f'Discovered {self.behavioral_dims} behavioral dimensions from {self.num_raw_metrics} raw metrics')
+
+        # Notify observers that dimension discovery is complete
+        if hasattr(self, '_discovery_callbacks'):
+            for callback in self._discovery_callbacks:
+                callback()
+
         return True
 
     def transform_to_behavioral_space(self, raw_metrics: np.ndarray) -> np.ndarray:

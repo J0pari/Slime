@@ -50,6 +50,14 @@ class Organism(nn.Module):
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
         self.archive = CVTArchive(config=arch_config, variance_threshold=0.85, device=self.device, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel_selection='auto', gc_interval=100, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
+
+        # Register callback to update Mahalanobis covariance after dimension discovery
+        def _on_discovery_complete():
+            logger.info('Dimension discovery complete, updating chemotaxis to Mahalanobis distance')
+            self.chemotaxis.distance_metric = 'mahalanobis'
+            self.chemotaxis.update_covariance()
+
+        self.archive._discovery_callbacks.append(_on_discovery_complete)
         if pool_config is None:
             pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)
         self.pseudopod_pool = DynamicPool(component_factory=lambda: Pseudopod(head_dim, self.kernel, arch_config.fitness, arch_config.numerical, self.device, latent_dim=head_dim, stimulus_dim=head_dim, num_heads=arch_config.dimensions.num_heads), config=pool_config, arch_config=arch_config, bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, arch_config.fitness, arch_config.numerical, self.device), archive=self.archive, device=self.device)

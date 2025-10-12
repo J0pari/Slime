@@ -51,10 +51,10 @@ distance_metric='manhattan'
 
 ---
 
-### 3. Mahalanobis (Covariance-Weighted) - **RECOMMENDED**
+### 3. Mahalanobis (Covariance-Weighted) - **DEFAULT AFTER KERNEL PCA**
 ```python
 distance_metric='mahalanobis'
-chemotaxis.update_covariance()  # Must call after dimension discovery
+chemotaxis.update_covariance()  # Automatically called after dimension discovery
 ```
 
 **Formula:** `d = sqrt((p1 - p2)ᵀ Σ⁻¹ (p1 - p2))` where Σ is covariance matrix
@@ -116,17 +116,31 @@ d(x, z) ≤ max(d(x, y), d(y, z))
 
 ## Recommendation
 
-**For most use cases:** Start with **Euclidean** (default)
+**Default behavior:** Chemotaxis automatically uses **Mahalanobis distance** after Kernel PCA dimension discovery completes, falling back to **Euclidean** before discovery.
 
-**For correlated behavioral spaces:** Use **Mahalanobis** (best theoretical justification)
+This default is chosen because:
+- Kernel PCA discovers correlated behavioral dimensions
+- Mahalanobis respects the correlation structure discovered by Kernel PCA
+- Euclidean naively treats dimensions as independent (incorrect after PCA)
+- Covariance matrix is automatically computed from discovered centroids
+
+**To override the default:**
 ```python
-chemotaxis = Chemotaxis(archive, distance_metric='mahalanobis')
-chemotaxis.update_covariance()  # Call after dimension discovery
+# Force Euclidean even after dimension discovery
+chemotaxis = Chemotaxis(archive, distance_metric='euclidean')
+
+# Force Manhattan for robustness
+chemotaxis = Chemotaxis(archive, distance_metric='manhattan')
+
+# Force Cosine for normalized spaces
+chemotaxis = Chemotaxis(archive, distance_metric='cosine')
 ```
 
-**For computational efficiency:** Use **Manhattan**
-
-**For normalized behaviors:** Use **Cosine**
+**For manual Mahalanobis control:**
+```python
+chemotaxis = Chemotaxis(archive, distance_metric='mahalanobis')
+chemotaxis.update_covariance()  # Manually recompute covariance
+```
 
 ---
 

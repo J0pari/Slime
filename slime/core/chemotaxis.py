@@ -10,10 +10,14 @@ DistanceMetric = Literal['euclidean', 'manhattan', 'mahalanobis', 'cosine']
 class Chemotaxis:
 
     def __init__(self, archive: CVTArchive, device: Optional[torch.device]=None,
-                 distance_metric: DistanceMetric = 'euclidean'):
+                 distance_metric: Optional[DistanceMetric] = None):
         self.archive = archive
         self.device = device or torch.device('cuda')
-        self.distance_metric = distance_metric
+        # Default to Mahalanobis after Kernel PCA, Euclidean before
+        if distance_metric is None:
+            self.distance_metric = 'mahalanobis' if archive._dimensions_discovered else 'euclidean'
+        else:
+            self.distance_metric = distance_metric
         self._sources: Dict[Tuple[int, ...], Tuple[torch.Tensor, float]] = {}
         self._covariance_matrix = None  # For Mahalanobis
 
