@@ -76,8 +76,10 @@ class Trainer:
         fitness_scores = []
         if organism:
             for pod in organism.pseudopod_pool.get_all():
-                if hasattr(pod, '_correlation') and pod._correlation is not None:
-                    correlation_matrices.append(pod._correlation)
+                # Skip pseudopods that haven't been used yet (no correlation computed)
+                if not (hasattr(pod, '_correlation') and pod._correlation is not None):
+                    continue
+                correlation_matrices.append(pod._correlation)
                 if hasattr(pod, 'coherence'):
                     coherence_scores.append(pod.coherence())
                 if hasattr(pod, 'fitness'):
