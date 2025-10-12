@@ -39,7 +39,7 @@ class Elite:
 
 class CVTArchive:
 
-    def __init__(self, config: ArchitectureConfig, variance_threshold: float=0.85, device: torch.device=None, kmo_threshold: float=0.6, reconstruction_error_threshold: float=0.5, kernel_selection: str='auto', gc_interval: int=100, seed: int=42):
+    def __init__(self, config: ArchitectureConfig, variance_threshold: float=0.85, device: torch.device=None, trustworthiness_threshold: float=0.85, reconstruction_error_threshold: float=0.5, kernel_selection: str='auto', gc_interval: int=100, seed: int=42):
         self.num_raw_metrics = config.behavioral_space.num_raw_metrics
         self.variance_threshold = variance_threshold
         self.min_dims = config.behavioral_space.min_dims
@@ -48,7 +48,7 @@ class CVTArchive:
         self.low_rank_k = config.compression.low_rank_k
         self.delta_rank = config.compression.delta_rank
         self.device = device or torch.device('cuda')
-        self.kmo_threshold = kmo_threshold
+        self.trustworthiness_threshold = trustworthiness_threshold
         self.reconstruction_error_threshold = reconstruction_error_threshold
         self.kernel_selection = kernel_selection
         self.gc_interval = gc_interval
@@ -335,8 +335,8 @@ class CVTArchive:
 
         try:
             from sklearn.decomposition import PCA, KernelPCA
-            from factor_analyzer.factor_analyzer import calculate_kmo
-            from scipy.stats import bartlett
+            from sklearn.manifold import trustworthiness
+            from scipy.spatial import procrustes
         except ImportError as e:
             raise ImportError(f'Missing required package for dimension discovery: {e}')
 
@@ -379,11 +379,11 @@ class CVTArchive:
                     reconstructed = kpca.inverse_transform(transformed)
 
                     recon_error = np.mean((raw_matrix - reconstructed) ** 2)
-                    _, kmo_model = calculate_kmo(transformed)
+                    trust_score = trustworthiness(raw_matrix, transformed, n_neighbors=min(30, len(raw_matrix) - 1))
 
-                    score = recon_error / (kmo_model + 1e-6)
+                    score = recon_error / (trust_score + 1e-6)
 
-                    logger.debug(f"Kernel {kernel_name}{kernel_params}: recon_error={recon_error:.3f}, KMO={kmo_model:.3f}, score={score:.3f}")
+                    logger.debug(f"Kernel {kernel_name}{kernel_params}: recon_error={recon_error:.3f}, trustworthiness={trust_score:.3f}, score={score:.3f}")
 
                     if score < best_score:
                         best_kernel, best_params, best_score = kernel_name, kernel_params, score
@@ -414,19 +414,55 @@ class CVTArchive:
         if normalized_error > self.reconstruction_error_threshold:
             raise ValueError(f'Normalized reconstruction error {normalized_error:.3f} > {self.reconstruction_error_threshold}')
 
-        kmo_all, kmo_model = calculate_kmo(raw_matrix)
-        logger.info(f'KMO statistic: {kmo_model:.3f}')
+        # Compute Trustworthiness (preservation of k-nearest neighbors)
+        trust_score = trustworthiness(raw_matrix, transformed_samples, n_neighbors=min(30, len(raw_matrix) - 1))
+        logger.info(f'Trustworthiness: {trust_score:.3f}')
 
-        # Graceful handling of KMO threshold
-        if kmo_model < 0.5:
-            raise ValueError(f'KMO critically low ({kmo_model:.3f} < 0.5): metrics have insufficient correlation structure')
-        elif kmo_model < self.kmo_threshold:
-            logger.warning(f'KMO below threshold ({kmo_model:.3f} < {self.kmo_threshold}), proceeding with reduced confidence in dimension discovery')
+        # Compute Continuity (preservation of neighborhood structure)
+        from sklearn.metrics import pairwise_distances
+        dist_high = pairwise_distances(raw_matrix)
+        dist_low = pairwise_distances(transformed_samples)
 
-        stat, p_value = bartlett(*[raw_matrix[:, i] for i in range(raw_matrix.shape[1])])
-        logger.info(f"Bartlett's test: statistic={stat:.2f}, p-value={p_value:.4f}")
-        if p_value > 0.05:
-            raise ValueError(f"Bartlett's test p={p_value:.3f} > 0.05: metrics are uncorrelated")
+        # Continuity: percentage of k-nearest neighbors in low-D that were neighbors in high-D
+        k = min(30, len(raw_matrix) - 1)
+        continuity_sum = 0.0
+        for i in range(len(raw_matrix)):
+            neighbors_low = np.argsort(dist_low[i])[1:k+1]
+            neighbors_high = np.argsort(dist_high[i])[1:k+1]
+            continuity_sum += len(set(neighbors_low) & set(neighbors_high)) / k
+        continuity_score = continuity_sum / len(raw_matrix)
+        logger.info(f'Continuity: {continuity_score:.3f}')
+
+        # Compute Procrustes distance (shape similarity)
+        from scipy.linalg import orthogonal_procrustes
+        # Normalize both spaces
+        raw_centered = raw_matrix - raw_matrix.mean(axis=0)
+        transformed_centered = transformed_samples - transformed_samples.mean(axis=0)
+
+        # Project high-D to same dimensionality for comparison
+        from sklearn.decomposition import PCA as PCA_proj
+        pca_proj = PCA_proj(n_components=n_dims)
+        raw_projected = pca_proj.fit_transform(raw_centered)
+
+        # Find optimal rotation
+        R, _ = orthogonal_procrustes(raw_projected, transformed_centered)
+        raw_aligned = raw_projected @ R
+        procrustes_dist = np.sqrt(np.sum((raw_aligned - transformed_centered) ** 2) / len(raw_matrix))
+        logger.info(f'Procrustes distance: {procrustes_dist:.3f}')
+
+        # Validation thresholds
+        if trust_score < 0.7:
+            raise ValueError(f'Trustworthiness critically low ({trust_score:.3f} < 0.7): embeddings do not preserve neighborhoods')
+        elif trust_score < self.trustworthiness_threshold:
+            logger.warning(f'Trustworthiness below threshold ({trust_score:.3f} < {self.trustworthiness_threshold}), proceeding with reduced confidence')
+
+        if continuity_score < 0.7:
+            raise ValueError(f'Continuity critically low ({continuity_score:.3f} < 0.7): neighborhood structure not preserved')
+        elif continuity_score < 0.85:
+            logger.warning(f'Continuity below threshold ({continuity_score:.3f} < 0.85)')
+
+        if procrustes_dist > 0.25:
+            logger.warning(f'Procrustes distance high ({procrustes_dist:.3f} > 0.15): shape distortion detected')
 
         self.kpca_transform = kpca
         self.behavioral_dims = n_dims
@@ -595,24 +631,30 @@ class CVTArchive:
         return component
 
     def validate_behavioral_space(self, samples: np.ndarray) -> float:
+        """Validate behavioral space using Trustworthiness metric."""
         try:
-            from factor_analyzer.factor_analyzer import calculate_kmo
+            from sklearn.manifold import trustworthiness as compute_trust
         except ImportError:
-            logger.warning('factor_analyzer not installed, skipping KMO validation')
+            logger.warning('sklearn not installed, skipping validation')
             return 1.0
         if len(samples) < 50:
-            logger.warning(f'Only {len(samples)} behavioral samples, need ≥50 for reliable KMO test')
+            logger.warning(f'Only {len(samples)} behavioral samples, need ≥50 for reliable validation')
             return 0.0
         try:
-            from scipy.stats import bartlett
-            kmo_all, kmo_model = calculate_kmo(samples)
-            logger.info(f'KMO statistic: {kmo_model:.3f} (>0.6=acceptable, >0.8=good, >0.9=excellent)')
-            if kmo_model < self.kmo_threshold:
-                logger.error(f'KMO {kmo_model:.3f} < {self.kmo_threshold}: behavioral dimensions are not factorable!')
-            corr_matrix = np.corrcoef(samples, rowvar=False)
-            stat, p_value = bartlett(*[samples[:, i] for i in range(samples.shape[1])])
-            logger.info(f"Bartlett's test: statistic={stat:.2f}, p-value={p_value:.4f}")
-            return kmo_model
+            # Use stored raw metrics to compute trustworthiness
+            if not hasattr(self, '_raw_metrics_samples') or len(self._raw_metrics_samples) == 0:
+                logger.warning('No raw metrics available for validation')
+                return 0.0
+
+            raw_samples = np.array(self._raw_metrics_samples[:len(samples)], dtype=np.float32)
+            k = min(30, len(samples) - 1)
+            trust_score = compute_trust(raw_samples, samples, n_neighbors=k)
+            logger.info(f'Trustworthiness: {trust_score:.3f} (>0.85=good, >0.90=excellent)')
+
+            if trust_score < self.trustworthiness_threshold:
+                logger.error(f'Trustworthiness {trust_score:.3f} < {self.trustworthiness_threshold}: behavioral dimensions do not preserve neighborhoods!')
+
+            return trust_score
         except Exception as e:
             logger.error(f'Failed to validate behavioral space: {e}')
             return 0.0
