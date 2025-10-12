@@ -290,13 +290,45 @@ NO CYCLES
 
 ### 4. GPU Memory Safety
 - Kernels check allocation before launch
-- Organism enforces total memory budget
+- Organism enforces total memory budget (Decision #4: soft limits)
 - Pool culling triggered by OOM
 
 ### 5. Observability Injection
-- Metrics collector passed to Organism.__init__()
+- Metrics collector passed to Organism.__init__() (Decision #5)
 - All forward passes record to metrics
 - NO global state for metrics
+
+### 6. Timescale Separation (NEW: Critical for Training Stability)
+```
+Fast (every step):
+  - Weight updates via backprop
+  - Fitness tracking (EMA)
+  - Metrics collection
+
+Medium (every 100 steps):
+  - Fitness assessment
+  - Archive elite updates
+  - Pool spawn decisions
+
+Slow (every 1000 steps):
+  - Pool culling (apoptosis)
+  - Memory budget enforcement
+  - Behavioral space analysis
+```
+
+### 7. Archive Bootstrapping Policy (NEW: Prevents Gradient Conflicts)
+- Archive provides INITIALIZATION only
+- Bootstrapped components trained with rest of network
+- NO frozen parameters injected mid-training
+- Prevents mode collapse and gradient conflicts
+
+### 8. Fitness Correlation with Task (NEW: Essential for Meaningful Evolution)
+Fitness MUST correlate with loss reduction. Options:
+- Gradient magnitude (components affecting loss)
+- Attention alignment with targets
+- Information bottleneck metrics (mutual information)
+
+NOT attention entropy alone (doesn't correlate with task)
 
 ## Implementation Checklist
 
@@ -358,4 +390,26 @@ if memory > budget: pool.cull_worst(fraction=0.2)
 **Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
 ```python
 Organism.__init__(metrics_collector: Optional[MetricsCollector])
+```
+
+### 6. Fitness metric: Gradient magnitude ✓
+**Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
+```python
+fitness = grad_norm * attention_to_targets  # Task-relevant
+```
+
+### 7. Archive bootstrapping: Initialization only ✓
+**Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
+```python
+if new_component_needed:
+    component = archive.bootstrap_component(...)  # Init from elite
+    component.requires_grad_(True)  # Train with network
+```
+
+### 8. Timescale separation: 1x / 100x / 1000x ✓
+**Reasoning (Stability):** Separate fast (weights) from medium (fitness) from slow (lifecycle).
+```python
+if step % 1000 == 0: pool.cull()
+elif step % 100 == 0: archive.add_if_elite()
+fitness_ema.update()  # Every step
 ```
