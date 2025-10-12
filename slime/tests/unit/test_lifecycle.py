@@ -7,8 +7,12 @@ from slime.memory.archive import CVTArchive
 @pytest.fixture
 def archive():
     arc = CVTArchive(num_raw_metrics=10, min_dims=5, max_dims=5, num_centroids=50, low_rank_k=32, seed=42)
+    rng = np.random.RandomState(42)
+    latent = rng.randn(150, 5).astype(np.float32)
+    mixing_matrix = rng.randn(5, 10).astype(np.float32)
     for i in range(150):
-        arc.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
+        arc.add_raw_metrics(raw_metrics)
     arc.discover_dimensions()
     return arc
 
@@ -151,8 +155,12 @@ def test_lifecycle_no_freeze_normal_loss(lifecycle):
 
 def test_lifecycle_warmup_phase():
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    rng = np.random.RandomState(42)
+    latent = rng.randn(150, 3).astype(np.float32)
+    mixing_matrix = rng.randn(3, 10).astype(np.float32)
     for i in range(150):
-        archive.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
+        archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
     lifecycle = SimulatedAnnealingLifecycle(archive=archive, seed=42)
     lifecycle.step = 50
@@ -199,14 +207,22 @@ def test_annealing_exploration_exploitation_transition(lifecycle):
 
 def test_seed_reproducibility():
     archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    rng1 = np.random.RandomState(42)
+    latent1 = rng1.randn(150, 3).astype(np.float32)
+    mixing_matrix1 = rng1.randn(3, 10).astype(np.float32)
     for i in range(150):
-        archive1.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent1[i] @ mixing_matrix1 + rng1.randn(10).astype(np.float32) * 0.1
+        archive1.add_raw_metrics(raw_metrics)
     archive1.discover_dimensions()
     lifecycle1 = SimulatedAnnealingLifecycle(archive=archive1, seed=42)
 
     archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    rng2 = np.random.RandomState(42)
+    latent2 = rng2.randn(150, 3).astype(np.float32)
+    mixing_matrix2 = rng2.randn(3, 10).astype(np.float32)
     for i in range(150):
-        archive2.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent2[i] @ mixing_matrix2 + rng2.randn(10).astype(np.float32) * 0.1
+        archive2.add_raw_metrics(raw_metrics)
     archive2.discover_dimensions()
     lifecycle2 = SimulatedAnnealingLifecycle(archive=archive2, seed=42)
 
@@ -218,14 +234,22 @@ def test_seed_reproducibility():
 
 def test_different_seeds_different_behavior():
     archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=42)
+    rng1 = np.random.RandomState(42)
+    latent1 = rng1.randn(150, 3).astype(np.float32)
+    mixing_matrix1 = rng1.randn(3, 10).astype(np.float32)
     for i in range(150):
-        archive1.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent1[i] @ mixing_matrix1 + rng1.randn(10).astype(np.float32) * 0.1
+        archive1.add_raw_metrics(raw_metrics)
     archive1.discover_dimensions()
     lifecycle1 = SimulatedAnnealingLifecycle(archive=archive1, seed=42)
 
     archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=10, seed=99)
+    rng2 = np.random.RandomState(99)
+    latent2 = rng2.randn(150, 3).astype(np.float32)
+    mixing_matrix2 = rng2.randn(3, 10).astype(np.float32)
     for i in range(150):
-        archive2.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        raw_metrics = latent2[i] @ mixing_matrix2 + rng2.randn(10).astype(np.float32) * 0.1
+        archive2.add_raw_metrics(raw_metrics)
     archive2.discover_dimensions()
     lifecycle2 = SimulatedAnnealingLifecycle(archive=archive2, seed=99)
 

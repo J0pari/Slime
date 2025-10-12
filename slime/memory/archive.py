@@ -367,11 +367,11 @@ class CVTArchive:
                     reconstructed = kpca.inverse_transform(transformed)
 
                     recon_error = np.mean((raw_matrix - reconstructed) ** 2)
-                    kmo_stat, _ = calculate_kmo(transformed)
+                    _, kmo_model = calculate_kmo(transformed)
 
-                    score = recon_error / (kmo_stat + 1e-6)
+                    score = recon_error / (kmo_model + 1e-6)
 
-                    logger.debug(f"Kernel {kernel_name}{kernel_params}: recon_error={recon_error:.3f}, KMO={kmo_stat:.3f}, score={score:.3f}")
+                    logger.debug(f"Kernel {kernel_name}{kernel_params}: recon_error={recon_error:.3f}, KMO={kmo_model:.3f}, score={score:.3f}")
 
                     if score < best_score:
                         best_kernel, best_params, best_score = kernel_name, kernel_params, score

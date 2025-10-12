@@ -129,8 +129,8 @@ class ToyDataset(Dataset):
 
     def __init__(self, num_samples: int, seed: int=42):
         self.num_samples = num_samples
+        self.seed = seed
         torch.manual_seed(seed)
-        np.random.seed(seed)
 
     def __len__(self) -> int:
         return self.num_samples

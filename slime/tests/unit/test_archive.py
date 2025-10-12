@@ -5,8 +5,9 @@ from slime.memory.archive import CVTArchive
 
 def test_warmup_phase_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, seed=42)
+    rng = np.random.RandomState(42)
     for i in range(100):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = rng.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
     constraint('Archive collected 100 raw metric samples during warmup', lambda: (len(archive._raw_metrics_samples) == 100, len(archive._raw_metrics_samples), 100, {}))
     constraint('Archive not yet discovered (centroids=None)', lambda: (archive.centroids is None, archive.centroids, None, {'discovered': archive._discovered}))
@@ -14,8 +15,11 @@ def test_warmup_phase_constraint(constraint):
 
 def test_dimension_discovery_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    rng = np.random.RandomState(42)
+    latent = rng.randn(150, 3).astype(np.float32)
+    mixing_matrix = rng.randn(3, 10).astype(np.float32)
     for i in range(150):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     success = archive.discover_dimensions()
     constraint('Dimension discovery succeeded', lambda: (success == True, success, True, {}))
@@ -26,8 +30,11 @@ def test_dimension_discovery_constraint(constraint):
 
 def test_add_after_discovery_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    rng = np.random.RandomState(42)
+    latent = rng.randn(150, 3).astype(np.float32)
+    mixing_matrix = rng.randn(3, 10).astype(np.float32)
     for i in range(150):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
     state_dict = {'W_q': torch.randn(64, 64), 'W_k': torch.randn(64, 64), 'W_v': torch.randn(64, 64), 'W_o': torch.randn(64, 64)}
@@ -43,8 +50,11 @@ def test_add_after_discovery_constraint(constraint):
 
 def test_low_rank_compression_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=8, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    rng = np.random.RandomState(42)
+    latent = rng.randn(150, 3).astype(np.float32)
+    mixing_matrix = rng.randn(3, 10).astype(np.float32)
     for i in range(150):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = latent[i] @ mixing_matrix + rng.randn(10).astype(np.float32) * 0.1
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
     state_dict = {'W_q': torch.randn(64, 64), 'W_k': torch.randn(64, 64), 'W_v': torch.randn(64, 64), 'W_o': torch.randn(64, 64)}
@@ -63,25 +73,32 @@ def test_low_rank_compression_constraint(constraint):
 
 def test_centroid_determinism_constraint(constraint):
     archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
+    rng1 = np.random.RandomState(42)
+    latent1 = rng1.randn(150, 3).astype(np.float32)
+    mixing_matrix1 = rng1.randn(3, 10).astype(np.float32)
     for i in range(150):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = latent1[i] @ mixing_matrix1 + rng1.randn(10).astype(np.float32) * 0.1
         archive1.add_raw_metrics(raw_metrics)
     archive1.discover_dimensions()
     archive2 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
+    rng2 = np.random.RandomState(42)
+    latent2 = rng2.randn(150, 3).astype(np.float32)
+    mixing_matrix2 = rng2.randn(3, 10).astype(np.float32)
     for i in range(150):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = latent2[i] @ mixing_matrix2 + rng2.randn(10).astype(np.float32) * 0.1
         archive2.add_raw_metrics(raw_metrics)
     archive2.discover_dimensions()
     constraint('Deterministic centroid initialization (seed=42)', lambda: (np.allclose(archive1.centroids, archive2.centroids, atol=0.01), 'centroids_match', 'centroids_match', {'max_diff': float(np.max(np.abs(archive1.centroids - archive2.centroids))), 'mean_diff': float(np.mean(np.abs(archive1.centroids - archive2.centroids)))}))
 
 def test_warmup_phase_errors_constraint(constraint):
     archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
+    rng = np.random.RandomState(42)
     for i in range(100):
-        raw_metrics = np.random.randn(10).astype(np.float32)
+        raw_metrics = rng.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
     archive.discover_dimensions()
     try:
-        archive.add_raw_metrics(np.random.randn(10).astype(np.float32))
+        archive.add_raw_metrics(rng.randn(10).astype(np.float32))
         constraint('Cannot add raw metrics after discovery', lambda: (False, 'allowed', 'ValueError', {}))
     except ValueError as e:
         constraint('Cannot add raw metrics after discovery', lambda: (True, 'ValueError', 'ValueError', {'error_msg': str(e)}))
