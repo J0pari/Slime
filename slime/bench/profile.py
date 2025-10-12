@@ -157,6 +157,11 @@ class Profiler:
             backward_times.append((end - start) * 1000)  # ms
             model.zero_grad()
 
+        # Compute standard deviations
+        import statistics
+        forward_std = statistics.stdev(forward_times) if len(forward_times) > 1 else 0.0
+        backward_std = statistics.stdev(backward_times) if len(backward_times) > 1 else 0.0
+
         # Memory metrics
         if self.device.type == 'cuda':
             peak_memory_mb = torch.cuda.max_memory_allocated(self.device) / 1024**2
@@ -178,11 +183,11 @@ class Profiler:
         num_parameters = sum(p.numel() for p in model.parameters())
 
         logger.info(f"{model_name} profile complete: "
-                   f"forward={forward_time_ms:.2f}ms, "
-                   f"backward={backward_time_ms:.2f}ms, "
+                   f"forward={forward_time_ms:.2f}±{forward_std:.2f}ms, "
+                   f"backward={backward_time_ms:.2f}±{backward_std:.2f}ms, "
                    f"memory={peak_memory_mb:.1f}MB")
 
-        return ProfileResult(
+        result = ProfileResult(
             model_name=model_name,
             batch_size=batch_size,
             sequence_length=sequence_length,
@@ -195,6 +200,12 @@ class Profiler:
             tokens_per_second=tokens_per_second,
             num_parameters=num_parameters,
         )
+
+        # Store std deviations as extra metrics
+        result.extra_metrics['forward_std'] = forward_std
+        result.extra_metrics['backward_std'] = backward_std
+
+        return result
 
     def compare_models(
         self,
@@ -258,8 +269,8 @@ class Profiler:
             memory_reduction=memory_reduction,
             throughput_improvement=throughput_improvement,
             num_trials=self.profile_steps,
-            forward_std=0.0,  # TODO: compute std from trials
-            backward_std=0.0,
+            forward_std=baseline_result.extra_metrics.get('forward_std', 0.0),
+            backward_std=baseline_result.extra_metrics.get('backward_std', 0.0),
         )
 
         self.print_comparison(comparison)
@@ -356,8 +367,8 @@ def count_flops(
 ) -> int:
     """Estimate FLOPs for a forward pass.
 
-    Note: This is a rough estimate. For precise counting,
-    use specialized tools like fvcore or torchinfo.
+    Rough estimation based on parameter count and sequence length.
+    For precise counting, use fvcore or torchinfo.
 
     Args:
         model: Model to count FLOPs for
@@ -368,7 +379,15 @@ def count_flops(
     Returns:
         Estimated FLOPs (floating point operations)
     """
-    # TODO: Implement precise FLOP counting
-    # For now, return 0 as placeholder
-    logger.warning("FLOP counting not yet implemented")
-    return 0
+    num_params = sum(p.numel() for p in model.parameters())
+
+    # Rough estimate: 2 FLOPs per parameter per token (forward + backward)
+    # Attention: O(N^2 * D) for sequence length N, dimension D
+    attention_flops = 2 * batch_size * sequence_length * sequence_length * input_dim
+
+    # Linear layers: 2 * params (MAC = multiply + add)
+    linear_flops = 2 * num_params * batch_size * sequence_length
+
+    total_flops = attention_flops + linear_flops
+
+    return int(total_flops)

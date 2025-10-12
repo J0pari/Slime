@@ -85,22 +85,24 @@ class Pseudopod(nn.Module):
         """Compute normalized correlation matrix via injected kernel"""
         return self.kernel.correlation(k, v)
 
-    def _update_fitness(self, attn: torch.Tensor) -> None:
-        """Update fitness based on gradient magnitude (task-relevant).
+    def update_fitness_from_gradients(self) -> None:
+        """Update fitness from gradient magnitude (task-relevant).
 
         High gradient = component affects loss = high fitness
         Low gradient = component irrelevant = low fitness
 
-        NOTE: Actual gradient computed externally during backward pass.
-        This is a proxy using attention variance as surrogate.
-        Real implementation should use: fitness = grad_norm of parameters.
+        Call this AFTER backward pass to use actual gradients.
         """
-        # Proxy: attention variance (high variance = diverse attention)
-        # TODO: Replace with actual gradient magnitude after backward pass
-        variance = torch.var(attn, dim=-1).mean()
+        grad_norms = []
+        for param in self.parameters():
+            if param.grad is not None:
+                grad_norms.append(torch.norm(param.grad).item())
 
-        # Exponential moving average
-        self._fitness = 0.9 * self._fitness + 0.1 * variance.item()
+        if not grad_norms:
+            return
+
+        mean_grad = sum(grad_norms) / len(grad_norms)
+        self._fitness = 0.9 * self._fitness + 0.1 * mean_grad
 
     def get_attention_distance(self, attn: torch.Tensor) -> float:
         """Compute average attention distance (hardware-relevant metric).

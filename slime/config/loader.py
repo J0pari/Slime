@@ -70,5 +70,25 @@ def load_config(config_path: Path) -> ConfigSchema:
     with open(config_path) as f:
         data = yaml.safe_load(f)
 
-    # TODO: Add proper validation
-    return ConfigSchema(**data) if data else ConfigSchema()
+    if not data:
+        return ConfigSchema()
+
+    # Validate required fields
+    if 'model' in data:
+        model = data['model']
+        required = ['sensory_dim', 'latent_dim', 'head_dim']
+        for field in required:
+            if field not in model:
+                raise ValueError(f"Missing required model field: {field}")
+            if not isinstance(model[field], int) or model[field] <= 0:
+                raise ValueError(f"Invalid {field}: must be positive integer")
+
+    if 'archive' in data:
+        archive = data['archive']
+        if 'grid_size' in archive:
+            if not isinstance(archive['grid_size'], list):
+                raise ValueError("archive.grid_size must be a list")
+            if not all(isinstance(x, int) and x > 0 for x in archive['grid_size']):
+                raise ValueError("archive.grid_size must contain positive integers")
+
+    return ConfigSchema(**data)

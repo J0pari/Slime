@@ -109,10 +109,20 @@ class DynamicPool:
         Returns:
             List of relevant components
         """
-        # TODO: Implement spatial indexing for large pools
-        # For now, return all (simple baseline)
+        if behavior_location is None:
+            components = self._components
+        else:
+            # Sort by distance to behavior location
+            components_with_dist = []
+            for comp in self._components:
+                if hasattr(comp, 'last_behavior'):
+                    dist = sum((a - b) ** 2 for a, b in zip(comp.last_behavior, behavior_location))
+                    components_with_dist.append((dist, comp))
+                else:
+                    components_with_dist.append((float('inf'), comp))
 
-        components = self._components
+            components_with_dist.sort(key=lambda x: x[0])
+            components = [comp for _, comp in components_with_dist]
 
         if max_count is not None:
             components = components[:max_count]

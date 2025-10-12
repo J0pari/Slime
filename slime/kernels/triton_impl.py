@@ -11,14 +11,14 @@ from slime.proto.kernel import Kernel
 
 @triton.jit
 def fused_attention_kernel(
-    Q, K, V, Out,
+    Q, K_mat, V, Out,
     softmax_scale,
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
     stride_vb, stride_vh, stride_vn, stride_vk,
     stride_ob, stride_oh, stride_om, stride_ok,
-    B, H, M, N, K,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    B, H, M, N, D,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     """Fused flash attention kernel - sub-quadratic memory complexity.
 
@@ -34,19 +34,19 @@ def fused_attention_kernel(
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
 
     q_ptrs = Q + (pid_b * stride_qb + pid_h * stride_qh +
-                  offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk)
+                  offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
 
-    k_ptrs = K + (pid_b * stride_kb + pid_h * stride_kh +
-                  offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk)
+    k_ptrs = K_mat + (pid_b * stride_kb + pid_h * stride_kh +
+                  offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kk)
     v_ptrs = V + (pid_b * stride_vb + pid_h * stride_vh +
-                  offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk)
+                  offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk)
 
     q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0)
 
-    acc = tl.zeros([BLOCK_M, BLOCK_K], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
     m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
 
@@ -78,18 +78,18 @@ def fused_attention_kernel(
     acc = acc / l_i[:, None]
 
     o_ptrs = Out + (pid_b * stride_ob + pid_h * stride_oh +
-                    offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok)
+                    offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok)
     tl.store(o_ptrs, acc, mask=offs_m[:, None] < M)
 
 
 @triton.jit
 def correlation_kernel(
-    K, V, Corr,
+    K_mat, V, Corr,
     stride_kb, stride_kn, stride_kk,
     stride_vb, stride_vn, stride_vk,
     stride_cb, stride_ck1, stride_ck2,
-    B, N, K,
-    BLOCK_SIZE: tl.constexpr,
+    B, N,
+    BLOCK_SIZE: tl.constexpr, D: tl.constexpr,
 ):
     """Compute normalized correlation matrix K^T @ V efficiently.
 
@@ -102,17 +102,17 @@ def correlation_kernel(
 
     offs_i = pid_i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     offs_j = pid_j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    offs_k = tl.arange(0, K)
+    offs_d = tl.arange(0, D)
 
-    k_i_ptrs = K + (pid_b * stride_kb +
+    k_i_ptrs = K_mat + (pid_b * stride_kb +
                     offs_i[:, None] * stride_kn +
-                    offs_k[None, :] * stride_kk)
-    k_j_ptrs = K + (pid_b * stride_kb +
+                    offs_d[None, :] * stride_kk)
+    k_j_ptrs = K_mat + (pid_b * stride_kb +
                     offs_j[:, None] * stride_kn +
-                    offs_k[None, :] * stride_kk)
+                    offs_d[None, :] * stride_kk)
 
-    k_i = tl.load(k_i_ptrs, mask=offs_i[:, None] < N, other=0.0)
-    k_j = tl.load(k_j_ptrs, mask=offs_j[:, None] < N, other=0.0)
+    k_i = tl.load(k_i_ptrs, mask=offs_i[:, None] < N, other=0.0).to(tl.float32)
+    k_j = tl.load(k_j_ptrs, mask=offs_j[:, None] < N, other=0.0).to(tl.float32)
 
     corr_block = tl.dot(k_i, tl.trans(k_j))
 
@@ -218,7 +218,7 @@ class TritonKernel(Kernel):
         temperature: float = 1.0,
     ) -> torch.Tensor:
         """Fused flash attention with sub-quadratic memory complexity"""
-        B, H, M, K = query.shape
+        B, H, M, D = query.shape
         _, _, N, _ = key.shape
 
         assert query.shape[-1] == key.shape[-1] == value.shape[-1]
@@ -226,11 +226,11 @@ class TritonKernel(Kernel):
 
         output = torch.empty_like(query)
 
-        softmax_scale = 1.0 / (math.sqrt(K) * temperature)
+        softmax_scale = 1.0 / (math.sqrt(D) * temperature)
 
         BLOCK_M = 64
         BLOCK_N = 64
-        BLOCK_K = K
+        BLOCK_D = D
 
         grid = (B, H, triton.cdiv(M, BLOCK_M))
 
@@ -241,8 +241,8 @@ class TritonKernel(Kernel):
             key.stride(0), key.stride(1), key.stride(2), key.stride(3),
             value.stride(0), value.stride(1), value.stride(2), value.stride(3),
             output.stride(0), output.stride(1), output.stride(2), output.stride(3),
-            B, H, M, N, K,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+            B, H, M, N, D,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
         )
 
         return output
@@ -253,7 +253,7 @@ class TritonKernel(Kernel):
         value: torch.Tensor,
     ) -> torch.Tensor:
         """Compute normalized correlation matrix with fusion"""
-        B, N, K = key.shape
+        B, N, D = key.shape
 
         assert key.is_cuda and value.is_cuda
 
@@ -268,8 +268,8 @@ class TritonKernel(Kernel):
             key.stride(0), key.stride(1), key.stride(2),
             value.stride(0), value.stride(1), value.stride(2),
             corr.stride(0), corr.stride(1), corr.stride(2),
-            B, N, K,
-            BLOCK_SIZE=BLOCK_SIZE,
+            B, N,
+            BLOCK_SIZE=BLOCK_SIZE, D=D,
         )
 
         return corr
