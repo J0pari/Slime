@@ -4,16 +4,26 @@ import torch
 from typing import Tuple, Optional
 import logging
 
+try:
+    import triton
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
 logger = logging.getLogger(__name__)
 
 
 def cdiv(a: int, b: int) -> int:
     """Ceiling division"""
+    if HAS_TRITON:
+        return triton.cdiv(a, b)
     return (a + b - 1) // b
 
 
 def next_power_of_2(n: int) -> int:
     """Next power of 2 >= n"""
+    if HAS_TRITON:
+        return triton.next_power_of_2(n)
     if n <= 1:
         return 1
     return 1 << (n - 1).bit_length()

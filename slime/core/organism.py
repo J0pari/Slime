@@ -13,6 +13,18 @@ from slime.memory.pool import DynamicPool, PoolConfig
 from slime.proto.kernel import Kernel
 from slime.kernels.torch_fallback import TorchKernel
 from slime.observability.metrics import MetricsCollector
+import os
+from pathlib import Path
+
+try:
+    from slime.kernels.triton_impl import TritonKernel
+    HAS_TRITON = True
+    repo_root = Path(__file__).parent.parent.parent
+    tcc_path = repo_root / '.local' / 'tcc' / 'tcc.exe'
+    if tcc_path.exists():
+        os.environ.setdefault('CC', str(tcc_path))
+except ImportError:
+    HAS_TRITON = False
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +58,15 @@ class Organism(nn.Module):
         self.head_dim = head_dim
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        self.kernel = kernel if kernel is not None else TorchKernel(self.device)
+        if kernel is not None:
+            self.kernel = kernel
+        elif HAS_TRITON:
+            self.kernel = TritonKernel(self.device)
+            logger.info("Using Triton GPU kernels for maximum performance")
+        else:
+            self.kernel = TorchKernel(self.device)
+            logger.warning("Triton not available, using PyTorch fallback")
+
         self.metrics = metrics_collector
 
         self.encode = nn.Sequential(
