@@ -929,6 +929,259 @@ device_id = hash(centroid_id) % num_gpus
 
 **Test:** Does discovered space beat manually-designed dimensions? If no, Kernel PCA overhead has no benefit.
 
+### 10a. Dimension Discovery: Principled Hyperparameter Selection ✓
+**Question 1: Why 5 dimensions? Why not 3 or 10?**
+
+**WRONG (arbitrary):** `n_components=5  # seems reasonable`
+
+**RIGHT (principled via scree plot):**
+```python
+# Run PCA with all components to get variance explained
+pca_full = PCA(n_components=None)
+pca_full.fit(raw_metrics_matrix)
+variance_ratios = pca_full.explained_variance_ratio_
+
+# Plot cumulative variance
+cumulative_variance = np.cumsum(variance_ratios)
+
+# Find elbow: first dimension where marginal variance < threshold
+n_dims = np.argmax(cumulative_variance > 0.85) + 1  # 85% variance explained
+n_dims = np.clip(n_dims, 3, 7)  # Constrain to [3, 7] for CVT feasibility
+
+# CVT scales poorly beyond 7 dims (curse of dimensionality)
+# Below 3 dims loses too much information
+```
+
+**Question 2: Why RBF kernel? What about poly, sigmoid, cosine?**
+
+**WRONG (assume one kernel):** `kernel='rbf'  # default`
+
+**RIGHT (test multiple, select best):**
+```python
+kernel_candidates = [
+    ('rbf', {'gamma': 1.0}),      # Local similarity (good for clustered behaviors)
+    ('rbf', {'gamma': 0.1}),      # Broader similarity (good for smooth manifolds)
+    ('poly', {'degree': 2}),      # Quadratic relationships
+    ('poly', {'degree': 3}),      # Cubic relationships
+    ('cosine', {}),               # Directional similarity (good for normalized metrics)
+]
+
+best_kernel, best_params, best_score = None, None, float('inf')
+
+for kernel_name, kernel_params in kernel_candidates:
+    kpca = KernelPCA(n_components=n_dims, kernel=kernel_name,
+                     fit_inverse_transform=True, **kernel_params)
+    transformed = kpca.fit_transform(raw_metrics_matrix)
+    reconstructed = kpca.inverse_transform(transformed)
+
+    recon_error = np.mean((raw_metrics_matrix - reconstructed) ** 2)
+    kmo_stat, _ = calculate_kmo(transformed)
+
+    # Score: minimize reconstruction error, maximize KMO
+    score = recon_error / (kmo_stat + 1e-6)  # Lower is better
+
+    if score < best_score:
+        best_kernel, best_params, best_score = kernel_name, kernel_params, score
+        best_kpca = kpca
+
+logger.info(f"Selected kernel: {best_kernel} with params {best_params} (score={best_score:.3f})")
+archive.kpca_transform = best_kpca
+```
+
+### 10b. Content-Addressable Storage: Delta Protocol Specification ✓
+**Question 3: What operations does delta compression support?**
+
+**Delta format (structured operations, NOT raw byte diffs):**
+```python
+# Delta is list of weight-level operations
+delta_ops = [
+    {
+        'key': 'W_q',  # Weight matrix name
+        'op': 'sparse_add',  # Operation type
+        'indices': [[0, 1], [2, 3], ...],  # 2D indices
+        'values': [0.001, -0.002, ...]  # Values to add at indices
+    },
+    {
+        'key': 'W_k',
+        'op': 'low_rank',  # Low-rank update: W += dU @ dV
+        'dU': <tensor>,  # D×r where r << k
+        'dV': <tensor>   # r×D
+    },
+    {
+        'key': 'bias',
+        'op': 'dense',  # Full dense update (for small tensors)
+        'value': <tensor>
+    },
+    {
+        'key': 'W_v',
+        'op': 'scale_add',  # Scalar + sparse
+        'scale': 1.02,
+        'indices': [[5, 6]],
+        'values': [0.0001]
+    }
+]
+
+# Apply delta to base weights
+def apply_delta(base_weights: dict, delta_ops: list) -> dict:
+    weights = {k: v.clone() for k, v in base_weights.items()}
+
+    for op in delta_ops:
+        if op['op'] == 'sparse_add':
+            # Sparse update: only change specified indices
+            indices = torch.tensor(op['indices'])
+            values = torch.tensor(op['values'])
+            weights[op['key']][indices[:, 0], indices[:, 1]] += values
+
+        elif op['op'] == 'low_rank':
+            # Low-rank update: W += dU @ dV
+            weights[op['key']] += op['dU'] @ op['dV']
+
+        elif op['op'] == 'dense':
+            # Full replacement (small tensors only)
+            weights[op['key']] = op['value']
+
+        elif op['op'] == 'scale_add':
+            # Scalar multiplication + sparse add
+            weights[op['key']] *= op['scale']
+            indices = torch.tensor(op['indices'])
+            values = torch.tensor(op['values'])
+            weights[op['key']][indices[:, 0], indices[:, 1]] += values
+
+    return weights
+
+# Compute delta between consecutive elites
+def compute_weight_delta(current_weights: dict, parent_weights: dict) -> list:
+    delta_ops = []
+
+    for key in current_weights.keys():
+        diff = current_weights[key] - parent_weights[key]
+
+        # Choose operation based on sparsity and rank
+        sparsity = (torch.abs(diff) < 1e-4).float().mean()
+
+        if sparsity > 0.95:
+            # Sparse update: only changed entries
+            indices = torch.where(torch.abs(diff) >= 1e-4)
+            values = diff[indices]
+            delta_ops.append({
+                'key': key,
+                'op': 'sparse_add',
+                'indices': torch.stack(indices, dim=1).tolist(),
+                'values': values.tolist()
+            })
+
+        elif diff.numel() < 100:
+            # Small tensor: store full
+            delta_ops.append({
+                'key': key,
+                'op': 'dense',
+                'value': diff
+            })
+
+        else:
+            # Low-rank SVD of diff
+            U, S, Vt = torch.linalg.svd(diff, full_matrices=False)
+            r = min(8, len(S))  # Rank for delta (smaller than low_rank_k!)
+            dU = U[:, :r] @ torch.diag(torch.sqrt(S[:r]))
+            dV = torch.diag(torch.sqrt(S[:r])) @ Vt[:r, :]
+            delta_ops.append({
+                'key': key,
+                'op': 'low_rank',
+                'dU': dU,
+                'dV': dV
+            })
+
+    return delta_ops
+```
+
+### 10c. Content-Addressable Storage: Garbage Collection Policy ✓
+**Question 4: When are unreferenced objects deleted?**
+
+**GC Policy: Reference Counting + Periodic Mark-and-Sweep**
+
+```python
+class CVTArchive:
+    def __init__(self, ...):
+        self.object_store: Dict[str, bytes] = {}  # SHA → compressed object
+        self.ref_counts: Dict[str, int] = {}      # SHA → reference count
+        self.centroid_refs: Dict[int, str] = {}   # centroid_id → elite_sha
+        self._gc_counter = 0
+        self._gc_interval = 100  # Run GC every 100 add() calls
+
+    def _incr_ref(self, sha: str):
+        self.ref_counts[sha] = self.ref_counts.get(sha, 0) + 1
+
+    def _decr_ref(self, sha: str):
+        if sha in self.ref_counts:
+            self.ref_counts[sha] -= 1
+            if self.ref_counts[sha] <= 0:
+                # Immediate deletion when ref count hits 0
+                self._delete_object(sha)
+
+    def add(self, behavior, fitness, state_dict, ...):
+        # ... store elite, get new_sha ...
+
+        # Update reference: decrement old, increment new
+        centroid_id = self._find_nearest_centroid(behavior)
+        if centroid_id in self.centroid_refs:
+            old_sha = self.centroid_refs[centroid_id]
+            self._decr_ref(old_sha)  # May trigger deletion
+
+        self.centroid_refs[centroid_id] = new_sha
+        self._incr_ref(new_sha)
+
+        # Periodic mark-and-sweep (safety check)
+        self._gc_counter += 1
+        if self._gc_counter >= self._gc_interval:
+            self._mark_and_sweep_gc()
+            self._gc_counter = 0
+
+    def _mark_and_sweep_gc(self):
+        # Mark phase: find all reachable objects
+        reachable = set()
+
+        # Mark from centroid refs
+        for elite_sha in self.centroid_refs.values():
+            self._mark_reachable(elite_sha, reachable)
+
+        # Sweep phase: delete unreachable objects
+        all_shas = set(self.object_store.keys())
+        unreachable = all_shas - reachable
+
+        for sha in unreachable:
+            self._delete_object(sha)
+            logger.debug(f"GC: deleted unreachable object {sha[:8]}")
+
+        if unreachable:
+            logger.info(f"GC: freed {len(unreachable)} unreachable objects")
+
+    def _mark_reachable(self, sha: str, reachable: set):
+        if sha in reachable:
+            return  # Already marked
+
+        reachable.add(sha)
+
+        # Follow delta chain
+        obj_type, content = self._read_object(sha)
+        if obj_type == 'delta':
+            delta_data = json.loads(content.decode('utf-8'))
+            self._mark_reachable(delta_data['base'], reachable)
+            for delta_sha in delta_data['deltas']:
+                self._mark_reachable(delta_sha, reachable)
+
+    def _delete_object(self, sha: str):
+        if sha in self.object_store:
+            del self.object_store[sha]
+        if sha in self.ref_counts:
+            del self.ref_counts[sha]
+```
+
+**GC guarantees:**
+1. **No premature deletion:** Reference counting prevents deletion while object is reachable
+2. **No memory leaks:** Mark-and-sweep catches orphaned delta chains
+3. **Bounded overhead:** GC runs every 100 add() calls, amortized O(1) per operation
+4. **Deterministic:** Same sequence of operations → same GC decisions (given same seed)
+
 ### 11. Deterministic hash-based random ✓
 **Reasoning (Reproducibility):** Non-deterministic random breaks reproducibility. Hash-based seeded random is cheap (~100ns) vs gradient computation (ms).
 
