@@ -104,8 +104,22 @@ def test_effective_rank_batch_constraint(constraint, kernel, device):
     constraint('All ranks <= matrix dimension', lambda: (all_bounded, all_bounded, True, {}))
 
 def test_attention_gradient_flow_constraint(constraint, kernel, device):
-    # Skip gradient test if kernel doesn't support autograd
-    pytest.skip("Triton kernel attention may not support autograd - gradient flow test skipped")
+    """Test that gradients flow through CA activation and value propagation."""
+    Q = torch.randn(2, 4, 32, 16, device=device, dtype=torch.float32, requires_grad=True)
+    K = torch.randn(2, 4, 32, 16, device=device, dtype=torch.float32, requires_grad=True)
+    V = torch.randn(2, 4, 32, 16, device=device, dtype=torch.float32, requires_grad=True)
+
+    output = kernel.attention(Q, K, V, temperature=1.0)
+    loss = output.sum()
+    loss.backward()
+
+    q_has_grad = Q.grad is not None and Q.grad.abs().sum() > 0
+    k_has_grad = K.grad is not None and K.grad.abs().sum() > 0
+    v_has_grad = V.grad is not None and V.grad.abs().sum() > 0
+
+    constraint('Q receives gradients', lambda: (q_has_grad, Q.grad.abs().sum().item() if Q.grad is not None else 0, '>0', {}))
+    constraint('K receives gradients', lambda: (k_has_grad, K.grad.abs().sum().item() if K.grad is not None else 0, '>0', {}))
+    constraint('V receives gradients', lambda: (v_has_grad, V.grad.abs().sum().item() if V.grad is not None else 0, '>0', {}))
 
 def test_attention_numerical_stability_zeros_constraint(constraint, kernel, device):
     Q = torch.zeros(1, 1, 64, 32, device=device, dtype=torch.float16)

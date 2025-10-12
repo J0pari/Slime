@@ -368,38 +368,22 @@ def effective_rank_kernel(
     tl.store(Rank + pid, approx_rank)
 
 
-class TritonKernel(Kernel):
+class CAAttentionAutograd(torch.autograd.Function):
     """
-    Triton-accelerated implementation of Kernel protocol for Neural CA.
+    Autograd wrapper for Triton CA activation + value propagation.
 
-    Provides GPU-optimized kernels for:
-    - Multi-head CA projections
-    - Flow-Lenia growth function
-    - CA activation patterns
-    - Value propagation
-    - Mass conservation
-    - Correlation and effective rank (for behavioral metrics)
+    Enables gradient flow through Triton-compiled kernels by falling back
+    to PyTorch operations for backward pass.
     """
 
-    def __init__(self, device: torch.device, numerical_config):
-        self.device = device
-        self.numerical_config = numerical_config
-
-    def attention(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
-        """
-        Legacy attention interface - redirects to correlation-based CA.
-
-        For Neural CA, this computes CA activation pattern and value propagation.
-        """
-        # Note: This is kept for protocol compatibility
-        # Neural CA uses ca_activation + ca_value_propagation instead
+    @staticmethod
+    def forward(ctx, query, key, value, device, numerical_config):
+        """Forward: use Triton kernels for speed."""
         B, H, M, D = query.shape
         _, _, N, _ = key.shape
 
-        assert query.is_cuda and key.is_cuda and value.is_cuda
-
-        # Compute CA activation pattern (similar to attention scores)
-        ca_activation = torch.empty(B, H, M, N, device=self.device, dtype=query.dtype)
+        # Compute CA activation using Triton kernel
+        ca_activation = torch.empty(B, H, M, N, device=device, dtype=query.dtype)
 
         BLOCK_Q = 64
         BLOCK_K = 64
@@ -414,7 +398,7 @@ class TritonKernel(Kernel):
             BLOCK_Q=BLOCK_Q, BLOCK_K=BLOCK_K
         )
 
-        # Apply CA pattern to values
+        # Apply CA pattern to values using Triton kernel
         output = torch.empty_like(query)
 
         BLOCK_D = D
@@ -429,7 +413,69 @@ class TritonKernel(Kernel):
             BLOCK_Q=BLOCK_Q, BLOCK_K=BLOCK_K, BLOCK_D=BLOCK_D
         )
 
+        # Save for backward
+        ctx.save_for_backward(query, key, value, ca_activation)
+        ctx.device = device
+        ctx.numerical_config = numerical_config
+
         return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward: use PyTorch for autograd compatibility."""
+        query, key, value, ca_activation = ctx.saved_tensors
+        device = ctx.device
+        eps = ctx.numerical_config.epsilon
+
+        B, H, M, D = query.shape
+        _, _, N, _ = key.shape
+
+        # Recompute CA activation pattern for gradients using PyTorch
+        # perception ⊗ interaction / sqrt(D)
+        scale = 1.0 / math.sqrt(float(D))
+        scores = torch.einsum('bhqd,bhkd->bhqk', query, key) * scale
+
+        # Gradient through value propagation: d(scores @ V) / d(scores, V)
+        grad_scores = torch.einsum('bhqd,bhkd->bhqk', grad_output, value)
+        grad_value = torch.einsum('bhqk,bhqd->bhkd', scores, grad_output)
+
+        # Gradient through scores = Q @ K^T
+        grad_query = torch.einsum('bhqk,bhkd->bhqd', grad_scores, key) * scale
+        grad_key = torch.einsum('bhqk,bhqd->bhkd', grad_scores.transpose(-2, -1), query) * scale
+
+        return grad_query, grad_key, grad_value, None, None
+
+
+class TritonKernel(Kernel):
+    """
+    Triton-accelerated implementation of Kernel protocol for Neural CA.
+
+    Provides GPU-optimized kernels for:
+    - Multi-head CA projections
+    - Flow-Lenia growth function
+    - CA activation patterns
+    - Value propagation
+    - Mass conservation
+    - Correlation and effective rank (for behavioral metrics)
+
+    Uses autograd wrappers for gradient flow during training.
+    """
+
+    def __init__(self, device: torch.device, numerical_config):
+        self.device = device
+        self.numerical_config = numerical_config
+
+    def attention(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+        """
+        Legacy attention interface - redirects to correlation-based CA.
+
+        For Neural CA, this computes CA activation pattern and value propagation.
+        Uses autograd wrapper to enable gradient flow.
+        """
+        assert query.is_cuda and key.is_cuda and value.is_cuda
+
+        # Use autograd-enabled function
+        return CAAttentionAutograd.apply(query, key, value, self.device, self.numerical_config)
 
     def correlation(self, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Compute normalized correlation K @ K^T."""
