@@ -338,6 +338,80 @@ def correlation_kernel(
 
 
 @triton.jit
+def simulated_annealing_kernel(
+    Fitness, Archive_Max_Fitness, Temperature,  # Scalars (1D tensors)
+    Birth_Probs, Death_Probs,  # Outputs: [batch]
+    stride_f, stride_b, stride_d,
+    B: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    GPU-accelerated Simulated Annealing birth/death probabilities.
+
+    Computes:
+    - Birth prob = exp(-fitness_deficit / (temp * max_fitness + eps))
+    - Death prob = 1 - exp(-fitness_gap / (temp * max_fitness + eps))
+
+    Replaces CPU numpy operations with GPU Triton.
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+
+    # Load fitness values
+    fitness_ptrs = Fitness + offs * stride_f
+    fitness = tl.load(fitness_ptrs, mask=offs < B, other=0.0)
+
+    # Load scalars (broadcast)
+    max_fitness = tl.load(Archive_Max_Fitness)
+    temp = tl.load(Temperature)
+
+    eps = 1e-6
+    denom = temp * max_fitness + eps
+
+    # Birth probability: exp(-deficit / denom)
+    deficit = tl.maximum(0.0, max_fitness - fitness)
+    birth_prob = tl.exp(-deficit / denom)
+
+    # Death probability: 1 - exp(-gap / denom)
+    gap = tl.maximum(0.0, max_fitness - fitness)
+    death_prob = 1.0 - tl.exp(-gap / denom)
+
+    # Store results
+    birth_ptrs = Birth_Probs + offs * stride_b
+    death_ptrs = Death_Probs + offs * stride_d
+    tl.store(birth_ptrs, birth_prob, mask=offs < B)
+    tl.store(death_ptrs, death_prob, mask=offs < B)
+
+
+@triton.jit
+def temperature_cooling_kernel(
+    Initial_Temp, Progress,  # Scalars
+    Temperature,  # Output scalar
+    schedule: tl.constexpr,  # 0=linear, 1=exponential, 2=logarithmic
+):
+    """
+    GPU-accelerated temperature cooling schedules.
+
+    - Linear: T = T0 * (1 - progress)
+    - Exponential: T = T0 * exp(-5 * progress)
+    - Logarithmic: T = T0 / (1 + log(1 + progress * 10))
+
+    Replaces CPU numpy operations.
+    """
+    t0 = tl.load(Initial_Temp)
+    p = tl.load(Progress)
+
+    if schedule == 0:  # Linear
+        temp = t0 * (1.0 - p)
+    elif schedule == 1:  # Exponential
+        temp = t0 * tl.exp(-5.0 * p)
+    else:  # Logarithmic
+        temp = t0 / (1.0 + tl.log(1.0 + p * 10.0))
+
+    tl.store(Temperature, temp)
+
+
+@triton.jit
 def effective_rank_kernel(
     Matrix,  # [batch, seq_len, seq_len]
     Rank,  # [batch]
@@ -594,3 +668,71 @@ class TritonKernel(Kernel):
             )
 
             return rank
+
+    def simulated_annealing_probs(self, fitness: torch.Tensor, max_fitness: float, temperature: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        GPU-accelerated Simulated Annealing birth/death probabilities.
+
+        Args:
+            fitness: [batch] fitness values on GPU
+            max_fitness: scalar maximum fitness
+            temperature: scalar current temperature
+
+        Returns:
+            birth_probs: [batch] probabilities for spawning
+            death_probs: [batch] probabilities for culling
+        """
+        assert fitness.is_cuda
+        B = fitness.shape[0]
+
+        # Create scalar tensors on GPU
+        max_fit_tensor = torch.tensor([max_fitness], device=self.device, dtype=torch.float32)
+        temp_tensor = torch.tensor([temperature], device=self.device, dtype=torch.float32)
+
+        # Allocate outputs
+        birth_probs = torch.empty(B, device=self.device, dtype=torch.float32)
+        death_probs = torch.empty(B, device=self.device, dtype=torch.float32)
+
+        BLOCK_SIZE = 128
+        grid = (triton.cdiv(B, BLOCK_SIZE),)
+
+        simulated_annealing_kernel[grid](
+            fitness, max_fit_tensor, temp_tensor,
+            birth_probs, death_probs,
+            fitness.stride(0), birth_probs.stride(0), death_probs.stride(0),
+            B=B,
+            BLOCK_SIZE=BLOCK_SIZE
+        )
+
+        return birth_probs, death_probs
+
+    def temperature_cooling(self, initial_temp: float, progress: float, schedule: str = 'logarithmic') -> float:
+        """
+        GPU-accelerated temperature cooling.
+
+        Args:
+            initial_temp: initial temperature
+            progress: progress in [0, 1]
+            schedule: 'linear', 'exponential', or 'logarithmic'
+
+        Returns:
+            cooled temperature
+        """
+        # Map schedule to integer
+        schedule_map = {'linear': 0, 'exponential': 1, 'logarithmic': 2}
+        schedule_int = schedule_map.get(schedule, 2)
+
+        # Create scalar tensors on GPU
+        init_temp_tensor = torch.tensor([initial_temp], device=self.device, dtype=torch.float32)
+        progress_tensor = torch.tensor([progress], device=self.device, dtype=torch.float32)
+        temp_output = torch.empty(1, device=self.device, dtype=torch.float32)
+
+        grid = (1,)
+
+        temperature_cooling_kernel[grid](
+            init_temp_tensor, progress_tensor,
+            temp_output,
+            schedule=schedule_int
+        )
+
+        return temp_output.item()
