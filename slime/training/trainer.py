@@ -100,7 +100,7 @@ class Trainer:
         phase = self.stability_manager.get_phase(self._step)
         lifecycle_result = self.lifecycle_manager.step_lifecycle(current_loss=total_loss.item())
         if organism:
-            if not self.lifecycle_manager.should_allow_lifecycle_changes():
+            if not self.stability_manager.should_allow_birth(self._step):
                 pass
             elif self._step % 1000 == 0:
                 if self.stability_manager.should_allow_culling(self._step):
