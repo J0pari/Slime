@@ -516,23 +516,29 @@ class CAAttentionAutograd(torch.autograd.Function):
         device = ctx.device
         eps = ctx.numerical_config.epsilon
 
-        B, H, M, D = query.shape
-        _, _, N, _ = key.shape
+        # Ensure CUDA context is initialized before cuBLAS operations
+        if query.is_cuda and not torch.cuda.is_initialized():
+            torch.cuda.init()
 
-        # Recompute CA activation pattern for gradients using PyTorch
-        # perception ⊗ interaction / sqrt(D)
-        scale = 1.0 / math.sqrt(float(D))
-        scores = torch.einsum('bhqd,bhkd->bhqk', query, key) * scale
+        # Set device context explicitly to avoid cuBLAS context warnings
+        with torch.cuda.device(device):
+            B, H, M, D = query.shape
+            _, _, N, _ = key.shape
 
-        # Gradient through value propagation: d(scores @ V) / d(scores, V)
-        grad_scores = torch.einsum('bhqd,bhkd->bhqk', grad_output, value)
-        grad_value = torch.einsum('bhqk,bhqd->bhkd', scores, grad_output)
+            # Recompute CA activation pattern for gradients using PyTorch
+            # perception ⊗ interaction / sqrt(D)
+            scale = 1.0 / math.sqrt(float(D))
+            scores = torch.einsum('bhqd,bhkd->bhqk', query, key) * scale
 
-        # Gradient through scores = Q @ K^T
-        grad_query = torch.einsum('bhqk,bhkd->bhqd', grad_scores, key) * scale
-        grad_key = torch.einsum('bhqk,bhqd->bhkd', grad_scores.transpose(-2, -1), query) * scale
+            # Gradient through value propagation: d(scores @ V) / d(scores, V)
+            grad_scores = torch.einsum('bhqd,bhkd->bhqk', grad_output, value)
+            grad_value = torch.einsum('bhqk,bhqd->bhkd', scores, grad_output)
 
-        return grad_query, grad_key, grad_value, None, None, None
+            # Gradient through scores = Q @ K^T
+            grad_query = torch.einsum('bhqk,bhkd->bhqd', grad_scores, key) * scale
+            grad_key = torch.einsum('bhqk,bhqd->bhkd', grad_scores.transpose(-2, -1), query) * scale
+
+            return grad_query, grad_key, grad_value, None, None, None
 
 
 class TritonKernel(Kernel):
