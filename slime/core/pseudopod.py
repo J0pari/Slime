@@ -196,26 +196,26 @@ class Pseudopod(nn.Module):
             metrics.extend([0.0, 0.0, 0.0])
 
         # Weight gradient norms (change during training)
-        q_grad_norm = torch.norm(self.query_weight.grad).item() if self.query_weight.grad is not None else 0.0
-        k_grad_norm = torch.norm(self.key_weight.grad).item() if self.key_weight.grad is not None else 0.0
-        v_grad_norm = torch.norm(self.value_weight.grad).item() if self.value_weight.grad is not None else 0.0
+        q_grad_norm = torch.norm(self.neural_ca.perception_weight.grad).item() if self.neural_ca.perception_weight.grad is not None else 0.0
+        k_grad_norm = torch.norm(self.neural_ca.interaction_weight.grad).item() if self.neural_ca.interaction_weight.grad is not None else 0.0
+        v_grad_norm = torch.norm(self.neural_ca.value_weight.grad).item() if self.neural_ca.value_weight.grad is not None else 0.0
         metrics.extend([q_grad_norm, k_grad_norm, v_grad_norm])
 
         # Weight magnitudes (evolve during training)
-        q_weight_norm = torch.norm(self.query_weight).item()
-        k_weight_norm = torch.norm(self.key_weight).item()
-        v_weight_norm = torch.norm(self.value_weight).item()
+        q_weight_norm = torch.norm(self.neural_ca.perception_weight).item()
+        k_weight_norm = torch.norm(self.neural_ca.interaction_weight).item()
+        v_weight_norm = torch.norm(self.neural_ca.value_weight).item()
         metrics.extend([q_weight_norm, k_weight_norm, v_weight_norm])
 
         # Attention sparsity - actual runtime behavior
-        attn_sparsity = (attn < 0.01).float().mean().item()
-        attn_sparsity_adaptive = (attn < (attn.mean() * 0.1)).float().mean().item()
-        attn_top1_mass = attn.max(dim=-1)[0].mean().item()  # concentration
+        attn_sparsity = (ca_pattern < 0.01).float().mean().item()
+        attn_sparsity_adaptive = (ca_pattern < (ca_pattern.mean() * 0.1)).float().mean().item()
+        attn_top1_mass = ca_pattern.max(dim=-1)[0].mean().item()  # concentration
         metrics.extend([attn_sparsity, attn_sparsity_adaptive, attn_top1_mass])
 
         # === Activation Statistics (10 metrics) ===
         # Actual runtime tensor statistics
-        attn_variance = torch.var(attn).item()
+        attn_variance = torch.var(ca_pattern).item()
         output_variance = torch.var(output).item()
         output_mean = torch.mean(output).item()
         output_std = torch.std(output).item()
@@ -224,18 +224,18 @@ class Pseudopod(nn.Module):
         metrics.extend([attn_variance, output_variance, output_mean, output_std, output_max, output_min])
 
         # Information content
-        attn_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean().item()
+        attn_entropy = -(ca_pattern * torch.log(ca_pattern + self.numerical_config.epsilon)).sum(dim=-1).mean().item()
         metrics.append(attn_entropy)
 
         # Dynamic range
-        attn_dynamic_range = (attn.max() - attn.min()).item()
+        attn_dynamic_range = (ca_pattern.max() - ca_pattern.min()).item()
         output_dynamic_range = (output.max() - output.min()).item()
         metrics.extend([attn_dynamic_range, output_dynamic_range])
 
         # === REAL Compute Metrics (8 metrics) ===
         # Attention pattern complexity - affects compute
-        attn_unique_ratio = (torch.unique(attn.flatten()).numel() / attn.numel())  # uniqueness
-        attn_outlier_ratio = ((attn > attn.mean() + 2*attn.std()).float().mean().item())  # outliers
+        attn_unique_ratio = (torch.unique(ca_pattern.flatten()).numel() / ca_pattern.numel())  # uniqueness
+        attn_outlier_ratio = ((ca_pattern > ca_pattern.mean() + 2*ca_pattern.std()).float().mean().item())  # outliers
         metrics.extend([attn_unique_ratio, attn_outlier_ratio])
 
         # Output activation patterns - actual compute behavior
@@ -245,15 +245,15 @@ class Pseudopod(nn.Module):
         metrics.extend([output_active_ratio, output_saturation, output_dead_ratio])
 
         # Weight update dynamics
-        if self.query_weight.grad is not None:
-            weight_grad_ratio = (torch.norm(self.query_weight.grad) / (torch.norm(self.query_weight) + 1e-10)).item()
+        if self.neural_ca.perception_weight.grad is not None:
+            weight_grad_ratio = (torch.norm(self.neural_ca.perception_weight.grad) / (torch.norm(self.neural_ca.perception_weight) + 1e-10)).item()
         else:
             weight_grad_ratio = 0.0
         metrics.append(weight_grad_ratio)
 
         # Correlation structure - changes during training
         try:
-            attn_head_correlation = torch.corrcoef(attn.mean(dim=2).flatten(0, 1)).abs().mean().item() if num_heads > 1 else 0.0
+            attn_head_correlation = torch.corrcoef(ca_pattern.mean(dim=2).flatten(0, 1)).abs().mean().item() if num_heads > 1 else 0.0
         except:
             attn_head_correlation = 0.0
         try:

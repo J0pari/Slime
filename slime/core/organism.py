@@ -37,7 +37,7 @@ class Organism(nn.Module):
         if kernel is not None:
             self.kernel = kernel
         elif HAS_TRITON:
-            self.kernel = TritonKernel(self.device)
+            self.kernel = TritonKernel(self.device, arch_config.numerical)
             logger.info('Using Triton GPU kernels for maximum performance')
         else:
             self.kernel = TorchKernel(arch_config.numerical, self.device)
