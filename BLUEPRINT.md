@@ -389,12 +389,15 @@ else:
 - [ ] **tests/ablations/test_with_without_archive.py** - Prove archive helps
 - [ ] **bench/toy_tasks.py** - Simple tasks (y=sin(x), XOR, parity)
 
-### Phase 1 Completion 
-- [ ] kernels/triton_impl.py (Triton optimizations)
+### Phase 1 Completion
+- [ ] kernels/triton_impl.py
 - [ ] tests/unit/test_archive.py
 - [ ] tests/unit/test_pool.py
 - [ ] tests/unit/test_pseudopod.py
+- [ ] tests/unit/test_tubes.py
+- [ ] tests/unit/test_chemotaxis.py
 - [ ] tests/unit/test_kernels.py
+- [ ] tests/unit/test_metrics.py
 
 ### Phase 2 
 - [ ] bench/toy_tasks.py ✓ (validate on simple tasks first)
