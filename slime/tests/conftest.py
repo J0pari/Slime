@@ -5,6 +5,7 @@ from typing import Callable, Any, Dict, List, Tuple, Optional, TypeVar, Generic
 from dataclasses import dataclass, field
 from enum import Enum
 import pytest
+from .checkpoint import TestResultCheckpointSystem
 try:
     import numpy as np
 except ImportError:
@@ -179,10 +180,34 @@ def constraint(request):
     request.node.constraint_checker = checker
     return checker.check
 
+@pytest.fixture
+def checkpoint_system(request):
+    return request.config._checkpoint_system
+
+@pytest.fixture
+def test_checkpoint_sha(request):
+    def _get_sha():
+        test_name = request.node.nodeid.replace('::', '_').replace('/', '_').replace('.py', '')
+        return request.config._test_run_shas.get(test_name)
+    return _get_sha
+
+@pytest.fixture
+def restore_previous_test(request, checkpoint_system):
+    def _restore(checkpoint_sha: str = None):
+        test_name = request.node.nodeid.replace('::', '_').replace('/', '_').replace('.py', '')
+        if not checkpoint_sha:
+            checkpoint_sha = checkpoint_system._get_current_checkpoint(test_name)
+        if checkpoint_sha:
+            return checkpoint_system._get_content(checkpoint_sha)
+        return None
+    return _restore
+
 def pytest_configure(config):
     archive_dir = Path('test_results')
     archive_dir.mkdir(exist_ok=True)
     config._test_item = None
+    config._checkpoint_system = TestResultCheckpointSystem(Path.cwd())
+    config._test_run_shas = {}
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
@@ -212,10 +237,41 @@ def pytest_runtest_makereport(item, call):
                 test_result['error'] = str(report.longrepr)
         elif report.outcome == 'skipped':
             test_result['skip_reason'] = str(report.longrepr)
+
+        checkpoint_system = item.config._checkpoint_system
+        test_name = item.nodeid.replace('::', '_').replace('/', '_').replace('.py', '')
+        individual_test_file = Path('test_results') / f'{test_name}.json'
+        individual_test_file.write_text(json.dumps(_make_serializable_standalone(test_result), indent=2))
+
+        try:
+            checkpoint_sha = checkpoint_system.checkpoint_test_result(individual_test_file, message=f'{item.nodeid} {report.outcome}')
+            test_result['checkpoint_sha'] = checkpoint_sha
+            item.config._test_run_shas[test_name] = checkpoint_sha
+        except Exception as e:
+            test_result['checkpoint_error'] = str(e)
+
         if hasattr(item, 'test_results'):
             item.test_results.append(test_result)
         else:
             item.test_results = [test_result]
+
+def _make_serializable_standalone(obj: Any) -> Any:
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, (list, tuple)):
+        return [_make_serializable_standalone(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {str(k): _make_serializable_standalone(v) for k, v in obj.items()}
+    elif isinstance(obj, set):
+        return list(obj)
+    elif np and isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif hasattr(obj, 'cpu') and hasattr(obj, 'detach'):
+        return obj.detach().cpu().tolist()
+    elif hasattr(obj, '__dict__'):
+        return str(obj)
+    else:
+        return str(obj)
 
 def pytest_sessionfinish(session, exitstatus):
     archive_dir = Path('test_results')
@@ -249,11 +305,25 @@ def pytest_sessionfinish(session, exitstatus):
                     result['error'] = 'INVARIANT VIOLATION: Constraints violated but test passed'
                     summary['test_summary']['failed'] += 1
                     summary['test_summary']['passed'] -= 1
+        serializable_summary = _make_serializable_standalone(summary)
+        serializable_summary['checkpoint_shas'] = session.config._test_run_shas
+
         with open(output_file, 'w') as f:
-            serializable_summary = _make_serializable_standalone(summary)
             json.dump(serializable_summary, f, indent=2)
+
+        checkpoint_system = session.config._checkpoint_system
+        summary_checkpoint_sha = checkpoint_system.checkpoint_test_result(output_file, message=f'Test run summary {timestamp}')
+
         print(f'\n=== CAUSAL CONSTRAINT REPORT ===')
         print(f"Tests: {summary['test_summary']['passed']}/{summary['test_summary']['total_tests']} passed")
         print(f"Constraints: {satisfied_constraints}/{total_constraints} satisfied ({summary['constraint_summary']['satisfaction_rate']:.1%})")
         print(f"Avg causal depth: {summary['constraint_summary']['avg_causal_depth']:.1f}")
         print(f'Results: {output_file}')
+        print(f'Summary checkpoint: {summary_checkpoint_sha[:8]}')
+        print(f'\n=== CONTENT-ADDRESSABLE TEST CHECKPOINTS ===')
+        for test_name, sha in session.config._test_run_shas.items():
+            print(f'{test_name}: {sha[:8]}')
+        print(f'\nTotal checkpoints: {len(session.config._test_run_shas)}')
+        total_objects = len(list(checkpoint_system.objects_dir.rglob('*'))) - len(list(checkpoint_system.objects_dir.rglob('*/')
+))
+        print(f'Object store size: {total_objects} objects')

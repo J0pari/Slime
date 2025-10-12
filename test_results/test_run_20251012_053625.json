@@ -1,0 +1,36 @@
+{
+  "run_timestamp": "2025-10-12T05:36:25.194442+00:00",
+  "exit_status": 1,
+  "test_summary": {
+    "total_tests": 1,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0
+  },
+  "constraint_summary": {
+    "total_constraints": 0,
+    "satisfied": 0,
+    "violated": 0,
+    "satisfaction_rate": 0.0,
+    "avg_causal_depth": 0.0
+  },
+  "results": [
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_warmup_phase_constraint",
+      "outcome": "failed",
+      "duration_seconds": 0.0002155001275241375,
+      "timestamp": "2025-10-12T05:36:25.192582+00:00",
+      "causal_dag": {
+        "nodes": [],
+        "topology": {
+          "total_nodes": 0,
+          "max_depth": 0,
+          "connected_components": 0
+        }
+      },
+      "root_cause": null,
+      "error": "TypeError: CVTArchive.__init__() got an unexpected keyword argument 'target_dims'",
+      "traceback": "constraint = <bound method CausalConstraintChecker.check of <slime.tests.conftest.CausalConstraintChecker object at 0x000001AF16495D30>>\n\n    def test_warmup_phase_constraint(constraint):\n>       archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, low_rank_k=16, seed=42)\n                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: CVTArchive.__init__() got an unexpected keyword argument 'target_dims'\n\nslime\\tests\\unit\\test_archive.py:7: TypeError"
+    }
+  ]
+}

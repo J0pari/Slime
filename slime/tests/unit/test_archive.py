@@ -4,7 +4,7 @@ import numpy as np
 from slime.memory.archive import CVTArchive
 
 def test_warmup_phase_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, low_rank_k=16, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, seed=42)
     for i in range(100):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
@@ -13,7 +13,7 @@ def test_warmup_phase_constraint(constraint):
     constraint('Behavioral dims not yet set', lambda: (archive.behavioral_dims is None, archive.behavioral_dims, None, {}))
 
 def test_dimension_discovery_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     for i in range(150):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
@@ -25,7 +25,7 @@ def test_dimension_discovery_constraint(constraint):
     constraint('Archive marked as discovered', lambda: (archive._discovered == True, archive._discovered, True, {}))
 
 def test_add_after_discovery_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=16, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     for i in range(150):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
@@ -35,14 +35,14 @@ def test_add_after_discovery_constraint(constraint):
     fitness = 0.8
     added = archive.add(behavior, fitness, state_dict, generation=1, metadata={'test': True})
     constraint('Elite added successfully after discovery', lambda: (added == True, added, True, {}))
-    constraint('Archive contains 1 elite', lambda: (len(archive._archive) == 1, len(archive._archive), 1, {}))
+    constraint('Archive contains 1 elite', lambda: (len(archive.centroid_refs) == 1, len(archive.centroid_refs), 1, {}))
     centroid_id = archive._find_nearest_centroid(np.array(behavior))
-    elite = archive._archive[centroid_id]
+    elite = archive.elites[centroid_id]
     constraint('Elite has correct fitness', lambda: (elite.fitness == 0.8, elite.fitness, 0.8, {}))
     constraint('Elite has correct behavior', lambda: (elite.behavior == (0.1, 0.2, 0.3), elite.behavior, (0.1, 0.2, 0.3), {}))
 
 def test_low_rank_compression_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, target_dims=3, num_centroids=50, low_rank_k=8, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=8, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     for i in range(150):
         raw_metrics = np.random.randn(10).astype(np.float32)
         archive.add_raw_metrics(raw_metrics)
