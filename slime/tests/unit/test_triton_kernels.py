@@ -34,13 +34,10 @@ def test_attention_temperature_extremes(kernel, device):
     Q = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
     K = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
     V = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float16)
-    
     cold = kernel.attention(Q, K, V, temperature=0.01)
     hot = kernel.attention(Q, K, V, temperature=100.0)
-    
-    cold_entropy = -(cold * torch.log(cold + 1e-9)).sum()
-    hot_entropy = -(hot * torch.log(hot + 1e-9)).sum()
-    
+    cold_entropy = -(cold * torch.log(cold + 1e-09)).sum()
+    hot_entropy = -(hot * torch.log(hot + 1e-09)).sum()
     assert cold_entropy < hot_entropy
 
 def test_attention_single_head(kernel, device):
@@ -68,7 +65,7 @@ def test_correlation_symmetry(kernel, device):
     K = torch.randn(2, 64, 32, device=device, dtype=torch.float16)
     V = torch.randn(2, 64, 32, device=device, dtype=torch.float16)
     corr = kernel.correlation(K, V)
-    assert torch.allclose(corr, corr.transpose(-2, -1), atol=1e-2)
+    assert torch.allclose(corr, corr.transpose(-2, -1), atol=0.01)
 
 def test_correlation_bounds(kernel, device):
     K = torch.randn(2, 64, 32, device=device, dtype=torch.float16)
@@ -84,11 +81,7 @@ def test_correlation_large_batch(kernel, device):
     assert corr.shape == (16, 128, 128)
 
 def test_effective_rank_range(kernel, device):
-    matrices = [
-        torch.eye(64, device=device, dtype=torch.float16).unsqueeze(0),
-        torch.ones(1, 64, 64, device=device, dtype=torch.float16),
-        torch.randn(1, 64, 64, device=device, dtype=torch.float16),
-    ]
+    matrices = [torch.eye(64, device=device, dtype=torch.float16).unsqueeze(0), torch.ones(1, 64, 64, device=device, dtype=torch.float16), torch.randn(1, 64, 64, device=device, dtype=torch.float16)]
     ranks = [kernel.effective_rank(m) for m in matrices]
     assert ranks[0] > ranks[1]
 
@@ -103,11 +96,9 @@ def test_attention_gradient_flow(kernel, device):
     Q = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float32, requires_grad=True)
     K = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float32, requires_grad=True)
     V = torch.randn(1, 1, 64, 32, device=device, dtype=torch.float32, requires_grad=True)
-    
     output = kernel.attention(Q, K, V, temperature=1.0)
     loss = output.sum()
     loss.backward()
-    
     assert Q.grad is not None
     assert K.grad is not None
     assert V.grad is not None

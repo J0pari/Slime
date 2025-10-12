@@ -4,14 +4,7 @@ from dataclasses import dataclass
 import logging
 import weakref
 from slime.proto.component import Component
-from slime.core.comonad import (
-    SpatialContext,
-    behavioral_distance,
-    extract_relative_fitness,
-    extract_behavioral_divergence,
-    extract_gradient_magnitude_rank,
-    extract_attention_coherence
-)
+from slime.core.comonad import SpatialContext, behavioral_distance, extract_relative_fitness, extract_behavioral_divergence, extract_gradient_magnitude_rank, extract_attention_coherence
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -117,11 +110,7 @@ class DynamicPool:
 
     def extract_component_context(self, component: Component) -> SpatialContext:
         neighborhood = [c for c in self._components if c is not component]
-        return SpatialContext(
-            focus=component,
-            neighborhood=neighborhood,
-            distance_fn=behavioral_distance
-        )
+        return SpatialContext(focus=component, neighborhood=neighborhood, distance_fn=behavioral_distance)
 
     def compute_contextual_fitness(self, component: Component) -> float:
         ctx = self.extract_component_context(component)

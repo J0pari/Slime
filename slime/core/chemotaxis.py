@@ -27,7 +27,6 @@ class Chemotaxis:
         import numpy as np
         behavior_array = np.array(behavior)
         center_centroid = self.archive._find_nearest_centroid(behavior_array)
-
         weights = []
         nutrients_list = []
         for centroid_id, (nutrient, concentration) in self._sources.items():
@@ -36,10 +35,8 @@ class Chemotaxis:
             weight = weight / (metabolic_rate + 1e-10)
             weights.append(weight)
             nutrients_list.append(nutrient)
-
         if not nutrients_list:
             return None
-
         weights_tensor = torch.tensor(weights, device=self.device)
         weights_tensor = weights_tensor - weights_tensor.max()
         weights_tensor = torch.softmax(weights_tensor, dim=0)

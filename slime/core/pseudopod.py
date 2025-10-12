@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 class Pseudopod(nn.Module):
 
-    def __init__(self, head_dim: int, kernel: Kernel, device: Optional[torch.device]=None, component_id: int = 0):
+    def __init__(self, head_dim: int, kernel: Kernel, device: Optional[torch.device]=None, component_id: int=0):
         super().__init__()
         self.head_dim = head_dim
         self.kernel = kernel
@@ -30,10 +30,8 @@ class Pseudopod(nn.Module):
         scores = q @ k.T / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
         attn = torch.softmax(scores, dim=-1)
         output = attn @ v
-
         self._last_attention_pattern = attn.detach()
         self.last_behavior = self.get_behavioral_coordinates(attn, output)
-
         self._update_fitness(attn)
         return output
 
@@ -81,10 +79,10 @@ class Pseudopod(nn.Module):
         for i in range(seq_len):
             attn_weights = attn[..., i, :]
             mean_pos = (attn_weights * positions).sum(dim=-1)
-            variance = (attn_weights * ((positions - mean_pos.unsqueeze(-1)) ** 2)).sum(dim=-1)
+            variance = (attn_weights * (positions - mean_pos.unsqueeze(-1)) ** 2).sum(dim=-1)
             position_variance.append(variance.mean().item())
         avg_variance = sum(position_variance) / len(position_variance)
-        normalized = avg_variance / (seq_len ** 2)
+        normalized = avg_variance / seq_len ** 2
         return min(1.0, normalized)
 
     def get_computational_intensity(self, output: torch.Tensor, seq_len: int) -> float:
@@ -93,7 +91,7 @@ class Pseudopod(nn.Module):
         attn_flops = 2 * batch_size * seq_len * seq_len * d
         linear_flops = 2 * batch_size * seq_len * d * d * 3
         total_flops = attn_flops + linear_flops
-        normalized_flops = total_flops / (1e9)
+        normalized_flops = total_flops / 1000000000.0
         return min(1.0, normalized_flops)
 
     def get_behavioral_coordinates(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
@@ -102,14 +100,7 @@ class Pseudopod(nn.Module):
         gradient_flow = self.get_gradient_flow_magnitude()
         memory_locality = self.get_memory_access_locality(attn)
         compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
-
-        return torch.tensor([
-            attention_span,
-            activation_sparsity,
-            gradient_flow,
-            memory_locality,
-            compute_intensity
-        ], device=self.device)
+        return torch.tensor([attention_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity], device=self.device)
 
     @property
     def correlation(self) -> torch.Tensor:
