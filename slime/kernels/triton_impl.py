@@ -6,36 +6,65 @@ import math
 from slime.proto.kernel import Kernel
 
 @triton.jit
-def fused_attention_kernel(Q, K_mat, V, Out, softmax_scale, stride_qb, stride_qh, stride_qm, stride_qk, stride_kb, stride_kh, stride_kn, stride_kk, stride_vb, stride_vh, stride_vn, stride_vk, stride_ob, stride_oh, stride_om, stride_ok, B, H, M, N, D, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr):
+def fused_attention_kernel(
+    Q, K_mat, V, Out,
+    softmax_scale,
+    stride_qb, stride_qh, stride_qm, stride_qk,
+    stride_kb, stride_kh, stride_kn, stride_kk,
+    stride_vb, stride_vh, stride_vn, stride_vk,
+    stride_ob, stride_oh, stride_om, stride_ok,
+    B, H, M, N, D,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr
+):
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_m = tl.program_id(2)
+
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_D)
-    q_ptrs = Q + (pid_b * stride_qb + pid_h * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
-    k_ptrs = K_mat + (pid_b * stride_kb + pid_h * stride_kh + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kk)
-    v_ptrs = V + (pid_b * stride_vb + pid_h * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk)
+
+    q_ptrs = Q + (pid_b * stride_qb + pid_h * stride_qh +
+                  offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk)
+    k_ptrs = K_mat + (pid_b * stride_kb + pid_h * stride_kh +
+                      offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kk)
+    v_ptrs = V + (pid_b * stride_vb + pid_h * stride_vh +
+                  offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk)
+
     q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0)
+
     acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
     m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+
     for start_n in range(0, N, BLOCK_N):
         offs_n_block = start_n + offs_n
-        k = tl.load(k_ptrs + start_n * stride_kn, mask=offs_n_block[None, :] < N, other=0.0)
-        v = tl.load(v_ptrs + start_n * stride_vn, mask=offs_n_block[:, None] < N, other=0.0)
+
+        k = tl.load(k_ptrs + start_n * stride_kn,
+                   mask=offs_n_block[None, :] < N, other=0.0)
+        v = tl.load(v_ptrs + start_n * stride_vn,
+                   mask=offs_n_block[:, None] < N, other=0.0)
+
         qk = tl.dot(q, k)
         qk = qk * softmax_scale
+
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
         p = tl.exp(qk - m_ij[:, None])
         l_ij = tl.sum(p, axis=1)
+
         alpha = tl.exp(m_i - m_ij)
         acc = acc * alpha[:, None]
         acc += tl.dot(p.to(v.dtype), v)
+
         l_i = l_i * alpha + l_ij
         m_i = m_ij
+
     acc = acc / l_i[:, None]
-    o_ptrs = Out + (pid_b * stride_ob + pid_h * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok)
+
+    o_ptrs = Out + (pid_b * stride_ob + pid_h * stride_oh +
+                   offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok)
     tl.store(o_ptrs, acc, mask=offs_m[:, None] < M)
 
 @triton.jit

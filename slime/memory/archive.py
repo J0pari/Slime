@@ -1,79 +1,226 @@
 import torch
+import torch.nn as nn
 from typing import Dict, Tuple, Optional, List, Callable
 from dataclasses import dataclass
 import weakref
 import logging
+import numpy as np
+from scipy.spatial import distance
 from slime.proto.component import Component
+
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Elite:
     behavior: Tuple[float, ...]
     fitness: float
-    genome: dict
+    weights_u: Dict[str, torch.Tensor]
+    weights_v: Dict[str, torch.Tensor]
     generation: int
+    metadata: dict
 
     def __post_init__(self):
         self.behavior = tuple(self.behavior)
-        self.genome = dict(self.genome)
 
-class BehavioralArchive:
+    def reconstruct_weights(self) -> dict:
+        weights = {}
+        for key in self.weights_u.keys():
+            weights[key] = torch.matmul(self.weights_u[key], self.weights_v[key])
+        return weights
 
-    def __init__(self, dimensions: List[str], bounds: List[Tuple[float, float]], resolution: int=50, device: torch.device=None):
-        self.dimensions = dimensions
-        self.bounds = bounds
-        self.resolution = resolution
+    def memory_usage(self) -> int:
+        mem = 0
+        for key in self.weights_u.keys():
+            mem += self.weights_u[key].numel() * self.weights_u[key].element_size()
+            mem += self.weights_v[key].numel() * self.weights_v[key].element_size()
+        return mem
+
+
+class CVTArchive:
+
+    def __init__(
+        self,
+        behavioral_dims: int,
+        num_centroids: int = 1000,
+        low_rank_k: int = 64,
+        device: torch.device = None,
+        kmo_threshold: float = 0.6,
+        seed: int = 42
+    ):
+        self.behavioral_dims = behavioral_dims
+        self.num_centroids = num_centroids
+        self.low_rank_k = low_rank_k
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self._archive: Dict[Tuple[int, ...], Elite] = {}
+        self.kmo_threshold = kmo_threshold
+        self.seed = seed
+
+        self.centroids = None
+        self._archive: Dict[int, Elite] = {}
         self._live_components: weakref.WeakSet = weakref.WeakSet()
         self._generation = 0
         self._total_additions = 0
         self._total_replacements = 0
+        self._behavioral_samples = []
 
-    def _quantize(self, behavior: Tuple[float, ...]) -> Tuple[int, ...]:
-        cell = []
-        for val, (low, high) in zip(behavior, self.bounds):
-            val = max(low, min(high, val))
-            normalized = (val - low) / (high - low)
-            idx = int(normalized * (self.resolution - 1))
-            cell.append(idx)
-        return tuple(cell)
+    def initialize_centroids(self, initial_samples: Optional[np.ndarray] = None):
+        if initial_samples is not None and len(initial_samples) >= self.num_centroids:
+            from scipy.cluster.vq import kmeans
+            self.centroids, _ = kmeans(initial_samples, self.num_centroids)
+            logger.info(f'Initialized {self.num_centroids} CVT centroids from {len(initial_samples)} samples')
+        else:
+            rng = np.random.RandomState(self.seed)
+            self.centroids = rng.randn(self.num_centroids, self.behavioral_dims).astype(np.float32)
+            logger.info(f'Initialized {self.num_centroids} CVT centroids from seed {self.seed}')
+
+    def validate_behavioral_space(self, samples: np.ndarray) -> float:
+        from scipy.stats import bartlett
+        from factor_analyzer.factor_analyzer import calculate_kmo
+
+        if len(samples) < 50:
+            logger.warning(f'Only {len(samples)} behavioral samples, need ≥50 for reliable KMO test')
+            return 0.0
+
+        try:
+            kmo_all, kmo_model = calculate_kmo(samples)
+            logger.info(f'KMO statistic: {kmo_model:.3f} (>0.6=acceptable, >0.8=good, >0.9=excellent)')
+
+            if kmo_model < self.kmo_threshold:
+                logger.error(f'KMO {kmo_model:.3f} < {self.kmo_threshold}: behavioral dimensions are not factorable!')
+
+            corr_matrix = np.corrcoef(samples, rowvar=False)
+            stat, p_value = bartlett(*[samples[:, i] for i in range(samples.shape[1])])
+            logger.info(f"Bartlett's test: statistic={stat:.2f}, p-value={p_value:.4f}")
+
+            return kmo_model
+        except Exception as e:
+            logger.error(f'Failed to validate behavioral space: {e}')
+            return 0.0
+
+    def _find_nearest_centroid(self, behavior: Tuple[float, ...]) -> int:
+        if self.centroids is None:
+            raise ValueError('Centroids not initialized. Call initialize_centroids() first.')
+
+        behavior_array = np.array(behavior, dtype=np.float32)
+        distances = distance.cdist([behavior_array], self.centroids, metric='euclidean')[0]
+        return int(np.argmin(distances))
+
+    def _compress_weights(self, state_dict: dict) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        weights_u = {}
+        weights_v = {}
+
+        for key, tensor in state_dict.items():
+            if tensor.ndim == 2 and min(tensor.shape) > self.low_rank_k:
+                D1, D2 = tensor.shape
+                U, S, Vt = torch.linalg.svd(tensor, full_matrices=False)
+                k = min(self.low_rank_k, len(S))
+
+                sqrt_S = torch.sqrt(S[:k])
+                weights_u[key] = U[:, :k] * sqrt_S
+                weights_v[key] = Vt[:k, :] * sqrt_S.unsqueeze(1)
+            else:
+                identity = torch.eye(tensor.shape[0], device=tensor.device)[:, :self.low_rank_k]
+                weights_u[key] = tensor @ identity
+                weights_v[key] = identity.T
+
+        return weights_u, weights_v
 
     def add(self, component: Component, behavior: Tuple[float, ...], fitness: float) -> bool:
-        if len(behavior) != len(self.dimensions):
-            raise ValueError(f'Behavior dimension mismatch: expected {len(self.dimensions)}, got {len(behavior)}')
-        cell = self._quantize(behavior)
-        if cell in self._archive:
-            if fitness <= self._archive[cell].fitness:
+        if len(behavior) != self.behavioral_dims:
+            raise ValueError(
+                f'Behavior dimension mismatch: expected {self.behavioral_dims}, got {len(behavior)}'
+            )
+
+        self._behavioral_samples.append(behavior)
+
+        if self.centroids is None:
+            if len(self._behavioral_samples) >= 100:
+                samples = np.array(self._behavioral_samples, dtype=np.float32)
+                kmo = self.validate_behavioral_space(samples)
+                if kmo >= self.kmo_threshold:
+                    self.initialize_centroids(samples)
+                else:
+                    logger.warning('Deferring centroid initialization: KMO too low')
+            return False
+
+        centroid_id = self._find_nearest_centroid(behavior)
+
+        if centroid_id in self._archive:
+            if fitness <= self._archive[centroid_id].fitness:
                 return False
             self._total_replacements += 1
-        elite = Elite(behavior=behavior, fitness=fitness, genome=component.to_dict(), generation=self._generation)
-        self._archive[cell] = elite
+
+        state_dict = component.state_dict()
+        weights_u, weights_v = self._compress_weights(state_dict)
+
+        metadata = {
+            'component_id': component.component_id,
+            'device': str(component.device)
+        }
+
+        elite = Elite(
+            behavior=behavior,
+            fitness=fitness,
+            weights_u=weights_u,
+            weights_v=weights_v,
+            generation=self._generation,
+            metadata=metadata
+        )
+
+        self._archive[centroid_id] = elite
         self._total_additions += 1
-        logger.debug(f'Added elite at cell {cell}: fitness={fitness:.4f}, generation={self._generation}')
+
+        logger.debug(
+            f'Added elite at centroid {centroid_id}: fitness={fitness:.4f}, '
+            f'memory={elite.memory_usage() / 1024:.1f}KB'
+        )
         return True
 
     def get(self, behavior: Tuple[float, ...]) -> Optional[Elite]:
-        cell = self._quantize(behavior)
-        return self._archive.get(cell)
+        if self.centroids is None:
+            return None
+        centroid_id = self._find_nearest_centroid(behavior)
+        return self._archive.get(centroid_id)
 
-    def sample_near(self, behavior: Tuple[float, ...], radius: float=0.1) -> List[Elite]:
-        center = self._quantize(behavior)
-        radius_cells = int(radius * self.resolution)
-        nearby = []
-        for cell, elite in self._archive.items():
-            if all((abs(c - center[i]) <= radius_cells for i, c in enumerate(cell))):
-                nearby.append(elite)
-        return nearby
+    def sample_near(self, behavior: Tuple[float, ...], k: int = 5) -> List[Elite]:
+        if self.centroids is None or not self._archive:
+            return []
 
-    def bootstrap_component(self, component_factory: Callable[[dict], Component], behavior: Tuple[float, ...], search_radius: float=0.2) -> Optional[Component]:
-        nearby = self.sample_near(behavior, search_radius)
+        behavior_array = np.array(behavior, dtype=np.float32)
+        centroid_ids = list(self._archive.keys())
+        centroid_positions = self.centroids[centroid_ids]
+
+        distances = distance.cdist([behavior_array], centroid_positions, metric='euclidean')[0]
+        nearest_indices = np.argsort(distances)[:k]
+
+        return [self._archive[centroid_ids[i]] for i in nearest_indices if i < len(centroid_ids)]
+
+    def bootstrap_component(
+        self,
+        component_factory: Callable[[dict], Component],
+        behavior: Tuple[float, ...],
+        k_neighbors: int = 3,
+        mutation_std: float = 0.1
+    ) -> Optional[Component]:
+        nearby = self.sample_near(behavior, k=k_neighbors)
         if not nearby:
             return None
+
         best = max(nearby, key=lambda e: e.fitness)
-        component = component_factory(best.genome)
+        weights = best.reconstruct_weights()
+
+        torch.manual_seed(self.seed + self._generation)
+        for key in weights:
+            noise = torch.randn_like(weights[key]) * mutation_std
+            weights[key] = weights[key] + noise
+
+        component = component_factory({'weights': weights, 'metadata': best.metadata})
         self._live_components.add(component)
-        logger.debug(f'Bootstrapped component from elite at generation {best.generation}, fitness={best.fitness:.4f}')
+
+        logger.debug(
+            f'Bootstrapped component from elite at generation {best.generation}, '
+            f'fitness={best.fitness:.4f}'
+        )
         return component
 
     def increment_generation(self) -> None:
@@ -83,13 +230,24 @@ class BehavioralArchive:
         return len(self._archive)
 
     def coverage(self) -> float:
-        total_cells = self.resolution ** len(self.dimensions)
-        return len(self._archive) / total_cells
+        if self.centroids is None:
+            return 0.0
+        return len(self._archive) / self.num_centroids
 
     def max_fitness(self) -> float:
         if not self._archive:
             return float('-inf')
-        return max((e.fitness for e in self._archive.values()))
+        return max(e.fitness for e in self._archive.values())
+
+    def get_behavioral_variance(self) -> np.ndarray:
+        if not self._archive:
+            return np.zeros(self.behavioral_dims)
+
+        behaviors = np.array([elite.behavior for elite in self._archive.values()])
+        return np.var(behaviors, axis=0)
+
+    def total_memory_usage(self) -> int:
+        return sum(elite.memory_usage() for elite in self._archive.values())
 
     def clear(self) -> None:
         self._archive.clear()
@@ -97,3 +255,4 @@ class BehavioralArchive:
         self._generation = 0
         self._total_additions = 0
         self._total_replacements = 0
+        self._behavioral_samples.clear()

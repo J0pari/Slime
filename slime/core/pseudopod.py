@@ -58,10 +58,51 @@ class Pseudopod(nn.Module):
         sparsity = 1.0 - l1 / (l2 * torch.sqrt(torch.tensor(dim, dtype=torch.float32)))
         return sparsity.clamp(0.0, 1.0).item()
 
+    def get_gradient_flow_magnitude(self) -> float:
+        grad_norms = []
+        for param in self.parameters():
+            if param.grad is not None:
+                grad_norms.append(torch.norm(param.grad).item())
+        if not grad_norms:
+            return 0.0
+        return sum(grad_norms) / len(grad_norms)
+
+    def get_memory_access_locality(self, attn: torch.Tensor) -> float:
+        seq_len = attn.shape[-1]
+        positions = torch.arange(seq_len, device=attn.device, dtype=torch.float32)
+        position_variance = []
+        for i in range(seq_len):
+            attn_weights = attn[..., i, :]
+            mean_pos = (attn_weights * positions).sum(dim=-1)
+            variance = (attn_weights * ((positions - mean_pos.unsqueeze(-1)) ** 2)).sum(dim=-1)
+            position_variance.append(variance.mean().item())
+        avg_variance = sum(position_variance) / len(position_variance)
+        normalized = avg_variance / (seq_len ** 2)
+        return min(1.0, normalized)
+
+    def get_computational_intensity(self, output: torch.Tensor, seq_len: int) -> float:
+        batch_size = output.shape[0]
+        d = self.head_dim
+        attn_flops = 2 * batch_size * seq_len * seq_len * d
+        linear_flops = 2 * batch_size * seq_len * d * d * 3
+        total_flops = attn_flops + linear_flops
+        normalized_flops = total_flops / (1e9)
+        return min(1.0, normalized_flops)
+
     def get_behavioral_coordinates(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        attention_distance = self.get_attention_distance(attn)
+        attention_span = self.get_attention_distance(attn)
         activation_sparsity = self.get_activation_sparsity(output)
-        return torch.tensor([attention_distance, activation_sparsity], device=self.device)
+        gradient_flow = self.get_gradient_flow_magnitude()
+        memory_locality = self.get_memory_access_locality(attn)
+        compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
+
+        return torch.tensor([
+            attention_span,
+            activation_sparsity,
+            gradient_flow,
+            memory_locality,
+            compute_intensity
+        ], device=self.device)
 
     @property
     def correlation(self) -> torch.Tensor:
