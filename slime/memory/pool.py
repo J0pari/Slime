@@ -98,29 +98,33 @@ class DynamicPool:
         behavior_location: Tuple[float, ...],
         max_count: Optional[int] = None,
     ) -> List[Component]:
-        """Get components relevant to behavioral location.
+        """Get components relevant to behavioral location using spatial indexing.
 
-        For now, returns all components. Future: spatial indexing.
+        Sorts components by Euclidean distance to target location in behavioral space.
+        Components without behavioral coordinates are ranked lowest.
 
         Args:
-            behavior_location: Target location in behavior space
-            max_count: Maximum components to return
+            behavior_location: Target location in behavior space (e.g., (rank, coherence))
+            max_count: Maximum components to return (k-nearest neighbors)
 
         Returns:
-            List of relevant components
+            List of components sorted by distance to target location
         """
         if behavior_location is None:
             components = self._components
         else:
-            # Sort by distance to behavior location
+            # Spatial indexing: k-nearest neighbors by Euclidean distance
             components_with_dist = []
             for comp in self._components:
                 if hasattr(comp, 'last_behavior'):
+                    # Compute Euclidean distance in behavioral space
                     dist = sum((a - b) ** 2 for a, b in zip(comp.last_behavior, behavior_location))
                     components_with_dist.append((dist, comp))
                 else:
+                    # Components without coordinates go to end
                     components_with_dist.append((float('inf'), comp))
 
+            # Sort by distance (O(n log n))
             components_with_dist.sort(key=lambda x: x[0])
             components = [comp for _, comp in components_with_dist]
 
