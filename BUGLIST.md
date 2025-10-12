@@ -2,18 +2,6 @@
 
 This document tracks where the implementation doesn't match the blueprint architecture.
 
-## Neural CA Pseudopod Updates (CRITICAL)
-
-**Blueprint**: Pseudopod.forward() is learned CA update with Flow-Lenia dynamics
-**Current Implementation**: Pseudopod.forward() uses transformer attention
-**Impact**: Missing mass conservation, parameter localization, warp-level GPU execution
-
-**What needs to change**:
-- Replace attention mechanism with learned CA convolution
-- Add mass conservation constraint: ∑ output = ∑ input
-- Implement parameter localization (spatial variation of CA rule parameters)
-- Warp-level CUDA kernel (neighbors via shuffles, tensor cores for convolution)
-
 ## Curiosity-Driven Lifecycle (CRITICAL)
 
 **Blueprint**: hunger = learning_progress_deficit (intrinsic motivation)
