@@ -98,7 +98,7 @@ class Trainer:
                 if hasattr(pod, '_fitness'):
                     pod._fitness = fitness
         phase = self.stability_manager.get_phase(self._step)
-        lifecycle_result = self.lifecycle_manager.step(current_loss=total_loss.item(), pool_size=organism.pseudopod_pool.size() if organism else 0, archive_size=organism.archive.size() if organism else 0)
+        lifecycle_result = self.lifecycle_manager.step_lifecycle(current_loss=total_loss.item())
         if organism:
             if not self.lifecycle_manager.should_allow_lifecycle_changes():
                 pass
