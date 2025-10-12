@@ -45,14 +45,17 @@ model:
 
 archive:
   num_centroids: 1000                    # CVT partitions, not grid cells
-  target_dims: 5                         # Target dimensions after Kernel PCA (4-5 typical)
   num_raw_metrics: 15                    # Number of raw metrics to collect (10-20 typical)
   discovery_warmup: 1000                 # Steps to collect metrics before Kernel PCA discovery
-  low_rank_k: 64                         # Factorization rank for weight compression
+  variance_threshold: 0.85               # Cumulative variance for scree plot (determines n_dims)
+  min_dims: 3                            # Minimum dimensions (below loses information)
+  max_dims: 7                            # Maximum dimensions (above hits curse of dimensionality)
+  low_rank_k: 64                         # Factorization rank for elite weight compression
+  delta_rank: 8                          # Factorization rank for delta compression (smaller!)
   kmo_threshold: 0.6                     # KMO statistic threshold for validation
   reconstruction_error_threshold: 0.5    # Max reconstruction error for Kernel PCA
-  kernel: 'rbf'                          # Kernel type (rbf, poly, sigmoid, cosine)
-  gamma: 1.0                             # RBF kernel gamma parameter
+  kernel_selection: 'auto'               # 'auto' tests multiple kernels, or specify 'rbf'/'poly'/'cosine'
+  gc_interval: 100                       # Run garbage collection every N add() calls
   seed: 42                               # Seed for deterministic centroid initialization
 
 lifecycle:
