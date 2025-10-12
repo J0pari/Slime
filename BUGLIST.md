@@ -2,18 +2,6 @@
 
 This document tracks where the implementation doesn't match the blueprint architecture.
 
-## Adaptive Voronoi Archive (HIGH)
-
-**Blueprint**: Archive cells grow/shrink based on density
-**Current Implementation**: Fixed CVT centroids
-**Impact**: Poor coverage in sparse regions, inflexible partitioning
-
-**What needs to change**:
-- Cell density monitoring (elites per cell)
-- Subdivision trigger (density > threshold → split)
-- Merge trigger (density < threshold → merge neighbors)
-- Lloyd's relaxation for centroid adjustment
-
 ## Comonadic GPU Orchestration (MEDIUM)
 
 **Blueprint**: GPU execution state AS comonad (extract/extend for context-aware decisions)

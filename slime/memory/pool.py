@@ -6,6 +6,7 @@ import weakref
 from slime.proto.component import Component
 from slime.core.stencil import SpatialStencil
 from slime.config.dimensions import ArchitectureConfig
+from slime.gpu.comonad import GPUContext, make_spawn_retire_decisions
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -19,7 +20,7 @@ class PoolConfig:
 
 class DynamicPool:
 
-    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, arch_config: ArchitectureConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None, device: Optional[torch.device]=None):
+    def __init__(self, component_factory: Callable[[], Component], config: PoolConfig, arch_config: ArchitectureConfig, bootstrap_factory: Optional[Callable[[dict], Component]]=None, archive: Optional['CVTArchive']=None, device: Optional[torch.device]=None, gpu_context: Optional[GPUContext]=None):
         self.factory = component_factory
         self.bootstrap_factory = bootstrap_factory if bootstrap_factory is not None else component_factory
         self.config = config
@@ -33,6 +34,9 @@ class DynamicPool:
         self._total_culled = 0
         self._consumers = weakref.WeakSet()
         self.stencil = SpatialStencil(k_neighbors=arch_config.k_neighbors, distance_metric='euclidean', device=self.device)
+
+        # GPU comonadic context for resource-aware spawn/retire
+        self.gpu_context = gpu_context or GPUContext(num_warps=32, device=self.device)
 
     def _spawn_component(self, behavior_location: Optional[Tuple[float, ...]]=None) -> Component:
         if self.archive is not None and behavior_location is not None:
@@ -71,25 +75,41 @@ class DynamicPool:
 
     def _cull_low_fitness(self) -> None:
         before = len(self._components)
+
+        # GPU-aware retire decision: context-aware culling
+        should_spawn, retire_count = make_spawn_retire_decisions(
+            self.gpu_context,
+            pool_size=len(self._components),
+            max_pool_size=self.config.max_size or 64
+        )
+
+        # Combine GPU retire count with curiosity-driven culling
         # Curiosity-driven: cull components with low learning progress (high hunger)
         # coherence() → learning progress, hunger = 1 - coherence
-        surviving = []
+        components_with_hunger = []
         for c in self._components:
             coherence_val = c.coherence().item() if hasattr(c, 'coherence') else c.fitness
             hunger = 1.0 - coherence_val
-            if hunger < (1.0 - self.config.death_threshold):  # Low hunger → keep
-                surviving.append(c)
+            components_with_hunger.append((hunger, c))
 
-        if len(surviving) < self.config.min_size:
-            # Keep top min_size by coherence
-            surviving = sorted(self._components,
-                             key=lambda c: c.coherence().item() if hasattr(c, 'coherence') else c.fitness,
-                             reverse=True)[:self.config.min_size]
+        # Sort by hunger (high hunger first = low learning progress)
+        components_with_hunger.sort(key=lambda x: x[0], reverse=True)
+
+        # Retire top N by hunger + GPU-recommended retire count
+        curiosity_threshold = 1.0 - self.config.death_threshold
+        curiosity_cull_count = sum(1 for hunger, _ in components_with_hunger if hunger > curiosity_threshold)
+        total_cull = max(curiosity_cull_count, retire_count)
+
+        # Keep at least min_size
+        total_cull = min(total_cull, before - self.config.min_size)
+
+        surviving = [c for _, c in components_with_hunger[total_cull:]]
+
         culled = before - len(surviving)
         if culled > 0:
             self._components = surviving
             self._total_culled += culled
-            logger.debug(f'Culled {culled} components (high hunger / low learning progress)')
+            logger.debug(f'Culled {culled} components (curiosity: {curiosity_cull_count}, GPU context: {retire_count})')
 
     def _should_spawn(self) -> bool:
         if self.config.max_size is not None:
@@ -97,10 +117,21 @@ class DynamicPool:
                 return False
         if not self._components:
             return True
-        # Spawn when average learning progress is high (low hunger)
+
+        # GPU-aware spawn decision
+        should_spawn_gpu, _ = make_spawn_retire_decisions(
+            self.gpu_context,
+            pool_size=len(self._components),
+            max_pool_size=self.config.max_size or 64
+        )
+
+        # Curiosity-driven spawn: high average learning progress
         avg_coherence = sum((c.coherence().item() if hasattr(c, 'coherence') else c.fitness
                             for c in self._components)) / len(self._components)
-        return avg_coherence >= self.config.birth_threshold
+        should_spawn_curiosity = avg_coherence >= self.config.birth_threshold
+
+        # Spawn if EITHER GPU context or curiosity recommends it
+        return should_spawn_gpu or should_spawn_curiosity
 
     def _spawn_batch(self, behavior_location: Optional[Tuple[float, ...]]=None) -> None:
         for _ in range(self.config.spawn_batch_size):
