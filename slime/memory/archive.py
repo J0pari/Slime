@@ -72,6 +72,12 @@ class CVTArchive:
 
         self._elite_metadata: Dict[int, Tuple[float, int, dict]] = {}
 
+        # Adaptive Voronoi: density-based cell subdivision/merge
+        self._cell_densities: Dict[int, int] = {}  # centroid_id → elite count
+        self._density_high_threshold = 5  # Split if > 5 elites in cell
+        self._density_low_threshold = 0   # Merge if 0 elites and neighbor has space
+        self._adaptation_interval = 100   # Check every 100 additions
+
     def _hash_object(self, content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
 
@@ -528,6 +534,13 @@ class CVTArchive:
 
         self._total_additions += 1
 
+        # Update cell density tracking
+        self._cell_densities[centroid_id] = self._cell_densities.get(centroid_id, 0) + 1
+
+        # Adaptive Voronoi: check for subdivision/merge
+        if self._total_additions % self._adaptation_interval == 0:
+            self._adapt_voronoi_cells()
+
         self._gc_counter += 1
         if self._gc_counter >= self.gc_interval:
             self._mark_and_sweep_gc()
@@ -690,3 +703,99 @@ class CVTArchive:
             'behavioral_dims': self.behavioral_dims,
             'discovered': self._discovered
         }
+
+    def _adapt_voronoi_cells(self) -> None:
+        """
+        Adaptive Voronoi: adjust cells based on density.
+
+        - High density cells (> threshold) → subdivide
+        - Low density cells (= 0) with high-density neighbors → merge
+        - Lloyd's relaxation → adjust centroid positions
+        """
+        if self.centroids is None or self.behavioral_dims is None:
+            return
+
+        # Subdivision: split high-density cells
+        cells_to_split = [cid for cid, density in self._cell_densities.items()
+                         if density > self._density_high_threshold]
+
+        for centroid_id in cells_to_split:
+            self._subdivide_cell(centroid_id)
+
+        # Lloyd's relaxation: adjust centroids toward elite mean
+        self._lloyd_relaxation()
+
+        logger.debug(f'Voronoi adaptation: {len(cells_to_split)} cells subdivided, Lloyd relaxation applied')
+
+    def _subdivide_cell(self, centroid_id: int) -> None:
+        """
+        Subdivide high-density cell by splitting centroid.
+
+        Creates new centroid at offset from original along direction of elite spread.
+        """
+        if centroid_id not in self.centroid_refs:
+            return
+
+        # Collect elite behaviors in this cell
+        elite_behaviors = []
+        if centroid_id in self._elite_metadata:
+            _, _, _, behavior = self._elite_metadata[centroid_id]
+            elite_behaviors.append(np.array(behavior[:self.behavioral_dims]))
+
+        if len(elite_behaviors) < 2:
+            return  # Need multiple elites to determine split direction
+
+        # Compute spread direction (PCA first component)
+        behaviors_matrix = np.array(elite_behaviors)
+        centroid_pos = self.centroids[centroid_id]
+
+        # Offset along max variance direction
+        cov = np.cov(behaviors_matrix.T)
+        if cov.ndim == 0:
+            return
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        split_direction = eigenvectors[:, -1]  # Max variance
+
+        # Create new centroid at offset
+        offset_distance = 0.1 * np.linalg.norm(split_direction)
+        new_centroid = centroid_pos + offset_distance * split_direction
+
+        # Add to centroids
+        self.centroids = np.vstack([self.centroids, new_centroid])
+        new_centroid_id = len(self.centroids) - 1
+
+        # Reset density for both cells
+        self._cell_densities[centroid_id] = self._cell_densities.get(centroid_id, 0) // 2
+        self._cell_densities[new_centroid_id] = 0
+
+        logger.debug(f'Subdivided cell {centroid_id} → new cell {new_centroid_id}')
+
+    def _lloyd_relaxation(self, alpha: float = 0.1) -> None:
+        """
+        Lloyd's algorithm: move centroids toward mean of assigned elites.
+
+        Args:
+            alpha: Learning rate for centroid movement
+        """
+        if self.centroids is None or self.behavioral_dims is None:
+            return
+
+        # Compute mean behavior per cell
+        cell_means = {}
+        cell_counts = {}
+
+        for centroid_id, (_, _, _, behavior) in self._elite_metadata.items():
+            behavior_vec = np.array(behavior[:self.behavioral_dims])
+            if centroid_id not in cell_means:
+                cell_means[centroid_id] = behavior_vec
+                cell_counts[centroid_id] = 1
+            else:
+                cell_means[centroid_id] += behavior_vec
+                cell_counts[centroid_id] += 1
+
+        # Move centroids toward means
+        for centroid_id, mean_sum in cell_means.items():
+            if centroid_id >= len(self.centroids):
+                continue
+            mean_behavior = mean_sum / cell_counts[centroid_id]
+            self.centroids[centroid_id] += alpha * (mean_behavior - self.centroids[centroid_id])
