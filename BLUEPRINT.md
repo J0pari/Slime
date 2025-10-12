@@ -1063,7 +1063,6 @@ Disadvantage: Slime has 15% overhead vs fixed architecture.
 
 **Slime borrows this insight for archive storage:**
 
-
 **Key differences:**
 ```
 Hypernetworks: Generate weights dynamically at runtime
