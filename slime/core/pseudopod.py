@@ -5,6 +5,7 @@ import logging
 from slime.proto.kernel import Kernel
 from slime.proto.component import Component
 from slime.config.dimensions import FitnessConfig, NumericalConfig
+from slime.core.neural_ca import MultiHeadNeuralCA
 logger = logging.getLogger(__name__)
 
 class Pseudopod(nn.Module):
@@ -21,36 +22,39 @@ class Pseudopod(nn.Module):
         self.latent_dim = latent_dim if latent_dim is not None else head_dim
         self.stimulus_dim = stimulus_dim if stimulus_dim is not None else head_dim
         self.input_dim = self.latent_dim + self.stimulus_dim
-        self.key_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
-        self.value_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
-        self.query_weight = nn.Parameter(torch.randn(self.num_heads, self.input_dim, head_dim, device=self.device))
-        self.output_proj = nn.Parameter(torch.randn(self.num_heads, head_dim, head_dim, device=self.device))
+
+        # Multi-head Neural CA (replaces attention)
+        self.neural_ca = MultiHeadNeuralCA(
+            head_dim=head_dim,
+            num_heads=num_heads,
+            input_dim=self.input_dim,
+            kernel_size=3,
+            device=self.device,
+            kernel=kernel
+        )
+
         self._correlation: Optional[torch.Tensor] = None
         self._fitness = 0.0
         self.last_behavior: Optional[torch.Tensor] = None
-        self._last_attention_pattern: Optional[torch.Tensor] = None
+        self._last_ca_pattern: Optional[torch.Tensor] = None  # CA pattern (was attention pattern)
         self._raw_metrics: Optional[torch.Tensor] = None
+        self._ca_metrics: Optional[dict] = None  # CA-specific metrics
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([latent, stimulus], dim=-1)
-        batch_size, seq_len, input_dim = x.shape
-        x_expanded = x.unsqueeze(1).expand(batch_size, self.num_heads, seq_len, input_dim)
-        k = torch.einsum('bhsi,hid->bhsd', x_expanded, self.key_weight)
-        v = torch.einsum('bhsi,hid->bhsd', x_expanded, self.value_weight)
-        q = torch.einsum('bhsi,hid->bhsd', x_expanded, self.query_weight)
-        self._correlation = self._compute_correlation(k, v)
-        scores = torch.einsum('bhqd,bhkd->bhqk', q, k) / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32, device=x.device))
-        attn = torch.softmax(scores, dim=-1)
-        output = torch.einsum('bhqk,bhvd->bhqd', attn, v)
-        output = torch.einsum('bhqd,hdo->bhqo', output, self.output_proj)
-        self._last_attention_pattern = attn.detach()
-        # Store raw metrics for kernel PCA (62 GPU-aware metrics)
-        self._raw_metrics = self.compute_raw_metrics(attn, output)
+        # Neural CA update (replaces attention)
+        output, correlation, ca_metrics = self.neural_ca(latent, stimulus)
+        # output: [batch, num_heads, seq_len, head_dim]
 
-        # Use discovered behavioral dimensions if available, otherwise fallback to first 5 metrics
+        self._correlation = correlation
+        self._ca_pattern = self.neural_ca.get_ca_pattern()
+        self._ca_metrics = ca_metrics
+
+        # Compute raw metrics (now includes CA metrics)
+        self._raw_metrics = self.compute_raw_metrics(self._ca_pattern, output)
+
+        # Use discovered behavioral dimensions if available
         if hasattr(self, '_archive_ref') and self._archive_ref is not None:
             try:
-                # Transform raw metrics using Kernel PCA to discovered behavioral space
                 raw_np = self._raw_metrics.detach().cpu().numpy().reshape(1, -1)
                 behavioral_coords = self._archive_ref.transform_to_behavioral_space(raw_np)[0]
                 self.last_behavior = torch.tensor(behavioral_coords, device=self.device, dtype=torch.float32)
@@ -60,15 +64,16 @@ class Pseudopod(nn.Module):
         else:
             # Backward compatibility: use first 5 raw metrics before dimension discovery
             self.last_behavior = self._raw_metrics[:5]
-        attention_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean()
+
+        # Fitness from CA pattern entropy + output magnitude (same as attention)
+        ca_pattern_normalized = self._ca_pattern / (self._ca_pattern.sum(dim=-1, keepdim=True) + self.numerical_config.epsilon)
+        ca_entropy = -(ca_pattern_normalized * torch.log(ca_pattern_normalized + self.numerical_config.epsilon)).sum(dim=-1).mean()
         output_magnitude = torch.norm(output) / torch.sqrt(torch.tensor(output.numel(), dtype=torch.float32, device=output.device))
-        fitness_signal = (self.fitness_config.entropy_weight * attention_entropy +
+        fitness_signal = (self.fitness_config.entropy_weight * ca_entropy +
                          self.fitness_config.magnitude_weight * output_magnitude)
         self._fitness = self.fitness_config.ema_decay * self._fitness + (1.0 - self.fitness_config.ema_decay) * fitness_signal.item()
-        return output
 
-    def _compute_correlation(self, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        return self.kernel.correlation(k, v)
+        return output
 
     def update_fitness_from_gradients(self) -> None:
         grad_norms = []
@@ -149,13 +154,23 @@ class Pseudopod(nn.Module):
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
 
-        # === Core 5 metrics (preserved for compatibility) ===
-        attention_span = self.get_attention_distance(attn)
+        # === CA Metrics (FIRST - Blueprint specifies these) ===
+        if self._ca_metrics is not None:
+            metrics.extend([
+                self._ca_metrics['CA_mass_conservation'],
+                self._ca_metrics['CA_parameter_localization'],
+                self._ca_metrics['CA_neighborhood_coherence']
+            ])
+        else:
+            metrics.extend([0.0, 0.0, 0.0])
+
+        # === Core metrics (adapted for CA) ===
+        ca_span = self.get_attention_distance(attn)  # CA pattern distance
         activation_sparsity = self.get_activation_sparsity(output)
         gradient_flow = self.get_gradient_flow_magnitude()
-        memory_locality = self.get_memory_access_locality(attn)
+        memory_locality = self.get_memory_access_locality(attn)  # CA pattern locality
         compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
-        metrics.extend([attention_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity])
+        metrics.extend([ca_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity])
 
         # === REAL GPU Memory Telemetry (12 metrics) ===
         if torch.cuda.is_available():
@@ -372,14 +387,16 @@ class Pseudopod(nn.Module):
         self._fitness = 0.0
 
     def to_dict(self) -> dict:
-        return {'head_dim': self.head_dim, 'num_heads': self.num_heads, 'key_weight': self.key_weight.detach().cpu().numpy().tolist(), 'value_weight': self.value_weight.detach().cpu().numpy().tolist(), 'query_weight': self.query_weight.detach().cpu().numpy().tolist(), 'output_proj': self.output_proj.detach().cpu().numpy().tolist(), 'fitness': self._fitness}
+        return {
+            'head_dim': self.head_dim,
+            'num_heads': self.num_heads,
+            'neural_ca_state': self.neural_ca.state_dict(),
+            'fitness': self._fitness
+        }
 
     @classmethod
     def from_dict(cls, data: dict, kernel: Kernel, fitness_config: FitnessConfig, numerical_config: NumericalConfig, device: Optional[torch.device]=None) -> 'Pseudopod':
         pod = cls(data['head_dim'], kernel, fitness_config, numerical_config, device, num_heads=data['num_heads'])
-        pod.key_weight.data = torch.tensor(data['key_weight'], device=pod.device)
-        pod.value_weight.data = torch.tensor(data['value_weight'], device=pod.device)
-        pod.query_weight.data = torch.tensor(data['query_weight'], device=pod.device)
-        pod.output_proj.data = torch.tensor(data['output_proj'], device=pod.device)
+        pod.neural_ca.load_state_dict(data['neural_ca_state'])
         pod._fitness = data['fitness']
         return pod
