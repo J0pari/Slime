@@ -9,14 +9,14 @@
 5. **GPU-Native**: 100% device execution, zero CPU synchronization
 6. **DRY Principle**: Single source of truth for each concept
 
-## Dependency DAG (Strict Hierarchy)
+## Dependency DAG
 
 ```
 Layer 0: Protocols (no dependencies)
     proto/kernel.py
     proto/memory.py
     proto/model.py
-    proto/component.py  # NEW: Component lifecycle interface
+    proto/component.py
 
 Layer 1: Implementations of protocols (depend only on Layer 0)
     kernels/utils.py
@@ -49,7 +49,7 @@ Layer 6: Applications (depend on Layer 0-5)
     config/* → (reads Layer 5)
 ```
 
-##Data Flow
+## Data Flow
 
 ```
 User Input
@@ -96,13 +96,13 @@ User Input
 └─────────────────┘
 ```
 
-**Features**: No cycles. Archive doesn't call anything. Observability is passive collector.
+No cycles. Archive doesn't call anything. Observability is passive collector.
 
-## Protocol Corrections
+## Protocols
 
 ### proto.component.Component
 ```python
-"""NEW: Base component protocol for pool management"""
+"""Base component protocol for pool management"""
 
 Protocol:
   - fitness: float (property)
@@ -126,7 +126,7 @@ Protocol:
   - clear() -> None
 
 Implementations:
-  - memory.tubes.TubeNetwork (exponential decay)
+  - memory.tubes.TubeNetwork
 
 Purpose:
   - ONLY for temporal memory with decay
@@ -259,7 +259,7 @@ slime/
     └── package.py
 ```
 
-## Critical Invariants
+## Invariants
 
 ### 1. Dependency Direction (DAG Enforcement)
 - Lower layers NEVER import from higher layers
@@ -290,11 +290,11 @@ NO CYCLES
 
 ### 4. GPU Memory Safety
 - Kernels check allocation before launch
-- Organism enforces total memory budget (Decision #4: soft limits)
+- Organism enforces memory budget
 - Pool culling triggered by OOM
 
 ### 5. Observability Injection
-- Metrics collector passed to Organism.__init__() (Decision #5)
+- Metrics collector passed to Organism.__init__()
 - All forward passes record to metrics
 - NO global state for metrics
 
@@ -302,7 +302,7 @@ NO CYCLES
 ```
 Fast (every step):
   - Weight updates via backprop
-  - Fitness tracking (EMA)
+  - Fitness tracking
   - Metrics collection
   - Loss monitoring
 
@@ -310,10 +310,10 @@ Medium (every 100 steps):
   - Fitness assessment
   - Archive elite updates
   - Pool spawn decisions
-  - Loss gate check (halt if diverging)
+  - Loss gate check
 
 Slow (every 1000 steps):
-  - Pool culling (apoptosis)
+  - Pool culling
   - Memory budget enforcement
   - Behavioral space analysis
   - Hard limit enforcement (max pool size, max archive)
@@ -350,7 +350,7 @@ if step < 1000:
 elif step < 5000:
     phase = "gentle"  # Allow births, no deaths
 else:
-    phase = "full"    # Full dynamics
+    phase = "full"    # All dynamics enabled
 ```
 
 ## Implementation Checklist
@@ -368,26 +368,26 @@ else:
 - [x] api/native.py
 - [x] config/loader.py (partial)
 
-### MUST FIX NOW (BLOCKING BASIC FUNCTIONALITY)
-- [ ] **core/chemotaxis.py** - Behavioral space navigator
+### MUST FIX NOW
+- [ ] **core/chemotaxis.py** - Behavioral space navigation
 - [ ] **core/organism.py** - Fix to inject metrics, kernel, use chemotaxis
 - [ ] **observability/metrics.py** - MetricsCollector (injectable)
 - [ ] **observability/slo.py** - SLO definitions
 - [ ] **observability/tracing.py** - Tracing spans
 
-### MUST ADD (BLOCKING TRAINING VIABILITY)
-- [ ] **training/stability.py** - Phased training protocol (warmup/gentle/full)
+### MUST ADD
+- [ ] **training/stability.py** - Phased training (warmup/gentle/full)
 - [ ] **training/fitness.py** - Gradient-based fitness computation
 - [ ] **training/losses.py** - Multi-objective loss functions
 - [ ] **training/trainer.py** - Training loop with lifecycle timescales
 - [ ] **training/lifecycle.py** - Hard limits, loss gates, safety checks
 
-### MUST TEST (BLOCKING VALIDATION)
+### MUST TEST
 - [ ] **tests/integration/test_training_stability.py** - Convergence with lifecycle
 - [ ] **tests/integration/test_gradient_flow.py** - Gradients through dynamic pools
 - [ ] **tests/ablations/test_static_vs_dynamic.py** - Prove dynamic helps
 - [ ] **tests/ablations/test_with_without_archive.py** - Prove archive helps
-- [ ] **bench/toy_tasks.py** - Simple tasks (y=sin(x), XOR, parity)
+- [ ] **bench/toy_tasks.py** - Tasks (y=sin(x), XOR, parity)
 
 ### Phase 1 Completion
 - [ ] kernels/triton_impl.py
@@ -399,18 +399,18 @@ else:
 - [ ] tests/unit/test_kernels.py
 - [ ] tests/unit/test_metrics.py
 
-### Phase 2 
-- [ ] bench/toy_tasks.py ✓ (validate on simple tasks first)
+### Phase 2
+- [ ] bench/toy_tasks.py
 - [ ] tests/ablations/test_fitness_metrics.py (which fitness works?)
 - [ ] tests/integration/test_behavioral_space.py (coverage, gradients)
 - [ ] tools/visualize.py (behavioral space plots)
 
-### Phase 3 (SCALE UP AFTER VALIDATION)
+### Phase 3
 - [ ] bench/transformer.py (vs baseline on real tasks)
 - [ ] tests/integration/test_optimization_landscape.py
 - [ ] config/* (complete YAML schemas)
 
-### Phase 4 (PACKAGING)
+### Phase 4
 - [ ] tools/export.py (ONNX, TorchScript)
 - [ ] tools/package.py (Windows .exe)
 - [ ] setup.py / pyproject.toml
