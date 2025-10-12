@@ -15,7 +15,7 @@ class Chemotaxis:
         self.device = device or torch.device('cuda')
         # Default to Mahalanobis after Kernel PCA, Euclidean before
         if distance_metric is None:
-            self.distance_metric = 'mahalanobis' if archive._dimensions_discovered else 'euclidean'
+            self.distance_metric = 'mahalanobis' if archive._discovered else 'euclidean'
         else:
             self.distance_metric = distance_metric
         self._sources: Dict[Tuple[int, ...], Tuple[torch.Tensor, float]] = {}

@@ -199,17 +199,17 @@ class BehavioralHierarchy:
 
     def cluster_distance(self, cluster_a: int, cluster_b: int) -> float:
         """
-        Compute distance between cluster means.
+        Compute ultrametric distance between clusters via dendrogram traversal.
 
-        Uses Euclidean distance for simplicity. For true ultrametric,
-        would need dendrogram traversal (TODO).
+        Uses linkage matrix to find the height at which clusters merge.
+        This guarantees the ultrametric property: d(x,z) <= max(d(x,y), d(y,z))
 
         Args:
             cluster_a: First cluster ID
             cluster_b: Second cluster ID
 
         Returns:
-            Distance between cluster means
+            Ultrametric distance (height of merge in dendrogram)
 
         Example:
             >>> hierarchy.fit(coords)
@@ -228,10 +228,47 @@ class BehavioralHierarchy:
         if cluster_b < 0 or cluster_b >= self.n_clusters:
             raise IndexError(f"Cluster B ID {cluster_b} out of range")
 
-        # Euclidean distance between means (proxy for dendrogram distance)
-        mean_a = self._cluster_means[cluster_a]
-        mean_b = self._cluster_means[cluster_b]
-        return float(np.linalg.norm(mean_a - mean_b))
+        # Use dendrogram to find merge height (true ultrametric)
+        # Linkage matrix format: [idx1, idx2, distance, sample_count]
+        # First n_clusters rows are original clusters (indexed 0..n_clusters-1)
+        # Each subsequent row represents a merge creating new cluster n_clusters+i
+
+        # Find which merged cluster contains cluster_a and cluster_b
+        # Traverse dendrogram from leaves to root
+        def find_merge_height(a: int, b: int, Z: np.ndarray) -> float:
+            """Find height at which clusters a and b merge."""
+            n = len(Z) + 1  # Number of original clusters
+
+            # Track which merged cluster each original cluster belongs to
+            # cluster_to_merged[i] = set of original clusters in merged cluster i
+            cluster_to_merged: dict[int, set[int]] = {}
+            for i in range(n):
+                cluster_to_merged[i] = {i}
+
+            # Process merges from bottom to top
+            for i, row in enumerate(Z):
+                idx1, idx2, height, count = row
+                idx1, idx2 = int(idx1), int(idx2)
+
+                # Merged cluster ID
+                merged_id = n + i
+
+                # Combine sets from children
+                cluster_to_merged[merged_id] = (
+                    cluster_to_merged[idx1] | cluster_to_merged[idx2]
+                )
+
+                # Check if this merge joins a and b
+                if a in cluster_to_merged[merged_id] and b in cluster_to_merged[merged_id]:
+                    # But they weren't together before this merge
+                    if not (a in cluster_to_merged[idx1] and b in cluster_to_merged[idx1]):
+                        if not (a in cluster_to_merged[idx2] and b in cluster_to_merged[idx2]):
+                            return float(height)
+
+            # Should never reach here if dendrogram is valid
+            return float('inf')
+
+        return find_merge_height(cluster_a, cluster_b, self.linkage_matrix)
 
     def log_likelihood(self, x: np.ndarray) -> float:
         """
