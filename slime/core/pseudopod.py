@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 import logging
 from slime.proto.kernel import Kernel
@@ -38,7 +39,11 @@ class Pseudopod(nn.Module):
         self.last_behavior: Optional[torch.Tensor] = None
         self._last_ca_pattern: Optional[torch.Tensor] = None
         self._raw_metrics: Optional[torch.Tensor] = None
-        self._ca_metrics: Optional[dict] = None  # CA-specific metrics
+        self._ca_metrics: Optional[dict] = None
+
+        # Learning progress tracking for curiosity-driven lifecycle
+        self._prediction_error_history = []
+        self._max_history_length = 100
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
         # Neural CA update
@@ -64,6 +69,14 @@ class Pseudopod(nn.Module):
         else:
             # Backward compatibility: use first 5 raw metrics before dimension discovery
             self.last_behavior = self._raw_metrics[:5]
+
+        # Track prediction error for learning progress
+        # Prediction error = reconstruction error from CA output
+        if latent.requires_grad:
+            prediction_error = F.mse_loss(output.mean(dim=1), latent).item()
+            self._prediction_error_history.append(prediction_error)
+            if len(self._prediction_error_history) > self._max_history_length:
+                self._prediction_error_history.pop(0)
 
         # Fitness from CA pattern entropy + output magnitude
         ca_pattern_normalized = self._ca_pattern / (self._ca_pattern.sum(dim=-1, keepdim=True) + self.numerical_config.epsilon)
@@ -377,11 +390,37 @@ class Pseudopod(nn.Module):
         return self.kernel.effective_rank(self.correlation)
 
     def coherence(self) -> torch.Tensor:
-        eye = torch.eye(self.correlation.shape[0], device=self.device)
-        partial = torch.linalg.solve(self.correlation + eye * 0.001, eye)
-        corr_sq = torch.sum(self.correlation ** 2)
-        partial_sq = torch.sum(partial ** 2)
-        return corr_sq / (corr_sq + partial_sq + 1e-10)
+        """
+        Learning progress metric for curiosity-driven lifecycle.
+
+        Returns: Δ prediction error (change in error over time window)
+                 High value → learning fast → low hunger → survive
+                 Low value → plateaued → high hunger → sample archive
+        """
+        if len(self._prediction_error_history) < 2:
+            return torch.tensor(0.0, device=self.device)
+
+        # Compute learning progress: negative slope of prediction error
+        # If error decreasing → positive progress → high coherence
+        # If error flat/increasing → zero/negative progress → low coherence
+        window_size = min(20, len(self._prediction_error_history))
+        recent_errors = self._prediction_error_history[-window_size:]
+
+        # Simple linear regression slope
+        x = torch.arange(window_size, dtype=torch.float32, device=self.device)
+        y = torch.tensor(recent_errors, dtype=torch.float32, device=self.device)
+
+        x_mean = x.mean()
+        y_mean = y.mean()
+        slope = ((x - x_mean) * (y - y_mean)).sum() / ((x - x_mean) ** 2).sum()
+
+        # Negative slope = decreasing error = learning progress
+        learning_progress = -slope
+
+        # Normalize to [0, 1] via sigmoid
+        coherence_value = torch.sigmoid(learning_progress * 10.0)
+
+        return coherence_value
 
     @property
     def fitness(self) -> float:

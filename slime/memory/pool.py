@@ -71,14 +71,25 @@ class DynamicPool:
 
     def _cull_low_fitness(self) -> None:
         before = len(self._components)
-        surviving = [c for c in self._components if c.fitness >= self.config.death_threshold]
+        # Curiosity-driven: cull components with low learning progress (high hunger)
+        # coherence() → learning progress, hunger = 1 - coherence
+        surviving = []
+        for c in self._components:
+            coherence_val = c.coherence().item() if hasattr(c, 'coherence') else c.fitness
+            hunger = 1.0 - coherence_val
+            if hunger < (1.0 - self.config.death_threshold):  # Low hunger → keep
+                surviving.append(c)
+
         if len(surviving) < self.config.min_size:
-            surviving = sorted(self._components, key=lambda c: c.fitness, reverse=True)[:self.config.min_size]
+            # Keep top min_size by coherence
+            surviving = sorted(self._components,
+                             key=lambda c: c.coherence().item() if hasattr(c, 'coherence') else c.fitness,
+                             reverse=True)[:self.config.min_size]
         culled = before - len(surviving)
         if culled > 0:
             self._components = surviving
             self._total_culled += culled
-            logger.debug(f'Culled {culled} components (fitness < {self.config.death_threshold})')
+            logger.debug(f'Culled {culled} components (high hunger / low learning progress)')
 
     def _should_spawn(self) -> bool:
         if self.config.max_size is not None:
@@ -86,8 +97,10 @@ class DynamicPool:
                 return False
         if not self._components:
             return True
-        avg_fitness = sum((c.fitness for c in self._components)) / len(self._components)
-        return avg_fitness >= self.config.birth_threshold
+        # Spawn when average learning progress is high (low hunger)
+        avg_coherence = sum((c.coherence().item() if hasattr(c, 'coherence') else c.fitness
+                            for c in self._components)) / len(self._components)
+        return avg_coherence >= self.config.birth_threshold
 
     def _spawn_batch(self, behavior_location: Optional[Tuple[float, ...]]=None) -> None:
         for _ in range(self.config.spawn_batch_size):
