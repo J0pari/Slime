@@ -4,7 +4,7 @@
 
 **Foundation**: Conway → Lenia → Flow-Lenia → Neural Flow-Lenia evolution path. Our Slime Mold Transformer is a **Neural Flow-Lenia organism** where Pseudopods are learned CA update rules with spatially-localized parameters, mass-conservative dynamics, and intrinsic curiosity-driven lifecycle.
 
-### Core Principles (2025 Substrate)
+**Core Principles**
 
 1. **Protocol-First**: All interfaces defined before implementations (algebraic effect handlers for optional capabilities)
 2. **Dynamic Everything**: No static allocations, lifecycle-managed components (curiosity-driven birth/death via learning progress)
@@ -14,7 +14,7 @@
 5. **Warp-Native GPU Kernels**: Like Polynesian navigator reading ocean/stars/birds as unified field, read warps/cache/tensor-cores as unified substrate
    - FlashAttention-style tiling (HBM ↔ SRAM), warp shuffles for zero-global-memory neighbor access, tensor cores for 256 FLOPs/cycle convolutions
 6. **Content-Addressable Low-Rank Archive**: SVD factorization + content-addressed delta compression (80-160x memory reduction)
-7. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure (ultrametric topology via p-adic/genealogy/hierarchy)
+7. **Validated Behavioral Space**: Distance-preserving embeddings ensure dimensions correlate with hardware structure (ultrametric topology via p-adic/genealogy/hierarchy)
 8. **DIRESA Learned Embeddings**: Adaptive dimensionality via distance-preserving nonlinear autoencoders, learns online, dimension count adapts via warp vote (2-10D)
 9. **Deterministic Random**: Hash-based seeded random for reproducibility
 10. **SRE Built-In**: Observability, SLOs, error budgets from day one (100% constraint satisfaction always)
@@ -257,11 +257,11 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 ### 9. Fitness Correlation with Task
 Fitness MUST correlate with loss reduction. Options:
 - Gradient magnitude (components affecting loss)
-- Attention alignment with targets
+- CA mass conservation correlation with targets
 - Information bottleneck metrics (mutual information)
 - **Relative fitness** (gradient magnitude z-score vs k-nearest neighbors)
 
-NOT attention entropy alone (doesn't correlate with task)
+NOT activation entropy alone (doesn't correlate with task)
 
 ### 9. CVT-MAP-Elites Architecture
 **Reasoning (Scalability):** Fixed grid scales as resolution^dims. CVT scales linearly with num_centroids.
@@ -270,7 +270,7 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **CVT solution:** Linear scaling (1000 centroids for any dimensionality)
 
-**Behavioral dimensions:** DIRESA learns 2-10 nonlinear dimensions from 10-20 raw metrics online. KMO validation ensures factorability.
+**Behavioral dimensions:** DIRESA learns 2-10 nonlinear dimensions from 10-20 raw metrics online. Trustworthiness/Continuity validation ensures distance preservation.
 
 ### 10. Content-Addressable Low-Rank Archive Storage
 **Reasoning (Memory Efficiency):** SVD low-rank factorization with content-addressable delta compression.
@@ -352,9 +352,9 @@ NOT attention entropy alone (doesn't correlate with task)
 
 **Raw metrics (10-20 metrics):** CA_mass_conservation, activation_sparsity, gradient_flow_magnitude, memory_access_locality, computational_intensity, CA_parameter_localization, weight_magnitude, gradient_variance, activation_magnitude, CA_neighborhood_coherence, etc.
 
-**Learned embeddings:** Nonlinear projections preserving pairwise distances better than PCA/t-SNE/UMAP
+**Learned embeddings:** Nonlinear projections preserving pairwise distances via autoencoder with distance loss
 
-**Validation (2025 metrics):** Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15, reconstruction error ≤ 0.5
+**Validation:** Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15, reconstruction error ≤ 0.5
 
 ### 10a. DIRESA Adaptive Dimensionality
 **Question: How many dimensions should behavioral embeddings use?**
@@ -581,7 +581,7 @@ Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compu
 
 - Zhang, Y., et al. (2025). "DIRESA: Distance-preserving nonlinear dimension reduction via regularized autoencoders." [arXiv:2404.18314](https://arxiv.org/abs/2404.18314)
   - Adaptive dimensionality via learned gating (2-10 dimensions)
-  - Preserves pairwise distances better than PCA/t-SNE/UMAP
+  - Distance-preserving autoencoder with explicit pairwise distance loss
   - **Foundation for our behavioral embedding learning**
 
 ### Curiosity & Intrinsic Motivation (2021-2024)
@@ -596,15 +596,16 @@ Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compu
   - Connections to developmental psychology, meta-learning, open-endedness
   - **Informs our curiosity-driven selection pressure**
 
-### Statistical Validation
 
-- Kaiser, H. F. (1970). "A second generation little jiffy." *Psychometrika*, 35(4), 401-415.
-  - Kaiser-Meyer-Olkin (KMO) test for factor analysis adequacy
-  - Used to validate behavioral dimensions are factorable
+### Dimensionality Reduction Validation
 
-- Bartlett, M. S. (1950). "Tests of significance in factor analysis." *British Journal of Statistical Psychology*, 3(2), 77-85.
-  - Bartlett's test of sphericity for correlation matrices
-  - Tests null hypothesis that behavioral dimensions are uncorrelated
+- Venna, J., Peltonen, J., Nybo, K., Aidos, H., & Kaski, S. (2010). "Information retrieval perspective to nonlinear dimensionality reduction for data visualization." *Journal of Machine Learning Research*, 11, 451-490.
+  - Trustworthiness and Continuity metrics for embedding quality
+  - Measures preservation of local neighborhoods in dimension reduction
+
+- Gower, J. C., & Dijksterhuis, G. B. (2004). *Procrustes Problems*. Oxford University Press.
+  - Procrustes distance for comparing geometric configurations
+  - Used to validate shape-preservation in DIRESA embeddings
 
 ### Optimization Theory
 

@@ -71,7 +71,7 @@ archive:
   diresa_dims: [2, 10]                   # Adaptive dimensionality range (learned)
   low_rank_k: 64                         # Factorization rank for weight compression
   delta_rank: 8                          # Delta compression rank (smaller)
-  kmo_threshold: 0.6                     # KMO validation threshold
+  trustworthiness_threshold: 0.85        # Trustworthiness validation threshold
   reconstruction_error_threshold: 0.5    # Max reconstruction error
   gc_interval: 100                       # Garbage collection frequency
   seed: 42                               # Deterministic centroid init
@@ -147,7 +147,7 @@ DIRESA autoencoder learns 2-10 dimensions online. Raw metrics:
 - gradient_variance
 - activation_magnitude
 
-DIRESA learns nonlinear embeddings preserving pairwise distances. Dimension count adapts based on task. Validated via KMO ≥ 0.6, Bartlett's p < 0.05, reconstruction error ≤ 0.5.
+DIRESA learns nonlinear embeddings preserving pairwise distances. Dimension count adapts based on task. Validated via Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15, reconstruction error ≤ 0.5.
 
 ## Testing
 
@@ -231,7 +231,7 @@ export_torchscript(model, output_path='model.pt')
 - Verify fitness uses gradients: `pytest slime/tests/unit/test_fitness_computation.py`
 
 **"Components not diversifying"**
-- Check DIRESA embeddings: KMO > 0.6, reconstruction error < 0.5
+- Check DIRESA embeddings: Trustworthiness > 0.85, reconstruction error < 0.5
 - Verify fitness includes efficiency signal
 - Increase `num_centroids` (more Voronoi cells)
 
@@ -289,7 +289,7 @@ Similar behaviors → same centroid → same GPU. Deterministic placement, no co
 - Windows: Use `triton-windows` (bundled TinyCC compiler)
 - Archive memory: 1000 centroids × D² × 4 bytes, but low-rank (k=64) reduces by 8x
 - Lifecycle adds overhead vs static transformer
-- DIRESA embeddings must be factorable (validated via KMO test)
+- DIRESA embeddings must preserve distances (validated via Trustworthiness/Continuity)
 
 ## References
 
