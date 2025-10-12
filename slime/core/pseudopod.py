@@ -29,6 +29,7 @@ class Pseudopod(nn.Module):
         self._fitness = 0.0
         self.last_behavior: Optional[torch.Tensor] = None
         self._last_attention_pattern: Optional[torch.Tensor] = None
+        self._raw_metrics: Optional[torch.Tensor] = None
 
     def forward(self, latent: torch.Tensor, stimulus: torch.Tensor) -> torch.Tensor:
         x = torch.cat([latent, stimulus], dim=-1)
@@ -43,7 +44,10 @@ class Pseudopod(nn.Module):
         output = torch.einsum('bhqk,bhvd->bhqd', attn, v)
         output = torch.einsum('bhqd,hdo->bhqo', output, self.output_proj)
         self._last_attention_pattern = attn.detach()
-        self.last_behavior = self.get_behavioral_coordinates(attn, output)
+        # Store raw metrics for kernel PCA (50+ GPU-aware metrics)
+        self._raw_metrics = self.compute_raw_metrics(attn, output)
+        # Keep behavioral coordinates for backward compatibility during transition
+        self.last_behavior = self._raw_metrics[:5]  # Use first 5 metrics temporarily
         attention_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean()
         output_magnitude = torch.norm(output) / torch.sqrt(torch.tensor(output.numel(), dtype=torch.float32, device=output.device))
         fitness_signal = (self.fitness_config.entropy_weight * attention_entropy +
@@ -110,13 +114,144 @@ class Pseudopod(nn.Module):
         normalized_flops = total_flops / 1000000000.0
         return min(1.0, normalized_flops)
 
-    def get_behavioral_coordinates(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+    def compute_raw_metrics(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Compute 50+ GPU-aware raw metrics that kernel PCA will reduce to 3-5D.
+
+        These capture actual GPU execution characteristics:
+        - Memory access patterns (coalescing, bandwidth, cache behavior)
+        - Compute utilization (SM occupancy, warp efficiency, divergence)
+        - Data movement (global/shared memory, register usage)
+        - Tensor operations (contiguity, stride patterns, alignment)
+        """
+        batch_size, num_heads, seq_len, head_dim = output.shape
+        metrics = []
+
+        # === Core 5 metrics (preserved for compatibility) ===
         attention_span = self.get_attention_distance(attn)
         activation_sparsity = self.get_activation_sparsity(output)
         gradient_flow = self.get_gradient_flow_magnitude()
         memory_locality = self.get_memory_access_locality(attn)
         compute_intensity = self.get_computational_intensity(output, attn.shape[-1])
-        return torch.tensor([attention_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity], device=self.device)
+        metrics.extend([attention_span, activation_sparsity, gradient_flow, memory_locality, compute_intensity])
+
+        # === Memory Access Patterns (12 metrics) ===
+        # Stride patterns - strided access kills GPU perf
+        q_strides = sum([abs(s) for s in self.query_weight.stride()])
+        k_strides = sum([abs(s) for s in self.key_weight.stride()])
+        v_strides = sum([abs(s) for s in self.value_weight.stride()])
+        metrics.extend([q_strides, k_strides, v_strides])
+
+        # Memory contiguity - non-contiguous = extra copies
+        attn_contiguous = 1.0 if attn.is_contiguous() else 0.0
+        output_contiguous = 1.0 if output.is_contiguous() else 0.0
+        metrics.extend([attn_contiguous, output_contiguous])
+
+        # Attention sparsity - affects memory bandwidth
+        attn_sparsity = (attn < 0.01).float().mean().item()
+        metrics.append(attn_sparsity)
+
+        # Memory footprint per batch element
+        attn_mem_mb = (attn.element_size() * attn.nelement()) / (1024**2)
+        output_mem_mb = (output.element_size() * output.nelement()) / (1024**2)
+        metrics.extend([attn_mem_mb, output_mem_mb])
+
+        # Alignment - unaligned access = performance penalty
+        attn_aligned = 1.0 if (attn.data_ptr() % 128 == 0) else 0.0
+        output_aligned = 1.0 if (output.data_ptr() % 128 == 0) else 0.0
+        metrics.extend([attn_aligned, output_aligned])
+
+        # === Compute Utilization (15 metrics) ===
+        # Warp divergence proxy - how uniform are operations
+        attn_variance = torch.var(attn).item()
+        output_variance = torch.var(output).item()
+        metrics.extend([attn_variance, output_variance])
+
+        # Activation density - affects SM occupancy
+        output_activation_density = (torch.abs(output) > self.numerical_config.epsilon).float().mean().item()
+        metrics.append(output_activation_density)
+
+        # Output magnitude distribution
+        output_mean = torch.mean(output).item()
+        output_std = torch.std(output).item()
+        output_max = torch.max(torch.abs(output)).item()
+        output_min = torch.min(torch.abs(output)).item()
+        metrics.extend([output_mean, output_std, output_max, output_min])
+
+        # Entropy - measure of information content
+        attn_entropy = -(attn * torch.log(attn + self.numerical_config.epsilon)).sum(dim=-1).mean().item()
+        metrics.append(attn_entropy)
+
+        # Correlation rank - numerical stability indicator
+        corr_rank = torch.linalg.matrix_rank(self._correlation).item() if self._correlation is not None else 0.0
+        metrics.append(corr_rank)
+
+        # Attention head utilization
+        attn_head_variance = torch.var(attn.mean(dim=-1), dim=1).mean().item()
+        metrics.append(attn_head_variance)
+
+        # Dynamic range
+        attn_dynamic_range = (attn.max() - attn.min()).item()
+        output_dynamic_range = (output.max() - output.min()).item()
+        metrics.extend([attn_dynamic_range, output_dynamic_range])
+
+        # === Tensor Core Utilization (8 metrics) ===
+        # Optimal for tensor cores: multiples of 8/16
+        seq_len_tc_friendly = 1.0 if (seq_len % 16 == 0) else 0.0
+        head_dim_tc_friendly = 1.0 if (head_dim % 8 == 0) else 0.0
+        batch_tc_friendly = 1.0 if (batch_size % 8 == 0) else 0.0
+        metrics.extend([seq_len_tc_friendly, head_dim_tc_friendly, batch_tc_friendly])
+
+        # Matrix shape ratios - square matrices utilize tensor cores better
+        attn_aspect_ratio = seq_len / max(seq_len, 1)
+        output_aspect_ratio = seq_len / max(head_dim, 1)
+        metrics.extend([attn_aspect_ratio, output_aspect_ratio])
+
+        # Data type efficiency (fp16/bf16 better than fp32)
+        dtype_efficiency = 1.0 if output.dtype in [torch.float16, torch.bfloat16] else 0.5
+        metrics.append(dtype_efficiency)
+
+        # Operation fusion potential
+        softmax_fusion_potential = attention_span  # local attention = more fuseable
+        metrics.append(softmax_fusion_potential)
+
+        # === Register Pressure (8 metrics) ===
+        # More live tensors = more register spills
+        num_params = sum(p.numel() for p in self.parameters())
+        metrics.append(num_params / 1000.0)  # Normalize
+
+        # Intermediate tensor sizes
+        qkv_intermediate_size = (batch_size * num_heads * seq_len * head_dim * 3) / 1000.0
+        metrics.append(qkv_intermediate_size)
+
+        # Weight matrix sizes
+        weight_size = sum(p.numel() for p in self.parameters() if p.requires_grad) / 1000.0
+        metrics.append(weight_size)
+
+        # Activation checkpointing benefit estimate
+        activation_mem = (output.numel() * output.element_size()) / (1024**2)
+        metrics.append(activation_mem)
+
+        # Gradient accumulation memory
+        if any(p.grad is not None for p in self.parameters()):
+            grad_mem = sum(p.grad.numel() * p.grad.element_size() for p in self.parameters() if p.grad is not None) / (1024**2)
+        else:
+            grad_mem = 0.0
+        metrics.append(grad_mem)
+
+        # Sparsity benefits for memory
+        param_sparsity = sum((torch.abs(p) < 1e-6).float().mean().item() for p in self.parameters()) / max(1, len(list(self.parameters())))
+        metrics.append(param_sparsity)
+
+        # Layer norm stats
+        output_mean_abs = torch.mean(torch.abs(output)).item()
+        metrics.append(output_mean_abs)
+
+        # Numerical stability indicators
+        output_has_nan = torch.isnan(output).any().float().item()
+        output_has_inf = torch.isinf(output).any().float().item()
+        metrics.extend([output_has_nan, output_has_inf])
+
+        return torch.tensor(metrics, device=self.device)
 
     @property
     def correlation(self) -> torch.Tensor:

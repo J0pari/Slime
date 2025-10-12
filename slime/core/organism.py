@@ -88,13 +88,16 @@ class Organism(nn.Module):
         fitness = (max_rank * min_coherence).item()
 
         if not self.archive._discovered:
-            num_body_features = self.arch_config.behavioral_space.num_raw_metrics - 2
-            body_features = body.mean(0)[:, :num_body_features]
-            max_rank_expanded = max_rank.unsqueeze(0).expand(body_features.shape[0], 1)
-            min_coherence_expanded = min_coherence.unsqueeze(0).expand(body_features.shape[0], 1)
-            raw_metrics_per_seq = torch.cat([max_rank_expanded, min_coherence_expanded, body_features], dim=1)
-            raw_metrics = raw_metrics_per_seq.mean(0).detach().cpu().numpy().astype(np.float32)
-            self.archive.add_raw_metrics(raw_metrics)
+            # Collect 10D raw metrics from ALL active pseudopods for kernel PCA
+            pseudopod_raw_metrics = []
+            for pod in pseudopods:
+                if hasattr(pod, '_raw_metrics'):
+                    pseudopod_raw_metrics.append(pod._raw_metrics)
+
+            if pseudopod_raw_metrics:
+                # Average raw metrics across all pseudopods
+                avg_raw_metrics = torch.stack(pseudopod_raw_metrics).mean(0)
+                self.archive.add_raw_metrics(avg_raw_metrics.detach().cpu().numpy().astype(np.float32))
             warmup_samples = self.arch_config.behavioral_space.num_centroids * 3
             if len(self.archive._raw_metrics_samples) >= warmup_samples:
                 logger.info(f"Warmup complete ({warmup_samples} samples), discovering behavioral dimensions...")
