@@ -45,7 +45,7 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
-        self.archive = CVTArchive(behavioral_dims=5, num_centroids=100, low_rank_k=32, kmo_threshold=0.6, seed=42)
+        self.archive = CVTArchive(num_raw_metrics=15, target_dims=5, num_centroids=100, low_rank_k=32, kmo_threshold=0.6, reconstruction_error_threshold=0.5, kernel='rbf', gamma=1.0, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
         if pool_config is None:
             pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)

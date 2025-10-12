@@ -44,11 +44,16 @@ model:
   num_pseudopods: 8
 
 archive:
-  num_centroids: 1000  # CVT partitions, not grid cells
-  behavioral_dims: 5   # Can use 4-5 dims without exponential explosion
-  low_rank_k: 64       # Factorization rank for weight compression
-  kmo_threshold: 0.6   # KMO statistic threshold for behavioral space validation
-  seed: 42             # Seed for deterministic centroid initialization
+  num_centroids: 1000                    # CVT partitions, not grid cells
+  target_dims: 5                         # Target dimensions after Kernel PCA (4-5 typical)
+  num_raw_metrics: 15                    # Number of raw metrics to collect (10-20 typical)
+  discovery_warmup: 1000                 # Steps to collect metrics before Kernel PCA discovery
+  low_rank_k: 64                         # Factorization rank for weight compression
+  kmo_threshold: 0.6                     # KMO statistic threshold for validation
+  reconstruction_error_threshold: 0.5    # Max reconstruction error for Kernel PCA
+  kernel: 'rbf'                          # Kernel type (rbf, poly, sigmoid, cosine)
+  gamma: 1.0                             # RBF kernel gamma parameter
+  seed: 42                               # Seed for deterministic centroid initialization
 
 lifecycle:
   initial_temp: 1.0    # Simulated annealing initial temperature
@@ -113,14 +118,17 @@ If loss exceeds 10x moving average, lifecycle freezes automatically.
 
 Think of a slime mold foraging for food. It extends pseudopods (components) in different directions. Successful pseudopods (high fitness) persist. Unsuccessful ones retract (culling). The organism remembers successful patterns (archive using low-rank compressed weights) and reuses them when exploring new areas.
 
-**CVT-MAP-Elites:** Archive uses Voronoi partitioning of behavioral space (not fixed grid). Scales to 4-5 behavioral dimensions:
-- Attention span (memory locality)
-- Activation sparsity (compute efficiency)
-- Gradient flow magnitude (task relevance)
-- Memory access locality (cache friendliness)
-- Computational intensity (GPU occupancy)
+**CVT-MAP-Elites:** Archive uses Voronoi partitioning of behavioral space (not fixed grid). Behavioral dimensions are automatically discovered via Kernel PCA:
 
-Key difference from standard transformers: attention heads don't have fixed roles. Components discover specializations through gradient-based selection pressure.
+1. **Warmup phase (steps 0-999):** Collect 10-20 raw metrics from each component
+   - Attention span, activation sparsity, gradient magnitude, etc.
+2. **Discovery phase (step 1000):** Run Kernel PCA to find 4-5 principal components
+   - Validate with KMO test (>0.6), Bartlett's test (p<0.05), and reconstruction error (<0.5)
+3. **Training phase (steps 1000+):** Use discovered dimensions for archive
+
+Raw metrics → Kernel PCA (RBF kernel) → Discovered dimensions (nonlinear manifold projections)
+
+Key difference from standard transformers: attention heads don't have fixed roles. Components discover specializations through gradient-based selection pressure. Behavioral dimensions discovered from data, not hardcoded.
 
 ## Testing
 
@@ -144,8 +152,10 @@ pytest slime/tests/unit/test_triton_kernels.py -v
 # Verify DAG dependencies are not violated
 pytest slime/tests/unit/test_dag_enforcement.py -v
 
-# Verify behavioral space is factorable (KMO test)
+# Verify Kernel PCA discovery produces valid dimensions (KMO + Bartlett's tests)
 pytest slime/tests/unit/test_behavioral_kmo.py -v
+pytest slime/tests/unit/test_behavioral_bartlett.py -v
+pytest slime/tests/unit/test_behavioral_kernel_pca.py -v
 ```
 
 ## Profiling

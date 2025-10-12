@@ -250,7 +250,8 @@ def pytest_sessionfinish(session, exitstatus):
                     summary['test_summary']['failed'] += 1
                     summary['test_summary']['passed'] -= 1
         with open(output_file, 'w') as f:
-            json.dump(summary, f, indent=2)
+            serializable_summary = _make_serializable_standalone(summary)
+            json.dump(serializable_summary, f, indent=2)
         print(f'\n=== CAUSAL CONSTRAINT REPORT ===')
         print(f"Tests: {summary['test_summary']['passed']}/{summary['test_summary']['total_tests']} passed")
         print(f"Constraints: {satisfied_constraints}/{total_constraints} satisfied ({summary['constraint_summary']['satisfaction_rate']:.1%})")

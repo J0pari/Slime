@@ -35,19 +35,26 @@ class Elite:
 
 class CVTArchive:
 
-    def __init__(self, behavioral_dims: int, num_centroids: int=1000, low_rank_k: int=64, device: torch.device=None, kmo_threshold: float=0.6, seed: int=42):
-        self.behavioral_dims = behavioral_dims
+    def __init__(self, num_raw_metrics: int=15, target_dims: int=5, num_centroids: int=1000, low_rank_k: int=64, device: torch.device=None, kmo_threshold: float=0.6, reconstruction_error_threshold: float=0.5, kernel: str='rbf', gamma: float=1.0, seed: int=42):
+        self.num_raw_metrics = num_raw_metrics
+        self.target_dims = target_dims
         self.num_centroids = num_centroids
         self.low_rank_k = low_rank_k
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.kmo_threshold = kmo_threshold
+        self.reconstruction_error_threshold = reconstruction_error_threshold
+        self.kernel = kernel
+        self.gamma = gamma
         self.seed = seed
         self.centroids: Optional[np.ndarray] = None
+        self.kpca_transform = None
+        self.behavioral_dims: Optional[int] = None
         self._archive: Dict[int, Elite] = {}
         self._generation = 0
         self._total_additions = 0
         self._total_replacements = 0
-        self._behavioral_samples: List[Tuple[float, ...]] = []
+        self._raw_metrics_samples: List[np.ndarray] = []
+        self._discovered = False
 
     def initialize_centroids(self, initial_samples: Optional[np.ndarray]=None):
         if initial_samples is not None and len(initial_samples) >= self.num_centroids:
@@ -58,6 +65,42 @@ class CVTArchive:
             rng = np.random.RandomState(self.seed)
             self.centroids = rng.randn(self.num_centroids, self.behavioral_dims).astype(np.float32)
             logger.info(f'Initialized {self.num_centroids} CVT centroids from seed {self.seed}')
+
+    def discover_dimensions(self) -> bool:
+        if self._discovered:
+            logger.warning('Dimensions already discovered')
+            return True
+        if len(self._raw_metrics_samples) < 100:
+            raise ValueError(f'Need ≥100 raw metric samples for Kernel PCA, got {len(self._raw_metrics_samples)}')
+        raw_matrix = np.array(self._raw_metrics_samples, dtype=np.float32)
+        logger.info(f'Running Kernel PCA on {raw_matrix.shape[0]} samples with {raw_matrix.shape[1]} raw metrics')
+        try:
+            from sklearn.decomposition import KernelPCA
+            from factor_analyzer.factor_analyzer import calculate_kmo
+            from scipy.stats import bartlett
+        except ImportError as e:
+            raise ImportError(f'Missing required package for dimension discovery: {e}')
+        kmo_all, kmo_model = calculate_kmo(raw_matrix)
+        logger.info(f'KMO statistic: {kmo_model:.3f} (>0.6=acceptable, >0.8=good, >0.9=excellent)')
+        if kmo_model < self.kmo_threshold:
+            raise ValueError(f'KMO {kmo_model:.3f} < {self.kmo_threshold}: raw metrics not factorable')
+        stat, p_value = bartlett(*[raw_matrix[:, i] for i in range(raw_matrix.shape[1])])
+        logger.info(f"Bartlett's test: statistic={stat:.2f}, p-value={p_value:.4f}")
+        if p_value > 0.05:
+            raise ValueError(f"Bartlett's test p={p_value:.3f} > 0.05: metrics are uncorrelated")
+        kpca = KernelPCA(n_components=self.target_dims, kernel=self.kernel, gamma=self.gamma, random_state=self.seed, fit_inverse_transform=True)
+        transformed_samples = kpca.fit_transform(raw_matrix)
+        reconstructed = kpca.inverse_transform(transformed_samples)
+        reconstruction_error = np.mean((raw_matrix - reconstructed) ** 2)
+        logger.info(f'Kernel PCA reconstruction error: {reconstruction_error:.3f}')
+        if reconstruction_error > self.reconstruction_error_threshold:
+            raise ValueError(f'Kernel PCA reconstruction error {reconstruction_error:.3f} > {self.reconstruction_error_threshold}')
+        self.kpca_transform = kpca
+        self.behavioral_dims = self.target_dims
+        self._discovered = True
+        self.initialize_centroids(transformed_samples)
+        logger.info(f'Discovered {self.behavioral_dims} behavioral dimensions from {self.num_raw_metrics} raw metrics using Kernel PCA (kernel={self.kernel}, gamma={self.gamma})')
+        return True
 
     def validate_behavioral_space(self, samples: np.ndarray) -> float:
         try:
@@ -113,19 +156,24 @@ class CVTArchive:
                     weights_v[key] = torch.ones(1, 1, device=tensor.device, dtype=tensor.dtype)
         return (weights_u, weights_v)
 
+    def add_raw_metrics(self, raw_metrics: np.ndarray) -> bool:
+        if self._discovered:
+            raise ValueError('Cannot add raw metrics after dimension discovery. Use add() instead.')
+        if len(raw_metrics) != self.num_raw_metrics:
+            raise ValueError(f'Raw metrics dimension mismatch: expected {self.num_raw_metrics}, got {len(raw_metrics)}')
+        self._raw_metrics_samples.append(raw_metrics)
+        logger.debug(f'Collected raw metrics sample {len(self._raw_metrics_samples)}/{100} for dimension discovery')
+        return False
+
     def add(self, behavior: Tuple[float, ...], fitness: float, state_dict: dict, generation: Optional[int]=None, metadata: Optional[dict]=None) -> bool:
+        if not self._discovered:
+            raise ValueError('Cannot add elites before dimension discovery. Use add_raw_metrics() during warmup phase.')
+        if self.behavioral_dims is None:
+            raise ValueError('Behavioral dimensions not set. Call discover_dimensions() first.')
         if len(behavior) != self.behavioral_dims:
             raise ValueError(f'Behavior dimension mismatch: expected {self.behavioral_dims}, got {len(behavior)}')
-        self._behavioral_samples.append(behavior)
         if self.centroids is None:
-            if len(self._behavioral_samples) >= 100:
-                samples = np.array(self._behavioral_samples, dtype=np.float32)
-                kmo = self.validate_behavioral_space(samples)
-                if kmo >= self.kmo_threshold:
-                    self.initialize_centroids(samples)
-                else:
-                    logger.warning('Deferring centroid initialization: KMO too low')
-            return False
+            raise ValueError('Centroids not initialized. Call discover_dimensions() first.')
         centroid_id = self._find_nearest_centroid(behavior)
         if centroid_id in self._archive:
             if fitness <= self._archive[centroid_id].fitness:

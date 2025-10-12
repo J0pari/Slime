@@ -1,0 +1,221 @@
+{
+  "run_timestamp": "2025-10-12T04:16:40.960818+00:00",
+  "exit_status": 0,
+  "test_summary": {
+    "total_tests": 8,
+    "passed": 7,
+    "failed": 1,
+    "skipped": 0
+  },
+  "constraint_summary": {
+    "total_constraints": 22,
+    "satisfied": 18,
+    "violated": 4,
+    "satisfaction_rate": 0.8181818181818182,
+    "avg_causal_depth": 0.0
+  },
+  "results": [
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_archive_initialization_constraint",
+      "outcome": "passed",
+      "duration_seconds": 0.021098099648952484,
+      "timestamp": "2025-10-12T04:16:40.940306+00:00",
+      "causal_dag": {
+        "nodes": [
+          {
+            "id": "Archive centroids exist with shape (num_centroids, behavioral_dims)_0",
+            "constraint": "Archive centroids exist with shape (num_centroids, behavioral_dims)",
+            "satisfied": true,
+            "expected": [
+              100,
+              5
+            ],
+            "actual": [
+              100,
+              5
+            ],
+            "details": {
+              "centroids_dtype": "float32"
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.940015+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Archive starts with zero elites_1",
+            "constraint": "Archive starts with zero elites",
+            "satisfied": true,
+            "expected": 0,
+            "actual": 0,
+            "details": {},
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.940046+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          }
+        ],
+        "topology": {
+          "total_nodes": 2,
+          "max_depth": 0,
+          "connected_components": 2
+        }
+      },
+      "root_cause": null
+    },
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_centroid_determinism_constraint",
+      "outcome": "passed",
+      "duration_seconds": 0.0009586000815033913,
+      "timestamp": "2025-10-12T04:16:40.942283+00:00",
+      "causal_dag": {
+        "nodes": [
+          {
+            "id": "Deterministic centroid initialization (seed=42)_0",
+            "constraint": "Deterministic centroid initialization (seed=42)",
+            "satisfied": true,
+            "expected": "centroids_match",
+            "actual": "centroids_match",
+            "details": {
+              "max_diff": 0.0,
+              "mean_diff": 0.0
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.941897+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Different seeds produce different centroids_1",
+            "constraint": "Different seeds produce different centroids",
+            "satisfied": true,
+            "expected": "centroids_differ",
+            "actual": "centroids_differ",
+            "details": {
+              "max_diff": 3.3940489292144775,
+              "similarity": 1.0086008310317993
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.942142+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          }
+        ],
+        "topology": {
+          "total_nodes": 2,
+          "max_depth": 0,
+          "connected_components": 2
+        }
+      },
+      "root_cause": null
+    },
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_nearest_centroid_constraint",
+      "outcome": "passed",
+      "duration_seconds": 0.0004926999099552631,
+      "timestamp": "2025-10-12T04:16:40.943507+00:00",
+      "causal_dag": {
+        "nodes": [
+          {
+            "id": "Nearest centroid ID is in valid range [0, num_centroids)_0",
+            "constraint": "Nearest centroid ID is in valid range [0, num_centroids)",
+            "satisfied": true,
+            "expected": "range(0, 100)",
+            "actual": 63,
+            "details": {
+              "centroid_id": 63,
+              "is_int": true
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.943320+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Returned centroid is actually nearest by Euclidean distance_1",
+            "constraint": "Returned centroid is actually nearest by Euclidean distance",
+            "satisfied": true,
+            "expected": 63,
+            "actual": 63,
+            "details": {
+              "distance_to_returned": 1.0068642327318533,
+              "min_distance": 1.0068642327318533
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.943374+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          }
+        ],
+        "topology": {
+          "total_nodes": 2,
+          "max_depth": 0,
+          "connected_components": 2
+        }
+      },
+      "root_cause": null
+    },
+    {
+      "test_name": "slime/tests/unit/test_archive.py::test_low_rank_compression_constraint",
+      "outcome": "failed",
+      "duration_seconds": 0.00726559991016984,
+      "timestamp": "2025-10-12T04:16:40.951496+00:00",
+      "causal_dag": {
+        "nodes": [
+          {
+            "id": "Elite exists at nearest centroid after add()_0",
+            "constraint": "Elite exists at nearest centroid after add()",
+            "satisfied": true,
+            "expected": "elite_exists",
+            "actual": "elite_exists",
+            "details": {
+              "centroid_id": 0,
+              "elite_fitness": 0.8
+            },
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.950327+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Reconstructed weights have same keys as original_1",
+            "constraint": "Reconstructed weights have same keys as original",
+            "satisfied": true,
+            "expected": [
+              "W_k",
+              "W_q",
+              "W_o",
+              "W_v"
+            ],
+            "actual": [
+              "W_k",
+              "W_q",
+              "W_o",
+              "W_v"
+            ],
+            "details": {},
+            "context": {},
+            "timestamp": "2025-10-12T04:16:40.950564+00:00",
+            "depth": 0,
+            "parents": [],
+            "children": [],
+            "edge_types": {}
+          },
+          {
+            "id": "Reconstruction error for W_q < 0.5 (low-rank k=8)_2",
+            "constraint": "Reconstruction error for W_q < 0.5 (low-rank k=8)",
+            "satisfied": 

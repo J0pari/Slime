@@ -9,10 +9,11 @@
 5. **IO-Aware Kernels**: FlashAttention-style tiled computation (HBM ↔ SRAM management)
 6. **Low-Rank Archive**: Store weight factorizations (U, V) not full matrices (10-100x memory reduction)
 7. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure
-8. **Deterministic Random**: Hash-based seeded random for reproducibility
-9. **SRE Built-In**: Observability, SLOs, error budgets from day one
-10. **GPU-Native**: 100% device execution, zero CPU synchronization
-11. **DRY Principle**: Single source of truth for each concept
+8. **Automatic Dimension Discovery**: Kernel PCA discovers behavioral dimensions from component metrics (no hardcoded dimensions)
+9. **Deterministic Random**: Hash-based seeded random for reproducibility
+10. **SRE Built-In**: Observability, SLOs, error budgets from day one
+11. **GPU-Native**: 100% device execution, zero CPU synchronization
+12. **DRY Principle**: Single source of truth for each concept
 
 ## Dependency DAG
 
@@ -67,6 +68,7 @@ Layer 6: Applications (depend on Layer 0-5)
     tests/unit/test_archive_operations.py → memory/archive
     tests/unit/test_pool_lifecycle.py → memory/pool
     tests/unit/test_tubes_memory.py → memory/tubes
+    tests/unit/test_comonad.py → core/comonad
     tests/unit/test_pseudopod_component.py → core/pseudopod
     tests/unit/test_chemotaxis_selection.py → core/chemotaxis
     tests/unit/test_organism_orchestration.py → core/organism
@@ -330,6 +332,7 @@ slime/
 │   │   ├── test_tubes_memory.py
 │   │   ├── test_tubes_temporal_access.py
 │   │   ├── test_state_dataclass.py
+│   │   ├── test_comonad.py
 │   │   ├── test_pseudopod_component.py
 │   │   ├── test_pseudopod_fitness.py
 │   │   ├── test_chemotaxis_selection.py
@@ -556,18 +559,45 @@ num_centroids = 1000  # Linear scaling, user-defined
 # No exponential explosion, handles continuous space naturally
 ```
 
-**Behavioral dimensions (4-5 dims):**
+**Behavioral dimensions (automatically discovered):**
 ```python
-behavior = (
-    avg_attention_span,         # Mean(attention_weights * position_distance)
-    activation_sparsity,         # Fraction of activations near zero
-    gradient_flow_magnitude,     # L2 norm of gradients through component
-    memory_access_locality,      # Coherence of attention patterns
-    computational_intensity,     # FLOPs per forward pass
-)
+# Raw metrics collected from each component (10-20 raw metrics)
+raw_metrics = {
+    'avg_attention_span': mean(attn_weights * position_distance),
+    'activation_sparsity': fraction(activations < threshold),
+    'gradient_flow_magnitude': l2_norm(gradients),
+    'memory_access_locality': var(attention_positions),
+    'computational_intensity': flops_per_forward,
+    'attention_entropy': -sum(p * log(p)),
+    'weight_magnitude': l2_norm(weights),
+    'gradient_variance': var(gradients),
+    'activation_magnitude': l2_norm(activations),
+    'attention_coherence': cosine_similarity(attn_patterns),
+    # ... 10-20 total metrics
+}
+
+# Warmup phase (first 1000 steps): collect raw metrics from all components
+# samples shape: (num_components × num_steps, num_raw_metrics)
+
+# Discovery phase (step 1000): Kernel PCA + KMO validation
+from sklearn.decomposition import KernelPCA
+from scipy.stats import KMO
+
+kpca = KernelPCA(n_components=5, kernel='rbf', gamma=1.0, random_state=42, fit_inverse_transform=True)
+behavior_space = kpca.fit_transform(raw_metrics_matrix)
+# Validate quality: check reconstruction error
+reconstructed = kpca.inverse_transform(behavior_space)
+reconstruction_error = np.mean((raw_metrics_matrix - reconstructed) ** 2)
+
+kmo_statistic = KMO(raw_metrics_matrix)
+if kmo_statistic < 0.6:
+    raise ValueError("Raw metrics don't capture structured variance")
+
+# Discovered dimensions are Kernel PCA components (nonlinear combinations of raw metrics)
+# Archive uses these discovered dimensions for rest of training
 ```
 
-Each dimension correlates with hardware structure: memory locality, compute efficiency, task relevance.
+Dimensions are NOT hardcoded. Kernel PCA discovers nonlinear manifold structure in raw metrics. KMO validates that raw metrics are factorable.
 
 ### 10. Low-Rank Archive Storage ✓
 **Reasoning (Memory Efficiency):** Inspired by Ha et al. (2016) hypernetworks memory optimization.
@@ -603,9 +633,11 @@ if current_loss > 10 * loss_ema:
 
 # Phased training (gradually enable dynamics)
 if step < 1000:
-    phase = "warmup"  # Static pool, no lifecycle
+    phase = "warmup"  # Static pool, collect raw metrics for dimension discovery
+elif step == 1000:
+    phase = "discovery"  # Run Kernel PCA on collected metrics, initialize CVT centroids
 elif step < 5000:
-    phase = "gentle"  # Allow births, no deaths
+    phase = "gentle"  # Allow births, no deaths, archive active
 else:
     phase = "full"    # All dynamics enabled
 ```
@@ -622,7 +654,7 @@ else:
 ### MUST ADD
 - [ ] **memory/archive.py** - CVT-MAP-Elites with Voronoi partitioning and low-rank storage
 - [ ] **kernels/triton_impl.py** - FlashAttention-style tiled attention (HBM ↔ SRAM)
-- [ ] **core/pseudopod.py** - 5D behavioral metric computation
+- [ ] **core/pseudopod.py** - Raw behavioral metric computation (10-20 metrics)
 - [ ] **training/stability.py** - Simulated annealing temperature schedule
 - [ ] **training/fitness.py** - Gradient-based fitness with efficiency signals
 - [ ] **training/losses.py** - Multi-objective loss functions
@@ -760,54 +792,82 @@ elif step % 100 == 0: archive.add_if_elite()
 fitness_ema.update()  # Every step
 ```
 
-### 10. KMO-validated behavioral dimensions (4-5 dims) ✓
-**Reasoning (MAP-Elites Research):** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. CVT allows 4-5 dimensions without exponential grid explosion.
+### 10. Automatic Behavioral Dimension Discovery ✓
+**Reasoning (MAP-Elites Research):** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. Hardcoded dimensions are arbitrary. Let Kernel PCA discover nonlinear manifold structure from data.
 
-**Validation requirement:** KMO (Kaiser-Meyer-Olkin) test ensures behavioral dimensions are factorable and capture meaningful variance.
-
+**Discovery pipeline (step 1000):**
 ```python
-# Before training: validate behavioral space
+from sklearn.decomposition import KernelPCA
 from scipy.stats import KMO
-behavioral_samples = sample_components(n=100)
-kmo_statistic = KMO(behavioral_samples)
 
-if kmo_statistic < 0.5:
-    raise ValueError("Behavioral dimensions are not factorable - diversity will be noise")
-elif kmo_statistic < 0.6:
-    warnings.warn("Marginal behavioral space quality")
-# KMO > 0.6: Acceptable, KMO > 0.8: Good, KMO > 0.9: Excellent
+# Step 0-999: Collect 10-20 raw metrics from all components
+raw_metrics_matrix = collect_raw_metrics()  # Shape: (N_samples, 10-20)
+
+# Step 1000: Run Kernel PCA to discover 4-5 principal components
+kpca = KernelPCA(n_components=5, kernel='rbf', gamma=1.0, random_state=42)
+kpca.fit(raw_metrics_matrix)
+
+# Validate: reconstruction error must be low
+reconstructed = kpca.inverse_transform(kpca.transform(raw_metrics_matrix))
+reconstruction_error = np.mean((raw_metrics_matrix - reconstructed) ** 2)
+if reconstruction_error > 0.5:
+    raise ValueError(f"Kernel PCA reconstruction error {reconstruction_error:.3f} > 0.5")
+
+# Validate: KMO test for sampling adequacy (measures if variables are correlated)
+kmo_statistic = KMO(raw_metrics_matrix)
+if kmo_statistic < 0.6:
+    raise ValueError(f"KMO={kmo_statistic:.2f} too low - metrics don't capture structure")
+
+# Validate: Bartlett's test of sphericity (tests if correlation matrix is identity)
+from scipy.stats import bartlett
+chi_square, p_value = bartlett(raw_metrics_matrix)
+if p_value > 0.05:
+    raise ValueError(f"Bartlett's test p={p_value:.3f} - metrics are uncorrelated")
+
+# Store Kernel PCA transform for rest of training
+archive.kpca_transform = kpca
+
+# Project raw metrics to discovered dimensions
+behavior = kpca.transform(raw_metrics)  # Shape: (5,)
 ```
 
-**5-dimensional behavioral space (CVT-compatible):**
-```python
-behavior = (
-    avg_attention_span,         # Mean(attention_weights * position_distance)
-    activation_sparsity,         # Fraction of activations < threshold
-    gradient_flow_magnitude,     # L2 norm of gradients through component
-    memory_access_locality,      # Variance of attention positions
-    computational_intensity,     # FLOPs per forward pass
-)
-```
+**Raw metrics collected (10-20 metrics, NOT final dimensions):**
+- avg_attention_span
+- activation_sparsity
+- gradient_flow_magnitude
+- memory_access_locality
+- computational_intensity
+- attention_entropy
+- weight_magnitude
+- gradient_variance
+- activation_magnitude
+- attention_coherence
+- ... etc
 
-Each dimension correlates with measurable hardware metrics:
-- Attention span → Memory bandwidth usage
-- Sparsity → Compute utilization
-- Gradient flow → Task relevance
-- Memory locality → Cache hit rate
-- Compute intensity → GPU occupancy
+**Discovered dimensions are nonlinear projections of raw metrics:**
+- Kernel PCA discovers manifold structure in high-dimensional raw metric space
+- Dimensions are NOT interpretable by design - they capture nonlinear relationships
+- RBF kernel captures local similarity structure between component behaviors
 
-**CVT partitioning for device placement:**
+**CVT partitioning uses discovered dimensions:**
 ```python
-# Compute 1000 Voronoi centroids in 5D behavioral space
+# After discovery: initialize centroids in discovered space
 centroids = compute_cvt_centroids(num_centroids=1000, dims=5)
-# Each component maps to nearest centroid
-centroid_id = find_nearest_centroid(component.behavior(), centroids)
+
+# Runtime: project component to discovered space, find nearest centroid
+raw_metrics = component.compute_raw_metrics()
+behavior = archive.kpca_transform.transform(raw_metrics)
+centroid_id = find_nearest_centroid(behavior, centroids)
 device_id = hash(centroid_id) % num_gpus
 ```
 
-**Failure mode prevention:** KMO < 0.6 indicates dimensions don't capture structured variance. Replace dimensions before training.
+**Failure modes prevented:**
+- KMO < 0.6: Raw metrics have insufficient intercorrelation for factor analysis
+- Bartlett's p > 0.05: Raw metrics are uncorrelated (correlation matrix is identity)
+- Reconstruction error > 0.5: Kernel PCA loses too much information in projection
+- All three tests must pass: KMO ≥ 0.6 AND Bartlett's p < 0.05 AND reconstruction error ≤ 0.5
 
-**Test:** Does KMO-validated behavioral space beat random dimensions? If no, MAP-Elites adds overhead without benefit.
+**Test:** Does discovered space beat manually-designed dimensions? If no, Kernel PCA overhead has no benefit.
 
 ### 11. Deterministic hash-based random ✓
 **Reasoning (Reproducibility):** Non-deterministic random breaks reproducibility. Hash-based seeded random is cheap (~100ns) vs gradient computation (ms).
