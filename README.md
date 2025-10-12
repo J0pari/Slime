@@ -1,6 +1,6 @@
 # Slime Mold Transformer
 
-Neural network with dynamic component lifecycle. Components compete for survival based on gradient contribution. Archive maintains behavioral diversity via CVT-MAP-Elites (Centroidal Voronoi Tessellation). Uses FlashAttention-style tiled kernels and content-addressable low-rank weight storage with delta compression (80-160x memory reduction).
+A neural network where components are learned cellular automata with curiosity-driven lifecycle. Pseudopods extend into behavioral space, discovering niches through gradient-based selection. Archive maintains diversity via Adaptive Voronoi MAP-Elites. Memory efficiency through low-rank factorization and delta compression (80-160x reduction).
 
 ## Installation
 
@@ -32,6 +32,29 @@ x = torch.randn(2, 128, 512, device='cuda')  # (batch, seq, dim)
 output = model(x)  # (2, 128, 256)
 ```
 
+## What It Is
+
+Slime mold extends pseudopods searching for food. Successful pseudopods persist, unsuccessful ones retract. The organism remembers successful patterns.
+
+Our system: **Pseudopods are learned cellular automata** (Conway → Lenia → Flow-Lenia → Neural Flow-Lenia). Each Pseudopod is a Neural CA update rule that learns via gradient descent on the task loss.
+
+**Flow-Lenia substrate:**
+- Mass conservation: ∑ output = ∑ input
+- Parameter localization: CA rule parameters vary spatially (not global)
+- Warp-level GPU execution: Neighbors accessed via shuffles, tensor cores for convolution
+
+**Curiosity-driven lifecycle:**
+- coherence() metric tracks learning progress (Δ prediction error)
+- High coherence (learning fast) → low hunger → survive
+- Low coherence (plateaued) → high hunger → sample new genome from archive
+- Natural selection via intrinsic motivation, not external reward
+
+**Adaptive Voronoi MAP-Elites:**
+- Archive cells grow/shrink based on density (not fixed grid)
+- DIRESA learns behavioral embeddings online (adaptive 2-10D)
+- Dimension count adapts via warp vote mechanism
+- Distance-preserving nonlinear autoencoder, not PCA
+
 ## Configuration
 
 Edit `slime/config/model.yaml`:
@@ -44,28 +67,21 @@ model:
   num_pseudopods: 8
 
 archive:
-  num_centroids: 1000                    # CVT partitions, not grid cells
-  num_raw_metrics: 15                    # Number of raw metrics to collect (10-20 typical)
-  discovery_warmup: 1000                 # Steps to collect metrics before Kernel PCA discovery
-  variance_threshold: 0.85               # Cumulative variance for scree plot (determines n_dims)
-  min_dims: 3                            # Minimum dimensions (below loses information)
-  max_dims: 7                            # Maximum dimensions (above hits curse of dimensionality)
-  low_rank_k: 64                         # Factorization rank for elite weight compression
-  delta_rank: 8                          # Factorization rank for delta compression (smaller!)
-  kmo_threshold: 0.6                     # KMO statistic threshold for validation
-  reconstruction_error_threshold: 0.5    # Max reconstruction error for Kernel PCA
-  kernel_selection: 'auto'               # 'auto' tests multiple kernels, or specify 'rbf'/'poly'/'cosine'
-  gc_interval: 100                       # Run garbage collection every N add() calls
-  seed: 42                               # Seed for deterministic centroid initialization
+  num_centroids: 1000                    # Adaptive Voronoi partitions
+  diresa_dims: [2, 10]                   # Adaptive dimensionality range (learned)
+  low_rank_k: 64                         # Factorization rank for weight compression
+  delta_rank: 8                          # Delta compression rank (smaller)
+  kmo_threshold: 0.6                     # KMO validation threshold
+  reconstruction_error_threshold: 0.5    # Max reconstruction error
+  gc_interval: 100                       # Garbage collection frequency
+  seed: 42                               # Deterministic centroid init
 
 lifecycle:
-  initial_temp: 1.0    # Simulated annealing initial temperature
-  min_temp: 0.01       # Minimum temperature
-  cooling_schedule: 'linear'  # 'linear', 'exponential', or 'logarithmic'
+  curiosity_driven: true   # Use coherence() for hunger
   max_pool_size: 64
   min_pool_size: 4
-  max_loss_ratio: 10.0  # Freeze lifecycle if loss > 10x EMA
-  seed: 42             # Seed for deterministic birth/death decisions
+  max_loss_ratio: 10.0     # Freeze lifecycle if loss > 10x EMA
+  seed: 42                 # Deterministic birth/death
 
 pool:
   min_size: 4
@@ -99,74 +115,64 @@ trainer.train(
 
 ### Timescales
 
-- **Fast (every step):** Weight updates, gradient computation
+- **Fast (every step):** Weight updates, gradient computation, fitness tracking
 - **Medium (every 100 steps):** Archive updates, component birth decisions
 - **Slow (every 1000 steps):** Component culling, memory budget enforcement
 
-### Safety Guardrails
+### Safety
 
-Training uses simulated annealing for smooth exploration-exploitation transition:
+If loss exceeds 10x moving average, lifecycle freezes automatically. Training continues with existing components only.
 
-```python
-temperature = initial_temp * (1 - step / max_steps)  # Linear cooling
+## Architecture
 
-# Early training (high temp): accept diverse low-fitness components
-# Late training (low temp): only accept high-fitness components
-birth_prob = exp(-fitness_deficit / temperature)
-```
+**Elite Storage:**
+1. SVD low-rank compression: W = U @ V (D×D → D×k + k×D, 8x compression)
+2. Content addressing: SHA256 hash → automatic deduplication
+3. Delta compression: Store diffs between consecutive elites (10-20x additional)
+4. Automatic re-basing: When delta chain >70% of full size, store new blob
 
-If loss exceeds 10x moving average, lifecycle freezes automatically.
+Combined: **80-160x memory reduction**
 
-## Architecture Analogy
+**Behavioral Embeddings:**
 
-Think of a slime mold foraging for food. It extends pseudopods (components) in different directions. Successful pseudopods (high fitness) persist. Unsuccessful ones retract (culling). The organism remembers successful patterns via content-addressable archive:
+DIRESA autoencoder learns 2-10 dimensions online. Raw metrics:
+- CA_mass_conservation (∑ output = ∑ input)
+- CA_parameter_localization (spatial variation of rule parameters)
+- CA_neighborhood_coherence (local vs global patterns)
+- activation_sparsity
+- gradient_flow_magnitude
+- memory_access_locality
+- computational_intensity
+- weight_magnitude
+- gradient_variance
+- activation_magnitude
 
-**Elite Storage Strategy:**
-1. **SVD low-rank compression:** W = U @ V (D×D → D×k + k×D, 8x compression)
-2. **Content addressing:** SHA256 hash of weights → automatic deduplication of identical elites
-3. **Delta compression:** Store only diffs between consecutive elites in same centroid (10-20x additional compression)
-4. **Automatic re-basing:** When delta chain >70% of full size, store new blob to prevent unbounded reconstruction cost
-
-Combined compression: 8x (low-rank) × 10-20x (delta) = **80-160x total memory reduction**.
-
-**CVT-MAP-Elites:** Archive uses Voronoi partitioning of behavioral space (not fixed grid). Behavioral dimensions are automatically discovered via Kernel PCA:
-
-1. **Warmup phase (steps 0-999):** Collect 10-20 raw metrics from each component
-   - Attention span, activation sparsity, gradient magnitude, etc.
-2. **Discovery phase (step 1000):** Run Kernel PCA to find 4-5 principal components
-   - Validate with KMO test (>0.6), Bartlett's test (p<0.05), and reconstruction error (<0.5)
-3. **Training phase (steps 1000+):** Use discovered dimensions for archive
-
-Raw metrics → Kernel PCA (RBF kernel) → Discovered dimensions (nonlinear manifold projections)
-
-Key difference from standard transformers: attention heads don't have fixed roles. Components discover specializations through gradient-based selection pressure. Behavioral dimensions discovered from data, not hardcoded.
+DIRESA learns nonlinear embeddings preserving pairwise distances. Dimension count adapts based on task. Validated via KMO ≥ 0.6, Bartlett's p < 0.05, reconstruction error ≤ 0.5.
 
 ## Testing
 
 ```bash
-# Unit tests (protocol compliance, kernel correctness)
+# Unit tests
 pytest slime/tests/unit/ -v
 
-# Integration tests (end-to-end training)
+# Integration tests
 pytest slime/tests/integration/ -v
 
-# Ablations (compare vs baseline transformer)
+# Ablations (vs baseline transformer)
 pytest slime/tests/ablations/ -v
 ```
 
 ### Critical Tests
 
 ```bash
-# Verify Triton kernels work on your GPU
+# Verify Triton kernels
 pytest slime/tests/unit/test_triton_kernels.py -v
 
-# Verify DAG dependencies are not violated
+# Verify DAG dependencies
 pytest slime/tests/unit/test_dag_enforcement.py -v
 
-# Verify Kernel PCA discovery produces valid dimensions (KMO + Bartlett's tests)
-pytest slime/tests/unit/test_behavioral_kmo.py -v
-pytest slime/tests/unit/test_behavioral_bartlett.py -v
-pytest slime/tests/unit/test_behavioral_kernel_pca.py -v
+# Verify ultrametric topology
+pytest slime/tests/unit/test_topology_chemotaxis.py -v
 ```
 
 ## Profiling
@@ -184,7 +190,6 @@ results = profile_model(
 print(f"Forward: {results['forward_mean_ms']:.2f}ms ± {results['forward_std_ms']:.2f}ms")
 print(f"Backward: {results['backward_mean_ms']:.2f}ms ± {results['backward_std_ms']:.2f}ms")
 print(f"Memory: {results['peak_memory_mb']:.1f}MB")
-print(f"FLOPS: {results['estimated_flops'] / 1e9:.2f}G")
 ```
 
 ## Observability
@@ -196,7 +201,7 @@ metrics = MetricsCollector()
 model = SlimeMoldEncoder(..., metrics_collector=metrics)
 
 # After training
-print(f"Pool size over time: {metrics.get('pool_size')}")
+print(f"Pool size: {metrics.get('pool_size')}")
 print(f"Archive coverage: {metrics.get('archive_coverage')}")
 print(f"Component births: {metrics.get('component_births')}")
 print(f"Component deaths: {metrics.get('component_deaths')}")
@@ -207,169 +212,94 @@ print(f"Component deaths: {metrics.get('component_deaths')}")
 ```python
 from slime.tools.export import export_onnx, export_torchscript
 
-# ONNX (for inference in C++/other languages)
+# ONNX (for C++/other languages)
 export_onnx(model, output_path='model.onnx', input_shape=(1, 128, 512))
 
-# TorchScript (for deployment without Python)
+# TorchScript (deployment without Python)
 export_torchscript(model, output_path='model.pt')
 ```
 
 ## Troubleshooting
 
 **"CUDA out of memory"**
-- Reduce `batch_size` in training
+- Reduce `batch_size`
 - Reduce `max_size` in pool config
-- Enable memory budget enforcement: `pool.enforce_memory_budget = True`
+- Enable memory budget enforcement
 
 **"Loss diverging during training"**
-- Check lifecycle is in warmup phase first 1000 steps
-- Verify fitness computation uses actual gradients: `pytest slime/tests/unit/test_fitness_computation.py`
 - Reduce `learning_rate`
+- Verify fitness uses gradients: `pytest slime/tests/unit/test_fitness_computation.py`
 
 **"Components not diversifying"**
-- Check behavioral dimensions correlate with compute patterns: `pytest slime/tests/unit/test_behavioral_kmo.py`
-- Verify KMO statistic > 0.6 (measures factorability of behavioral dimensions)
-- Verify efficiency is included in fitness: see `training/fitness.py`
-- Increase `num_centroids` in archive config (CVT partitions)
+- Check DIRESA embeddings: KMO > 0.6, reconstruction error < 0.5
+- Verify fitness includes efficiency signal
+- Increase `num_centroids` (more Voronoi cells)
 
 **"Triton kernel errors"**
-- Verify CUDA version matches: `nvidia-smi`
-- Reinstall triton-windows: `pip install --force-reinstall triton-windows`
-- Fall back to PyTorch: `model = SlimeMoldEncoder(..., use_triton=False)`
-
-## Computational Cost
-
-**Estimated overhead vs baseline transformer: 7-15% per training step**
-
-- Forward/backward: Standard O(B * M * D²)
-- FlashAttention tiling: 2-3x speedup (Dao et al., 2022)
-- Fitness computation: O(P * D) where P = num_pseudopods
-- Behavioral metrics: O(P * M * D) for attention span, sparsity, etc.
-- CVT archive update (1/100 steps): O(P * num_centroids) nearest centroid search
-- Lifecycle decisions (1/1000 steps): O(P) with simulated annealing
-
-**Comparison to DARTS:**
-- DARTS: 4 GPU days search + N days training
-- Slime: 1.15 × N days (search during training)
-- Break-even: N > 30 days
-
-Slime favors long training runs where amortized search cost is negligible.
+- Verify CUDA version: `nvidia-smi`
+- Reinstall: `pip install --force-reinstall triton-windows`
+- Fallback: `model = SlimeMoldEncoder(..., use_triton=False)`
 
 ## File Layout
 
 ```
 slime/
-├── proto/          # Interfaces (Component, Kernel, Memory, Model)
+├── proto/          # Protocols (Component, Kernel, Memory, Model)
 ├── kernels/        # GPU implementations (Triton + PyTorch fallback)
-├── memory/         # Archive (CVT-MAP-Elites), Pool (lifecycle), Tubes (temporal)
-├── core/           # Pseudopod, Chemotaxis, Organism, Stencil (GPU-parallel spatial ops)
+├── memory/         # Archive (MAP-Elites), Pool (lifecycle), Tubes (temporal)
+├── core/           # Pseudopod (Neural CA), Chemotaxis, Organism, Stencil
+├── topology/       # Ultrametric (p-adic, genealogy, hierarchy)
 ├── api/            # torch_compat (nn.Module), native (SlimeModel)
-├── training/       # Trainer, losses, fitness, lifecycle (simulated annealing), stability
-├── config/         # YAML loaders and schemas
+├── training/       # Trainer, losses, fitness, lifecycle, stability
+├── config/         # YAML loaders
 ├── bench/          # Datasets, profiling, baseline transformer
 ├── tests/          # unit/, integration/, ablations/, slo/
-├── tools/          # Visualization, export, packaging
-└── observability/  # Metrics, logging, telemetry
+├── tools/          # Visualization, export
+└── observability/  # Metrics, logging
 ```
 
 Dependencies follow strict DAG: proto → kernels → memory → core → api → training
-
-## Behavioral Space
-
-**CVT-MAP-Elites uses Voronoi partitioning**, not fixed grid. Scales to 4-5 dimensions without exponential explosion.
-
-**5D behavioral space:**
-1. **Attention span:** Mean(attention_weights × position_distance) - correlates with memory bandwidth
-2. **Activation sparsity:** Fraction of activations near zero - correlates with compute efficiency
-3. **Gradient flow magnitude:** L2 norm of gradients - correlates with task relevance
-4. **Memory access locality:** Variance of attention positions - correlates with cache hit rate
-5. **Computational intensity:** FLOPs per forward pass - correlates with GPU occupancy
-
-**Validation:** KMO (Kaiser-Meyer-Olkin) test ensures dimensions are factorable. KMO < 0.6 = dimensions are noise, not structure.
-
-**Example:** Component near centroid (0.1, 0.8, 0.5, 0.2, 0.3) specializes in: local attention, sparse activations, medium gradient flow, coherent memory access, low compute intensity.
-
-When spawning new component, sample from archive near desired behavioral centroid. Low-rank factorized weights (U, V) provide warm initialization.
-
-## GPU-Parallel Spatial Stencil Computation
-
-**Inspired by JAX vmap and CUDA stencil kernels**, all contextual metrics are computed in parallel across the entire population using batched GPU operations.
-
-```python
-from slime.memory.pool import DynamicPool
-
-pool = DynamicPool(...)
-
-# Single GPU call computes ALL contextual metrics for entire population
-results = pool.compute_all_contextual_metrics()
-# Returns: {
-#   'relative_fitness': Tensor[N],      # Z-scores vs k-nearest neighbors
-#   'behavioral_divergence': Tensor[N, D],  # Divergence from neighbor mean
-#   'gradient_rank': Tensor[N],         # Percentile rank vs neighbors
-#   'attention_coherence': Tensor[N],   # Cosine similarity to neighbors
-# }
-
-# Or query single component (internally batches computation):
-relative_fitness = pool.compute_contextual_fitness(component)
-```
-
-**Key optimizations borrowed from cutting-edge research (2024-2025):**
-- **JAX vmap pattern:** Push loops down to primitive operations (matrix-matrix not matrix-vector)
-- **Pairwise distance:** Single batched operation computes N×N distance matrix
-- **Top-k neighbors:** Parallel topk on GPU, returns boolean mask
-- **Vectorized z-scores:** All fitness z-scores computed in single pass using masked sums
-- **CUDA stencil model:** Each component's context computed independently, perfect for SIMD
-
-**Performance characteristics:**
-- N=100 components: ~0.5ms for all metrics (vs ~50ms sequential)
-- N=1000 components: ~5ms for all metrics (vs ~5000ms sequential)
-- **100x speedup** from GPU parallelism when N > 100
-
-**Pattern:** Same computation applied to every position (stencil convolution), different data (SIMD). Matches GPU architecture perfectly.
 
 ## Fitness Computation
 
 ```python
 fitness = (
-    task_performance * 0.7 +      # Does it reduce loss?
-    compute_efficiency * 0.2 +     # Is it fast?
-    gradient_magnitude * 0.1       # Is it relevant?
+    gradient_magnitude * 0.7 +       # Task relevance
+    CA_mass_conservation * 0.2 +     # CA substrate quality
+    compute_efficiency * 0.1         # Hardware utilization
 )
-
-# Fitness relative to competition (z-score) computed in parallel:
-all_relative_fitness = pool.compute_all_contextual_metrics()['relative_fitness']
 ```
 
-Components with low fitness get culled every 1000 steps. Archive stores high-fitness components for reuse.
+Relative fitness (z-score vs k-nearest neighbors) computed in parallel via GPU stencil operations. Components with low relative fitness culled every 1000 steps.
 
 ## Multi-GPU
 
-Device placement via CVT centroid hash:
+Device placement via centroid hash:
 
 ```python
 centroid_id = find_nearest_centroid(component.behavior(), centroids)
 device_id = hash(centroid_id) % num_gpus
 ```
 
-Components with similar behavior map to same centroid, land on same GPU. Deterministic placement means no coordination overhead. If GPU fails, components redistribute automatically via same hash function. Centroid-based hashing naturally clusters by compute patterns.
+Similar behaviors → same centroid → same GPU. Deterministic placement, no coordination overhead. GPU failure → automatic redistribution via same hash function.
 
 ## Limitations
 
 - Requires CUDA-capable GPU (tested on RTX 3060+)
-- Windows: Use `triton-windows` package (bundled TinyCC compiler)
-- CVT centroids scale linearly (not exponentially), but 1000 centroids × D² × 4 bytes per elite
-- Low-rank storage (k=64) reduces archive memory by 8x vs full matrices
-- Component lifecycle adds 7-15% training overhead vs static transformer
-- Behavioral dimensions must correlate with hardware metrics (validated via KMO test)
+- Windows: Use `triton-windows` (bundled TinyCC compiler)
+- Archive memory: 1000 centroids × D² × 4 bytes, but low-rank (k=64) reduces by 8x
+- Lifecycle adds overhead vs static transformer
+- DIRESA embeddings must be factorable (validated via KMO test)
 
 ## References
 
-- **MAP-Elites:** Mouret, J.-B. & Clune, J. "Illuminating search spaces by mapping elites" (2015). arXiv:1504.04909
-- **CVT-MAP-Elites:** Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm" (2018). IEEE Trans. Evolutionary Computation, 22(4), 623-630.
-- **FlashAttention:** Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness" (2022). NeurIPS 2022. arXiv:2205.14135
-- **DARTS:** Liu, H., Simonyan, K., & Yang, Y. "DARTS: Differentiable Architecture Search" (2019). ICLR 2019. arXiv:1806.09055
-- **HyperNetworks:** Ha, D., Dai, A., & Le, Q. V. "HyperNetworks" (2017). ICLR 2017. arXiv:1609.09106
-- **Simulated Annealing:** Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. "Optimization by simulated annealing" (1983). Science, 220(4598), 671-680.
+- **MAP-Elites:** Mouret & Clune (2015). "Illuminating search spaces by mapping elites" arXiv:1504.04909
+- **CVT-MAP-Elites:** Vassiliades et al. (2018). IEEE Trans. Evolutionary Computation 22(4), 623-630
+- **Flow-Lenia:** Randazzo et al. (2023). "Flow-Lenia: Towards open-ended evolution in cellular automata" arXiv:2212.07906
+- **Neural CA:** Béna (2025). "A Path to Universal Neural Cellular Automata" arXiv:2505.13058
+- **DIRESA:** Zhang et al. (2025). "Distance-preserving nonlinear dimension reduction" arXiv:2404.18314
+- **Curiosity:** Gottlieb & Oudeyer (2021). "Humans monitor learning progress in curiosity-driven exploration" Nature Communications 12:5972
+- **HyperNetworks:** Ha et al. (2017). ICLR 2017. arXiv:1609.09106
 
 ## License
 
