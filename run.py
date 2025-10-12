@@ -228,6 +228,29 @@ def create_full_system(config: ArchitectureConfig, device: torch.device):
     model.slo_checker = slo_checker
     model.tracer = tracer
 
+    # Wrap with classification head for MNIST
+    class SlimeClassifier(nn.Module):
+        def __init__(self, encoder, num_classes=10):
+            super().__init__()
+            self.encoder = encoder
+            self.classifier = nn.Linear(latent_dim, num_classes)
+            self.organism = encoder.organism  # Expose for trainer
+            self.tubes = encoder.tubes
+            self.stencil = encoder.stencil
+            self.slo_checker = encoder.slo_checker
+            self.tracer = encoder.tracer
+
+        def forward(self, x):
+            features, state = self.encoder(x)
+            # features is [batch, latent_dim], flatten if needed
+            if features.dim() > 2:
+                features = features.mean(dim=1)  # Pool over sequence
+            logits = self.classifier(features)
+            return logits, state
+
+    model = SlimeClassifier(model)
+    logger.info(f"  ✓ Added classification head (10 classes)")
+
     logger.info("\n" + "=" * 80)
     logger.info("FULL SYSTEM READY - All layers initialized per blueprint DAG")
     logger.info("=" * 80 + "\n")

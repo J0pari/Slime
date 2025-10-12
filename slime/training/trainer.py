@@ -87,7 +87,7 @@ class Trainer:
             archive_coverage = organism.archive.coverage()
         else:
             archive_coverage = None
-        losses = self.loss_fn(output=outputs, target=targets, correlation_matrices=correlation_matrices if correlation_matrices else None, coherence_scores=coherence_scores if coherence_scores else None, pseudopod_outputs=pseudopod_outputs if pseudopod_outputs else None, archive_coverage=archive_coverage, fitness_scores=fitness_scores if fitness_scores else None)
+        losses = self.loss_fn(output=outputs, target=targets, correlation_matrices=correlation_matrices if correlation_matrices else None, coherence_scores=coherence_scores if coherence_scores else None, pseudopod_outputs=pseudopod_outputs if pseudopod_outputs else None, archive_coverage=archive_coverage, fitness_scores=fitness_scores if fitness_scores else None, task_type='classification')
         total_loss = losses['total']
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip_norm)
