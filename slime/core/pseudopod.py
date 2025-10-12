@@ -102,6 +102,71 @@ class Pseudopod(nn.Module):
         # Exponential moving average
         self._fitness = 0.9 * self._fitness + 0.1 * variance.item()
 
+    def get_attention_distance(self, attn: torch.Tensor) -> float:
+        """Compute average attention distance (hardware-relevant metric).
+
+        Short distance → local memory access patterns → cache-friendly
+        Long distance → global memory access patterns → cache-unfriendly
+
+        Args:
+            attn: Attention weights [batch, seq_len] or [seq_len, seq_len]
+
+        Returns:
+            Average attention distance in [0, 1]
+        """
+        seq_len = attn.shape[-1]
+        positions = torch.arange(seq_len, device=attn.device, dtype=torch.float32)
+
+        # Compute weighted average distance
+        # For each query position, compute average distance to attended keys
+        distances = torch.abs(positions.unsqueeze(-1) - positions.unsqueeze(0))
+        weighted_distances = (attn * distances).sum(dim=-1).mean()
+
+        # Normalize by max possible distance
+        normalized = weighted_distances / seq_len
+        return normalized.item()
+
+    def get_activation_sparsity(self, output: torch.Tensor) -> float:
+        """Compute activation sparsity (hardware-relevant metric).
+
+        High sparsity → fewer operations → compute-efficient
+        Low sparsity → more operations → compute-intensive
+
+        Args:
+            output: Component output [batch, seq_len, dim]
+
+        Returns:
+            Sparsity ratio in [0, 1]
+        """
+        # L1/L2 ratio approximates sparsity
+        l1 = torch.abs(output).sum()
+        l2 = torch.sqrt((output ** 2).sum())
+
+        # Normalize by dimension
+        dim = output.numel()
+        sparsity = 1.0 - (l1 / (l2 * torch.sqrt(torch.tensor(dim, dtype=torch.float32))))
+
+        return sparsity.clamp(0.0, 1.0).item()
+
+    def get_behavioral_coordinates(self, attn: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Compute behavioral coordinates for MAP-Elites archive.
+
+        These coordinates MUST correlate with hardware costs:
+        - attention_distance → memory access patterns
+        - activation_sparsity → compute efficiency
+
+        Args:
+            attn: Attention weights [batch, seq_len, seq_len]
+            output: Component output [batch, seq_len, dim]
+
+        Returns:
+            Behavioral coordinates [2] in [0, 1]²
+        """
+        attention_distance = self.get_attention_distance(attn)
+        activation_sparsity = self.get_activation_sparsity(output)
+
+        return torch.tensor([attention_distance, activation_sparsity], device=self.device)
+
     @property
     def correlation(self) -> torch.Tensor:
         """Get cached correlation matrix"""

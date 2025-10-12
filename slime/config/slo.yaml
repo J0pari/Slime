@@ -1,0 +1,148 @@
+# Service Level Objectives for production readiness
+
+# SLO definitions follow Google SRE golden signals:
+# - Latency: Response time
+# - Traffic: Throughput
+# - Errors: Error rate
+# - Saturation: Resource utilization
+
+slos:
+  - name: inference_latency_p99
+    metric_name: inference_latency_ms
+    threshold: 100.0  # ms
+    comparison: "<"
+    window_size: 1000
+    error_budget: 0.01  # 99% of requests must be under threshold
+    description: "99th percentile inference latency under 100ms"
+
+  - name: inference_latency_p50
+    metric_name: inference_latency_ms
+    threshold: 50.0  # ms
+    comparison: "<"
+    window_size: 1000
+    error_budget: 0.5
+    description: "50th percentile inference latency under 50ms"
+
+  - name: throughput_minimum
+    metric_name: throughput_samples_per_sec
+    threshold: 100.0  # samples/sec
+    comparison: ">"
+    window_size: 100
+    error_budget: 0.05
+    description: "Minimum throughput of 100 samples/sec"
+
+  - name: memory_budget
+    metric_name: memory_allocated_mb
+    threshold: 8192.0  # 8GB
+    comparison: "<"
+    window_size: 100
+    error_budget: 0.0
+    description: "Memory usage under 8GB (hard limit)"
+
+  - name: gpu_utilization_minimum
+    metric_name: gpu_utilization
+    threshold: 0.5  # 50%
+    comparison: ">"
+    window_size: 100
+    error_budget: 0.1
+    description: "GPU utilization above 50%"
+
+  - name: pool_size_stability
+    metric_name: pool_size
+    threshold: 64
+    comparison: "<="
+    window_size: 1000
+    error_budget: 0.0
+    description: "Pool size under max limit (hard constraint)"
+
+  - name: archive_size_stability
+    metric_name: archive_size
+    threshold: 1000
+    comparison: "<="
+    window_size: 1000
+    error_budget: 0.0
+    description: "Archive size under max limit (hard constraint)"
+
+  - name: archive_coverage_minimum
+    metric_name: archive_coverage
+    threshold: 0.1  # 10% of behavioral space
+    comparison: ">"
+    window_size: 1000
+    error_budget: 0.2
+    description: "Archive covers at least 10% of behavioral space"
+
+  - name: loss_stability
+    metric_name: loss
+    threshold: 1000.0
+    comparison: "<"
+    window_size: 100
+    error_budget: 0.0
+    description: "Loss does not diverge (hard limit)"
+
+# Alert thresholds
+alerts:
+  critical:
+    # Violations that require immediate action
+    - inference_latency_p99
+    - memory_budget
+    - pool_size_stability
+    - archive_size_stability
+    - loss_stability
+
+  warning:
+    # Violations that should be monitored
+    - inference_latency_p50
+    - throughput_minimum
+    - gpu_utilization_minimum
+    - archive_coverage_minimum
+
+  info:
+    # Informational metrics
+    - []
+
+# Error budgets (per SLO)
+error_budgets:
+  # Percentage of violations allowed before alerting
+  inference_latency_p99: 0.01  # 1% error budget
+  inference_latency_p50: 0.50  # 50% error budget
+  throughput_minimum: 0.05     # 5% error budget
+  memory_budget: 0.00          # 0% error budget (hard limit)
+  gpu_utilization_minimum: 0.10
+  pool_size_stability: 0.00    # Hard constraint
+  archive_size_stability: 0.00 # Hard constraint
+  archive_coverage_minimum: 0.20
+  loss_stability: 0.00         # Hard limit
+
+# Monitoring configuration
+monitoring:
+  check_interval_seconds: 10
+  window_size_default: 1000
+  enable_alerting: true
+  alert_cooldown_seconds: 300  # Don't re-alert for 5 minutes
+
+# Production readiness gates
+# All critical SLOs must pass before deployment
+gates:
+  pre_deployment:
+    - inference_latency_p99
+    - memory_budget
+    - throughput_minimum
+
+  post_deployment:
+    - all  # All SLOs must pass in production
+
+# Degraded mode configuration
+degraded_mode:
+  # Actions to take when SLOs are violated
+  on_latency_violation:
+    - reduce_batch_size
+    - disable_lifecycle_dynamics
+
+  on_memory_violation:
+    - force_cull_pool
+    - clear_archive
+
+  on_loss_divergence:
+    - freeze_lifecycle
+    - reduce_learning_rate
+    - rollback_checkpoint

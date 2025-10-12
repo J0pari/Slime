@@ -231,7 +231,9 @@ slime/
 │   ├── __init__.py
 │   ├── trainer.py
 │   ├── losses.py
-│   └── optimizer.py
+│   ├── stability.py
+│   ├── fitness.py
+│   └── lifecycle.py
 │
 ├── config/
 │   ├── __init__.py
@@ -355,19 +357,6 @@ else:
 
 ## Implementation Checklist
 
-### COMPLETED ✓
-- [x] proto/component.py
-- [x] memory/archive.py (uses Component protocol)
-- [x] memory/pool.py (uses Component protocol)
-- [x] memory/tubes.py (implements Memory protocol)
-- [x] core/pseudopod.py (injects Kernel)
-- [x] core/state.py
-- [x] kernels/torch_fallback.py
-- [x] kernels/utils.py
-- [x] api/torch_compat.py
-- [x] api/native.py
-- [x] config/loader.py (partial)
-
 ### MUST FIX NOW
 - [ ] **core/chemotaxis.py** - Behavioral space navigation
 - [ ] **core/organism.py** - Fix to inject metrics, kernel, use chemotaxis
@@ -469,3 +458,132 @@ if step % 1000 == 0: pool.cull()
 elif step % 100 == 0: archive.add_if_elite()
 fitness_ema.update()  # Every step
 ```
+
+### 9. Behavioral dimensions must correlate with hardware costs ✓
+**Reasoning (Emergent Hardware Optimization):** MAP-Elites can discover hardware-optimal patterns IF behavioral space captures hardware-relevant structure.
+
+**Critical requirement:** Behavioral dimensions MUST correlate with actual compute patterns. If dimensions are arbitrary, diversity is meaningless.
+
+**Good behavioral dimensions:**
+```python
+behavior = (
+    attention_distance,      # Correlates with memory access patterns
+    activation_sparsity,     # Correlates with compute efficiency
+    weight_magnitude_std,    # Correlates with numerical precision needs
+)
+```
+
+**Bad behavioral dimensions:**
+```python
+behavior = (
+    random_noise,            # No correlation with anything
+    component_id_hash,       # Arbitrary identifier
+    creation_timestamp,      # Temporal accident, not structure
+)
+```
+
+**Hash partitioning for device placement:**
+```python
+device_id = hash(behavior_coords) % num_gpus
+```
+
+This creates deterministic device placement. IF behavioral space captures hardware structure:
+- Short attention distance → GPU 0 (local memory access)
+- Long attention distance → GPU 3 (global memory access)
+- Components naturally partition by actual compute patterns
+
+**Failure mode:** If behavioral dimensions don't correlate with hardware, this is just random device assignment with extra steps.
+
+**Test:** Does archive-guided device placement beat random placement? If no, behavioral space is wrong.
+
+### 10. Fitness must include efficiency signals ✓
+**Reasoning (Hardware Awareness):** Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency.
+
+```python
+fitness = (
+    task_performance * 0.7 +           # Does it help the task?
+    compute_efficiency * 0.2 +          # Is it fast?
+    gradient_magnitude * 0.1            # Is it relevant?
+)
+```
+
+**Without efficiency in fitness:**
+- Slow components survive if they help task accuracy
+- No evolutionary pressure for hardware-friendly patterns
+- You get diversity, but not useful diversity
+
+**With efficiency in fitness:**
+- Cross-GPU communication → slower training → lower fitness → culled
+- Poor cache behavior → slower training → lower fitness → culled
+- Excessive memory → exceeds budget → culled
+
+MAP-Elites doesn't "know" about GPUs, but fitness does. Hardware-optimal patterns emerge from selection pressure, not explicit programming.
+
+**Test:** Train with and without efficiency in fitness. Does it discover faster configurations?
+
+### 11. Quality-diversity maintains architectural variety ✓
+**Reasoning (Avoid Mode Collapse):** Standard transformers: all heads learn similar features. MAP-Elites: forced diversity.
+
+**Standard transformer failure mode:**
+```python
+# All 8 attention heads learn to do the same thing
+head_similarity = cosine_similarity(head_0, head_1)  # 0.95
+```
+
+**MAP-Elites pressure:**
+```python
+archive[(0.1, 0.2)] = local_syntax_checker     # Short distance, sparse
+archive[(0.8, 0.9)] = global_coherence_tracker # Long distance, dense
+archive[(0.5, 0.3)] = mid_range_dependency     # Medium distance, sparse
+```
+
+Each cell MUST be occupied by behaviorally-distinct component. No collapse to single strategy.
+
+**Benefit 1: Graceful degradation under device loss**
+```python
+# Lost a GPU? Components redistribute deterministically
+device = hash(behavior) % 3  # was 4 GPUs, now 3
+# No retraining needed - hash mapping is pure function
+```
+
+**Benefit 2: Interpretability**
+```python
+# Ask system: "show me all short-range sparse components"
+short_range_components = [
+    elite for coords, elite in archive.items()
+    if coords[0] < 0.3 and coords[1] < 0.4
+]
+```
+
+**Test:** Does MAP-Elites maintain higher behavioral diversity than standard training?
+
+### 12. Ablation tests determine architectural value ✓
+**Reasoning (Scientific Method):** Don't assume architectural choices work. Test them.
+
+**Required comparisons:**
+1. **Slime Mold vs Baseline Transformer** (same parameters, same compute)
+   - If slower or worse accuracy: architecture is self-indulgent
+   - If faster or better accuracy: investigate why
+
+2. **With Archive vs Without Archive** (dynamic pool only)
+   - Does archive-guided bootstrapping improve convergence?
+   - Or is it overhead with no benefit?
+
+3. **With Lifecycle vs Static Pool** (fixed number of components)
+   - Does birth/death improve over fixed architecture?
+   - Or does training instability hurt more than variety helps?
+
+4. **Behavioral Device Placement vs Random Placement**
+   - Does hash(behavior) % num_gpus beat random device assignment?
+   - Test requires: multi-GPU setup, measure cross-GPU communication
+
+5. **Efficiency in Fitness vs Accuracy Only**
+   - Does including compute_efficiency in fitness discover faster configurations?
+   - Measure: throughput (samples/sec), memory usage
+
+**Acceptance criteria:**
+- Must beat baseline transformer on at least one dimension (speed OR accuracy)
+- If worse on all dimensions: architecture is a failure, simplify
+- If better on some dimensions: document tradeoffs, make configurable
+
+**Phase 2 implementation:** Create tests/ablations/ with automated comparisons.
