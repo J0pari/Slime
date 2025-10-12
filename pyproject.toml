@@ -66,7 +66,7 @@ warn_return_any = true
 no_implicit_reexport = true
 strict = true
 
-# Topology module - STRICT (will be added in Phase 1-2)
+# Topology module - STRICT (Phase 1-2)
 [[tool.mypy.overrides]]
 module = "slime.topology.*"
 disallow_untyped_defs = true
@@ -77,6 +77,15 @@ check_untyped_defs = true
 disallow_untyped_decorators = true
 warn_return_any = true
 no_implicit_reexport = true
+strict = true
+
+# Protocol definitions - STRICT (Layer 0)
+[[tool.mypy.overrides]]
+module = "slime.proto.*"
+disallow_untyped_defs = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+warn_return_any = true
 strict = true
 
 # Test modules - STRICT for test_effects
