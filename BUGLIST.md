@@ -2,18 +2,6 @@
 
 This document tracks where the implementation doesn't match the blueprint architecture.
 
-## Warp-Level GPU Kernels (MEDIUM)
-
-**Blueprint**: Zero-global-memory CA updates via warp shuffles
-**Current Implementation**: Standard PyTorch/Triton kernels with global memory access
-**Impact**: Missing 100x GPU utilization, no tensor core usage for convolutions
-
-**What needs to change**:
-- Warp shuffles for neighbor access (no global memory)
-- Tensor cores for 16x16 matrix multiply (256 FLOPs/instruction)
-- Entire CA update in registers
-- CUDA kernel: `__shfl_sync()` for neighbor communication
-
 ## Algebraic Effect Handlers (LOW - Already implemented)
 
 **Status**: Effect handlers exist for GetHierarchy, GetGenealogy, UsePAdicDistance
