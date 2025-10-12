@@ -42,12 +42,22 @@ model:
   latent_dim: 256
   head_dim: 64
   num_pseudopods: 8
-  behavioral_dims: 2
 
 archive:
   num_centroids: 1000  # CVT partitions, not grid cells
   behavioral_dims: 5   # Can use 4-5 dims without exponential explosion
   low_rank_k: 64       # Factorization rank for weight compression
+  kmo_threshold: 0.6   # KMO statistic threshold for behavioral space validation
+  seed: 42             # Seed for deterministic centroid initialization
+
+lifecycle:
+  initial_temp: 1.0    # Simulated annealing initial temperature
+  min_temp: 0.01       # Minimum temperature
+  cooling_schedule: 'linear'  # 'linear', 'exponential', or 'logarithmic'
+  max_pool_size: 64
+  min_pool_size: 4
+  max_loss_ratio: 10.0  # Freeze lifecycle if loss > 10x EMA
+  seed: 42             # Seed for deterministic birth/death decisions
 
 pool:
   min_size: 4
@@ -230,14 +240,15 @@ Slime favors long training runs where amortized search cost is negligible.
 slime/
 ├── proto/          # Interfaces (Component, Kernel, Memory, Model)
 ├── kernels/        # GPU implementations (Triton + PyTorch fallback)
-├── memory/         # Archive (MAP-Elites), Pool (lifecycle), Tubes (temporal)
-├── core/           # Pseudopod, Chemotaxis, Organism
+├── memory/         # Archive (CVT-MAP-Elites), Pool (lifecycle), Tubes (temporal)
+├── core/           # Pseudopod, Chemotaxis, Organism, Comonad (spatial context)
 ├── api/            # torch_compat (nn.Module), native (SlimeModel)
-├── training/       # Trainer, losses, fitness, lifecycle, stability
+├── training/       # Trainer, losses, fitness, lifecycle (simulated annealing), stability
 ├── config/         # YAML loaders and schemas
 ├── bench/          # Datasets, profiling, baseline transformer
 ├── tests/          # unit/, integration/, ablations/, slo/
-└── tools/          # Visualization, export, packaging
+├── tools/          # Visualization, export, packaging
+└── observability/  # Metrics, logging, telemetry
 ```
 
 Dependencies follow strict DAG: proto → kernels → memory → core → api → training
@@ -259,6 +270,37 @@ Dependencies follow strict DAG: proto → kernels → memory → core → api �
 
 When spawning new component, sample from archive near desired behavioral centroid. Low-rank factorized weights (U, V) provide warm initialization.
 
+## Comonadic Spatial Context
+
+Components extract values from their spatial neighborhood (comonadic extraction, not monadic injection). GPU computation is inherently spatial (SIMD, tiles), not sequential.
+
+```python
+from slime.memory.pool import ComponentPool
+from slime.core.comonad import extract_relative_fitness, extract_behavioral_divergence
+
+pool = ComponentPool(...)
+
+# Extract fitness relative to competition context
+relative_fitness = pool.compute_contextual_fitness(component)  # Z-score vs neighbors
+
+# Extract behavioral divergence from neighborhood
+divergence = pool.compute_behavioral_divergence(component)  # my_behavior - mean(neighbors)
+
+# Extract gradient magnitude rank in local competition
+gradient_rank = pool.compute_gradient_rank(component)  # Percentile rank vs neighbors
+
+# Extract attention coherence from local patterns
+attention_coherence = pool.compute_attention_coherence(component)  # Cosine similarity vs neighbors
+```
+
+**Pattern:** Extract value from spatial context (W a → a), not inject into context (a → M a). This mirrors GPU compute model: each thread reads from neighborhood (shared memory tile), not writes to global context.
+
+**Applications:**
+- **Behavioral metrics:** Component's attention span IS relative to neighbors (comonadic)
+- **Fitness:** Component fitness IS relative to competition (comonadic)
+- **Archive bootstrapping:** Bootstrap from k-nearest elites (already correct)
+- **FlashAttention:** Each tile extracts from Q/K/V context (already correct)
+
 ## Fitness Computation
 
 ```python
@@ -267,6 +309,9 @@ fitness = (
     compute_efficiency * 0.2 +     # Is it fast?
     gradient_magnitude * 0.1       # Is it relevant?
 )
+
+# Fitness can also be extracted comonadically from competition context:
+relative_fitness = extract_relative_fitness(spatial_context)  # Z-score
 ```
 
 Components with low fitness get culled every 1000 steps. Archive stores high-fitness components for reuse.

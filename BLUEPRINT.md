@@ -4,13 +4,15 @@
 
 1. **Protocol-First**: All interfaces defined before implementations
 2. **Dynamic Everything**: No static allocations, lifecycle-managed components
-3. **CVT-MAP-Elites Core**: Archive-driven evolution using Centroidal Voronoi Tessellation (scales to 4-5 behavioral dimensions)
-4. **IO-Aware Kernels**: FlashAttention-style tiled computation (HBM ↔ SRAM management)
-5. **Low-Rank Archive**: Store weight factorizations (U, V) not full matrices (10-100x memory reduction)
-6. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure
-7. **SRE Built-In**: Observability, SLOs, error budgets from day one
-8. **GPU-Native**: 100% device execution, zero CPU synchronization
-9. **DRY Principle**: Single source of truth for each concept
+3. **Comonadic Extraction**: GPU computation is spatial (extract from context), not sequential (inject into context)
+4. **CVT-MAP-Elites Core**: Archive-driven evolution using Centroidal Voronoi Tessellation (scales to 4-5 behavioral dimensions)
+5. **IO-Aware Kernels**: FlashAttention-style tiled computation (HBM ↔ SRAM management)
+6. **Low-Rank Archive**: Store weight factorizations (U, V) not full matrices (10-100x memory reduction)
+7. **Validated Behavioral Space**: KMO test ensures dimensions correlate with hardware structure
+8. **Deterministic Random**: Hash-based seeded random for reproducibility
+9. **SRE Built-In**: Observability, SLOs, error budgets from day one
+10. **GPU-Native**: 100% device execution, zero CPU synchronization
+11. **DRY Principle**: Single source of truth for each concept
 
 ## Dependency DAG
 
@@ -33,10 +35,12 @@ Layer 2: Data structures (depend on Layer 0-1)
     memory/pool.py → proto.component
     memory/tubes.py → proto.memory
     core/state.py → (no dependencies, plain dataclass)
+    core/comonad.py → (comonad protocol, no dependencies)
 
 Layer 3: Components (depend on Layer 0-2)
     core/pseudopod.py → proto.model, proto.kernel, kernels/*, observability/*
     core/chemotaxis.py → proto.model, memory/archive
+    memory/pool.py → core/comonad (for spatial context extraction)
 
 Layer 4: Orchestration (depend on Layer 0-3)
     core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
@@ -274,6 +278,7 @@ slime/
 ├── core/
 │   ├── __init__.py
 │   ├── state.py            # FlowState dataclass (input, hidden, residual)
+│   ├── comonad.py          # Comonadic spatial context (extract from neighborhood)
 │   ├── pseudopod.py        # Pseudopod component (implements Component + Model.Pseudopod)
 │   ├── chemotaxis.py       # Chemotaxis selection (implements Model.Chemotaxis)
 │   └── organism.py         # Organism orchestrator (implements Model.Organism)
@@ -460,11 +465,75 @@ Slow (every 1000 steps):
 - NO frozen parameters injected mid-training
 - Prevents mode collapse and gradient conflicts
 
-### 8. Fitness Correlation with Task
+### 8. Comonadic Spatial Context ✓
+**Reasoning (GPU Architecture):** GPU computation is spatial (SIMD, tiles, neighborhoods), not sequential. Extract values from context, don't inject context into values.
+
+**Comonad laws:**
+```python
+extract :: W a → a                    # Get focal value from context
+extend :: (W a → b) → W a → W b      # Apply context-aware function
+duplicate :: W a → W (W a)            # Nested contexts
+```
+
+**SpatialContext implementation:**
+```python
+@dataclass
+class SpatialContext(Generic[T]):
+    focus: T                           # Focal component
+    neighborhood: List[T]              # All other components
+    distance_fn: Callable[[T, T], float]  # Behavioral distance
+
+    def extract(self) -> T:
+        return self.focus
+
+    def get_k_nearest(self, k: int) -> List[T]:
+        # Extract k nearest neighbors by behavioral distance
+```
+
+**Comonadic extractors (context → value):**
+```python
+# Fitness IS relative to competition
+extract_relative_fitness(ctx: W Component) → float
+# Z-score: (my_fitness - mean_neighbor) / std_neighbor
+
+# Diversity IS relative to neighborhood
+extract_behavioral_divergence(ctx: W Component) → Tensor[5]
+# my_behavior - mean(neighbor_behaviors)
+
+# Learning rate IS relative to neighborhood activity
+extract_gradient_magnitude_rank(ctx: W Component) → float
+# Percentile ∈ [0,1] among k neighbors
+
+# Synchronization IS relative to what neighbors attend to
+extract_attention_coherence(ctx: W Component) → float
+# Cosine similarity with neighbor attention patterns
+```
+
+**Why comonads:**
+- Monads (sequential): a → M a (inject into context) - good for I/O, state
+- Comonads (spatial): W a → a (extract from context) - good for convolution, attention, GPU
+
+**FlashAttention is comonadic:**
+```python
+q_tile = load_context()  # W Q (full query context)
+for k_tile, v_tile:
+    output += extract(q_tile, k_tile, v_tile)  # Extract from tiles
+```
+
+**Pool provides spatial context:**
+```python
+ctx = pool.extract_component_context(component)  # W Component
+relative_fitness = extract_relative_fitness(ctx)  # Extract from competition
+```
+
+**Pattern:** All contextual computations go through comonad extract. No component computes in isolation.
+
+### 9. Fitness Correlation with Task ✓
 Fitness MUST correlate with loss reduction. Options:
 - Gradient magnitude (components affecting loss)
 - Attention alignment with targets
 - Information bottleneck metrics (mutual information)
+- **Relative fitness** (gradient magnitude vs neighborhood via comonad)
 
 NOT attention entropy alone (doesn't correlate with task)
 
@@ -740,7 +809,48 @@ device_id = hash(centroid_id) % num_gpus
 
 **Test:** Does KMO-validated behavioral space beat random dimensions? If no, MAP-Elites adds overhead without benefit.
 
-### 11. Fitness must include efficiency signals ✓
+### 11. Deterministic hash-based random ✓
+**Reasoning (Reproducibility):** Non-deterministic random breaks reproducibility. Hash-based seeded random is cheap (~100ns) vs gradient computation (ms).
+
+**Deterministic random primitive:**
+```python
+def _deterministic_random(seed: int, step: int, context: str) -> float:
+    hash_input = f"{seed}:{step}:{context}".encode('utf-8')
+    hash_digest = hashlib.sha256(hash_input).digest()
+    random_bytes = int.from_bytes(hash_digest[:8], byteorder='big')
+    return random_bytes / (2**64 - 1)  # [0, 1]
+```
+
+**Applications:**
+```python
+# Birth decisions
+random_val = _deterministic_random(seed, step, f"birth:{behavior_hash}")
+if random_val < birth_probability:
+    spawn_component()
+
+# Death decisions
+random_val = _deterministic_random(seed, step, f"cull:{component_id}")
+if random_val < death_probability:
+    cull_component()
+
+# Centroid initialization
+rng = np.random.RandomState(seed)
+centroids = rng.randn(num_centroids, behavioral_dims)
+
+# Component mutation
+torch.manual_seed(seed + generation)
+noise = torch.randn_like(weights) * mutation_std
+```
+
+**Benefits:**
+- Same seed → identical training trajectory → identical final model
+- Debuggable: replay exact sequence of births/deaths
+- Scientific: ablation tests require identical random seeds
+- Cost: SHA256 hash ~100ns, negligible vs ~10ms gradient computation
+
+**Pattern:** NO np.random.random() or random.random(). All random decisions via hash(seed, step, context).
+
+### 12. Fitness must include efficiency signals ✓
 **Reasoning (Hardware Awareness):** Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency.
 
 ```python
