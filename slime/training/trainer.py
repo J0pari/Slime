@@ -1,0 +1,266 @@
+"""Training loop with lifecycle timescale management"""
+
+import torch
+import torch.nn as nn
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
+from typing import Optional, Dict, Callable
+from dataclasses import dataclass
+import logging
+
+from slime.training.stability import StabilityManager, TrainingPhase
+from slime.training.lifecycle import LifecycleManager, LifecycleConfig
+from slime.training.losses import MultiObjectiveLoss, LossWeights
+from slime.training.fitness import FitnessComputer
+from slime.observability.metrics import MetricsCollector
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for training"""
+    num_epochs: int = 100
+    device: str = "cuda"
+    gradient_clip_norm: float = 1.0
+    log_interval: int = 10
+    eval_interval: int = 100
+    checkpoint_interval: int = 1000
+    warmup_steps: int = 1000
+    gentle_steps: int = 5000
+
+
+class Trainer:
+    """Training loop with full lifecycle management.
+
+    Implements:
+    - Timescale separation (1x/100x/1000x per Invariant #6)
+    - Phased training (warmup/gentle/full per Invariant #9)
+    - Lifecycle safety guardrails
+    - Multi-objective loss
+    - Gradient-based fitness
+    - Metrics collection
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer: Optimizer,
+        config: Optional[TrainingConfig] = None,
+        loss_weights: Optional[LossWeights] = None,
+        lifecycle_config: Optional[LifecycleConfig] = None,
+    ):
+        self.model = model
+        self.optimizer = optimizer
+        self.config = config or TrainingConfig()
+
+        self.device = torch.device(self.config.device)
+        self.model = self.model.to(self.device)
+
+        self.stability_manager = StabilityManager(
+            warmup_steps=self.config.warmup_steps,
+            gentle_steps=self.config.gentle_steps,
+        )
+
+        self.lifecycle_manager = LifecycleManager(lifecycle_config)
+
+        self.loss_fn = MultiObjectiveLoss(loss_weights)
+
+        self.fitness_computer = FitnessComputer()
+
+        self.metrics = MetricsCollector()
+
+        self._step = 0
+        self._epoch = 0
+
+    def train_step(
+        self,
+        batch: tuple[torch.Tensor, torch.Tensor],
+    ) -> Dict[str, float]:
+        """Single training step with full lifecycle management"""
+        self.model.train()
+
+        inputs, targets = batch
+        inputs = inputs.to(self.device)
+        targets = targets.to(self.device)
+
+        self.optimizer.zero_grad()
+
+        outputs, state = self.model(inputs)
+
+        organism = self.model.organism if hasattr(self.model, 'organism') else None
+
+        correlation_matrices = []
+        coherence_scores = []
+        pseudopod_outputs = []
+        fitness_scores = []
+
+        if organism:
+            for pod in organism.pseudopod_pool.get_all():
+                if hasattr(pod, '_correlation') and pod._correlation is not None:
+                    correlation_matrices.append(pod._correlation)
+                if hasattr(pod, 'coherence'):
+                    coherence_scores.append(pod.coherence())
+                if hasattr(pod, 'fitness'):
+                    fitness_scores.append(pod.fitness)
+
+            archive_coverage = organism.archive.coverage()
+        else:
+            archive_coverage = None
+
+        losses = self.loss_fn(
+            output=outputs,
+            target=targets,
+            correlation_matrices=correlation_matrices if correlation_matrices else None,
+            coherence_scores=coherence_scores if coherence_scores else None,
+            pseudopod_outputs=pseudopod_outputs if pseudopod_outputs else None,
+            archive_coverage=archive_coverage,
+            fitness_scores=fitness_scores if fitness_scores else None,
+        )
+
+        total_loss = losses['total']
+        total_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(),
+            self.config.gradient_clip_norm
+        )
+
+        self.optimizer.step()
+
+        if organism and self._step % 100 == 0:
+            for i, pod in enumerate(organism.pseudopod_pool.get_all()):
+                fitness = self.fitness_computer.compute_gradient_based_fitness(pod, i)
+                if hasattr(pod, '_fitness'):
+                    pod._fitness = fitness
+
+        phase = self.stability_manager.get_phase(self._step)
+
+        lifecycle_result = self.lifecycle_manager.step(
+            current_loss=total_loss.item(),
+            pool_size=organism.pseudopod_pool.size() if organism else 0,
+            archive_size=organism.archive.size() if organism else 0,
+        )
+
+        if organism:
+            if not self.lifecycle_manager.should_allow_lifecycle_changes():
+                pass
+            elif self._step % 1000 == 0:
+                if self.stability_manager.should_allow_culling(self._step):
+                    organism.pseudopod_pool._cull_low_fitness()
+            elif self._step % 100 == 0:
+                if self.stability_manager.should_allow_birth(self._step):
+                    organism.pseudopod_pool._spawn_batch(state.behavior if state else None)
+
+            if 'force_cull_pool' in lifecycle_result['actions']:
+                self.lifecycle_manager.force_cull_pool(organism.pseudopod_pool)
+
+            if 'cull_archive' in lifecycle_result['actions']:
+                self.lifecycle_manager.cull_archive(organism.archive)
+
+        self._step += 1
+
+        return {
+            'loss': total_loss.item(),
+            'reconstruction_loss': losses['reconstruction'].item(),
+            'rank_loss': losses['rank_regularization'].item(),
+            'coherence_loss': losses['coherence_regularization'].item(),
+            'diversity_loss': losses['diversity'].item(),
+            'phase': phase.name.value,
+            'lifecycle_frozen': self.lifecycle_manager._lifecycle_frozen,
+        }
+
+    def train_epoch(
+        self,
+        train_loader: DataLoader,
+        epoch: int,
+    ) -> Dict[str, float]:
+        """Train for one epoch"""
+        epoch_losses = []
+
+        for batch_idx, batch in enumerate(train_loader):
+            step_result = self.train_step(batch)
+
+            epoch_losses.append(step_result['loss'])
+
+            if batch_idx % self.config.log_interval == 0:
+                logger.info(
+                    f"Epoch {epoch} Step {batch_idx}: "
+                    f"loss={step_result['loss']:.4f} "
+                    f"phase={step_result['phase']}"
+                )
+
+        return {
+            'avg_loss': sum(epoch_losses) / len(epoch_losses),
+            'min_loss': min(epoch_losses),
+            'max_loss': max(epoch_losses),
+        }
+
+    def train(
+        self,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader] = None,
+    ) -> Dict:
+        """Full training loop"""
+        logger.info(f"Starting training for {self.config.num_epochs} epochs")
+
+        training_history = []
+
+        for epoch in range(self.config.num_epochs):
+            self._epoch = epoch
+
+            epoch_result = self.train_epoch(train_loader, epoch)
+
+            training_history.append(epoch_result)
+
+            logger.info(
+                f"Epoch {epoch} complete: avg_loss={epoch_result['avg_loss']:.4f}"
+            )
+
+            if val_loader and epoch % (self.config.eval_interval // len(train_loader)) == 0:
+                val_result = self.evaluate(val_loader)
+                logger.info(f"Validation: loss={val_result['avg_loss']:.4f}")
+
+        return {
+            'training_history': training_history,
+            'final_stats': self.get_stats(),
+        }
+
+    @torch.no_grad()
+    def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:
+        """Evaluate model on validation data"""
+        self.model.eval()
+
+        eval_losses = []
+
+        for batch in data_loader:
+            inputs, targets = batch
+            inputs = inputs.to(self.device)
+            targets = targets.to(self.device)
+
+            outputs, _ = self.model(inputs)
+
+            loss = self.loss_fn.reconstruction_loss(outputs, targets)
+
+            eval_losses.append(loss.item())
+
+        return {
+            'avg_loss': sum(eval_losses) / len(eval_losses),
+            'min_loss': min(eval_losses),
+            'max_loss': max(eval_losses),
+        }
+
+    def get_stats(self) -> Dict:
+        """Get comprehensive training statistics"""
+        stats = {
+            'step': self._step,
+            'epoch': self._epoch,
+            'stability': self.stability_manager.stats(),
+            'lifecycle': self.lifecycle_manager.stats(),
+            'fitness': self.fitness_computer.stats(),
+        }
+
+        if hasattr(self.model, 'organism'):
+            stats['organism'] = self.model.organism.stats()
+
+        return stats
