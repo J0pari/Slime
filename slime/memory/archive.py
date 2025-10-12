@@ -419,9 +419,11 @@ class CVTArchive:
 
     def initialize_centroids(self, initial_samples: Optional[np.ndarray]=None):
         if initial_samples is not None and len(initial_samples) >= self.num_centroids:
-            from scipy.cluster.vq import kmeans
-            self.centroids, _ = kmeans(initial_samples.astype(np.float32), self.num_centroids)
-            logger.info(f'Initialized {self.num_centroids} CVT centroids from {len(initial_samples)} samples')
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=self.num_centroids, random_state=self.seed, n_init=10)
+            kmeans.fit(initial_samples.astype(np.float32))
+            self.centroids = kmeans.cluster_centers_.astype(np.float32)
+            logger.info(f'Initialized {self.num_centroids} CVT centroids from {len(initial_samples)} samples with seed {self.seed}')
         else:
             if self.behavioral_dims is None:
                 raise ValueError("behavioral_dims must be set before initializing centroids")
@@ -471,7 +473,7 @@ class CVTArchive:
         self._incr_ref(elite_sha)
 
         gen = generation if generation is not None else self._generation
-        self._elite_metadata[centroid_id] = (fitness, gen, metadata or {})
+        self._elite_metadata[centroid_id] = (fitness, gen, metadata or {}, tuple(behavior))
 
         self._total_additions += 1
 
@@ -491,9 +493,9 @@ class CVTArchive:
             return None
 
         elite_sha = self.centroid_refs[centroid_id]
-        fitness, gen, metadata = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}))
+        fitness, gen, metadata, behavior = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}, tuple(self.centroids[centroid_id])))
         return Elite(
-            behavior=tuple(self.centroids[centroid_id]),
+            behavior=behavior,
             fitness=fitness,
             elite_sha=elite_sha,
             generation=gen,
@@ -514,9 +516,9 @@ class CVTArchive:
             if i < len(centroid_ids):
                 centroid_id = centroid_ids[i]
                 elite_sha = self.centroid_refs[centroid_id]
-                fitness, gen, metadata = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}))
+                fitness, gen, metadata, behavior = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}, tuple(self.centroids[centroid_id])))
                 elites.append(Elite(
-                    behavior=tuple(self.centroids[centroid_id]),
+                    behavior=behavior,
                     fitness=fitness,
                     elite_sha=elite_sha,
                     generation=gen,
@@ -600,7 +602,7 @@ class CVTArchive:
     def max_fitness(self) -> float:
         if not self._elite_metadata:
             return float('-inf')
-        return max(fitness for fitness, _, _ in self._elite_metadata.values())
+        return max(fitness for fitness, _, _, _ in self._elite_metadata.values())
 
     def coverage(self) -> float:
         if self.centroids is None:
@@ -611,9 +613,9 @@ class CVTArchive:
     def elites(self) -> Dict[int, Elite]:
         elite_dict = {}
         for centroid_id, elite_sha in self.centroid_refs.items():
-            fitness, gen, metadata = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}))
+            fitness, gen, metadata, behavior = self._elite_metadata.get(centroid_id, (0.0, self._generation, {}, tuple(self.centroids[centroid_id])))
             elite_dict[centroid_id] = Elite(
-                behavior=tuple(self.centroids[centroid_id]),
+                behavior=behavior,
                 fitness=fitness,
                 elite_sha=elite_sha,
                 generation=gen,

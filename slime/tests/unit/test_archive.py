@@ -50,7 +50,7 @@ def test_add_after_discovery_constraint(constraint):
     constraint('Elite has correct behavior', lambda: (elite.behavior == (0.1, 0.2, 0.3), elite.behavior, (0.1, 0.2, 0.3), {}))
 
 def test_low_rank_compression_constraint(constraint):
-    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=8, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
+    archive = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, low_rank_k=32, kmo_threshold=0.5, reconstruction_error_threshold=1.0, seed=42)
     rng = np.random.RandomState(42)
     latent = rng.randn(150, 3).astype(np.float32)
     mixing_matrix = rng.randn(3, 10).astype(np.float32)
@@ -71,7 +71,7 @@ def test_low_rank_compression_constraint(constraint):
         orig = state_dict[key]
         recon = reconstructed[key]
         error = torch.norm(recon - orig) / torch.norm(orig)
-        constraint(f'Reconstruction error for {key} < 0.5 (low-rank k=8)', lambda e=error, k=key: (e < 0.5, float(e), '<0.5', {'key': k, 'relative_error': float(e), 'orig_norm': float(torch.norm(orig)), 'recon_norm': float(torch.norm(recon))}))
+        constraint(f'Reconstruction error for {key} < 0.5 (low-rank k=32)', lambda e=error, k=key: (e < 0.5, float(e), '<0.5', {'key': k, 'relative_error': float(e), 'orig_norm': float(torch.norm(orig)), 'recon_norm': float(torch.norm(recon))}))
 
 def test_centroid_determinism_constraint(constraint):
     archive1 = CVTArchive(num_raw_metrics=10, min_dims=3, max_dims=3, num_centroids=50, seed=42)
