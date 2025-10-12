@@ -55,7 +55,7 @@ class Pseudopod(nn.Module):
                 behavioral_coords = self._archive_ref.transform_to_behavioral_space(raw_np)[0]
                 self.last_behavior = torch.tensor(behavioral_coords, device=self.device, dtype=torch.float32)
             except (AttributeError, RuntimeError):
-                # Archive not yet initialized or KernelPCA not fitted - use raw fallback
+                # Archive not yet initialized or DIRESA not trained - use raw fallback
                 self.last_behavior = self._raw_metrics[:5]
         else:
             # Backward compatibility: use first 5 raw metrics before dimension discovery

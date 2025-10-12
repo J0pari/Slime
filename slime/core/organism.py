@@ -48,7 +48,7 @@ class Organism(nn.Module):
         self.predict_rank = nn.Linear(latent_dim, 1).to(self.device)
         self.predict_coherence = nn.Linear(latent_dim, 1).to(self.device)
         self.project_heads = nn.Linear(head_dim, latent_dim).to(self.device)
-        self.archive = CVTArchive(config=arch_config, variance_threshold=0.85, device=self.device, trustworthiness_threshold=0.85, reconstruction_error_threshold=0.5, kernel_selection='auto', gc_interval=100, seed=42)
+        self.archive = CVTArchive(config=arch_config, variance_threshold=0.85, device=self.device, trustworthiness_threshold=0.85, reconstruction_error_threshold=0.5, gc_interval=100, seed=42)
         self.chemotaxis = Chemotaxis(self.archive, self.device)
 
         # Register callback to update Mahalanobis covariance after dimension discovery

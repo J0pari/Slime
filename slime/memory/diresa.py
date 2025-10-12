@@ -258,12 +258,15 @@ class DIRESABehavioralEncoder(nn.Module):
         continuity_score = continuity_sum / n_samples
 
         # Procrustes distance: shape similarity
-        from sklearn.decomposition import PCA
         active_dims = self.get_active_dims()
 
-        # Project raw to same dimensionality for comparison
-        pca = PCA(n_components=active_dims)
-        raw_projected = pca.fit_transform(raw_samples)
+        # GPU-optimal SVD projection (PyTorch on GPU, faster than sklearn PCA)
+        raw_tensor = torch.from_numpy(raw_samples).to(self.device).float()
+
+        # Center and compute SVD for projection to active_dims
+        raw_centered_tensor = raw_tensor - raw_tensor.mean(dim=0, keepdim=True)
+        U, S, Vt = torch.linalg.svd(raw_centered_tensor, full_matrices=False)
+        raw_projected = (U[:, :active_dims] * S[:active_dims].unsqueeze(0)).cpu().numpy()
 
         # Center both
         raw_centered = raw_projected - raw_projected.mean(axis=0)

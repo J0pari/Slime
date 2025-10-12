@@ -9,6 +9,7 @@ import logging
 import numpy as np
 from scipy.spatial import distance
 from slime.config.dimensions import ArchitectureConfig
+from slime.memory.diresa import DIRESABehavioralEncoder
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -39,7 +40,7 @@ class Elite:
 
 class CVTArchive:
 
-    def __init__(self, config: ArchitectureConfig, variance_threshold: float=0.85, device: torch.device=None, trustworthiness_threshold: float=0.85, reconstruction_error_threshold: float=0.5, kernel_selection: str='auto', gc_interval: int=100, seed: int=42):
+    def __init__(self, config: ArchitectureConfig, variance_threshold: float=0.85, device: torch.device=None, trustworthiness_threshold: float=0.85, reconstruction_error_threshold: float=0.5, gc_interval: int=100, seed: int=42):
         self.num_raw_metrics = config.behavioral_space.num_raw_metrics
         self.variance_threshold = variance_threshold
         self.min_dims = config.behavioral_space.min_dims
@@ -50,12 +51,11 @@ class CVTArchive:
         self.device = device or torch.device('cuda')
         self.trustworthiness_threshold = trustworthiness_threshold
         self.reconstruction_error_threshold = reconstruction_error_threshold
-        self.kernel_selection = kernel_selection
         self.gc_interval = gc_interval
         self.seed = seed
 
         self.centroids: Optional[np.ndarray] = None
-        self.kpca_transform = None
+        self.diresa: Optional[DIRESABehavioralEncoder] = None
         self.behavioral_dims: Optional[int] = None
 
         self.object_store: Dict[str, bytes] = {}
@@ -324,23 +324,17 @@ class CVTArchive:
         return False
 
     def discover_dimensions(self) -> bool:
+        """Discover behavioral dimensions using DIRESA learned embeddings."""
         if self._discovered:
-            logger.warning('Dimensions already discovered')
-            return True
+            raise ValueError("Dimensions already discovered - cannot call discover_dimensions() twice")
+
         if len(self._raw_metrics_samples) < 100:
-            raise ValueError(f'Need ≥100 raw metric samples for Kernel PCA, got {len(self._raw_metrics_samples)}')
+            raise ValueError(f'Need ≥100 raw metric samples for DIRESA, got {len(self._raw_metrics_samples)}')
 
         raw_matrix = np.array(self._raw_metrics_samples, dtype=np.float32)
-        logger.info(f'Running dimension discovery on {raw_matrix.shape[0]} samples with {raw_matrix.shape[1]} raw metrics')
+        logger.info(f'Running DIRESA dimension discovery on {raw_matrix.shape[0]} samples with {raw_matrix.shape[1]} raw metrics')
 
-        try:
-            from sklearn.decomposition import PCA, KernelPCA
-            from sklearn.manifold import trustworthiness
-            from scipy.spatial import procrustes
-        except ImportError as e:
-            raise ImportError(f'Missing required package for dimension discovery: {e}')
-
-        # Filter out zero-variance metrics (constant features break KMO/PCA)
+        # Filter out zero-variance metrics (constant features)
         variances = np.var(raw_matrix, axis=0)
         nonzero_variance_mask = variances > 1e-10
         n_filtered = (~nonzero_variance_mask).sum()
@@ -348,106 +342,80 @@ class CVTArchive:
             logger.info(f'Filtered out {n_filtered} zero-variance metrics (constant across samples)')
             raw_matrix = raw_matrix[:, nonzero_variance_mask]
             if raw_matrix.shape[1] < self.min_dims:
-                raise ValueError(f'After filtering zero-variance, only {raw_matrix.shape[1]} metrics remain (need ≥{self.min_dims})')
+                raise ValueError(f'After filtering zero-variance, only {raw_matrix.shape[1]} metrics remain (need ≥{archive.min_dims})')
 
-        pca_full = PCA(n_components=None)
-        pca_full.fit(raw_matrix)
-        variance_ratios = pca_full.explained_variance_ratio_
-        cumulative_variance = np.cumsum(variance_ratios)
+        # Initialize DIRESA encoder
+        self.diresa = DIRESABehavioralEncoder(
+            input_dim=raw_matrix.shape[1],
+            min_dims=self.min_dims,
+            max_dims=self.max_dims,
+            hidden_dim=64,
+            lambda_dist=1.0,
+            lambda_kl=0.01,
+            device=self.device
+        )
 
-        n_dims = np.argmax(cumulative_variance > self.variance_threshold) + 1
-        n_dims = np.clip(n_dims, self.min_dims, self.max_dims)
+        # Convert to torch
+        x_train = torch.from_numpy(raw_matrix).to(self.device)
 
-        logger.info(f"Scree plot elbow at {n_dims} dimensions (explains {cumulative_variance[n_dims-1]:.1%} variance)")
+        # Precompute pairwise distances for distance preservation loss
+        dist_matrix = pairwise_distances(raw_matrix)
+        dist_tensor = torch.from_numpy(dist_matrix).to(self.device)
 
-        if self.kernel_selection == 'auto':
-            kernel_candidates = [
-                ('rbf', {'gamma': 1.0}),
-                ('rbf', {'gamma': 0.1}),
-                ('poly', {'degree': 2}),
-                ('poly', {'degree': 3}),
-                ('cosine', {}),
-            ]
+        # Train DIRESA
+        optimizer = torch.optim.Adam(self.diresa.parameters(), lr=1e-3)
+        self.diresa.train()
 
-            best_kernel, best_params, best_score = None, None, float('inf')
+        n_epochs = 500
+        batch_size = min(32, len(x_train))
 
-            for kernel_name, kernel_params in kernel_candidates:
-                try:
-                    kpca = KernelPCA(n_components=n_dims, kernel=kernel_name, random_state=self.seed,
-                                     fit_inverse_transform=True, **kernel_params)
-                    transformed = kpca.fit_transform(raw_matrix)
-                    reconstructed = kpca.inverse_transform(transformed)
+        logger.info(f'Training DIRESA for {n_epochs} epochs (batch_size={batch_size})')
 
-                    recon_error = np.mean((raw_matrix - reconstructed) ** 2)
-                    trust_score = trustworthiness(raw_matrix, transformed, n_neighbors=min(30, len(raw_matrix) - 1))
+        for epoch in range(n_epochs):
+            # Shuffle data
+            indices = torch.randperm(len(x_train))
+            epoch_loss = 0.0
+            n_batches = 0
 
-                    score = recon_error / (trust_score + 1e-6)
+            for i in range(0, len(x_train), batch_size):
+                batch_indices = indices[i:i+batch_size]
+                x_batch = x_train[batch_indices]
+                dist_batch = dist_tensor[batch_indices][:, batch_indices]
 
-                    logger.debug(f"Kernel {kernel_name}{kernel_params}: recon_error={recon_error:.3f}, trustworthiness={trust_score:.3f}, score={score:.3f}")
+                optimizer.zero_grad()
+                loss, metrics = self.diresa.compute_loss(x_batch, dist_batch)
+                loss.backward()
+                optimizer.step()
 
-                    if score < best_score:
-                        best_kernel, best_params, best_score = kernel_name, kernel_params, score
-                        best_kpca = kpca
-                except Exception as e:
-                    logger.warning(f"Kernel {kernel_name}{kernel_params} failed: {e}")
-                    continue
+                epoch_loss += loss.item()
+                n_batches += 1
 
-            if best_kernel is None:
-                raise ValueError("All kernel candidates failed")
+            if (epoch + 1) % 100 == 0:
+                avg_loss = epoch_loss / n_batches
+                active_dims = self.diresa.get_active_dims()
+                logger.info(f'Epoch {epoch+1}/{n_epochs}: loss={avg_loss:.4f}, active_dims={active_dims}')
 
-            logger.info(f"Selected kernel: {best_kernel} with params {best_params} (score={best_score:.3f})")
-            kpca = best_kpca
-        else:
-            kpca = KernelPCA(n_components=n_dims, kernel=self.kernel_selection, random_state=self.seed,
-                             fit_inverse_transform=True)
-            kpca.fit(raw_matrix)
+        # Get final embeddings
+        self.diresa.eval()
+        with torch.no_grad():
+            transformed_tensor = self.diresa.encode(x_train)
+            transformed_samples = transformed_tensor.cpu().numpy()
 
-        transformed_samples = kpca.transform(raw_matrix)
-        reconstructed = kpca.inverse_transform(transformed_samples)
+        # Get active dimensionality
+        n_dims = self.diresa.get_active_dims()
+        self.behavioral_dims = n_dims
 
-        # Compute normalized reconstruction error (MSE / data variance)
-        mse = np.mean((raw_matrix - reconstructed) ** 2)
-        data_variance = np.var(raw_matrix)
-        normalized_error = mse / (data_variance + 1e-10)
-        logger.info(f'Kernel PCA reconstruction: MSE={mse:.3f}, normalized_error={normalized_error:.3f}')
+        logger.info(f'DIRESA selected {n_dims} dimensions (adaptive from {self.min_dims}-{self.max_dims} range)')
 
-        if normalized_error > self.reconstruction_error_threshold:
-            raise ValueError(f'Normalized reconstruction error {normalized_error:.3f} > {self.reconstruction_error_threshold}')
+        # Validate embeddings
+        validation = self.diresa.validate_embeddings(raw_matrix, transformed_samples)
 
-        # Compute Trustworthiness (preservation of k-nearest neighbors)
-        trust_score = trustworthiness(raw_matrix, transformed_samples, n_neighbors=min(30, len(raw_matrix) - 1))
+        trust_score = validation['trustworthiness']
+        continuity_score = validation['continuity']
+        procrustes_dist = validation['procrustes_distance']
+
         logger.info(f'Trustworthiness: {trust_score:.3f}')
-
-        # Compute Continuity (preservation of neighborhood structure)
-        from sklearn.metrics import pairwise_distances
-        dist_high = pairwise_distances(raw_matrix)
-        dist_low = pairwise_distances(transformed_samples)
-
-        # Continuity: percentage of k-nearest neighbors in low-D that were neighbors in high-D
-        k = min(30, len(raw_matrix) - 1)
-        continuity_sum = 0.0
-        for i in range(len(raw_matrix)):
-            neighbors_low = np.argsort(dist_low[i])[1:k+1]
-            neighbors_high = np.argsort(dist_high[i])[1:k+1]
-            continuity_sum += len(set(neighbors_low) & set(neighbors_high)) / k
-        continuity_score = continuity_sum / len(raw_matrix)
         logger.info(f'Continuity: {continuity_score:.3f}')
-
-        # Compute Procrustes distance (shape similarity)
-        from scipy.linalg import orthogonal_procrustes
-        # Normalize both spaces
-        raw_centered = raw_matrix - raw_matrix.mean(axis=0)
-        transformed_centered = transformed_samples - transformed_samples.mean(axis=0)
-
-        # Project high-D to same dimensionality for comparison
-        from sklearn.decomposition import PCA as PCA_proj
-        pca_proj = PCA_proj(n_components=n_dims)
-        raw_projected = pca_proj.fit_transform(raw_centered)
-
-        # Find optimal rotation
-        R, _ = orthogonal_procrustes(raw_projected, transformed_centered)
-        raw_aligned = raw_projected @ R
-        procrustes_dist = np.sqrt(np.sum((raw_aligned - transformed_centered) ** 2) / len(raw_matrix))
         logger.info(f'Procrustes distance: {procrustes_dist:.3f}')
 
         # Validation thresholds
@@ -464,13 +432,14 @@ class CVTArchive:
         if procrustes_dist > 0.25:
             logger.warning(f'Procrustes distance high ({procrustes_dist:.3f} > 0.15): shape distortion detected')
 
-        self.kpca_transform = kpca
-        self.behavioral_dims = n_dims
+        # Mark as discovered
         self._discovered = True
 
-        self.initialize_centroids(transformed_samples)
+        # Initialize centroids with DIRESA embeddings (only active dimensions)
+        transformed_active = transformed_samples[:, :n_dims]
+        self.initialize_centroids(transformed_active)
 
-        logger.info(f'Discovered {self.behavioral_dims} behavioral dimensions from {self.num_raw_metrics} raw metrics')
+        logger.info(f'Discovered {self.behavioral_dims} behavioral dimensions from {self.num_raw_metrics} raw metrics via DIRESA')
 
         # Notify observers that dimension discovery is complete
         if hasattr(self, '_discovery_callbacks'):
@@ -478,26 +447,6 @@ class CVTArchive:
                 callback()
 
         return True
-
-    def transform_to_behavioral_space(self, raw_metrics: np.ndarray) -> np.ndarray:
-        """Transform raw metrics to discovered behavioral space using fitted Kernel PCA.
-
-        Args:
-            raw_metrics: (N, num_raw_metrics) array of raw metrics
-
-        Returns:
-            (N, num_dims) array of behavioral coordinates in discovered space
-        """
-        if not self._dimensions_discovered:
-            raise RuntimeError('Dimension discovery not yet complete - call discover_dimensions() first')
-        if self.kpca_transform is None:
-            raise RuntimeError('Kernel PCA not fitted')
-
-        # Apply same filtering as during discovery
-        filtered_metrics = raw_metrics[:, self._nonzero_variance_mask]
-
-        # Transform using fitted Kernel PCA
-        return self.kpca_transform.transform(filtered_metrics)
 
     def initialize_centroids(self, initial_samples: Optional[np.ndarray]=None):
         if initial_samples is not None and len(initial_samples) >= self.num_centroids:
@@ -512,6 +461,26 @@ class CVTArchive:
             rng = np.random.RandomState(self.seed)
             self.centroids = rng.randn(self.num_centroids, self.behavioral_dims).astype(np.float32)
             logger.info(f'Initialized {self.num_centroids} CVT centroids from seed {self.seed}')
+
+    def transform_to_behavioral_space(self, raw_metrics: np.ndarray) -> np.ndarray:
+        """Transform raw metrics to behavioral space using DIRESA encoder.
+
+        Args:
+            raw_metrics: (N, num_raw_metrics) array of raw metrics
+
+        Returns:
+            (N, behavioral_dims) array of behavioral coordinates
+        """
+        if self.diresa is None:
+            raise ValueError('DIRESA not trained. Call discover_dimensions() first.')
+
+        self.diresa.eval()
+        with torch.no_grad():
+            x = torch.from_numpy(raw_metrics.astype(np.float32)).to(self.device)
+            embeddings = self.diresa.encode(x)
+            # Return only active dimensions
+            active_dims = self.diresa.get_active_dims()
+            return embeddings[:, :active_dims].cpu().numpy()
 
     def _find_nearest_centroid(self, behavior: Union[Tuple[float, ...], np.ndarray]) -> int:
         if self.centroids is None:

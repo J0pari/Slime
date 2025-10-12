@@ -26,7 +26,7 @@ def test_dimension_discovery_constraint(constraint):
     constraint('Dimension discovery succeeded', lambda: (success == True, success, True, {}))
     constraint('Behavioral dims set to target_dims after discovery', lambda: (archive.behavioral_dims == 3, archive.behavioral_dims, 3, {}))
     constraint('Centroids initialized with shape (num_centroids, target_dims)', lambda: (archive.centroids is not None and archive.centroids.shape == (50, 3), archive.centroids.shape if archive.centroids is not None else None, (50, 3), {}))
-    constraint('Kernel PCA transform exists', lambda: (archive.kpca_transform is not None, type(archive.kpca_transform).__name__, 'KernelPCA', {}))
+    constraint('DIRESA encoder exists', lambda: (archive.diresa is not None, type(archive.diresa).__name__, 'DIRESABehavioralEncoder', {}))
     constraint('Archive marked as discovered', lambda: (archive._discovered == True, archive._discovered, True, {}))
 
 def test_add_after_discovery_constraint(constraint):
