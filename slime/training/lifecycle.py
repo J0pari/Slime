@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from typing import List, Optional, Callable
+from dataclasses import dataclass
 import logging
 import hashlib
 from slime.core.pseudopod import Pseudopod
@@ -8,9 +9,52 @@ from slime.memory.pool import DynamicPool
 from slime.memory.archive import CVTArchive
 logger = logging.getLogger(__name__)
 
+@dataclass
+class LifecycleConfig:
+    initial_temp: float = 1.0
+    min_temp: float = 0.01
+    cooling_schedule: str = 'linear'
+    max_pool_size: int = 64
+    min_pool_size: int = 4
+    max_loss_ratio: float = 10.0
+    loss_ema_alpha: float = 0.99
+    seed: int = 42
+
+class LifecycleManager:
+
+    def __init__(self, config: Optional[LifecycleConfig]=None):
+        self.config = config or LifecycleConfig()
+        self._lifecycle = None
+
+    def initialize(self, pool: DynamicPool, archive: CVTArchive):
+        self._lifecycle = SimulatedAnnealingLifecycle(pool=pool, archive=archive, initial_temp=self.config.initial_temp, min_temp=self.config.min_temp, cooling_schedule=self.config.cooling_schedule, max_pool_size=self.config.max_pool_size, min_pool_size=self.config.min_pool_size, max_loss_ratio=self.config.max_loss_ratio, loss_ema_alpha=self.config.loss_ema_alpha, seed=self.config.seed)
+
+    def set_max_steps(self, max_steps: int):
+        if self._lifecycle:
+            self._lifecycle.set_max_steps(max_steps)
+
+    def step_lifecycle(self, current_loss: float):
+        if self._lifecycle:
+            self._lifecycle.step_lifecycle(current_loss)
+
+    def should_spawn_component(self, behavior: np.ndarray, fitness: float, component_factory: Callable[[dict], Pseudopod]) -> Optional[Pseudopod]:
+        if self._lifecycle:
+            return self._lifecycle.should_spawn_component(behavior, fitness, component_factory)
+        return None
+
+    def should_cull_component(self, component: Pseudopod) -> bool:
+        if self._lifecycle:
+            return self._lifecycle.should_cull_component(component)
+        return False
+
+    def get_statistics(self) -> dict:
+        if self._lifecycle:
+            return self._lifecycle.get_statistics()
+        return {}
+
 class SimulatedAnnealingLifecycle:
 
-    def __init__(self, pool: ComponentPool, archive: CVTArchive, initial_temp: float=1.0, min_temp: float=0.01, cooling_schedule: str='linear', max_pool_size: int=64, min_pool_size: int=4, max_loss_ratio: float=10.0, loss_ema_alpha: float=0.99, seed: int=42):
+    def __init__(self, pool: DynamicPool, archive: CVTArchive, initial_temp: float=1.0, min_temp: float=0.01, cooling_schedule: str='linear', max_pool_size: int=64, min_pool_size: int=4, max_loss_ratio: float=10.0, loss_ema_alpha: float=0.99, seed: int=42):
         self.pool = pool
         self.archive = archive
         self.initial_temp = initial_temp
