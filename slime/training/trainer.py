@@ -127,7 +127,7 @@ class Trainer:
             # Checkpoint every 50 steps - minimal data only
             if self.checkpoint_results and batch_idx % 50 == 0:
                 # Only save essential metrics, not full stats hierarchy
-                organism_stats = self.model.encoder.organism.get_stats()
+                organism_stats = self.model.encoder.organism.stats()
                 step_checkpoint = {
                     'step': self._step,
                     'epoch': epoch,
@@ -207,7 +207,7 @@ class Trainer:
             eval_losses.append(loss.item())
         return {'avg_loss': sum(eval_losses) / len(eval_losses), 'min_loss': min(eval_losses), 'max_loss': max(eval_losses)}
 
-    def get_stats(self) -> Dict:
+    def stats(self) -> Dict:
         stats = {'step': self._step, 'epoch': self._epoch, 'stability': self.stability_manager.stats(), 'lifecycle': self.lifecycle_manager.get_statistics(), 'fitness': self.fitness_computer.stats()}
         if hasattr(self.model, 'organism'):
             stats['organism'] = self.model.organism.stats()
