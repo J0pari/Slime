@@ -612,3 +612,120 @@ Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compu
 - Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. (1983). "Optimization by simulated annealing." *Science*, 220(4598), 671-680.
   - Simulated annealing for combinatorial optimization
   - Temperature schedule for exploration-exploitation balance
+
+## Wave 2: Bio-Inspired Enhancements (Effect Handler Gated)
+
+**Philosophy**: Optional capabilities via algebraic effect handlers. Wave 1 (current) must work first. Wave 2 adds sophistication component-by-component with zero overhead when disabled.
+
+### Effect Handler Architecture
+
+**Pattern**: Each Wave 2 feature is an algebraic effect that components can request:
+
+```python
+# Component requests capability
+@effect_handler('conformational_switching')
+def forward(self, x):
+    if has_effect('conformational_switching'):
+        return self.conformational_ode(x)
+    else:
+        return self.standard_forward(x)
+```
+
+**Benefits**:
+- Zero overhead when disabled (no runtime checks, compile-time optimization)
+- Gradual migration (enable per-component, not system-wide)
+- A/B testing (compare with/without each effect)
+- Composable (combine multiple effects freely)
+
+### 2.1: Conformational Switching (Neural ODE Bifurcations)
+
+**Biological Inspiration**: Proteins switch between conformational states via energy barriers.
+
+**Effect**: `conformational_switching`
+**Protocol**: `proto/effects/conformational.py`
+**Implementation**: `core/conformational_ode.py`
+
+### 2.2: Collective Memory (Modern Hopfield Networks)
+
+**Biological Inspiration**: Neural ensembles reach consensus via attractor dynamics.
+
+**Effect**: `collective_memory`
+**Protocol**: `proto/effects/collective.py`
+**Implementation**: `memory/collective_memory.py`
+
+### 2.3: Mitotic Division (Asexual Reproduction)
+
+**Biological Inspiration**: Successful cells divide with small variation.
+
+**Effect**: `mitotic_division`
+**Protocol**: `proto/effects/reproduction.py`
+**Implementation**: `lifecycle/mitotic_division.py`
+
+### 2.4: Meiotic Recombination (Sexual Reproduction)
+
+**Biological Inspiration**: Crossover creates diversity under stress.
+
+**Effect**: `meiotic_recombination`
+**Protocol**: `proto/effects/reproduction.py`
+**Implementation**: `lifecycle/meiotic_recombination.py`
+
+### 2.5: Self-Modification (Hypernetwork + Learned Optimizer)
+
+**Biological Inspiration**: Cells modify their own gene expression.
+
+**Effect**: `self_modification`
+**Protocol**: `proto/effects/meta_learning.py`
+**Implementation**: `meta/hypernetwork.py`, `meta/learned_optimizer.py`
+
+### 2.6: Adaptive Reproduction Strategy
+
+**Integration**: Pool decides reproduction mode based on environmental conditions.
+
+**Effect**: `adaptive_reproduction`
+**Implementation**: `lifecycle/adaptive_strategy.py`
+
+## Wave 2 Activation Strategy
+
+**Gradual Enablement**:
+1. Get Wave 1 baseline (current system working, ablations run)
+2. Enable one effect at a time, measure delta
+3. If improvement: keep enabled
+4. If regression: disable and debug
+5. Combine effects that show synergy
+
+**Testing Requirements**:
+- Each effect must have A/B test comparing enabled vs disabled
+- Must measure: accuracy, throughput, memory, training stability
+- Must document when each effect helps vs hurts
+
+**Acceptance Criteria**:
+- Effect improves at least one metric without regressing others >10%
+- Effect composes cleanly with other effects (no interactions)
+- Effect has zero overhead when disabled (compile-time optimization)
+
+**File Structure for Wave 2**:
+```
+slime/
+├── proto/
+│   └── effects/          # Wave 2 effect protocols
+│       ├── conformational.py
+│       ├── collective.py
+│       ├── reproduction.py
+│       └── meta_learning.py
+├── core/
+│   └── conformational_ode.py
+├── memory/
+│   └── collective_memory.py
+├── lifecycle/
+│   ├── mitotic_division.py
+│   ├── meiotic_recombination.py
+│   └── adaptive_strategy.py
+└── meta/
+    ├── hypernetwork.py
+    └── learned_optimizer.py
+```
+
+## Wave 2 References
+
+- Chen, R. T. Q., et al. (2018). "Neural Ordinary Differential Equations." *NeurIPS 2018*
+- Ramsauer, H., et al. (2021). "Hopfield Networks is All You Need." *ICLR 2021*
