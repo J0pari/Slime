@@ -93,7 +93,7 @@ class ArchitectureConfig:
 
 TINY = ArchitectureConfig(
     dimensions=DimensionConfig(head_dim=16, num_heads=4, hidden_dim=64),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=3, max_dims=5, num_centroids=50),
+    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=68, min_dims=3, max_dims=5, num_centroids=50),
     compression=CompressionConfig(low_rank_k=16, delta_rank=8),
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=2, seq_len=16, pool_max_size=32, pool_min_size=4, test_pool_max_size=4, test_pool_min_size=2),
@@ -103,7 +103,7 @@ TINY = ArchitectureConfig(
 
 SMALL = ArchitectureConfig(
     dimensions=DimensionConfig(head_dim=32, num_heads=8, hidden_dim=256),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=4, max_dims=6, num_centroids=200),
+    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=68, min_dims=4, max_dims=6, num_centroids=200),
     compression=CompressionConfig(low_rank_k=32, delta_rank=16),
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=4, seq_len=32, pool_max_size=64, pool_min_size=8, test_pool_max_size=8, test_pool_min_size=4),
@@ -113,7 +113,7 @@ SMALL = ArchitectureConfig(
 
 MEDIUM = ArchitectureConfig(
     dimensions=DimensionConfig(head_dim=64, num_heads=8, hidden_dim=512),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=5, max_dims=7, num_centroids=500),
+    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=68, min_dims=5, max_dims=7, num_centroids=500),
     compression=CompressionConfig(low_rank_k=64, delta_rank=16),
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=8, seq_len=64, pool_max_size=128, pool_min_size=16, test_pool_max_size=16, test_pool_min_size=8),
@@ -123,7 +123,7 @@ MEDIUM = ArchitectureConfig(
 
 LARGE = ArchitectureConfig(
     dimensions=DimensionConfig(head_dim=128, num_heads=16, hidden_dim=2048),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=62, min_dims=5, max_dims=7, num_centroids=1000),
+    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=68, min_dims=5, max_dims=7, num_centroids=1000),
     compression=CompressionConfig(low_rank_k=128, delta_rank=32),
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=16, seq_len=128, pool_max_size=256, pool_min_size=32, test_pool_max_size=32, test_pool_min_size=16),
