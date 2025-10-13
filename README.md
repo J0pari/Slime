@@ -94,7 +94,7 @@ Behavioral metrics (62 dimensions) from pseudopod runtime:
 ```python
 TINY = ArchitectureConfig(
     dimensions=Dimension Config(head_dim=16, num_heads=4, hidden_dim=64),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=68, min_dims=3, max_dims=5),
+    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=65, min_dims=3, max_dims=5),
     ...
 )
 ```
