@@ -420,79 +420,77 @@ NOT activation entropy alone (doesn't correlate with task)
 **Benefit 1**: Graceful degradation under device loss (hash-based redistribution, no retraining)
 **Benefit 2**: Interpretability (query archive by behavioral coordinates)
 
-### 13. Ablation tests determine architectural value (Popperian Falsifiability)
-**Reasoning (Scientific Method):** Falsifiable claims + risky predictions. Attempt to DISPROVE architecture, not just validate it works.
+### 13. Ablation testing methodology
 
-**Popper's Criterion:** Theory must make predictions that could be proven FALSE. Tests should be RISKY - real possibility of failure.
+Tests should make specific predictions that could be disproven. Design tests where failure is possible and informative.
 
-**Methodology (2025 NAS Best Practices):**
-1. **State falsifiable claims** - specific, measurable predictions
-2. **Design counter-examples** - conditions where claim should fail
-3. **Probe live system state** - Archive coverage, Pseudopod coherence trajectories, Voronoi cell density evolution
-4. **Component-level causation** - isolate mechanisms, not just compare outcomes
+**Approach:**
+1. State measurable predictions with numeric thresholds
+2. Design counter-examples where the prediction should fail
+3. Probe live system state (Archive coverage, Pseudopod coherence, Voronoi densities)
+4. Isolate component-level causation
 
-**NOT ALLOWED:**
-- Generic model comparison (treat as black box)
-- Recomputing metrics that system already tracks (use live Pseudopod._raw_metrics, Archive state)
-- Unfalsifiable descriptive statistics ("Fisher information = 42" - so what?)
-- Static end-of-training analysis (track dynamics over time)
+**Avoid:**
+- Black-box model comparison
+- Recomputing metrics the system already tracks
+- Descriptive statistics without falsification criteria
+- Static end-of-training snapshots
 
-**REQUIRED Falsifiable Claims:**
+**Test cases:**
 
-**Claim 1: "Curiosity-driven lifecycle maintains population diversity"**
-- **Prediction:** Pseudopod coherence std > 0.1 throughout training
-- **Risky test:** Disable lifecycle (static pool), coherence should collapse to uniform < 0.05
-- **Falsification:** If static pool maintains same diversity, lifecycle adds no value → REMOVE IT
-- **Probe:** Track `[pod.coherence().item() for pod in organism.pseudopod_pool._components]` every 100 steps
+**Curiosity-driven lifecycle maintains population diversity**
+- Prediction: Pseudopod coherence std > 0.1 throughout training
+- Counter-test: Static pool should collapse to std < 0.05
+- Probe: `[pod.coherence().item() for pod in organism.pseudopod_pool._components]` every 100 steps
+- If static pool maintains diversity, remove lifecycle
 
-**Claim 2: "DIRESA discovers intrinsic dimensionality < 50% of raw metrics"**
-- **Prediction:** Archive.behavioral_dims < 0.5 * Archive.num_raw_metrics after discovery
-- **Risky test:** Feed pure Gaussian noise, DIRESA should fail (dims ≈ num_raw_metrics)
-- **Falsification:** If DIRESA finds low dims in noise, embedding is broken → FIX DIRESA
-- **Probe:** `archive.behavioral_dims` vs `archive.num_raw_metrics` at discovery
+**DIRESA discovers intrinsic dimensionality**
+- Prediction: Archive.behavioral_dims < 0.5 * Archive.num_raw_metrics
+- Counter-test: Pure Gaussian noise should fail to compress (dims ≈ num_raw_metrics)
+- Probe: `archive.behavioral_dims` vs `archive.num_raw_metrics` at discovery
+- If DIRESA compresses noise, embedding is broken
 
-**Claim 3: "Adaptive Voronoi prevents density variance explosion"**
-- **Prediction:** `np.var(list(archive._cell_densities.values())) < 5.0` after 1000 additions
-- **Risky test:** Disable subdivision/merge, variance should explode > 20.0
-- **Falsification:** If static Voronoi has same variance, adaptation is useless → REMOVE ADAPTIVE LOGIC
-- **Probe:** Track `archive._cell_densities` histogram every 100 additions
+**Adaptive Voronoi prevents density variance explosion**
+- Prediction: `np.var(list(archive._cell_densities.values())) < 5.0` after 1000 additions
+- Counter-test: Static Voronoi should exceed variance > 20.0
+- Probe: `archive._cell_densities` histogram every 100 additions
+- If static has same variance, remove adaptive logic
 
-**Claim 4: "Coherence-based state blending improves sample efficiency"**
-- **Prediction:** Adaptive blend reaches 90% accuracy in < 0.8x epochs vs fixed 0.5/0.5
-- **Risky test:** Compare adaptive vs fixed blends on same task
-- **Falsification:** If fixed blend is as fast, adaptive mechanism adds overhead without benefit → REVERT
-- **Probe:** Training curves for adaptive vs `body = 0.5*fresh + 0.5*state`
+**Coherence-based state blending improves sample efficiency**
+- Prediction: Adaptive blend reaches 90% accuracy in < 0.8x epochs vs fixed 0.5/0.5
+- Counter-test: Fixed blend on same task
+- Probe: Training curves for adaptive vs `body = 0.5*fresh + 0.5*state`
+- If fixed is as fast, revert to simpler implementation
 
-**Claim 5: "Archive bootstrapping accelerates convergence vs random init"**
-- **Prediction:** Archive-bootstrapped Pseudopods reach fitness > 0.5 in < 200 steps
-- **Risky test:** Random init should take > 500 steps
-- **Falsification:** If random init converges as fast, archive overhead is wasted → DISABLE BOOTSTRAPPING
-- **Probe:** `pod.fitness` trajectory for archive-sampled vs factory-spawned Pseudopods
+**Archive bootstrapping accelerates convergence**
+- Prediction: Archive-bootstrapped Pseudopods reach fitness > 0.5 in < 200 steps
+- Counter-test: Random init should take > 500 steps
+- Probe: `pod.fitness` trajectory for archive-sampled vs factory-spawned
+- If random init converges as fast, disable bootstrapping
 
-**Claim 6: "Mass conservation enables Flow-Lenia substrate stability"**
-- **Prediction:** CA mass conservation metric > 0.95 throughout training
-- **Risky test:** Remove mass constraint, should see divergence (conservation < 0.7)
-- **Falsification:** If unconstrained CA is as stable, mass conservation is unnecessary → SIMPLIFY
-- **Probe:** `pod._ca_metrics['CA_mass_conservation']` every forward pass
+**Mass conservation enables substrate stability**
+- Prediction: CA mass conservation > 0.95 throughout training
+- Counter-test: Unconstrained CA should diverge (< 0.7)
+- Probe: `pod._ca_metrics['CA_mass_conservation']` every forward pass
+- If unconstrained is stable, simplify
 
-**Claim 7: "MAP-Elites archive coverage correlates with generalization"**
-- **Prediction:** Test accuracy increases monotonically with archive coverage (0.2 → 0.8 coverage = +5% test acc)
-- **Risky test:** Artificially limit coverage to 0.3, should hurt test performance
-- **Falsification:** If coverage uncorrelated with test acc, archive is just overhead → QUESTION DESIGN
-- **Probe:** `len(archive.centroid_refs) / archive.num_centroids` vs test accuracy
+**Archive coverage correlates with generalization**
+- Prediction: Test accuracy increases with coverage (0.2 to 0.8 coverage = +5% test acc)
+- Counter-test: Limit coverage to 0.3 should hurt test performance
+- Probe: `len(archive.centroid_refs) / archive.num_centroids` vs test accuracy
+- If uncorrelated, archive is overhead
 
-**Testing Implementation (tests/ablations/):**
-- **NOT:** Standalone Fisher information computers, generic nn.Module comparisons
-- **YES:** Probe live Organism state: `organism.archive`, `organism.pseudopod_pool._components`, CA metrics
-- **YES:** Track trajectories: coherence over time, coverage evolution, cell density histograms
-- **YES:** Mechanistic interventions: disable specific components, inject controlled noise
-- **YES:** Falsifiable assertions with specific numeric thresholds
+**Implementation:**
+- Probe live Organism state: `organism.archive`, `organism.pseudopod_pool._components`, CA metrics
+- Track trajectories: coherence over time, coverage evolution, density histograms
+- Mechanistic interventions: disable components, inject controlled noise
+- Numeric thresholds for pass/fail
 
-**Acceptance Criteria (Popperian):**
-- If ANY claim fails falsification test → component is broken or unnecessary
-- If claim survives RISKY test → provisionally corroborated (not "proven")
-- If component doesn't improve measurable metric → REMOVE IT (no "interesting but useless" components)
-- If test can't be made risky (no way to fail) → claim is unfalsifiable → INVALID TEST
+**Criteria:**
+- Failed prediction means component is broken or unnecessary
+- Survived counter-test means provisionally supported
+- No measurable improvement means remove the component
+- Test without failure mode is invalid
 
 ## Computational Cost Analysis
 
