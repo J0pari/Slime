@@ -34,6 +34,15 @@ class Organism(nn.Module):
         self.head_dim = head_dim
         self.arch_config = arch_config
         self.device = device or torch.device('cuda')
+        
+        # Estimate GPU memory budget for max_count
+        if torch.cuda.is_available():
+            gpu_memory_gb = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)
+            # Rough estimate: ~1GB per pseudopod at head_dim=32, scale linearly
+            memory_per_pod_gb = (head_dim / 32.0) * 1.0
+            self._max_pseudopods = max(4, min(16, int(gpu_memory_gb * 0.3 / memory_per_pod_gb)))
+        else:
+            self._max_pseudopods = 4
         if kernel is not None:
             self.kernel = kernel
         elif HAS_TRITON:
@@ -59,7 +68,13 @@ class Organism(nn.Module):
 
         self.archive._discovery_callbacks.append(_on_discovery_complete)
         if pool_config is None:
-            pool_config = PoolConfig(min_size=4, max_size=32, birth_threshold=0.8, death_threshold=0.1, cull_interval=100)
+            pool_config = PoolConfig(
+                min_size=arch_config.test.pool_min_size,
+                max_size=arch_config.test.pool_max_size,
+                birth_threshold=0.8,
+                death_threshold=0.1,
+                cull_interval=100
+            )
         self.pseudopod_pool = DynamicPool(component_factory=lambda: Pseudopod(head_dim, self.kernel, arch_config.fitness, arch_config.numerical, self.device, latent_dim=head_dim, stimulus_dim=head_dim, num_heads=arch_config.dimensions.num_heads), config=pool_config, arch_config=arch_config, bootstrap_factory=lambda genome: Pseudopod.from_dict(genome, self.kernel, arch_config.fitness, arch_config.numerical, self.device), archive=self.archive, device=self.device)
         self._generation = 0
 
@@ -86,7 +101,7 @@ class Organism(nn.Module):
         rank = torch.sigmoid(self.predict_rank(body_for_prediction.unsqueeze(0))).squeeze().item()
         coherence = torch.sigmoid(self.predict_coherence(body_for_prediction.unsqueeze(0))).squeeze().item()
         behavior = (rank, coherence)
-        pseudopods = self.pseudopod_pool.get_at(behavior, max_count=8)
+        pseudopods = self.pseudopod_pool.get_at(behavior, max_count=self._max_pseudopods)
         if not pseudopods:
             logger.warning('Empty pseudopod pool, spawning emergency pseudopod')
             pseudopods = [Pseudopod(self.head_dim, self.kernel, self.arch_config.fitness, self.arch_config.numerical, self.device, latent_dim=self.head_dim, stimulus_dim=self.head_dim, num_heads=self.arch_config.dimensions.num_heads)]
