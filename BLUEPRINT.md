@@ -536,59 +536,55 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 
 ### Hyperparameter Tuning Protocol
 
-**Problem**: Systems have dozens of hyperparameters. Guessing wastes time. Copying from papers assumes their task matches yours.
-
-**Principle**: Measure what the system needs, not what worked elsewhere.
-
 **Loss gate threshold**:
-- Question: When is loss spike real vs noise?
-- Measurement: Run training, compute loss std over last 1000 steps
-- Heuristic: Threshold = 10× loss_ema lets 3σ noise through without triggering
-- Validation test: Does gate trigger <5% of steps? If >20%, threshold too low (noisy task)
+- Measurement: Compute loss std over last 1000 training steps
+- Procedure: Try threshold values 5.0, 10.0, 20.0. Track gate trigger frequency.
+- Hypothesis: If gate triggers >30% of steps, threshold too low. If <1%, might miss real instability.
+- Test: Does changing threshold affect final accuracy? If not, threshold doesn't matter.
 
 **Culling fraction**:
-- Question: How much selection pressure before diversity collapses?
-- Measurement: Track coherence std after culling
-- Heuristic: Start 0.3 (aggressive). If coherence std <0.1, reduce to 0.2. If coverage stalls, reduce to 0.1.
-- Validation test: Does coherence std stay >0.1? If not, culling too aggressive.
+- Measurement: Track coherence std before and after culling
+- Procedure: Try fractions 0.1, 0.2, 0.3. Measure coherence std after 1000 steps.
+- Hypothesis: Coherence std drop >50% suggests over-culling.
+- Test: Does lower culling improve final coverage? Does higher culling improve final accuracy?
 
 **Warmup steps**:
-- Question: When do gradients stabilize?
-- Measurement: Plot gradient norm. Warmup = steps until variance stabilizes (no large jumps)
-- Heuristic: 100 steps typical for supervised. 500+ for RL. Depends on task noise.
-- Validation test: No loss spikes in 500 steps after warmup?
+- Measurement: Plot gradient norm over first 1000 steps
+- Procedure: Visual inspection for when variance stabilizes
+- Hypothesis: Lifecycle before stabilization causes training instability
+- Test: Does reducing warmup cause loss spikes? Does increasing warmup delay convergence?
 
 **Max pseudopods**:
-- Question: How many components fit in memory?
-- Measurement: Monitor GPU memory %. Increase until >90% or occupancy <50%.
-- Heuristic: Memory-limited or compute-limited, whichever hits first
-- Validation test: Memory 60-90%? Occupancy >50%?
+- Measurement: GPU memory % and kernel occupancy during forward pass
+- Procedure: Increase until memory >90% or occupancy <50%
+- Hypothesis: Memory limit or compute limit, whichever hits first
+- Test: Does increasing beyond limit cause OOM or slower throughput?
 
 **Archive centroids**:
-- Question: How to partition behavioral space?
-- Measurement: Track cell density variance (max_density / mean_density)
-- Heuristic: Start at 10^d where d=DIRESA dims. Increase if density variance >5. Decrease if >50% cells empty.
-- Validation test: Density variance <5? <30% cells empty?
+- Measurement: Cell density variance (max_density / mean_density)
+- Procedure: Try 10^d, 10^(d+1), 10^(d-1) where d=DIRESA dims
+- Hypothesis: High variance means unbalanced cells. High empty % means too many centroids.
+- Test: Does centroid count affect final coverage? Does it affect memory usage?
 
 ### Reproducibility Tests
 
-**Test 1: Same seed, same GPU**
-- What to check: Run twice with seed=42. Compare loss curves.
-- Pass criteria: Pearson correlation >0.9999 (allows ±1e-6 FP noise)
-- If fails: Non-deterministic operation exists (atomicAdd, unsorted dict, random without seeding)
-- Why this matters: Debugging impossible without determinism
+**Test: Same seed, same GPU**
+- Run: `python train.py --seed=42` twice
+- Check: `np.corrcoef(losses_run1, losses_run2)[0,1]`
+- Hypothesis: Deterministic RNG + sorted iteration → identical results
+- If different: Search for `random()` without seed, unsorted dict iteration, CUDA atomics
 
-**Test 2: Same seed, different GPU**
-- What to check: Run on RTX 3090 vs A100. Compare fitness rankings (Kendall tau).
-- Pass criteria: Tau >0.95, final accuracy within ±0.5%
-- If fails: Code branches on hardware (tile sizes, SRAM checks affecting logic not just performance)
-- Why this matters: Results shouldn't depend on which GPU user has
+**Test: Same seed, different GPU**
+- Run: `python train.py --seed=42` on two GPU models
+- Check: `scipy.stats.kendalltau(fitness_gpu1, fitness_gpu2)`
+- Hypothesis: FP rounding differs but rank order preserved
+- If rank order differs: Logic branches on hardware properties
 
-**Test 3: Different seeds**
-- What to check: Run 10 times with different seeds. Compute accuracy std.
-- Pass criteria: Std <1.5%, coverage std <0.1
-- If fails: System too sensitive to initialization (increase warmup, gentler early culling)
-- Why this matters: Science requires results aren't lucky draws
+**Test: Different seeds**
+- Run: `for seed in range(10): python train.py --seed=$seed`
+- Check: `np.std([final_acc_seed0, final_acc_seed1, ...])`
+- Hypothesis: Low std means system not sensitive to initialization
+- If high std: System explores different archive regions, check if some seeds consistently fail
 
 ### Resource Budget
 
