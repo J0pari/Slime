@@ -305,6 +305,425 @@ NOT activation entropy alone (doesn't correlate with task)
 
 **Cellular lattice as discrete spacetime:** The CA operates on a discrete spatial lattice where each cell undergoes local update rules. Mass conservation couples neighboring cells. Each forward pass applies the update rule across all lattice positions simultaneously (SIMD), computing one timestep of the discrete dynamics. Training gradient descent modifies the update rule parameters, changing which computational trajectories are accessible from given initial conditions.
 
+## Premortem Analysis
+
+**Purpose**: Identify failure modes before they occur. Each item describes a plausible way the system could fail, why it might happen, and how to detect it early.
+
+### Training Instability from Archive Updates
+
+**Failure mode**: Archive updates cause gradient variance spikes → training loss divergence
+
+**Why it happens**: 
+- New pseudopods bootstrapped from archive have different loss landscape positions
+- Sudden parameter distribution shifts confuse optimizer momentum
+- Lifecycle events (birth/death) create discontinuities in gradient flow
+
+**Early detection**:
+- Monitor loss variance: `np.std(losses[-100:]) > 3.0 × np.std(losses[-1000:-100])`
+- Track gradient norm spikes: `grad_norm > 10.0 × grad_norm_ema`
+- Watch lifecycle event correlation: High birth rate within 50 steps before loss spike
+
+**Mitigation**:
+- Loss gates: Freeze lifecycle when loss > 10× EMA (already implemented)
+- Warmup period: 100 steps no lifecycle, 500 steps reduced frequency (implemented)
+- Gradient clipping: Clip to 1.0 during gentle phase, 0.5 during warmup
+- Archive bootstrapping only for initialization: New pseudopods train from scratch with gradient flow
+
+### DIRESA Embeddings Don't Converge
+
+**Failure mode**: Behavioral embeddings fail to preserve distances → archive loses diversity signal
+
+**Why it happens**:
+- Insufficient training data: DIRESA needs ~1000 samples to learn manifold structure
+- Metric instability: Raw behavioral metrics fluctuate wildly during early training
+- Dimensionality mismatch: Intrinsic dimensionality > learned dimensions (e.g., 8D manifold compressed to 3D)
+- Adversarial dynamics: Training modifies behavioral distribution faster than DIRESA adapts
+
+**Early detection**:
+- Trustworthiness < 0.70 (should be ≥ 0.85)
+- Continuity < 0.70 (should be ≥ 0.85)
+- Reconstruction error > 0.8 (should be ≤ 0.5)
+- Embedding dimensions stuck at max (10D) or min (2D) for > 5000 steps
+
+**Mitigation**:
+- Delayed DIRESA activation: Use Euclidean distance for first 2000 steps, accumulate behavioral samples
+- Metric stabilization: Use EMA-smoothed behavioral metrics for embedding training
+- Adaptive dimension bounds: Allow 2-10D, monitor reconstruction error to detect under-compression
+- Separate learning rate: DIRESA lr = 0.1 × main lr (slower adaptation)
+- Fallback policy: If validation fails for > 1000 steps, revert to PCA embeddings
+
+### Pool Collapse to Single Strategy
+
+**Failure mode**: All pseudopods converge to identical behavior → diversity loss → archive coverage stalls
+
+**Why it happens**:
+- Fitness pressure dominates diversity pressure (lifecycle culls too aggressively)
+- Archive sampling bias: High-fitness centroids sampled repeatedly, low-fitness never explored
+- Gradient alignment: All pseudopods receive similar gradients → parameters converge
+- Behavioral metrics too coarse: Can't distinguish actually-different strategies
+
+**Early detection**:
+- Pseudopod coherence std < 0.05 (should be > 0.1)
+- Archive coverage plateaus: `len(archive.centroid_refs) / num_centroids` unchanged for 5000 steps
+- Behavioral metric correlation: `np.corrcoef(behavioral_vectors)` off-diagonal > 0.9
+- Pool size shrinks: `len(pool._components) < 0.5 × pool.max_size`
+
+**Mitigation**:
+- Diversity bonus in fitness: `fitness = 0.7 × task_fitness + 0.3 × diversity_bonus`
+- Archive sampling with exploration: ε-greedy (ε=0.2) samples random centroid instead of fitness-weighted
+- Birth threshold jitter: Add noise to birth_threshold (±0.1) to prevent deterministic culling
+- Behavioral metric expansion: Add more raw metrics (target: 80-100 dimensions before DIRESA)
+- Forced exploration: Every 1000 steps, spawn 1 pseudopod from random archive centroid
+
+### Memory Budget Violation from Archive Growth
+
+**Failure mode**: Archive grows unbounded → OOM crash → training interruption
+
+**Why it happens**:
+- Every elite addition creates new storage (low-rank + deltas)
+- Delta chains grow without GC → orphaned objects accumulate
+- Content-addressable hash table doesn't shrink → fragmentation
+- DIRESA autoencoder weights grow with each dimension increase
+
+**Early detection**:
+- Memory usage growth rate: `(mem_now - mem_1000_steps_ago) / mem_now > 0.1` (10% growth per 1000 steps)
+- Archive size: `len(archive._content_store) > 2 × num_centroids` (deduplication failing)
+- Delta chain depth: `max(chain_lengths) > 50` (GC not running)
+- GPU memory allocation failures: `torch.cuda.OutOfMemoryError` during archive operations
+
+**Mitigation**:
+- Hard archive limit: MAX_ARCHIVE_CENTROIDS=1000 (implemented), MAX_ELITES_PER_CENTROID=10
+- Aggressive GC: Mark-and-sweep every 100 additions (implemented), reference counting
+- Delta chain pruning: Collapse chains > 20 deltas into new base weights
+- Memory monitoring: Track archive memory usage, trigger early culling at 80% budget
+- Graceful degradation: Remove oldest elites in least-visited centroids when memory tight
+
+### GPU Kernel Launch Failures
+
+**Failure mode**: Triton kernel launches fail due to resource exhaustion → fallback to slow PyTorch → throughput collapse
+
+**Why it happens**:
+- Too many pseudopods active simultaneously → register pressure → kernel launch fails
+- Tile sizes too large for SRAM → shared memory exhaustion
+- Tensor shapes misaligned with warp size (32) → poor occupancy
+- CUDA context switching overhead from multi-GPU hash partitioning
+
+**Early detection**:
+- Kernel fallback rate: `num_torch_calls / (num_triton_calls + num_torch_calls) > 0.1`
+- Occupancy metrics: `torch.cuda.get_device_properties().multi_processor_count × active_warps < 0.5 × theoretical_max`
+- Launch latency spikes: `kernel_launch_time > 2.0 × kernel_launch_ema`
+- Memory allocation retries: Monitor `torch.cuda.memory_stats()['num_alloc_retries']`
+
+**Mitigation**:
+- Adaptive max_pseudopods: Scale with GPU memory (implemented), reduce when kernel launches fail
+- Tile size autotuning: Start with BLOCK_M=128, reduce to 64 if SRAM pressure detected
+- Batched kernel launches: Group pseudopod forward passes into single kernel with different offsets
+- Hash partition validation: Monitor cross-device communication, fall back to single-GPU if overhead > 20%
+- Graceful degradation: If Triton fails, log warning and use PyTorch fallback (already implemented)
+
+### Loss Gates Over-Trigger (Lifecycle Frozen Too Long)
+
+**Failure mode**: Loss gates freeze lifecycle for thousands of steps → stale pool → performance plateau
+
+**Why it happens**:
+- Loss EMA miscalibrated: Too low threshold triggers on normal variance
+- Noisy tasks (e.g., RL) have inherently high loss variance
+- Lifecycle freeze prevents adaptation → loss stays high → gates stay active (vicious cycle)
+
+**Early detection**:
+- Lifecycle frozen fraction: `frozen_steps / total_steps > 0.5`
+- Loss EMA calibration: `loss_ema < 0.1 × np.mean(losses)` (EMA too optimistic)
+- Pool staleness: No births/deaths for > 2000 steps while loss > threshold
+
+**Mitigation**:
+- Adaptive loss threshold: `threshold = max(10.0 × loss_ema, 2.0 × np.std(losses[-1000:]))`
+- Cooldown period: After gate triggers, wait 500 steps before re-enabling (prevent oscillation)
+- Gate timeout: If frozen for > 5000 steps, force re-enable lifecycle and recalibrate EMA
+- Task-specific thresholds: Accept threshold multiplier as config parameter (default=10.0)
+
+## Resource Budget
+
+**Purpose**: Explicit computational and memory constraints for each component. Ensures system scales to available hardware without silent degradation.
+
+### GPU Memory Budget (per-device)
+
+**Total Available**: Detect via `torch.cuda.get_device_properties(device).total_memory`
+
+**Allocation Strategy**:
+- **Model weights (40%)**: Pseudopod parameters (CA weights, attention, norms)
+- **Activations (30%)**: Forward pass intermediate tensors, gradients
+- **Archive storage (15%)**: Low-rank weight storage, delta chains
+- **DIRESA embeddings (5%)**: Autoencoder weights, behavioral metric buffers
+- **Optimizer state (10%)**: Adam momentum/variance, gradient buffers
+
+**Example (RTX 3090: 24GB)**:
+- Model weights: 9.6 GB → ~80M parameters at fp32 (20M at fp16 mixed precision)
+- Activations: 7.2 GB → Supports batch_size=32, max_pseudopods=16
+- Archive: 3.6 GB → 1000 centroids × 10 elites × 360KB per elite (low-rank)
+- DIRESA: 1.2 GB → 65 raw dims → 10 learned dims, batch=1024
+- Optimizer: 2.4 GB → Adam state for 80M params
+
+**Adaptive Limits**:
+- `max_pseudopods = max(4, min(16, int(gpu_memory_gb * 0.3 / memory_per_pod_gb)))` (implemented in organism.py:40-45)
+- `max_archive_centroids = min(1000, int(gpu_memory_gb * 0.15 / memory_per_centroid_gb))`
+- `diresa_batch_size = min(1024, int(gpu_memory_gb * 0.05 / memory_per_sample_gb))`
+
+**Safety Margins**:
+- Reserve 10% headroom for fragmentation and CUDA overhead
+- Monitor actual usage: `torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() < 0.9`
+- Trigger GC when > 85% allocated: `torch.cuda.empty_cache()`
+
+### Compute Budget (per-step)
+
+**Target Latency**: 100ms per training step (10 steps/sec)
+
+**Breakdown**:
+- **Forward pass (50ms)**: All active pseudopods, ensemble averaging
+  - Per-pseudopod: 3ms (Triton kernels), 12ms (PyTorch fallback)
+  - Max pseudopods: 16 × 3ms = 48ms (parallel), 16 × 12ms = 192ms (fallback)
+- **Backward pass (30ms)**: Gradient computation, optimizer step
+- **Lifecycle decisions (5ms)**: Fitness evaluation, birth/death decisions (only every 100 steps)
+- **Archive operations (10ms)**: Elite addition, sampling (only when needed)
+- **Metrics collection (5ms)**: Behavioral metrics, observability
+
+**Amortized Costs** (averaged over 100 steps):
+- Archive elite addition: 200ms / 100 = 2ms per step
+- Pool culling: 500ms / 1000 = 0.5ms per step
+- DIRESA embedding update: 100ms / 100 = 1ms per step
+- Voronoi adaptation: 1000ms / 1000 = 1ms per step
+
+**Total**: 50 + 30 + 5 + 10 + 5 + 4.5 = 104.5ms → Within budget
+
+**Scaling**:
+- **More pseudopods**: Latency increases linearly (forward pass bottleneck)
+- **Larger archive**: Logarithmic cost increase (hash table lookups)
+- **Higher dimensions**: Quadratic cost in DIRESA (pairwise distances)
+
+**Performance Requirements**:
+- Triton kernel occupancy: ≥ 50% (warp utilization)
+- Fallback overhead: < 10% of steps use PyTorch fallback
+- Multi-GPU efficiency: ≥ 80% scaling (2 GPUs → 1.6× throughput)
+
+### Training Budget (wall-clock time)
+
+**Target Tasks**:
+- **MNIST (TINY config)**: 10 minutes (5000 steps × 100ms, 1 GPU)
+- **CIFAR-10 (SMALL config)**: 4 hours (80k steps × 150ms, 1 GPU)
+- **ImageNet (MEDIUM config)**: 3 days (1M steps × 250ms, 4 GPUs)
+
+**Baseline Comparisons** (untested hypotheses):
+- **Standard Transformer (MNIST)**: ~5 minutes typical
+- **DARTS (CIFAR-10)**: ~1.5 GPU-days typical
+- **Hypernetworks (MNIST)**: ~8 minutes typical
+
+**Expected Cost Breakdown (CIFAR-10)** (untested):
+- **Forward/backward (70%)**: 2.8 hours pure gradient updates
+- **Lifecycle overhead (20%)**: 48 minutes births/deaths/archive
+- **Logging/checkpointing (10%)**: 24 minutes I/O
+
+**Amortization Hypothesis** (requires empirical validation): 
+- Short runs (< 10k steps): Lifecycle overhead may dominate
+- Long runs (> 100k steps): Architecture discovery may amortize overhead
+- Very long runs (> 1M steps): Adaptation may enable performance gains
+
+### Storage Budget (disk)
+
+**Checkpoints**:
+- **Full checkpoint**: 500 MB (model weights + optimizer state + archive)
+- **Archive-only**: 50 MB (compressed elites + delta chains)
+- **Checkpoint frequency**: Every 1000 steps → 50 MB × (total_steps / 1000)
+
+**Example (CIFAR-10: 80k steps)**:
+- Full checkpoints: 500 MB × 5 (every 16k steps) = 2.5 GB
+- Archive snapshots: 50 MB × 80 = 4 GB
+- Logs/metrics: 500 MB (tensorboard + observability)
+- **Total**: ~7 GB per training run
+
+**Cleanup Policy**:
+- Keep last 3 full checkpoints (1.5 GB)
+- Keep archive snapshots for analysis (4 GB)
+- Delete intermediate checkpoints after training completes
+
+### Network Budget (multi-GPU)
+
+**Hash-based Partitioning Overhead**:
+- **Assumption**: `device_id = hash(behavior_coords) % num_gpus`
+- **Worst case**: Every forward pass requires cross-device communication
+- **Bandwidth**: PCIe 4.0: 32 GB/s, NVLink: 600 GB/s
+
+**Communication Volume (per step)**:
+- **Pseudopod migration**: 10 MB per pseudopod (weights + state)
+- **Archive sync**: 50 MB per elite addition (low-rank weights + deltas)
+- **Gradient sync**: 100 MB (all-reduce for optimizer step)
+
+**Total (4 GPUs, 16 pseudopods)**:
+- Pseudopod comm: 0 MB (assuming good hash distribution, no migration)
+- Archive sync: 50 MB / 100 steps = 0.5 MB/step
+- Gradient sync: 100 MB/step
+- **Total**: ~100 MB/step → 1 ms latency on NVLink, 3 ms on PCIe
+
+**Expected Scaling Efficiency** (untested):
+- 2 GPUs: Target 1.8× throughput (90% efficiency)
+- 4 GPUs: Target 3.2× throughput (80% efficiency, communication overhead)
+- 8 GPUs: Target 5.6× throughput (70% efficiency, hash imbalance)
+
+**Mitigation**:
+- Use NVLink when available (200× faster than PCIe)
+- Batch archive updates to reduce sync frequency
+- Async gradient sync (overlap communication with computation)
+
+## Decision Tree
+
+**Purpose**: Guide implementation decisions with clear criteria. Each node asks a question, branches on measurable conditions, and leads to concrete actions.
+
+### When to Add a New Component to Pool?
+
+```
+Q: Is pool below min_size?
+├─ YES → Spawn immediately (safety: pool must have min_size components)
+└─ NO → Q: Is current step < warmup_steps (100)?
+    ├─ YES → Don't spawn (let existing components stabilize)
+    └─ NO → Q: Is current step < gentle_phase_end (500)?
+        ├─ YES → Q: Is step % 50 == 0? (reduced frequency)
+        │   ├─ YES → Continue to fitness check
+        │   └─ NO → Don't spawn
+        └─ NO → Continue to fitness check
+        
+Fitness Check:
+Q: Is there a component with fitness < death_threshold (0.1)?
+├─ YES → Q: Is archive coverage < 0.5?
+│   ├─ YES → Sample from random archive centroid (exploration)
+│   └─ NO → Sample from fitness-weighted archive (exploitation)
+└─ NO → Q: Is pool below max_size AND average fitness > birth_threshold (0.8)?
+    ├─ YES → Spawn from archive (high-performing pool, room to grow)
+    └─ NO → Don't spawn
+```
+
+### When to Cull Components from Pool?
+
+```
+Q: Is pool above max_size (hard limit)?
+├─ YES → Cull immediately (fraction=0.3, remove worst performers)
+└─ NO → Q: Is step % cull_interval (1000) == 0?
+    ├─ YES → Q: Is loss > 10.0 × loss_ema? (loss gate)
+    │   ├─ YES → Skip culling (training unstable, freeze lifecycle)
+    │   └─ NO → Q: Is pool size > 1.5 × min_size?
+    │       ├─ YES → Cull bottom 20% by fitness
+    │       └─ NO → Don't cull (too close to min_size)
+    └─ NO → Don't cull (not time yet)
+```
+
+### When to Update Archive with New Elite?
+
+```
+Q: Has component survived for > 100 steps?
+├─ NO → Don't archive (too young, fitness unstable)
+└─ YES → Q: Is fitness > current_elite_fitness at this centroid?
+    ├─ YES → Replace elite (found better solution)
+    └─ NO → Q: Is centroid empty?
+        ├─ YES → Add as first elite (expand coverage)
+        └─ NO → Q: Is centroid below capacity (10 elites per centroid)?
+            ├─ YES → Add as additional elite (maintain diversity within cell)
+            └─ NO → Q: Is fitness > worst_elite_fitness in this centroid?
+                ├─ YES → Replace worst elite
+                └─ NO → Don't archive (not competitive)
+```
+
+### When to Activate DIRESA Embeddings?
+
+```
+Q: Is step < 2000?
+├─ YES → Use Euclidean distance on raw metrics (accumulate samples)
+└─ NO → Q: Are there ≥ 1000 behavioral samples collected?
+    ├─ NO → Continue using Euclidean (insufficient training data)
+    └─ YES → Q: Train DIRESA for 500 steps, then validate
+        Q: Is Trustworthiness ≥ 0.70 AND Continuity ≥ 0.70?
+        ├─ YES → Activate DIRESA embeddings (sufficient quality)
+        └─ NO → Q: Have we retried < 3 times?
+            ├─ YES → Retrain with 2× learning rate
+            └─ NO → Fallback to PCA (DIRESA failing to converge)
+```
+
+### When to Trigger Loss Gate (Freeze Lifecycle)?
+
+```
+Q: Is loss > 10.0 × loss_ema?
+├─ YES → Q: Has loss gate been active for < 5000 steps?
+│   ├─ YES → Freeze lifecycle (loss unstable, protect training)
+│   └─ NO → Q: Is loss still decreasing (gradient of loss_ema < 0)?
+│       ├─ YES → Continue freeze (making progress despite high loss)
+│       └─ NO → Force unfreeze and recalibrate EMA (stuck, need adaptation)
+└─ NO → Q: Is loss gate currently active?
+    ├─ YES → Q: Has loss been stable for > 500 steps?
+    │   ├─ YES → Unfreeze lifecycle (loss recovered)
+    │   └─ NO → Continue freeze (wait for stabilization)
+    └─ NO → Normal lifecycle operation
+```
+
+### How to Choose Tile Sizes for Triton Kernels?
+
+```
+Q: What is SRAM size per SM?
+├─ >= 128 KB (A100) → Try BLOCK_M=128, BLOCK_N=128, BLOCK_D=64
+├─ >= 64 KB (RTX 3090) → Try BLOCK_M=64, BLOCK_N=64, BLOCK_D=64
+└─ < 64 KB (older GPUs) → Try BLOCK_M=32, BLOCK_N=32, BLOCK_D=32
+
+Q: Did kernel launch succeed?
+├─ YES → Q: Is occupancy > 50%?
+│   ├─ YES → Keep current tile sizes
+│   └─ NO → Reduce tile sizes by 2× (improve occupancy)
+└─ NO → Q: Was error "out of shared memory"?
+    ├─ YES → Reduce tile sizes by 2×
+    └─ NO → Q: Was error "out of registers"?
+        ├─ YES → Reduce BLOCK_D (fewer registers per thread)
+        └─ NO → Fallback to PyTorch (unknown error)
+```
+
+### When to Use Archive Sampling vs Random Initialization?
+
+```
+Q: Is archive coverage > 0.1? (at least 10% of centroids filled)
+├─ NO → Random initialization (archive too sparse)
+└─ YES → Q: Is this an exploration step? (ε=0.2 probability)
+    ├─ YES → Sample from random archive centroid (force diversity)
+    └─ NO → Q: What is the behavioral location for this spawn?
+        Q: Does archive have elite at this centroid?
+        ├─ YES → Sample from this centroid (behavioral locality)
+        └─ NO → Q: Does archive have elites in k=5 nearest centroids?
+            ├─ YES → Sample from nearest centroid (approximate locality)
+            └─ NO → Random initialization (no relevant history)
+```
+
+### When to Increase vs Decrease max_pseudopods?
+
+```
+Q: Is GPU memory utilization > 90%?
+├─ YES → Decrease max_pseudopods by 25% (approaching OOM)
+└─ NO → Q: Is GPU memory utilization < 60%?
+    ├─ YES → Q: Is kernel occupancy > 70%?
+    │   ├─ YES → Increase max_pseudopods by 25% (underutilized)
+    │   └─ NO → Keep current (occupancy bottleneck, not memory)
+    └─ NO → Q: Did we encounter kernel launch failures?
+        ├─ YES → Decrease max_pseudopods by 50% (register/SRAM pressure)
+        └─ NO → Keep current (healthy utilization)
+```
+
+### How to Handle DIRESA Embedding Dimension Count?
+
+```
+Q: Is reconstruction error > 0.8?
+├─ YES → Increase dimensions by 1 (under-compressing, losing information)
+└─ NO → Q: Is reconstruction error < 0.3?
+    ├─ YES → Q: Are dimensions > 2?
+    │   ├─ YES → Decrease dimensions by 1 (over-parameterized)
+    │   └─ NO → Keep at 2D (minimum dimensionality)
+    └─ NO → Q: Has dimension count been stable for > 2000 steps?
+        ├─ YES → Keep current (converged to good dimensionality)
+        └─ NO → Q: Is Trustworthiness < 0.85?
+            ├─ YES → Increase dimensions (neighborhoods not preserved)
+            └─ NO → Keep current (quality acceptable)
+```
+
 ## Architectural Decisions
 
 ### 1. IO-Aware Tiled Attention (FlashAttention)
@@ -583,9 +1002,11 @@ Tests should make specific predictions that could be disproven. Design tests whe
 
 **Test this claim:**
 
-Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compute than NAS, and 1.3-1.5x better throughput than hypernetworks.
+**Untested Hypothesis**: Slime may match or exceed task accuracy with significantly less compute than NAS methods, while maintaining competitive throughput with hypernetworks.
 
-**If hypothesis fails:** Architecture is self-indulgent. Simplify or abandon.
+**Empirical validation required**: If comparative testing shows no advantage over baselines, simplify or abandon architecture.
+
+**Decision Tree Check**: See "When to Add a New Component to Pool?" for lifecycle spawn logic, "When to Activate DIRESA Embeddings?" for embedding training schedule.
 
 ## System Components
 
