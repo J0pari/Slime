@@ -136,9 +136,8 @@ slime/
 
 ## Current Status
 
-- Triton kernels: 14/14 tests, 33/33 constraints (100%)
+- Triton kernels: unit testing in progress
 - Integration: In progress
-- Compression: 80-160× memory reduction validated
 
 ## References
 
