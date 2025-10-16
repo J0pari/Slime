@@ -21,7 +21,11 @@
 11. **Local-Hierarchical Duality**: Neural CA reads from spatial neighbors (local perception) while Archive/Genealogy broadcasts to descendants (hierarchical memory). GPU grid operations extract neighborhood context, phylogenetic tree propagates information through lineages. Complementary structures for different timescales
 12. **DRY Principle**: Single source of truth for each concept
 
-## Dependency DAG
+---
+
+## Part I: Abstract Architecture
+
+### Dependency DAG
 
 **Layer 0: Protocols** (no dependencies)
 - proto/kernel.py
@@ -56,8 +60,7 @@
 - config/loader.py
 - tests/* (unit, integration, ablations, slo)
 
-
-## Data Flow
+### Data Flow
 
 **User Input** → **API Layer** (torch_compat, native)
     ↓
@@ -83,9 +86,9 @@ merged = torch.stack(outputs).mean(0)  # Weighted sum over computational traject
 
 Each forward pass computes the ensemble average over all active pseudopods at a behavioral location. The archive maintains the history of successful trajectories through configuration space, weighted by fitness. Selection collapses the ensemble to high-fitness trajectories that persist to the archive.
 
-## Protocols
+### Protocols
 
-### proto.component.Component
+#### proto.component.Component
 **Purpose**: Unified interface for ALL pooled components
 
 **Interface**:
@@ -96,7 +99,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Usage**: Archive stores any Component via to_dict(), Pools manage any Component via fitness property
 
-### proto.memory.Memory
+#### proto.memory.Memory
 **Purpose**: Temporal memory interface with decay (NOT for component lifecycle - that's pool.py)
 
 **Interface**:
@@ -106,7 +109,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Implementations**: memory.tubes.TubeNetwork (flowing memory with exponential decay)
 
-### proto.model.Pseudopod
+#### proto.model.Pseudopod
 **Purpose**: Sensory probe with Neural CA update rule (Flow-Lenia substrate)
 
 **Interface**:
@@ -125,7 +128,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Dependencies**: MUST use proto.kernel.Kernel for all compute, MUST implement proto.component.Component
 
-### proto.model.Chemotaxis
+#### proto.model.Chemotaxis
 **Purpose**: Behavioral space navigator with curiosity-driven search (Adaptive Voronoi MAP-Elites)
 
 **Interface**:
@@ -143,7 +146,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Dependencies**: Uses memory.archive for spatial indexing (Adaptive Voronoi cells), NO direct component management
 
-### proto.model.Organism
+#### proto.model.Organism
 **Purpose**: Top-level orchestrator with context-aware GPU execution
 
 **Interface**:
@@ -159,7 +162,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Dependencies**: Owns Pool[Pseudopod] + Archive + Chemotaxis, Uses Kernels via Pseudopods, Records Observability metrics
 
-## File Structure
+### File Structure
 
 **Repository Layout**:
 - BLUEPRINT.md (system architecture), README.md (user documentation with examples)
@@ -179,699 +182,233 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 - **tests/** - Test suites (unit/ protocol + implementation tests, integration/ end-to-end, ablations/ comparative studies, slo/ performance validation)
 - **tools/** - Utilities (visualize behavioral space, export ONNX/TorchScript, package .exe)
 
+### Invariants (Structural Rules)
 
-## Invariants
-
-### 1. Dependency Direction (DAG Enforcement)
+**1. Dependency Direction** (DAG Enforcement)
 - Lower layers NEVER import from higher layers
 - Protocols NEVER import implementations
 - Components NEVER import API layer
 - **Violation = compilation error**
 
-### 2. Ownership Hierarchy
+**2. Ownership Hierarchy**
+- Organism owns: Pool[Pseudopod], Archive, Chemotaxis
+- Pool owns: List[Component]
+- Archive owns: Dict[cell, Elite] where Elite.genome = dict (NO object refs)
+- **NO CYCLES**
 
-**Organism owns:**
-- Pool[Pseudopod]
-- Archive
-- Chemotaxis
-
-**Pool owns:**
-- List[Component]
-
-**Archive owns:**
-- Dict[cell, Elite] where Elite.genome = dict (NO object refs)
-
-**NO CYCLES**
-
-### 3. Protocol Compliance
+**3. Protocol Compliance**
 - Every component MUST declare which protocols it implements
 - Archive stores via `Component.to_dict()` (immutable serialization)
 - Pools manage via `Component.fitness` (no type checking at runtime)
 
-### 4. GPU Memory Safety
-- Kernels check allocation before launch
-- Organism enforces memory budget
-- Pool culling triggered by OOM
-
-### 5. Observability Injection
+**4. Observability Injection**
 - Metrics collector passed to Organism.__init__()
 - All forward passes record to metrics
 - NO global state for metrics
 
-### 6. Timescale Separation
+**5. Determinism**
+- Archive iteration uses sorted keys (deterministic order)
+- All stochastic decisions via `_deterministic_random(seed, step, context)`
+- Hash-based seeded random for reproducibility
 
-**Fast (every step):**
+**6. Ultrametric Topology**
+- **Strong triangle inequality**: d(x, z) ≤ max(d(x, y), d(y, z)) for all x, y, z
+- **Implementation**: True dendrogram traversal via linkage matrix merge height
+- **Topology Types**: p-Adic (hierarchical codes), Genealogy (common ancestor), Hierarchy (dendrogram merge)
+- **Chemotaxis Integration**: HybridMetric (ultrametric between clusters, Mahalanobis within), DIRESA preserves ultrametric in learned embeddings
+
+---
+
+## Part II: Behavioral & Lifecycle Architecture
+
+### Archive & Quality-Diversity
+
+**CVT-MAP-Elites with Content-Addressable Storage**
+
+**Core Properties**:
+- Adaptive Voronoi tessellation (centroids grow/shrink based on density)
+- DIRESA learned behavioral embeddings (2-10D adaptive, distance-preserving)
+- Low-rank storage: SVD factorization (8x compression) + delta compression (10-20x)
+- Content-addressable: SHA256 deduplication prevents duplicate storage
+
+**Storage Strategy**:
+1. SVD low-rank factorization: D×D → (D×k + k×D), 8x compression
+2. Content-addressable hashing: Deduplicate identical elites
+3. Delta compression: Store diffs vs parent in same centroid, 10-20x additional compression
+4. **Result**: 80-160x memory reduction (D=512, k=64: 4MB → 25-50KB per elite)
+
+**Delta Protocol Operations**:
+- **sparse_add**: Add values at specified 2D indices (for sparse updates with >95% sparsity)
+- **low_rank**: Low-rank update W += dU @ dV where dU is D×r, dV is r×D, r << k
+- **dense**: Full replacement (for small tensors like biases)
+- **scale_add**: Scalar multiplication plus sparse add (for small perturbations)
+
+**Garbage Collection**: Reference counting + periodic mark-and-sweep every 100 add() calls
+- No premature deletion (reference counting)
+- No memory leaks (mark-and-sweep catches orphaned chains)
+- Bounded overhead (amortized O(1))
+- Deterministic (same sequence → same GC decisions)
+
+**Bootstrapping Policy**:
+- Archive provides INITIALIZATION only
+- Bootstrapped components trained with rest of network (requires_grad=True)
+- NO frozen parameters injected mid-training
+- Prevents mode collapse and gradient conflicts
+
+### DIRESA Behavioral Embeddings
+
+**Purpose**: Learn distance-preserving nonlinear embeddings from raw behavioral metrics
+
+**Architecture**: Autoencoder with learned gating for adaptive dimensions (2-10D), distance preservation loss, online training
+
+**Raw Behavioral Metrics (65 dimensions)**:
+- CA pattern statistics (mass conservation, neighborhood coherence, parameter localization)
+- Weight gradient norms
+- Activation statistics (sparsity, magnitude)
+- Compute metrics (memory locality, computational intensity)
+- Correlation structure (effective rank)
+
+**Learned Embeddings**: Nonlinear projections preserving pairwise distances via autoencoder with distance loss
+
+**Adaptive Dimensionality**:
+- DIRESA encoder has gating layer that learns which dimensions to activate
+- Dimension count adapts via warp vote mechanism (2-10D range)
+- System learns optimal dimensionality based on task, not predetermined
+
+**Validation Thresholds**:
+- Trustworthiness ≥ 0.85 (neighbors preserved in low-D)
+- Continuity ≥ 0.85 (neighborhoods preserved)
+- Procrustes distance ≤ 0.15 (shape similarity)
+- Reconstruction error ≤ 0.5 (information preservation)
+
+**Training Schedule**:
+- Delayed activation: Use Euclidean distance for first 2000 steps
+- Accumulate ≥1000 behavioral samples before training
+- Train DIRESA for 500 steps, then validate
+- Fallback to PCA if validation fails after 3 retries
+
+### Lifecycle & Curiosity-Driven Selection
+
+**Fitness Metric**: `fitness = effective_rank() × coherence()`
+- effective_rank(): Parameter localization (spatial variation of CA rule)
+- coherence(): Learning progress (how fast component is improving)
+
+**Curiosity-Driven Dynamics**:
+- High fitness → survive and get archived
+- Low fitness → replaced by sampling from archive history
+- Learning progress drives which trajectories persist (intrinsic motivation)
+
+**Timescale Separation**:
+
+**Fast (every step)**:
 - Weight updates via backprop
-- Fitness tracking
+- Fitness tracking (EMA)
 - Metrics collection
 - Loss monitoring
 
-**Medium (every 100 steps):**
+**Medium (every 100 steps)**:
 - Fitness assessment
 - Archive elite updates
 - Pool spawn decisions
 - Loss gate check
 
-**Slow (every 1000 steps):**
+**Slow (every 1000 steps)**:
 - Pool culling
 - Memory budget enforcement
 - Behavioral space analysis
-- Hard limit enforcement (max pool size, max archive)
+- Hard limit enforcement
 
-### 7. Ultrametric Topology
+**Loss Gates (Training Stability)**:
+- Freeze lifecycle when loss > threshold × loss_ema
+- Adaptive threshold: `max(10.0 × loss_ema, 2.0 × std(losses[-1000:]))`
+- Cooldown period: 500 steps after gate triggers
+- Timeout: Force re-enable after 5000 frozen steps
 
-**Strong triangle inequality**: d(x, z) ≤ max(d(x, y), d(y, z)) for all x, y, z
+**Warmup & Gentle Phases**:
+- Warmup (0-100 steps): No lifecycle, let trajectories stabilize
+- Gentle (100-500 steps): Reduced culling frequency, gradient clipping
+- Normal (500+ steps): Full lifecycle operation
 
-**Implementation**: True dendrogram traversal via linkage matrix merge height
+**GPU-Parallel Spatial Stencil**: JAX vmap-inspired batched computation of contextual metrics (pairwise distances, k-nearest neighbors) - 100x-1000x speedup vs sequential
 
-**Topology Types**:
-- **p-Adic**: Distance based on common prefix length (hierarchical codes)
-- **Genealogy**: Distance based on common ancestor recency
-- **Hierarchy**: Distance via dendrogram merge height (ultrametric guarantee)
+**Cellular Lattice Dynamics**: CA operates on discrete spatial lattice, local update rules, mass conservation couples neighbors, SIMD execution across positions
 
-**Chemotaxis Integration**: HybridMetric (ultrametric between clusters, Mahalanobis within), DIRESA preserves ultrametric in learned embeddings
+---
 
-### 8. Archive Bootstrapping Policy 
-- Archive provides INITIALIZATION only
-- Bootstrapped components trained with rest of network
-- NO frozen parameters injected mid-training
-- Prevents mode collapse and gradient conflicts
+## Part III: Implementation Decisions
 
-### 8. GPU-Parallel Spatial Stencil Computation
-**Reasoning (GPU Architecture):** GPU computation is spatial (SIMD, tiles, stencil convolution), not sequential. Batched operations on entire populations, not individual components.
+### GPU Kernel Architecture
 
-**JAX vmap pattern (push loops to primitives):**
-- BAD (sequential): Loop over pool computing per-component z-scores → O(N) sequential
-- GOOD (parallel): vmap_relative_fitness(fitnesses, neighbor_mask) → O(1) GPU call
+**IO-Aware Tiled Attention** (FlashAttention pattern)
+- Tile computation to fit in SRAM (HBM ↔ SRAM tiling)
+- IO complexity: O(M² × D / SRAM_size) vs naive O(M² × D)
+- Implementation: BLOCK_M=128, BLOCK_N=128, BLOCK_D=64 (adaptive to GPU SRAM)
 
-**SpatialStencil**: JAX vmap-inspired batched computation of contextual metrics (pairwise distances, k-nearest neighbors, vectorized metrics) - 100x-1000x speedup vs sequential
+**Kernel Injection**: Constructor injection pattern
+- Pseudopod accepts Kernel interface at construction
+- Allows Triton GPU, PyTorch CPU fallback, custom implementations
+- Scale with available hardware, not hardcoded assumptions
 
-**Pattern:** Stencil kernel applied to every component position (SIMD), matches GPU architecture perfectly.
+**Multi-GPU Hash Partitioning**:
+- Device assignment: `device_id = hash(behavior_coords) % num_gpus`
+- Scales to arbitrary GPU counts without manual partitioning
+- Hash function ensures load balancing
 
-### 9. Fitness Correlation with Task
-Fitness MUST correlate with loss reduction. Options:
-- Gradient magnitude (components affecting loss)
-- CA mass conservation correlation with targets
-- Information bottleneck metrics (mutual information)
-- **Relative fitness** (gradient magnitude z-score vs k-nearest neighbors)
+**Graceful Degradation**:
+- Forward uses Triton (speed), backward uses PyTorch einsum (gradient flow)
+- Fallback to PyTorch if Triton kernel fails
+- Adaptive tile sizes based on SRAM availability
 
-NOT activation entropy alone (doesn't correlate with task)
+### Fitness & Selection
 
-### 9. CVT-MAP-Elites Architecture
-**Reasoning (Scalability):** Fixed grid scales as resolution^dims. CVT scales linearly with num_centroids.
+**Fitness Components**:
+- Task performance (70%): Gradient magnitude (components affecting loss)
+- Compute efficiency (20%): Hardware-optimal patterns emerge from selection
+- Gradient magnitude (10%): CA mass conservation correlation with targets
 
-**Fixed grid problem:** Exponential explosion (3D: 8k cells, 4D: 160k, 5D: 3.2M)
+**NOT activation entropy alone** (doesn't correlate with task)
 
-**CVT solution:** Linear scaling (1000 centroids for any dimensionality)
+**Relative Fitness**: Gradient magnitude z-score vs k-nearest neighbors (contextual fitness)
 
-**Behavioral dimensions:** DIRESA learns 2-10 nonlinear dimensions from 10-20 raw metrics online. Trustworthiness/Continuity validation ensures distance preservation.
+**Simulated Annealing**: Temperature schedule for exploration→exploitation
+- Birth decisions: Accept diverse vs high-fitness components
+- CVT centroid refinement: Minimize quantization error
+- Archive mutation strength: Large mutations (early) → small mutations (late)
 
-### 10. Content-Addressable Low-Rank Archive Storage
-**Reasoning (Memory Efficiency):** SVD low-rank factorization with content-addressable delta compression.
+### Memory & Resource Management
 
-**Storage strategy:**
-1. SVD low-rank factorization: D×D → (D×k + k×D), 8x compression
-2. Content-addressable hashing: Deduplicate identical elites
-3. Delta compression: Store diffs vs parent in same centroid, 10-20x additional compression
+**Soft Limits with Graceful Degradation**:
+- When memory exceeds budget, pool culls worst performers (fraction=0.2)
+- System degrades quality gracefully rather than crashing on OOM
+- Adaptive max_pseudopods based on GPU memory availability
 
-**Result:** 80-160x memory reduction (D=512, k=64: 4MB → 25-50KB per elite)
+**GPU Memory Safety**:
+- Kernels check allocation before launch
+- Organism enforces memory budget
+- Pool culling triggered by OOM
+- Reserve 10% headroom for fragmentation
 
-**Key insight:** Elites in same centroid have similar behaviors → similar weights → tiny deltas
+---
 
-### 11. Lifecycle Safety Guardrails
-**Hard limits:** MAX_POOL_SIZE=64, MAX_ARCHIVE_CENTROIDS=1000, MAX_LOSS_RATIO=10.0
-**Loss gates:** Freeze lifecycle if loss > 10× moving average
-**Training:** DIRESA learns embeddings online, annealing schedule for exploration→exploitation, curiosity-driven lifecycle
+## Part IV: Testing & Validation
 
-**Cellular lattice as discrete spacetime:** The CA operates on a discrete spatial lattice where each cell undergoes local update rules. Mass conservation couples neighboring cells. Each forward pass applies the update rule across all lattice positions simultaneously (SIMD), computing one timestep of the discrete dynamics. Training gradient descent modifies the update rule parameters, changing which computational trajectories are accessible from given initial conditions.
+### Ablation Testing Methodology
 
-## Premortem Analysis
+**Approach**: Tests make specific predictions that could be disproven. Design tests where failure is possible and informative.
 
-**Purpose**: Identify failure modes before they occur. Each item describes a plausible way the system could fail, why it might happen, and how to detect it early.
-
-### Training Instability from Archive Updates
-
-**Failure mode**: Archive updates cause gradient variance spikes → training loss divergence
-
-**Why it happens**: 
-- New pseudopods bootstrapped from archive have different loss landscape positions
-- Sudden parameter distribution shifts confuse optimizer momentum
-- Lifecycle events (birth/death) create discontinuities in gradient flow
-
-**Early detection**:
-- Monitor loss variance: `np.std(losses[-100:]) > 3.0 × np.std(losses[-1000:-100])`
-- Track gradient norm spikes: `grad_norm > 10.0 × grad_norm_ema`
-- Watch lifecycle event correlation: High birth rate within 50 steps before loss spike
-
-**Mitigation**:
-- Loss gates: Freeze lifecycle when loss > 10× EMA (already implemented)
-- Warmup period: 100 steps no lifecycle, 500 steps reduced frequency (implemented)
-- Gradient clipping: Clip to 1.0 during gentle phase, 0.5 during warmup
-- Archive bootstrapping only for initialization: New pseudopods train from scratch with gradient flow
-
-### DIRESA Embeddings Don't Converge
-
-**Failure mode**: Behavioral embeddings fail to preserve distances → archive loses diversity signal
-
-**Why it happens**:
-- Insufficient training data: DIRESA needs ~1000 samples to learn manifold structure
-- Metric instability: Raw behavioral metrics fluctuate wildly during early training
-- Dimensionality mismatch: Intrinsic dimensionality > learned dimensions (e.g., 8D manifold compressed to 3D)
-- Adversarial dynamics: Training modifies behavioral distribution faster than DIRESA adapts
-
-**Early detection**:
-- Trustworthiness < 0.70 (should be ≥ 0.85)
-- Continuity < 0.70 (should be ≥ 0.85)
-- Reconstruction error > 0.8 (should be ≤ 0.5)
-- Embedding dimensions stuck at max (10D) or min (2D) for > 5000 steps
-
-**Mitigation**:
-- Delayed DIRESA activation: Use Euclidean distance for first 2000 steps, accumulate behavioral samples
-- Metric stabilization: Use EMA-smoothed behavioral metrics for embedding training
-- Adaptive dimension bounds: Allow 2-10D, monitor reconstruction error to detect under-compression
-- Separate learning rate: DIRESA lr = 0.1 × main lr (slower adaptation)
-- Fallback policy: If validation fails for > 1000 steps, revert to PCA embeddings
-
-### Pool Collapse to Single Strategy
-
-**Failure mode**: All pseudopods converge to identical behavior → diversity loss → archive coverage stalls
-
-**Why it happens**:
-- Fitness pressure dominates diversity pressure (lifecycle culls too aggressively)
-- Archive sampling bias: High-fitness centroids sampled repeatedly, low-fitness never explored
-- Gradient alignment: All pseudopods receive similar gradients → parameters converge
-- Behavioral metrics too coarse: Can't distinguish actually-different strategies
-
-**Early detection**:
-- Pseudopod coherence std < 0.05 (should be > 0.1)
-- Archive coverage plateaus: `len(archive.centroid_refs) / num_centroids` unchanged for 5000 steps
-- Behavioral metric correlation: `np.corrcoef(behavioral_vectors)` off-diagonal > 0.9
-- Pool size shrinks: `len(pool._components) < 0.5 × pool.max_size`
-
-**Mitigation**:
-- Diversity bonus in fitness: `fitness = 0.7 × task_fitness + 0.3 × diversity_bonus`
-- Archive sampling with exploration: ε-greedy (ε=0.2) samples random centroid instead of fitness-weighted
-- Birth threshold jitter: Add noise to birth_threshold (±0.1) to prevent deterministic culling
-- Behavioral metric expansion: Add more raw metrics (target: 80-100 dimensions before DIRESA)
-- Forced exploration: Every 1000 steps, spawn 1 pseudopod from random archive centroid
-
-### Memory Budget Violation from Archive Growth
-
-**Failure mode**: Archive grows unbounded → OOM crash → training interruption
-
-**Why it happens**:
-- Every elite addition creates new storage (low-rank + deltas)
-- Delta chains grow without GC → orphaned objects accumulate
-- Content-addressable hash table doesn't shrink → fragmentation
-- DIRESA autoencoder weights grow with each dimension increase
-
-**Early detection**:
-- Memory usage growth rate: `(mem_now - mem_1000_steps_ago) / mem_now > 0.1` (10% growth per 1000 steps)
-- Archive size: `len(archive._content_store) > 2 × num_centroids` (deduplication failing)
-- Delta chain depth: `max(chain_lengths) > 50` (GC not running)
-- GPU memory allocation failures: `torch.cuda.OutOfMemoryError` during archive operations
-
-**Mitigation**:
-- Hard archive limit: MAX_ARCHIVE_CENTROIDS=1000 (implemented), MAX_ELITES_PER_CENTROID=10
-- Aggressive GC: Mark-and-sweep every 100 additions (implemented), reference counting
-- Delta chain pruning: Collapse chains > 20 deltas into new base weights
-- Memory monitoring: Track archive memory usage, trigger early culling at 80% budget
-- Graceful degradation: Remove oldest elites in least-visited centroids when memory tight
-
-### GPU Kernel Launch Failures
-
-**Failure mode**: Triton kernel launches fail due to resource exhaustion → fallback to slow PyTorch → throughput collapse
-
-**Why it happens**:
-- Too many pseudopods active simultaneously → register pressure → kernel launch fails
-- Tile sizes too large for SRAM → shared memory exhaustion
-- Tensor shapes misaligned with warp size (32) → poor occupancy
-- CUDA context switching overhead from multi-GPU hash partitioning
-
-**Early detection**:
-- Kernel fallback rate: `num_torch_calls / (num_triton_calls + num_torch_calls) > 0.1`
-- Occupancy metrics: `torch.cuda.get_device_properties().multi_processor_count × active_warps < 0.5 × theoretical_max`
-- Launch latency spikes: `kernel_launch_time > 2.0 × kernel_launch_ema`
-- Memory allocation retries: Monitor `torch.cuda.memory_stats()['num_alloc_retries']`
-
-**Mitigation**:
-- Adaptive max_pseudopods: Scale with GPU memory (implemented), reduce when kernel launches fail
-- Tile size autotuning: Start with BLOCK_M=128, reduce to 64 if SRAM pressure detected
-- Batched kernel launches: Group pseudopod forward passes into single kernel with different offsets
-- Hash partition validation: Monitor cross-device communication, fall back to single-GPU if overhead > 20%
-- Graceful degradation: If Triton fails, log warning and use PyTorch fallback (already implemented)
-
-### Loss Gates Over-Trigger (Lifecycle Frozen Too Long)
-
-**Failure mode**: Loss gates freeze lifecycle for thousands of steps → stale pool → performance plateau
-
-**Why it happens**:
-- Loss EMA miscalibrated: Too low threshold triggers on normal variance
-- Noisy tasks (e.g., RL) have inherently high loss variance
-- Lifecycle freeze prevents adaptation → loss stays high → gates stay active (vicious cycle)
-
-**Early detection**:
-- Lifecycle frozen fraction: `frozen_steps / total_steps > 0.5`
-- Loss EMA calibration: `loss_ema < 0.1 × np.mean(losses)` (EMA too optimistic)
-- Pool staleness: No births/deaths for > 2000 steps while loss > threshold
-
-**Mitigation**:
-- Adaptive loss threshold: `threshold = max(10.0 × loss_ema, 2.0 × np.std(losses[-1000:]))`
-- Cooldown period: After gate triggers, wait 500 steps before re-enabling (prevent oscillation)
-- Gate timeout: If frozen for > 5000 steps, force re-enable lifecycle and recalibrate EMA
-- Task-specific thresholds: Accept threshold multiplier as config parameter (default=10.0)
-
-## Resource Budget
-
-**Purpose**: Explicit computational and memory constraints for each component. Ensures system scales to available hardware without silent degradation.
-
-### GPU Memory Budget (per-device)
-
-**Total Available**: Detect via `torch.cuda.get_device_properties(device).total_memory`
-
-**Allocation Strategy**:
-- **Model weights (40%)**: Pseudopod parameters (CA weights, attention, norms)
-- **Activations (30%)**: Forward pass intermediate tensors, gradients
-- **Archive storage (15%)**: Low-rank weight storage, delta chains
-- **DIRESA embeddings (5%)**: Autoencoder weights, behavioral metric buffers
-- **Optimizer state (10%)**: Adam momentum/variance, gradient buffers
-
-**Example (RTX 3090: 24GB)**:
-- Model weights: 9.6 GB → ~80M parameters at fp32 (20M at fp16 mixed precision)
-- Activations: 7.2 GB → Supports batch_size=32, max_pseudopods=16
-- Archive: 3.6 GB → 1000 centroids × 10 elites × 360KB per elite (low-rank)
-- DIRESA: 1.2 GB → 65 raw dims → 10 learned dims, batch=1024
-- Optimizer: 2.4 GB → Adam state for 80M params
-
-**Adaptive Limits**:
-- `max_pseudopods = max(4, min(16, int(gpu_memory_gb * 0.3 / memory_per_pod_gb)))` (implemented in organism.py:40-45)
-- `max_archive_centroids = min(1000, int(gpu_memory_gb * 0.15 / memory_per_centroid_gb))`
-- `diresa_batch_size = min(1024, int(gpu_memory_gb * 0.05 / memory_per_sample_gb))`
-
-**Safety Margins**:
-- Reserve 10% headroom for fragmentation and CUDA overhead
-- Monitor actual usage: `torch.cuda.memory_allocated() / torch.cuda.max_memory_allocated() < 0.9`
-- Trigger GC when > 85% allocated: `torch.cuda.empty_cache()`
-
-### Compute Budget (per-step)
-
-**Target Latency**: 100ms per training step (10 steps/sec)
-
-**Breakdown**:
-- **Forward pass (50ms)**: All active pseudopods, ensemble averaging
-  - Per-pseudopod: 3ms (Triton kernels), 12ms (PyTorch fallback)
-  - Max pseudopods: 16 × 3ms = 48ms (parallel), 16 × 12ms = 192ms (fallback)
-- **Backward pass (30ms)**: Gradient computation, optimizer step
-- **Lifecycle decisions (5ms)**: Fitness evaluation, birth/death decisions (only every 100 steps)
-- **Archive operations (10ms)**: Elite addition, sampling (only when needed)
-- **Metrics collection (5ms)**: Behavioral metrics, observability
-
-**Amortized Costs** (averaged over 100 steps):
-- Archive elite addition: 200ms / 100 = 2ms per step
-- Pool culling: 500ms / 1000 = 0.5ms per step
-- DIRESA embedding update: 100ms / 100 = 1ms per step
-- Voronoi adaptation: 1000ms / 1000 = 1ms per step
-
-**Total**: 50 + 30 + 5 + 10 + 5 + 4.5 = 104.5ms → Within budget
-
-**Scaling**:
-- **More pseudopods**: Latency increases linearly (forward pass bottleneck)
-- **Larger archive**: Logarithmic cost increase (hash table lookups)
-- **Higher dimensions**: Quadratic cost in DIRESA (pairwise distances)
-
-**Performance Requirements**:
-- Triton kernel occupancy: ≥ 50% (warp utilization)
-- Fallback overhead: < 10% of steps use PyTorch fallback
-- Multi-GPU efficiency: ≥ 80% scaling (2 GPUs → 1.6× throughput)
-
-### Training Budget (wall-clock time)
-
-**Target Tasks**:
-- **MNIST (TINY config)**: 10 minutes (5000 steps × 100ms, 1 GPU)
-- **CIFAR-10 (SMALL config)**: 4 hours (80k steps × 150ms, 1 GPU)
-- **ImageNet (MEDIUM config)**: 3 days (1M steps × 250ms, 4 GPUs)
-
-**Baseline Comparisons** (untested hypotheses):
-- **Standard Transformer (MNIST)**: ~5 minutes typical
-- **DARTS (CIFAR-10)**: ~1.5 GPU-days typical
-- **Hypernetworks (MNIST)**: ~8 minutes typical
-
-**Expected Cost Breakdown (CIFAR-10)** (untested):
-- **Forward/backward (70%)**: 2.8 hours pure gradient updates
-- **Lifecycle overhead (20%)**: 48 minutes births/deaths/archive
-- **Logging/checkpointing (10%)**: 24 minutes I/O
-
-**Amortization Hypothesis** (requires empirical validation): 
-- Short runs (< 10k steps): Lifecycle overhead may dominate
-- Long runs (> 100k steps): Architecture discovery may amortize overhead
-- Very long runs (> 1M steps): Adaptation may enable performance gains
-
-### Storage Budget (disk)
-
-**Checkpoints**:
-- **Full checkpoint**: 500 MB (model weights + optimizer state + archive)
-- **Archive-only**: 50 MB (compressed elites + delta chains)
-- **Checkpoint frequency**: Every 1000 steps → 50 MB × (total_steps / 1000)
-
-**Example (CIFAR-10: 80k steps)**:
-- Full checkpoints: 500 MB × 5 (every 16k steps) = 2.5 GB
-- Archive snapshots: 50 MB × 80 = 4 GB
-- Logs/metrics: 500 MB (tensorboard + observability)
-- **Total**: ~7 GB per training run
-
-**Cleanup Policy**:
-- Keep last 3 full checkpoints (1.5 GB)
-- Keep archive snapshots for analysis (4 GB)
-- Delete intermediate checkpoints after training completes
-
-### Network Budget (multi-GPU)
-
-**Hash-based Partitioning Overhead**:
-- **Assumption**: `device_id = hash(behavior_coords) % num_gpus`
-- **Worst case**: Every forward pass requires cross-device communication
-- **Bandwidth**: PCIe 4.0: 32 GB/s, NVLink: 600 GB/s
-
-**Communication Volume (per step)**:
-- **Pseudopod migration**: 10 MB per pseudopod (weights + state)
-- **Archive sync**: 50 MB per elite addition (low-rank weights + deltas)
-- **Gradient sync**: 100 MB (all-reduce for optimizer step)
-
-**Total (4 GPUs, 16 pseudopods)**:
-- Pseudopod comm: 0 MB (assuming good hash distribution, no migration)
-- Archive sync: 50 MB / 100 steps = 0.5 MB/step
-- Gradient sync: 100 MB/step
-- **Total**: ~100 MB/step → 1 ms latency on NVLink, 3 ms on PCIe
-
-**Expected Scaling Efficiency** (untested):
-- 2 GPUs: Target 1.8× throughput (90% efficiency)
-- 4 GPUs: Target 3.2× throughput (80% efficiency, communication overhead)
-- 8 GPUs: Target 5.6× throughput (70% efficiency, hash imbalance)
-
-**Mitigation**:
-- Use NVLink when available (200× faster than PCIe)
-- Batch archive updates to reduce sync frequency
-- Async gradient sync (overlap communication with computation)
-
-## Decision Tree
-
-**Purpose**: Guide implementation decisions with clear criteria. Each node asks a question, branches on measurable conditions, and leads to concrete actions.
-
-### When to Add a New Component to Pool?
-
-```
-Q: Is pool below min_size?
-├─ YES → Spawn immediately (safety: pool must have min_size components)
-└─ NO → Q: Is current step < warmup_steps (100)?
-    ├─ YES → Don't spawn (let existing components stabilize)
-    └─ NO → Q: Is current step < gentle_phase_end (500)?
-        ├─ YES → Q: Is step % 50 == 0? (reduced frequency)
-        │   ├─ YES → Continue to fitness check
-        │   └─ NO → Don't spawn
-        └─ NO → Continue to fitness check
-        
-Fitness Check:
-Q: Is there a component with fitness < death_threshold (0.1)?
-├─ YES → Q: Is archive coverage < 0.5?
-│   ├─ YES → Sample from random archive centroid (exploration)
-│   └─ NO → Sample from fitness-weighted archive (exploitation)
-└─ NO → Q: Is pool below max_size AND average fitness > birth_threshold (0.8)?
-    ├─ YES → Spawn from archive (high-performing pool, room to grow)
-    └─ NO → Don't spawn
-```
-
-### When to Cull Components from Pool?
-
-```
-Q: Is pool above max_size (hard limit)?
-├─ YES → Cull immediately (fraction=0.3, remove worst performers)
-└─ NO → Q: Is step % cull_interval (1000) == 0?
-    ├─ YES → Q: Is loss > 10.0 × loss_ema? (loss gate)
-    │   ├─ YES → Skip culling (training unstable, freeze lifecycle)
-    │   └─ NO → Q: Is pool size > 1.5 × min_size?
-    │       ├─ YES → Cull bottom 20% by fitness
-    │       └─ NO → Don't cull (too close to min_size)
-    └─ NO → Don't cull (not time yet)
-```
-
-### When to Update Archive with New Elite?
-
-```
-Q: Has component survived for > 100 steps?
-├─ NO → Don't archive (too young, fitness unstable)
-└─ YES → Q: Is fitness > current_elite_fitness at this centroid?
-    ├─ YES → Replace elite (found better solution)
-    └─ NO → Q: Is centroid empty?
-        ├─ YES → Add as first elite (expand coverage)
-        └─ NO → Q: Is centroid below capacity (10 elites per centroid)?
-            ├─ YES → Add as additional elite (maintain diversity within cell)
-            └─ NO → Q: Is fitness > worst_elite_fitness in this centroid?
-                ├─ YES → Replace worst elite
-                └─ NO → Don't archive (not competitive)
-```
-
-### When to Activate DIRESA Embeddings?
-
-```
-Q: Is step < 2000?
-├─ YES → Use Euclidean distance on raw metrics (accumulate samples)
-└─ NO → Q: Are there ≥ 1000 behavioral samples collected?
-    ├─ NO → Continue using Euclidean (insufficient training data)
-    └─ YES → Q: Train DIRESA for 500 steps, then validate
-        Q: Is Trustworthiness ≥ 0.70 AND Continuity ≥ 0.70?
-        ├─ YES → Activate DIRESA embeddings (sufficient quality)
-        └─ NO → Q: Have we retried < 3 times?
-            ├─ YES → Retrain with 2× learning rate
-            └─ NO → Fallback to PCA (DIRESA failing to converge)
-```
-
-### When to Trigger Loss Gate (Freeze Lifecycle)?
-
-```
-Q: Is loss > 10.0 × loss_ema?
-├─ YES → Q: Has loss gate been active for < 5000 steps?
-│   ├─ YES → Freeze lifecycle (loss unstable, protect training)
-│   └─ NO → Q: Is loss still decreasing (gradient of loss_ema < 0)?
-│       ├─ YES → Continue freeze (making progress despite high loss)
-│       └─ NO → Force unfreeze and recalibrate EMA (stuck, need adaptation)
-└─ NO → Q: Is loss gate currently active?
-    ├─ YES → Q: Has loss been stable for > 500 steps?
-    │   ├─ YES → Unfreeze lifecycle (loss recovered)
-    │   └─ NO → Continue freeze (wait for stabilization)
-    └─ NO → Normal lifecycle operation
-```
-
-### How to Choose Tile Sizes for Triton Kernels?
-
-```
-Q: What is SRAM size per SM?
-├─ >= 128 KB (A100) → Try BLOCK_M=128, BLOCK_N=128, BLOCK_D=64
-├─ >= 64 KB (RTX 3090) → Try BLOCK_M=64, BLOCK_N=64, BLOCK_D=64
-└─ < 64 KB (older GPUs) → Try BLOCK_M=32, BLOCK_N=32, BLOCK_D=32
-
-Q: Did kernel launch succeed?
-├─ YES → Q: Is occupancy > 50%?
-│   ├─ YES → Keep current tile sizes
-│   └─ NO → Reduce tile sizes by 2× (improve occupancy)
-└─ NO → Q: Was error "out of shared memory"?
-    ├─ YES → Reduce tile sizes by 2×
-    └─ NO → Q: Was error "out of registers"?
-        ├─ YES → Reduce BLOCK_D (fewer registers per thread)
-        └─ NO → Fallback to PyTorch (unknown error)
-```
-
-### When to Use Archive Sampling vs Random Initialization?
-
-```
-Q: Is archive coverage > 0.1? (at least 10% of centroids filled)
-├─ NO → Random initialization (archive too sparse)
-└─ YES → Q: Is this an exploration step? (ε=0.2 probability)
-    ├─ YES → Sample from random archive centroid (force diversity)
-    └─ NO → Q: What is the behavioral location for this spawn?
-        Q: Does archive have elite at this centroid?
-        ├─ YES → Sample from this centroid (behavioral locality)
-        └─ NO → Q: Does archive have elites in k=5 nearest centroids?
-            ├─ YES → Sample from nearest centroid (approximate locality)
-            └─ NO → Random initialization (no relevant history)
-```
-
-### When to Increase vs Decrease max_pseudopods?
-
-```
-Q: Is GPU memory utilization > 90%?
-├─ YES → Decrease max_pseudopods by 25% (approaching OOM)
-└─ NO → Q: Is GPU memory utilization < 60%?
-    ├─ YES → Q: Is kernel occupancy > 70%?
-    │   ├─ YES → Increase max_pseudopods by 25% (underutilized)
-    │   └─ NO → Keep current (occupancy bottleneck, not memory)
-    └─ NO → Q: Did we encounter kernel launch failures?
-        ├─ YES → Decrease max_pseudopods by 50% (register/SRAM pressure)
-        └─ NO → Keep current (healthy utilization)
-```
-
-### How to Handle DIRESA Embedding Dimension Count?
-
-```
-Q: Is reconstruction error > 0.8?
-├─ YES → Increase dimensions by 1 (under-compressing, losing information)
-└─ NO → Q: Is reconstruction error < 0.3?
-    ├─ YES → Q: Are dimensions > 2?
-    │   ├─ YES → Decrease dimensions by 1 (over-parameterized)
-    │   └─ NO → Keep at 2D (minimum dimensionality)
-    └─ NO → Q: Has dimension count been stable for > 2000 steps?
-        ├─ YES → Keep current (converged to good dimensionality)
-        └─ NO → Q: Is Trustworthiness < 0.85?
-            ├─ YES → Increase dimensions (neighborhoods not preserved)
-            └─ NO → Keep current (quality acceptable)
-```
-
-## Architectural Decisions
-
-### 1. IO-Aware Tiled Attention (FlashAttention)
-**Reasoning (Dao et al., 2022):** Standard attention is memory-bound, not compute-bound. Tile to maximize SRAM usage.
-
-**Problem:** Attention loads Q, K, V from HBM repeatedly.
-
-**FlashAttention solution:** Tile computation to fit in SRAM.
-
-**IO complexity:**
-- Naive: O(M² × D) HBM accesses
-- Tiled: O(M² × D / SRAM_size) HBM accesses
-- Speedup: ~3x on GPT-2 (Dao et al., 2022)
-
-**Implementation:** kernels/triton_impl.py uses tiling with BLOCK_M=128, BLOCK_N=128, BLOCK_D=64.
-
-### 2. Kernel injection: Constructor Injection
-**Reasoning (Bitter Lesson):** Let user provide compute capability. Scale with available hardware, not our assumptions.
-
-**Pattern**: Pseudopod constructor accepts Kernel interface, allowing user to provide compute capability (Triton GPU, PyTorch CPU fallback, custom implementations). Kernel is injected at construction time, not hardcoded.
-
-### 3. Multi-GPU: Hash-based partitioning
-**Reasoning (Bitter Lesson):** Hash function scales arbitrarily. No hand-coded spatial assumptions.
-
-**Pattern**: Device assignment via hash function: device_id = hash(behavior_coords) modulo num_gpus. Scales to arbitrary GPU counts without manual partitioning logic.
-
-### 4. Determinism: Sort keys on iteration
-**Reasoning (Architecture):** Spatial structure over temporal accidents. Reproducible science.
-
-**Pattern**: Archive iteration uses sorted keys to ensure deterministic order. Prevents non-deterministic behavior from hash table iteration order.
-
-### 5. Memory limits: Soft limit with graceful degradation
-**Reasoning (SRE + Bitter Lesson):** Adapt to constraints, don't crash. Trade quality for capacity automatically.
-
-**Pattern**: When memory exceeds budget, pool culls worst-performing components (fraction=0.2). System degrades quality gracefully rather than crashing on OOM.
-
-### 6. Metrics injection: Dependency injection
-**Reasoning (SRE + Testing):** Explicit dependencies. No globals. Testable.
-
-**Pattern**: Organism constructor accepts optional MetricsCollector parameter. Metrics are injected as explicit dependencies, not accessed via global state.
-
-### 7. Fitness metric: Gradient magnitude
-**Reasoning (Training Stability):** Fitness must correlate with task performance, not internal diversity metrics.
-
-**Formula**: fitness = gradient_norm × correlation_with_targets. Combines gradient magnitude (task impact) with CA mass conservation metric (relevance).
-
-### 8. Archive bootstrapping: Initialization only
-**Reasoning (Gradient Flow):** Don't inject frozen weights mid-training. Bootstrap init, then train together.
-
-**Pattern**: When new component needed, archive provides initialization (bootstrap_component), then component is trained with full gradient flow (requires_grad=True). No frozen weights injected.
-
-### 9. Timescale separation: 1x / 100x / 1000x
-**Reasoning (Stability):** Separate fast (weights) from medium (fitness) from slow (lifecycle).
-
-**Schedule**: Every step (1x) - update fitness EMA. Every 100 steps - check archive elite conditions. Every 1000 steps - pool culling. Prevents lifecycle churn from interfering with gradient updates.
-
-### 10. DIRESA Behavioral Dimension Learning
-**Reasoning:** Behavioral characterization is CRITICAL. Wrong dimensions = useless diversity. Hardcoded dimensions are arbitrary. DIRESA learns distance-preserving nonlinear embeddings online with adaptive dimensionality.
-
-**DIRESA Architecture:** Autoencoder with learned gating for adaptive dimensions (2-10D), distance preservation loss, online training
-
-**Raw metrics (10-20 metrics):** CA_mass_conservation, activation_sparsity, gradient_flow_magnitude, memory_access_locality, computational_intensity, CA_parameter_localization, weight_magnitude, gradient_variance, activation_magnitude, CA_neighborhood_coherence, etc.
-
-**Learned embeddings:** Nonlinear projections preserving pairwise distances via autoencoder with distance loss
-
-**Validation:** Trustworthiness ≥ 0.85, Continuity ≥ 0.85, Procrustes distance ≤ 0.15, reconstruction error ≤ 0.5
-
-### 10a. DIRESA Adaptive Dimensionality
-**Question: How many dimensions should behavioral embeddings use?**
-
-**WRONG (arbitrary fixed):** hardcode 5 dimensions
-
-**RIGHT (adaptive learned):** DIRESA autoencoder with learned gating determines dimensionality online
-
-**Mechanism**: DIRESA encoder has gating layer that learns which dimensions to activate. Dimension count adapts via warp vote mechanism (2-10D range). System learns optimal dimensionality based on task, not predetermined.
-
-**Validation**: Trustworthiness ≥ 0.85 (neighbors preserved in low-D), Continuity ≥ 0.85 (neighborhoods preserved), Procrustes distance ≤ 0.15 (shape similarity), reconstruction error ≤ 0.5 ensure learned embeddings are factorable and distance-preserving.
-
-### 10b. Content-Addressable Storage: Delta Protocol Specification
-**Question 3: What operations does delta compression support?**
-
-**Delta format (structured operations, NOT raw byte diffs):**
-
-**Operations**: Delta is list of structured weight-level operations:
-- **sparse_add**: Add values at specified 2D indices (for sparse updates with >95% sparsity)
-- **low_rank**: Low-rank update W += dU @ dV where dU is D×r, dV is r×D, r << k (for dense medium-sparsity updates)
-- **dense**: Full replacement (for small tensors like biases)
-- **scale_add**: Scalar multiplication plus sparse add (for small perturbations)
-
-**Application**: apply_delta reconstructs weights by applying operations sequentially to base weights. Each operation modifies specific weight matrix.
-
-**Compression strategy**: Choose operation based on sparsity and size. Sparsity >95% → sparse_add. Small tensors → dense. Otherwise → low_rank SVD with rank r=8.
-
-### 10c. Content-Addressable Storage: Garbage Collection Policy
-**Question 4: When are unreferenced objects deleted?**
-
-**GC Policy: Reference Counting + Periodic Mark-and-Sweep**
-
-
-**GC guarantees:**
-1. **No premature deletion:** Reference counting prevents deletion while object is reachable
-2. **No memory leaks:** Mark-and-sweep catches orphaned delta chains
-3. **Bounded overhead:** GC runs every 100 add() calls, amortized O(1) per operation
-4. **Deterministic:** Same sequence of operations → same GC decisions (given same seed)
-
-### 11. Deterministic hash-based random
-**Reasoning (Reproducibility):** Non-deterministic random breaks reproducibility. Hash-based seeded random is cheap (~100ns) vs gradient computation (ms).
-
-**Deterministic random primitive:**
-**Implementation**: Hash-based seeded random: `hash(seed, step, context) → [0,1]` for all stochastic decisions
-
-**Benefits**: Reproducible training, debuggable birth/death sequences, ablation-ready
-
-**Pattern**: NO unseeded random. All decisions via `_deterministic_random(seed, step, context)`
-
-### 12. Fitness must include efficiency signals
-**Reasoning (Hardware Awareness):** Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency.
-
-**Fitness formula**: `task_performance (70%) + compute_efficiency (20%) + gradient_magnitude (10%)`
-
-**Result**: Hardware-optimal patterns emerge from selection pressure (fast components survive, slow components culled)
-
-### 12. Quality-diversity maintains architectural variety
-**Reasoning (Avoid Mode Collapse):** Standard transformers: all heads learn similar features. MAP-Elites: forced diversity.
-
-**Standard transformer**: All heads learn similar features (head_similarity > 0.9)
-**MAP-Elites**: Each archive cell requires behaviorally-distinct component (forced diversity, no mode collapse)
-
-**Benefit 1**: Graceful degradation under device loss (hash-based redistribution, no retraining)
-**Benefit 2**: Interpretability (query archive by behavioral coordinates)
-
-### 13. Ablation testing methodology
-
-Tests should make specific predictions that could be disproven. Design tests where failure is possible and informative.
-
-**Approach:**
+**Pattern**:
 1. State measurable predictions with numeric thresholds
-2. Design counter-examples where the prediction should fail
+2. Design counter-examples where prediction should fail
 3. Probe live system state (Archive coverage, Pseudopod coherence, Voronoi densities)
 4. Isolate component-level causation
 
-**Avoid:**
+**Avoid**:
 - Black-box model comparison
-- Recomputing metrics the system already tracks
+- Recomputing metrics system already tracks
 - Descriptive statistics without falsification criteria
 - Static end-of-training snapshots
 
-**Test cases:**
+**Key Test Cases**:
 
 **Curiosity-driven lifecycle maintains population diversity**
 - Prediction: Pseudopod coherence std > 0.1 throughout training
@@ -881,7 +418,7 @@ Tests should make specific predictions that could be disproven. Design tests whe
 
 **DIRESA discovers intrinsic dimensionality**
 - Prediction: Archive.behavioral_dims < 0.5 * Archive.num_raw_metrics
-- Counter-test: Pure Gaussian noise should fail to compress (dims ≈ num_raw_metrics)
+- Counter-test: Pure Gaussian noise should fail to compress
 - Probe: `archive.behavioral_dims` vs `archive.num_raw_metrics` at discovery
 - If DIRESA compresses noise, embedding is broken
 
@@ -915,102 +452,245 @@ Tests should make specific predictions that could be disproven. Design tests whe
 - Probe: `len(archive.centroid_refs) / archive.num_centroids` vs test accuracy
 - If uncorrelated, archive is overhead
 
-**Implementation:**
-- Probe live Organism state: `organism.archive`, `organism.pseudopod_pool._components`, CA metrics
-- Track trajectories: coherence over time, coverage evolution, density histograms
-- Mechanistic interventions: disable components, inject controlled noise
-- Numeric thresholds for pass/fail
+---
 
-**Criteria:**
-- Failed prediction means component is broken or unnecessary
-- Survived counter-test means provisionally supported
-- No measurable improvement means remove the component
-- Test without failure mode is invalid
+## Part V: Operational Guidance
 
-## Computational Cost Analysis
+### Premortem Analysis
 
-### Cost Structure
+**Purpose**: Identify failure modes before they occur.
 
-**Training costs (per step):**
+**1. Training Instability from Archive Updates**
+- Failure: Archive updates cause gradient variance spikes → loss divergence
+- Detection: `np.std(losses[-100:]) > 3.0 × np.std(losses[-1000:-100])`
+- Mitigation: Loss gates (freeze lifecycle), warmup period, gradient clipping
 
-**Memory costs:**
+**2. DIRESA Embeddings Don't Converge**
+- Failure: Behavioral embeddings fail to preserve distances → diversity loss
+- Detection: Trustworthiness < 0.70, Continuity < 0.70, reconstruction error > 0.8
+- Mitigation: Delayed activation (2000 steps), EMA-smoothed metrics, fallback to PCA
 
-**Total overhead vs baseline transformer:**
+**3. Pool Collapse to Single Strategy**
+- Failure: All pseudopods converge to identical behavior → coverage stalls
+- Detection: Coherence std < 0.05, archive coverage plateaus
+- Mitigation: Diversity bonus in fitness, ε-greedy archive sampling, forced exploration
 
-### Comparison to DARTS (Modern NAS)
+**4. Memory Budget Violation from Archive Growth**
+- Failure: Archive grows unbounded → OOM crash
+- Detection: Memory growth > 10% per 1000 steps, delta chains > 50
+- Mitigation: Hard limits, aggressive GC, delta chain pruning
 
-**DARTS (Liu et al., 2018) baseline:**
-- Differentiable architecture search with continuous relaxation
-- Uses weight sharing across candidate operations
-- Search cost: 1-4 GPU days on CIFAR-10/ImageNet
-- 1000x faster than early NAS methods (NASNet: 2000 GPU days)
+**5. GPU Kernel Launch Failures**
+- Failure: Triton launches fail → fallback to slow PyTorch → throughput collapse
+- Detection: Fallback rate > 10%, occupancy < 50%, launch latency spikes
+- Mitigation: Adaptive max_pseudopods, tile size autotuning, batched launches
 
-**Key difference:**
+**6. Loss Gates Over-Trigger**
+- Failure: Lifecycle frozen too long → stale pool → performance plateau
+- Detection: Frozen fraction > 0.5, no births/deaths for > 2000 steps
+- Mitigation: Adaptive threshold, cooldown period, timeout after 5000 steps
 
-**Slime approach:**
+### Resource Budget
 
-**Honest comparison:**
+**GPU Memory (per-device)**:
+- Model weights (40%): Pseudopod parameters
+- Activations (30%): Forward pass tensors, gradients
+- Archive storage (15%): Low-rank weights, delta chains
+- DIRESA embeddings (5%): Autoencoder, behavioral buffers
+- Optimizer state (10%): Adam momentum/variance
 
-**Hypothesis (requires empirical validation):** For long training runs (100+ GPU days), amortized search cost favors Slime. For short runs (<30 days), DARTS is more efficient.
+**Example (RTX 3090: 24GB)**:
+- Model weights: 9.6 GB → ~80M params fp32 (20M fp16)
+- Activations: 7.2 GB → batch_size=32, max_pseudopods=16
+- Archive: 3.6 GB → 1000 centroids × 10 elites × 360KB
+- DIRESA: 1.2 GB → 65→10 dims, batch=1024
+- Optimizer: 2.4 GB → Adam state
 
-### Comparison to Hypernetworks (Ha et al., 2016)
+**Adaptive Limits**:
+- `max_pseudopods = max(4, min(16, int(gpu_memory_gb * 0.3 / memory_per_pod_gb)))`
+- `max_archive_centroids = min(1000, int(gpu_memory_gb * 0.15 / memory_per_centroid_gb))`
 
-**Hypernetwork approach (Ha et al., ICLR 2017):**
-- Small network generates weights for larger network
-- Achieves parameter efficiency: fewer learnable params than standard networks
-- Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
-- Weight sharing across layers via generation scheme
+**Compute Budget (per-step, target 100ms)**:
+- Forward pass (50ms): Per-pseudopod 3ms Triton, 12ms PyTorch
+- Backward pass (30ms): Gradients, optimizer
+- Lifecycle (5ms amortized): Birth/death every 100 steps
+- Archive ops (10ms amortized): Elite addition, sampling
+- Metrics (5ms): Behavioral metrics, observability
 
-**Key insight from Ha et al.:** Low-rank weight generation can be MORE efficient than storing full matrices.
+**Training Budget** (untested hypotheses):
+- MNIST (TINY): 10 minutes (5000 steps × 100ms, 1 GPU)
+- CIFAR-10 (SMALL): 4 hours (80k steps × 150ms, 1 GPU)
+- ImageNet (MEDIUM): 3 days (1M steps × 250ms, 4 GPUs)
 
-**Slime borrows this insight for archive storage:**
+**Network Budget (multi-GPU, untested)**:
+- Target 2 GPUs: 1.8× throughput (90% efficiency)
+- Target 4 GPUs: 3.2× throughput (80% efficiency)
+- Target 8 GPUs: 5.6× throughput (70% efficiency)
 
-**Key differences:**
+### Decision Tree
 
-**Computational tradeoffs:**
+**When to Add Component to Pool?**
+```
+Q: pool < min_size? → YES: Spawn immediately
+Q: step < 100? → YES: Don't spawn (warmup)
+Q: step < 500? → YES: Spawn only if step % 50 == 0 (gentle)
+Q: component with fitness < 0.1?
+  → YES: Q: coverage < 0.5?
+      → YES: Random centroid (exploration)
+      → NO: Fitness-weighted (exploitation)
+  → NO: Q: pool < max_size AND avg_fitness > 0.8?
+      → YES: Spawn from archive
+      → NO: Don't spawn
+```
 
-**Complementary approaches:** Hypernetworks excel at few-shot adaptation. Slime excels at maintaining diverse specialists for single-task training.
+**When to Cull from Pool?**
+```
+Q: pool > max_size? → YES: Cull 30% immediately
+Q: step % 1000 == 0?
+  → YES: Q: loss > 10.0 × loss_ema? (loss gate)
+      → YES: Skip culling (unstable)
+      → NO: Q: pool > 1.5 × min_size?
+          → YES: Cull bottom 20%
+          → NO: Don't cull
+```
 
-### Simulated Annealing for Component Lifecycle
+**When to Update Archive?**
+```
+Q: component age > 100 steps? → NO: Don't archive (too young)
+Q: fitness > current_elite? → YES: Replace elite
+Q: centroid empty? → YES: Add as first elite
+Q: centroid < 10 elites? → YES: Add for diversity
+Q: fitness > worst_elite? → YES: Replace worst
+→ Otherwise: Don't archive
+```
 
-**Insight:** Quality-diversity needs exploration-exploitation balance. Simulated annealing provides principled temperature schedule.
+**When to Activate DIRESA?**
+```
+Q: step < 2000? → YES: Use Euclidean (accumulate samples)
+Q: samples ≥ 1000? → NO: Continue Euclidean
+Q: Train 500 steps → Trustworthiness ≥ 0.70 AND Continuity ≥ 0.70?
+  → YES: Activate DIRESA
+  → NO: Retry < 3 times? → YES: Retrain 2× lr
+                         → NO: Fallback to PCA
+```
 
-**Applications**:
-- Birth decisions: Temperature schedule for accepting diverse vs high-fitness components
-- CVT centroid refinement: Annealing to minimize quantization error
-- Archive mutation strength: Large mutations (early) → small mutations (late)
+**When to Trigger Loss Gate?**
+```
+Q: loss > 10.0 × loss_ema?
+  → YES: Q: gate active < 5000 steps?
+      → YES: Freeze lifecycle
+      → NO: Q: loss decreasing?
+          → YES: Continue freeze
+          → NO: Force unfreeze, recalibrate
+  → NO: Q: gate currently active?
+      → YES: Q: loss stable > 500 steps?
+          → YES: Unfreeze
+          → NO: Continue freeze
+```
 
-**Pattern:** Annealing naturally transitions from exploration → exploitation without manual phase boundaries.
+**Triton Tile Size Selection?**
+```
+Q: SRAM ≥ 128 KB? → Try BLOCK=128
+Q: SRAM ≥ 64 KB? → Try BLOCK=64
+Q: SRAM < 64 KB? → Try BLOCK=32
 
-**Fundamental difference:**
+Q: Launch succeeded?
+  → YES: Q: Occupancy > 50%? → YES: Keep
+                             → NO: Reduce 2×
+  → NO: Q: Out of SRAM? → Reduce 2×
+        Q: Out of registers? → Reduce BLOCK_D
+        → Otherwise: Fallback PyTorch
+```
 
-**Slime uniqueness:**
-1. **No search vs exploitation tradeoff**: Archive maintains both
-   - Exploit: Use current best components for task
-   - Explore: Archive keeps diverse alternatives alive
-   - Switch cost: zero (deterministic bootstrap from archive)
+**Archive Sampling vs Random Init?**
+```
+Q: coverage > 0.1? → NO: Random init (sparse archive)
+Q: ε-greedy exploration (ε=0.2)? → YES: Random centroid
+Q: Elite at this centroid? → YES: Sample from centroid
+Q: Elite in k=5 nearest? → YES: Sample from nearest
+→ Otherwise: Random init
+```
 
-2. **Emergent specialization**: Components discover niches automatically
-   - No pre-specified roles (unlike multi-head attention with fixed heads)
-   - No manual architecture engineering
-   - Behavioral space captures relevant variance
+**Adjust max_pseudopods?**
+```
+Q: GPU memory > 90%? → Decrease 25%
+Q: GPU memory < 60%?
+  → Q: Occupancy > 70%? → Increase 25%
+                        → Keep (occupancy bottleneck)
+Q: Kernel launch failures? → Decrease 50%
+```
 
-3. **Hardware co-optimization**: Fitness includes efficiency signals
-   - NAS: Architecture search is task-accuracy only
-   - Hypernetworks: No mechanism for hardware awareness
-   - Slime: Fast components have higher fitness → survive
+**DIRESA Dimension Count?**
+```
+Q: reconstruction_error > 0.8? → Increase dims +1
+Q: reconstruction_error < 0.3? → Q: dims > 2? → Decrease -1
+                                              → Keep at 2D
+Q: dims stable > 2000 steps? → Keep
+Q: Trustworthiness < 0.85? → Increase dims
+```
 
-**Test this claim:**
+---
+
+## Part VI: Related Work & Comparisons
+
+### Computational Cost Analysis
+
+**Hypothesis (requires empirical validation)**: For long training runs (100+ GPU days), amortized search cost favors Slime. For short runs (<30 days), DARTS more efficient.
 
 **Untested Hypothesis**: Slime may match or exceed task accuracy with significantly less compute than NAS methods, while maintaining competitive throughput with hypernetworks.
 
 **Empirical validation required**: If comparative testing shows no advantage over baselines, simplify or abandon architecture.
 
-**Decision Tree Check**: See "When to Add a New Component to Pool?" for lifecycle spawn logic, "When to Activate DIRESA Embeddings?" for embedding training schedule.
+### Comparison to DARTS (Modern NAS)
 
-## System Components
+**DARTS baseline (Liu et al., 2018)**:
+- Differentiable architecture search with continuous relaxation
+- Weight sharing across candidate operations
+- Search cost: 1-4 GPU days on CIFAR-10/ImageNet
+- 1000x faster than early NAS methods (NASNet: 2000 GPU days)
 
-**Complete Architecture**: Algebraic effect handlers, Ultrametric topology, DIRESA learned embeddings (adaptive 2-10D), Adaptive Voronoi MAP-Elites, Neural CA Pseudopods (Flow-Lenia substrate), Curiosity-driven lifecycle (learning progress), Context-aware GPU execution
+**Key difference**: DARTS searches discrete architecture space. Slime continuously adapts component population.
+
+### Comparison to Hypernetworks (Ha et al., 2016)
+
+**Hypernetwork approach (Ha et al., ICLR 2017)**:
+- Small network generates weights for larger network
+- Parameter efficiency: fewer learnable params than standard networks
+- Memory-efficient: O(Nz × hidden_units) not O(Nz × all_params)
+
+**Key insight**: Low-rank weight generation can be MORE efficient than storing full matrices.
+
+**Slime borrows this for archive storage**: Low-rank SVD + delta compression
+
+**Complementary approaches**: Hypernetworks excel at few-shot adaptation. Slime excels at maintaining diverse specialists for single-task training.
+
+### Simulated Annealing Integration
+
+**Insight**: Quality-diversity needs exploration-exploitation balance. Simulated annealing provides principled temperature schedule.
+
+**Applications**:
+- Birth decisions: Temperature for accepting diverse vs high-fitness
+- CVT refinement: Annealing to minimize quantization error
+- Archive mutation: Large mutations (early) → small (late)
+
+### Slime Uniqueness
+
+1. **No search vs exploitation tradeoff**: Archive maintains both
+   - Exploit: Use current best components
+   - Explore: Archive keeps alternatives alive
+   - Switch cost: zero (deterministic bootstrap)
+
+2. **Emergent specialization**: Components discover niches automatically
+   - No pre-specified roles (unlike multi-head attention)
+   - No manual architecture engineering
+   - Behavioral space captures relevant variance
+
+3. **Hardware co-optimization**: Fitness includes efficiency signals
+   - NAS: Task accuracy only
+   - Hypernetworks: No hardware awareness mechanism
+   - Slime: Fast components survive
+
+---
 
 ## References
 
@@ -1018,78 +698,64 @@ Tests should make specific predictions that could be disproven. Design tests whe
 
 - Mouret, J.-B. & Clune, J. (2015). "Illuminating search spaces by mapping elites." *arXiv:1504.04909*
   - Original MAP-Elites algorithm for quality-diversity optimization
-  - Foundation for archive-based behavioral diversity
 
-- Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. (2018). "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm." *IEEE Transactions on Evolutionary Computation*, 22(4), 623-630.
+- Vassiliades, V., Chatzilygeroudis, K., & Mouret, J.-B. (2018). "Using Centroidal Voronoi Tessellations to Scale Up the Multidimensional Archive of Phenotypic Elites Algorithm." *IEEE Trans. Evolutionary Computation*, 22(4), 623-630.
   - CVT-MAP-Elites for scalable behavioral space partitioning
-  - Solves exponential grid explosion with fixed-resolution grids
 
 - Pugh, J. K., Soros, L. B., & Stanley, K. O. (2016). "Quality Diversity: A New Frontier for Evolutionary Computation." *Frontiers in Robotics and AI*, 3:40.
-  - Survey of quality-diversity algorithms and applications
-  - Distinguishes QD from pure optimization and novelty search
+  - Survey of quality-diversity algorithms
 
 ### Neural Architecture
 
 - Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness." *NeurIPS 2022*. *arXiv:2205.14135*
   - IO-aware tiled attention implementation
-  - 3x speedup on GPT-2, 15% speedup on BERT via HBM ↔ SRAM tiling
 
 - Liu, H., Simonyan, K., & Yang, Y. (2019). "DARTS: Differentiable Architecture Search." *ICLR 2019*. *arXiv:1806.09055*
-  - Modern NAS baseline: 1-4 GPU days (vs 2000 for early NAS)
-  - Continuous relaxation with weight sharing
+  - Modern NAS baseline: 1-4 GPU days
 
 - Ha, D., Dai, A., & Le, Q. V. (2017). "HyperNetworks." *ICLR 2017*. *arXiv:1609.09106*
-  - Small network generates weights for larger network
-  - Memory-efficient formulation: O(Nz × hidden_units) not O(Nz × all_params)
-  - Low-rank weight generation inspiration for archive storage
+  - Low-rank weight generation inspiration
 
-### Flow-Lenia & Cellular Automata (2023-2025)
+### Flow-Lenia & Cellular Automata
 
-- Randazzo, E., Mordvintsev, A., Niklasson, E., Levin, M., & Greydanus, S. (2023). "Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization." *Artificial Life Conference Proceedings*, MIT Press. [arXiv:2212.07906](https://arxiv.org/abs/2212.07906)
+- Randazzo, E., Mordvintsev, A., Niklasson, E., Levin, M., & Greydanus, S. (2023). "Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization." *Artificial Life Conference*, MIT Press. [arXiv:2212.07906]
   - Mass-conservative continuous CA with spatially-localized parameters
-  - Multi-species dynamics without global rules
-  - **Foundation substrate for our Pseudopod update rules**
+  - **Foundation substrate for Pseudopod update rules**
 
-- Béna, G. (2025). "A Path to Universal Neural Cellular Automata." [arXiv:2505.13058](https://arxiv.org/abs/2505.13058)
-  - Learned CA update rules via gradient descent on downstream tasks
-  - Continuous state spaces, differentiable dynamics
+- Béna, G. (2025). "A Path to Universal Neural Cellular Automata." [arXiv:2505.13058]
+  - Learned CA update rules via gradient descent
   - **Target: Pseudopods as learned Neural CA**
 
-### Learned Embeddings & Dimension Reduction (2025)
+### Learned Embeddings & Dimension Reduction
 
-- Zhang, Y., et al. (2025). "DIRESA: Distance-preserving nonlinear dimension reduction via regularized autoencoders." [arXiv:2404.18314](https://arxiv.org/abs/2404.18314)
+- Zhang, Y., et al. (2025). "DIRESA: Distance-preserving nonlinear dimension reduction via regularized autoencoders." [arXiv:2404.18314]
   - Adaptive dimensionality via learned gating (2-10 dimensions)
-  - Distance-preserving autoencoder with explicit pairwise distance loss
-  - **Foundation for our behavioral embedding learning**
+  - **Foundation for behavioral embedding learning**
 
-### Curiosity & Intrinsic Motivation (2021-2024)
+### Curiosity & Intrinsic Motivation
 
 - Gottlieb, J., & Oudeyer, P.-Y. (2021). "Humans monitor learning progress in curiosity-driven exploration." *Nature Communications*, 12:5972.
-  - Learning progress (derivative of prediction error) drives exploration
-  - Intrinsic motivation via competence signals, not external rewards
-  - **Foundation: coherence() metric → curiosity-driven Pseudopod lifecycle**
+  - Learning progress drives exploration
+  - **Foundation: coherence() metric → curiosity-driven lifecycle**
 
 - NeurIPS 2024 Workshop: Intrinsic Motivation and Open-Ended Learning (IMOL)
   - State-of-the-art intrinsic motivation research
-  - Connections to developmental psychology, meta-learning, open-endedness
-  - **Informs our curiosity-driven selection pressure**
-
+  - **Informs curiosity-driven selection pressure**
 
 ### Dimensionality Reduction Validation
 
-- Venna, J., Peltonen, J., Nybo, K., Aidos, H., & Kaski, S. (2010). "Information retrieval perspective to nonlinear dimensionality reduction for data visualization." *Journal of Machine Learning Research*, 11, 451-490.
-  - Trustworthiness and Continuity metrics for embedding quality
-  - Measures preservation of local neighborhoods in dimension reduction
+- Venna, J., Peltonen, J., Nybo, K., Aidos, H., & Kaski, S. (2010). "Information retrieval perspective to nonlinear dimensionality reduction for data visualization." *JMLR*, 11, 451-490.
+  - Trustworthiness and Continuity metrics
 
 - Gower, J. C., & Dijksterhuis, G. B. (2004). *Procrustes Problems*. Oxford University Press.
-  - Procrustes distance for comparing geometric configurations
-  - Used to validate shape-preservation in DIRESA embeddings
+  - Procrustes distance for comparing configurations
 
 ### Optimization Theory
 
 - Kirkpatrick, S., Gelatt, C. D., & Vecchi, M. P. (1983). "Optimization by simulated annealing." *Science*, 220(4598), 671-680.
-  - Simulated annealing for combinatorial optimization
   - Temperature schedule for exploration-exploitation balance
+
+---
 
 ## Wave 2: Bio-Inspired Enhancements (Effect Handler Gated)
 
@@ -1110,90 +776,66 @@ def forward(self, x):
 ```
 
 **Benefits**:
-- Zero overhead when disabled (no runtime checks, compile-time optimization)
-- Gradual migration (enable per-component, not system-wide)
+- Zero overhead when disabled (compile-time optimization)
+- Gradual migration (enable per-component)
 - A/B testing (compare with/without each effect)
 - Composable (combine multiple effects freely)
 
-### 2.1: Conformational Switching (Neural ODE Bifurcations)
+### Wave 2 Features
 
-**Biological Inspiration**: Proteins switch between conformational states via energy barriers.
+**2.1: Conformational Switching** (Neural ODE Bifurcations)
+- Biological: Proteins switch between conformational states via energy barriers
+- Effect: `conformational_switching`
 
-**Effect**: `conformational_switching`
-**Protocol**: `proto/effects/conformational.py`
-**Implementation**: `core/conformational_ode.py`
+**2.2: Collective Memory** (Modern Hopfield Networks)
+- Biological: Neural ensembles reach consensus via attractor dynamics
+- Effect: `collective_memory`
 
-### 2.2: Collective Memory (Modern Hopfield Networks)
+**2.3: Mitotic Division** (Asexual Reproduction)
+- Biological: Successful cells divide with small variation
+- Effect: `mitotic_division`
 
-**Biological Inspiration**: Neural ensembles reach consensus via attractor dynamics.
+**2.4: Meiotic Recombination** (Sexual Reproduction)
+- Biological: Crossover creates diversity under stress
+- Effect: `meiotic_recombination`
 
-**Effect**: `collective_memory`
-**Protocol**: `proto/effects/collective.py`
-**Implementation**: `memory/collective_memory.py`
+**2.5: Self-Modification** (Hypernetwork + Learned Optimizer)
+- Biological: Cells modify their own gene expression
+- Effect: `self_modification`
 
-### 2.3: Mitotic Division (Asexual Reproduction)
+**2.6: Adaptive Reproduction Strategy**
+- Integration: Pool decides reproduction mode based on environment
+- Effect: `adaptive_reproduction`
 
-**Biological Inspiration**: Successful cells divide with small variation.
-
-**Effect**: `mitotic_division`
-**Protocol**: `proto/effects/reproduction.py`
-**Implementation**: `lifecycle/mitotic_division.py`
-
-### 2.4: Meiotic Recombination (Sexual Reproduction)
-
-**Biological Inspiration**: Crossover creates diversity under stress.
-
-**Effect**: `meiotic_recombination`
-**Protocol**: `proto/effects/reproduction.py`
-**Implementation**: `lifecycle/meiotic_recombination.py`
-
-### 2.5: Self-Modification (Hypernetwork + Learned Optimizer)
-
-**Biological Inspiration**: Cells modify their own gene expression.
-
-**Effect**: `self_modification`
-**Protocol**: `proto/effects/meta_learning.py`
-**Implementation**: `meta/hypernetwork.py`, `meta/learned_optimizer.py`
-
-### 2.6: Adaptive Reproduction Strategy
-
-**Integration**: Pool decides reproduction mode based on environmental conditions.
-
-**Effect**: `adaptive_reproduction`
-**Implementation**: `lifecycle/adaptive_strategy.py`
-
-## Wave 2 Activation Strategy
+### Wave 2 Activation Strategy
 
 **Gradual Enablement**:
-1. Get Wave 1 baseline (current system working, ablations run)
+1. Get Wave 1 baseline (current system working)
 2. Enable one effect at a time, measure delta
 3. If improvement: keep enabled
 4. If regression: disable and debug
 5. Combine effects that show synergy
 
 **Testing Requirements**:
-- Each effect must have A/B test comparing enabled vs disabled
-- Must measure: accuracy, throughput, memory, training stability
-- Must document when each effect helps vs hurts
+- Each effect must have A/B test (enabled vs disabled)
+- Measure: accuracy, throughput, memory, training stability
+- Document when each effect helps vs hurts
 
 **Acceptance Criteria**:
-- Effect improves at least one metric without regressing others >10%
+- Effect improves ≥1 metric without regressing others >10%
 - Effect composes cleanly with other effects (no interactions)
-- Effect has zero overhead when disabled (compile-time optimization)
+- Effect has zero overhead when disabled
 
 **File Structure for Wave 2**:
 ```
 slime/
-├── proto/
-│   └── effects/          # Wave 2 effect protocols
-│       ├── conformational.py
-│       ├── collective.py
-│       ├── reproduction.py
-│       └── meta_learning.py
-├── core/
-│   └── conformational_ode.py
-├── memory/
-│   └── collective_memory.py
+├── proto/effects/          # Wave 2 effect protocols
+│   ├── conformational.py
+│   ├── collective.py
+│   ├── reproduction.py
+│   └── meta_learning.py
+├── core/conformational_ode.py
+├── memory/collective_memory.py
 ├── lifecycle/
 │   ├── mitotic_division.py
 │   ├── meiotic_recombination.py
@@ -1202,4 +844,3 @@ slime/
     ├── hypernetwork.py
     └── learned_optimizer.py
 ```
-
