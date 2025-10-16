@@ -67,9 +67,21 @@ class Organism(nn.Module):
         if self.metrics:
             self.metrics.start_step()
         batch_size = stimulus.shape[0]
-        body = self.encode(stimulus).unsqueeze(1)
+        fresh_body = self.encode(stimulus).unsqueeze(1)
+
+        # Adaptive state blending based on predicted coherence
+        # High coherence (learning) → trust fresh encoding more
+        # Low coherence (plateaued) → rely on memory state more
         if state is not None:
-            body = 0.7 * body + 0.3 * state.body
+            # Predict coherence from fresh encoding to decide blend
+            body_for_coherence_pred = fresh_body.mean(dim=(0, 1))
+            coherence_pred = torch.sigmoid(self.predict_coherence(body_for_coherence_pred.unsqueeze(0))).squeeze()
+            # Blend: high coherence → α≈1 (mostly fresh), low coherence → α≈0 (mostly state)
+            fresh_weight = coherence_pred.clamp(0.3, 0.9)  # Bounded to avoid extremes
+            state_weight = 1.0 - fresh_weight
+            body = fresh_weight * fresh_body + state_weight * state.body
+        else:
+            body = fresh_body
         body_for_prediction = body.mean(dim=(0, 1))
         rank = torch.sigmoid(self.predict_rank(body_for_prediction.unsqueeze(0))).squeeze().item()
         coherence = torch.sigmoid(self.predict_coherence(body_for_prediction.unsqueeze(0))).squeeze().item()
