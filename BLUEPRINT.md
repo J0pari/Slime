@@ -534,6 +534,62 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Detection: Frozen fraction > 0.5, no births/deaths for > 2000 steps, loss EMA < 0.1 × mean(losses)
 - Mitigation: Adaptive threshold max(10.0 × EMA, 2.0 × std(losses)), cooldown period 500 steps, timeout 5000 steps, task-specific threshold multiplier
 
+### Hyperparameter Tuning Protocol
+
+**Problem**: Systems have dozens of hyperparameters. Guessing wastes time. Copying from papers assumes their task matches yours.
+
+**Principle**: Measure what the system needs, not what worked elsewhere.
+
+**Loss gate threshold**:
+- Question: When is loss spike real vs noise?
+- Measurement: Run training, compute loss std over last 1000 steps
+- Heuristic: Threshold = 10× loss_ema lets 3σ noise through without triggering
+- Validation test: Does gate trigger <5% of steps? If >20%, threshold too low (noisy task)
+
+**Culling fraction**:
+- Question: How much selection pressure before diversity collapses?
+- Measurement: Track coherence std after culling
+- Heuristic: Start 0.3 (aggressive). If coherence std <0.1, reduce to 0.2. If coverage stalls, reduce to 0.1.
+- Validation test: Does coherence std stay >0.1? If not, culling too aggressive.
+
+**Warmup steps**:
+- Question: When do gradients stabilize?
+- Measurement: Plot gradient norm. Warmup = steps until variance stabilizes (no large jumps)
+- Heuristic: 100 steps typical for supervised. 500+ for RL. Depends on task noise.
+- Validation test: No loss spikes in 500 steps after warmup?
+
+**Max pseudopods**:
+- Question: How many components fit in memory?
+- Measurement: Monitor GPU memory %. Increase until >90% or occupancy <50%.
+- Heuristic: Memory-limited or compute-limited, whichever hits first
+- Validation test: Memory 60-90%? Occupancy >50%?
+
+**Archive centroids**:
+- Question: How to partition behavioral space?
+- Measurement: Track cell density variance (max_density / mean_density)
+- Heuristic: Start at 10^d where d=DIRESA dims. Increase if density variance >5. Decrease if >50% cells empty.
+- Validation test: Density variance <5? <30% cells empty?
+
+### Reproducibility Tests
+
+**Test 1: Same seed, same GPU**
+- What to check: Run twice with seed=42. Compare loss curves.
+- Pass criteria: Pearson correlation >0.9999 (allows ±1e-6 FP noise)
+- If fails: Non-deterministic operation exists (atomicAdd, unsorted dict, random without seeding)
+- Why this matters: Debugging impossible without determinism
+
+**Test 2: Same seed, different GPU**
+- What to check: Run on RTX 3090 vs A100. Compare fitness rankings (Kendall tau).
+- Pass criteria: Tau >0.95, final accuracy within ±0.5%
+- If fails: Code branches on hardware (tile sizes, SRAM checks affecting logic not just performance)
+- Why this matters: Results shouldn't depend on which GPU user has
+
+**Test 3: Different seeds**
+- What to check: Run 10 times with different seeds. Compute accuracy std.
+- Pass criteria: Std <1.5%, coverage std <0.1
+- If fails: System too sensitive to initialization (increase warmup, gentler early culling)
+- Why this matters: Science requires results aren't lucky draws
+
 ### Resource Budget
 
 **GPU Memory (per-device)**:
