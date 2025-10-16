@@ -1,8 +1,10 @@
 # Slime Mold Transformer
 
-A neural architecture that learns cellular automaton update rules for adaptive computation. Each forward pass computes an ensemble average over multiple active components (pseudopods), where each pseudopod explores a different trajectory through parameter space. The archive maintains a history of successful computational trajectories, weighted by fitness. Selection naturally collapses the ensemble toward high-fitness paths that persist.
+**Core idea**: A neural network learns multiple cellular automaton update rules simultaneously. Each rule explores a different computational path. Successful paths survive and get archived. Failed paths are replaced by sampling from archive history.
 
-Components (pseudopods) are multi-head Neural CAs implementing Flow-Lenia dynamics. Quality-diversity search via CVT-MAP-Elites archive with DIRESA learned embeddings discovers diverse behavioral strategies.
+**Why this works**: Traditional neural networks collapse to a single solution. This system maintains a population of diverse solutions, each specialized for different computational patterns. The archive prevents mode collapse while selection ensures quality.
+
+**Implementation**: Multi-head Neural CAs with Flow-Lenia dynamics (mass-conserving learned update rules). CVT-MAP-Elites archive with distance-preserving embeddings. Curiosity-driven lifecycle where learning progress determines survival.
 
 ## Installation
 
@@ -26,9 +28,11 @@ Trains on MNIST (28x28 images → 10 classes) using TINY architecture (4 heads, 
 
 ## Architecture
 
-### Neural Cellular Automaton
+### Foundation: Neural Cellular Automaton
 
-Each pseudopod is a learned CA update rule that traces a trajectory through configuration space (CA weights, attention weights, normalization scales):
+A pseudopod is a learned update rule for a cellular automaton. Standard neural networks apply the same computation everywhere. CAs let computation vary spatially - different cells can follow different update rules.
+
+Each pseudopod traces a trajectory through parameter space:
 
 ```
 Input (latent + stimulus)
@@ -46,59 +50,57 @@ Mass-conserving value propagation (∑ output = ∑ input)
 Spatially-modulated output projection
 ```
 
-**Key properties:**
-- Multi-head: 4 parallel CA update rules
-- Parameter localization: CA rule parameters vary spatially
-- Mass conservation: Biological inspiration from physical constraints
-- GPU-accelerated: Triton kernels with Flash Attention-style online softmax
+**Mass conservation** (∑ output = ∑ input): Physical constraint ensures stability. Unconstrained CAs diverge.
 
-**Computational ensemble:** Each forward pass activates multiple pseudopods at a behavioral location. Their outputs are averaged to compute the ensemble result. The archive stores parameter configurations that reached each behavioral region, weighted by their fitness contributions. This creates a form of memory that guides future exploration.
+**Parameter localization**: CA rule parameters vary by position, not global. Enables spatial specialization.
 
-### Triton Kernels
+**Multi-head**: 4 parallel update rules discover different computational strategies.
 
-GPU kernels implement:
-- Fused multi-head CA projections
-- Flow-Lenia growth function (Gaussian bell curve per head)
-- CA activation with temperature-modulated softmax
-- Mass-conserving value propagation
-- Correlation and effective rank (behavioral metrics)
+**Ensemble computation**: Multiple pseudopods active simultaneously. Outputs averaged. Archive stores which parameter configurations worked at which behavioral locations. Sampling from archive bootstraps new pseudopods from successful trajectories.
 
-Autograd support: Forward uses Triton (speed), backward uses PyTorch einsum (gradient flow).
+### GPU Acceleration
 
-### Quality-Diversity Archive
+**Problem**: CA updates are embarrassingly parallel but memory-bound. Naive implementation loads weights from HBM repeatedly.
 
-**Trajectory history:** The archive stores successful parameter configurations that reached different behavioral locations. When the pool needs new pseudopods, it samples from archive trajectories that previously succeeded at similar behaviors, weighted by their fitness.
+**Solution**: Tile computation to fit in SRAM (on-chip fast memory). Load tiles once, compute entirely in SRAM, write results.
 
-CVT-MAP-Elites with:
-- 50 centroids (TINY) - adaptive Voronoi partitioning
-- DIRESA learned embeddings (3-5D adaptive behavioral space)
-- Low-rank storage (16x compression) + delta compression (5-10x)
-- Content-addressable: SHA256 deduplication
+**Impact**: O(M² × D) HBM accesses → O(M² × D / SRAM_size). 10-20x speedup on typical workloads.
 
-Behavioral metrics (65 raw dimensions → 3-5D learned space) from pseudopod runtime:
-- CA pattern statistics
-- Weight gradient norms
-- Activation statistics
-- Compute metrics
-- Correlation structure
+**Implementation**: Triton kernels fuse operations (multi-head projections, Flow-Lenia growth, mass-conserving propagation). Adaptive tile sizes (BLOCK=128/64/32) based on GPU SRAM availability. Forward uses Triton for speed, backward uses PyTorch einsum for correct gradients.
 
-### Lifecycle Management
+### Archive: Trajectory Memory
 
-**Trajectory collapse through selection:** The pseudopod pool maintains multiple computational paths simultaneously. At each step:
-1. Active pseudopods compute their fitness (effective_rank × coherence)
-2. High-fitness trajectories survive and get archived
-3. Low-fitness trajectories are replaced by sampling from archive history
-4. This collapses the ensemble toward paths that work, while maintaining diversity
+**Problem**: Training finds one solution then stops. Diverse solutions exist but gradient descent collapses to nearest local optimum.
 
-**Curiosity-driven selection:**
-- fitness = effective_rank() × coherence()
-- High fitness → survive and archive, low fitness → resample from archive
-- Learning progress (coherence metric) drives which trajectories persist
+**Solution**: Archive stores successful parameter configurations indexed by behavior. When pool needs new pseudopods, sample from archive locations with similar behavior. This bootstraps from known-good trajectories instead of random initialization.
 
-**Stability guardrails:**
-- Warmup: 100 steps (no lifecycle, let trajectories stabilize)
-- Gentle: 500 steps (reduced culling frequency)
-- Loss gates: Freeze lifecycle if loss > 10× EMA (protect during training instability)
+**Behavioral space**: Each pseudopod generates metrics during runtime (CA mass conservation, gradient magnitudes, activation patterns, hardware utilization). These form a high-dimensional behavioral description. Dimensionality discovered via covariance rank, then compressed to 3-5D using DIRESA (distance-preserving learned embeddings).
+
+**Storage efficiency**: 
+- SVD low-rank factorization: 8x compression (D×D → D×k + k×D)
+- Delta compression: 10-20x (store diffs vs parent in same Voronoi cell)
+- Content-addressable hashing: Deduplicate identical elites
+- **Total: 80-160x compression** (4MB elite → 25-50KB)
+
+**Adaptive partitioning**: Voronoi cells grow in dense regions, shrink in sparse regions. Prevents unbalanced storage where some cells have 1000 elites and others have 0.
+
+### Selection: Curiosity-Driven Survival
+
+**Fitness = task performance × compute efficiency × CA quality**:
+- Task (70%): Gradient magnitude (high gradient = affects loss)
+- Efficiency (20%): Hardware utilization (FLOPs, bandwidth, tensor cores)
+- Conservation (10%): Mass conservation quality (stable CA dynamics)
+
+**Curiosity metric**: `coherence()` measures learning progress. High coherence = learning fast = survive. Low coherence = plateaued = replace with archive sample.
+
+**Selection pressure**: Every 100 steps, compute fitness for all pseudopods. Top performers survive and get archived. Bottom performers culled and replaced. This collapses the ensemble toward successful trajectories while archive maintains diversity.
+
+**Stability**: 
+- Warmup (0-100 steps): No lifecycle. Let gradients stabilize.
+- Gentle (100-500 steps): Reduced culling. Gradual pressure.
+- Loss gates: If loss spikes >10× EMA, freeze lifecycle until stable.
+
+**Why this works**: Standard neural networks have no memory of alternative solutions. Once gradient descent finds a local optimum, training stops. Archive maintains history of all successful trajectories. Selection explores this history guided by current task performance.
 
 ## Configuration
 
@@ -106,10 +108,9 @@ Behavioral metrics (65 raw dimensions → 3-5D learned space) from pseudopod run
 
 ```python
 TINY = ArchitectureConfig(
-    dimensions=Dimension Config(head_dim=16, num_heads=4, hidden_dim=64),
-    behavioral_space=BehavioralSpaceConfig(num_raw_metrics=65, min_dims=3, max_dims=5),
+    dimensions=DimensionConfig(head_dim=16, num_heads=4, hidden_dim=64),
+    behavioral_space=BehavioralSpaceConfig(min_dims=3, max_dims=5),  # dimensionality discovered
     ...
-)
 ```
 
 ## Training
@@ -158,7 +159,7 @@ slime/
 - Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization. Randazzo et al. (2023) arXiv:2212.07906
 - A Path to Universal Neural Cellular Automata. Béna et al. (2025) arXiv:2505.13058
 - DIRESA, a distance-preserving nonlinear dimension reduction technique based on regularized autoencoders. Geert De Paepe, Lesley De Cruz (2025) arXiv:2404.18314
-- FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (2022) NEURIPS2022_67d57c32
+- FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. (2022) NEURIPS2022_67d57c32
 
 ## License
 
