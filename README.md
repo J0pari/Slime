@@ -1,6 +1,8 @@
 # Slime Mold Transformer
 
-A neural architecture that learns cellular automaton update rules for adaptive computation. Components (pseudopods) are multi-head Neural CAs implementing Flow-Lenia dynamics. Quality-diversity search via CVT-MAP-Elites archive with DIRESA learned embeddings.
+A neural architecture that learns cellular automaton update rules for adaptive computation. Each forward pass computes an ensemble average over multiple active components (pseudopods), where each pseudopod explores a different trajectory through parameter space. The archive maintains a history of successful computational trajectories, weighted by fitness. Selection naturally collapses the ensemble toward high-fitness paths that persist.
+
+Components (pseudopods) are multi-head Neural CAs implementing Flow-Lenia dynamics. Quality-diversity search via CVT-MAP-Elites archive with DIRESA learned embeddings discovers diverse behavioral strategies.
 
 ## Installation
 
@@ -26,7 +28,7 @@ Trains on MNIST (28x28 images → 10 classes) using TINY architecture (4 heads, 
 
 ### Neural Cellular Automaton
 
-Each pseudopod is a learned CA update rule:
+Each pseudopod is a learned CA update rule that traces a trajectory through configuration space (CA weights, attention weights, normalization scales):
 
 ```
 Input (latent + stimulus)
@@ -50,6 +52,8 @@ Spatially-modulated output projection
 - Mass conservation: Biological inspiration from physical constraints
 - GPU-accelerated: Triton kernels with Flash Attention-style online softmax
 
+**Computational ensemble:** Each forward pass activates multiple pseudopods at a behavioral location. Their outputs are averaged to compute the ensemble result. The archive stores parameter configurations that reached each behavioral region, weighted by their fitness contributions. This creates a form of memory that guides future exploration.
+
 ### Triton Kernels
 
 GPU kernels implement:
@@ -63,13 +67,15 @@ Autograd support: Forward uses Triton (speed), backward uses PyTorch einsum (gra
 
 ### Quality-Diversity Archive
 
+**Trajectory history:** The archive stores successful parameter configurations that reached different behavioral locations. When the pool needs new pseudopods, it samples from archive trajectories that previously succeeded at similar behaviors, weighted by their fitness.
+
 CVT-MAP-Elites with:
 - 50 centroids (TINY) - adaptive Voronoi partitioning
 - DIRESA learned embeddings (3-5D adaptive behavioral space)
 - Low-rank storage (16x compression) + delta compression (5-10x)
 - Content-addressable: SHA256 deduplication
 
-Behavioral metrics (62 dimensions) from pseudopod runtime:
+Behavioral metrics (65 raw dimensions → 3-5D learned space) from pseudopod runtime:
 - CA pattern statistics
 - Weight gradient norms
 - Activation statistics
@@ -78,14 +84,21 @@ Behavioral metrics (62 dimensions) from pseudopod runtime:
 
 ### Lifecycle Management
 
+**Trajectory collapse through selection:** The pseudopod pool maintains multiple computational paths simultaneously. At each step:
+1. Active pseudopods compute their fitness (effective_rank × coherence)
+2. High-fitness trajectories survive and get archived
+3. Low-fitness trajectories are replaced by sampling from archive history
+4. This collapses the ensemble toward paths that work, while maintaining diversity
+
 **Curiosity-driven selection:**
 - fitness = effective_rank() × coherence()
-- High fitness → survive, low fitness → sample from archive
+- High fitness → survive and archive, low fitness → resample from archive
+- Learning progress (coherence metric) drives which trajectories persist
 
-**Stability:**
-- Warmup: 100 steps (no lifecycle)
-- Gentle: 500 steps (reduced frequency)
-- Loss gates: Freeze if loss > 10× EMA
+**Stability guardrails:**
+- Warmup: 100 steps (no lifecycle, let trajectories stabilize)
+- Gentle: 500 steps (reduced culling frequency)
+- Loss gates: Freeze lifecycle if loss > 10× EMA (protect during training instability)
 
 ## Configuration
 
