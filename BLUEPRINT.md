@@ -420,36 +420,79 @@ NOT activation entropy alone (doesn't correlate with task)
 **Benefit 1**: Graceful degradation under device loss (hash-based redistribution, no retraining)
 **Benefit 2**: Interpretability (query archive by behavioral coordinates)
 
-### 13. Ablation tests determine architectural value
-**Reasoning (Scientific Method):** Don't assume architectural choices work. Test them.
+### 13. Ablation tests determine architectural value (Popperian Falsifiability)
+**Reasoning (Scientific Method):** Falsifiable claims + risky predictions. Attempt to DISPROVE architecture, not just validate it works.
 
-**Required comparisons:**
-1. **Slime Mold vs Baseline Transformer** (same parameters, same compute)
-   - If slower or worse accuracy: architecture is self-indulgent
-   - If faster or better accuracy: investigate why
+**Popper's Criterion:** Theory must make predictions that could be proven FALSE. Tests should be RISKY - real possibility of failure.
 
-2. **With Archive vs Without Archive** (dynamic pool only)
-   - Does archive-guided bootstrapping improve convergence?
-   - Or is it overhead with no benefit?
+**Methodology (2025 NAS Best Practices):**
+1. **State falsifiable claims** - specific, measurable predictions
+2. **Design counter-examples** - conditions where claim should fail
+3. **Probe live system state** - Archive coverage, Pseudopod coherence trajectories, Voronoi cell density evolution
+4. **Component-level causation** - isolate mechanisms, not just compare outcomes
 
-3. **With Lifecycle vs Static Pool** (fixed number of components)
-   - Does birth/death improve over fixed architecture?
-   - Or does training instability hurt more than variety helps?
+**NOT ALLOWED:**
+- Generic model comparison (treat as black box)
+- Recomputing metrics that system already tracks (use live Pseudopod._raw_metrics, Archive state)
+- Unfalsifiable descriptive statistics ("Fisher information = 42" - so what?)
+- Static end-of-training analysis (track dynamics over time)
 
-4. **Behavioral Device Placement vs Random Placement**
-   - Does hash(behavior) % num_gpus beat random device assignment?
-   - Test requires: multi-GPU setup, measure cross-GPU communication
+**REQUIRED Falsifiable Claims:**
 
-5. **Efficiency in Fitness vs Accuracy Only**
-   - Does including compute_efficiency in fitness discover faster configurations?
-   - Measure: throughput (samples/sec), memory usage
+**Claim 1: "Curiosity-driven lifecycle maintains population diversity"**
+- **Prediction:** Pseudopod coherence std > 0.1 throughout training
+- **Risky test:** Disable lifecycle (static pool), coherence should collapse to uniform < 0.05
+- **Falsification:** If static pool maintains same diversity, lifecycle adds no value → REMOVE IT
+- **Probe:** Track `[pod.coherence().item() for pod in organism.pseudopod_pool._components]` every 100 steps
 
-**Acceptance criteria:**
-- Must beat baseline transformer on at least one dimension (speed OR accuracy)
-- If worse on all dimensions: architecture is a failure, simplify
-- If better on some dimensions: document tradeoffs, make configurable
+**Claim 2: "DIRESA discovers intrinsic dimensionality < 50% of raw metrics"**
+- **Prediction:** Archive.behavioral_dims < 0.5 * Archive.num_raw_metrics after discovery
+- **Risky test:** Feed pure Gaussian noise, DIRESA should fail (dims ≈ num_raw_metrics)
+- **Falsification:** If DIRESA finds low dims in noise, embedding is broken → FIX DIRESA
+- **Probe:** `archive.behavioral_dims` vs `archive.num_raw_metrics` at discovery
 
-**Testing approach:** tests/ablations/ contains automated comparisons.
+**Claim 3: "Adaptive Voronoi prevents density variance explosion"**
+- **Prediction:** `np.var(list(archive._cell_densities.values())) < 5.0` after 1000 additions
+- **Risky test:** Disable subdivision/merge, variance should explode > 20.0
+- **Falsification:** If static Voronoi has same variance, adaptation is useless → REMOVE ADAPTIVE LOGIC
+- **Probe:** Track `archive._cell_densities` histogram every 100 additions
+
+**Claim 4: "Coherence-based state blending improves sample efficiency"**
+- **Prediction:** Adaptive blend reaches 90% accuracy in < 0.8x epochs vs fixed 0.5/0.5
+- **Risky test:** Compare adaptive vs fixed blends on same task
+- **Falsification:** If fixed blend is as fast, adaptive mechanism adds overhead without benefit → REVERT
+- **Probe:** Training curves for adaptive vs `body = 0.5*fresh + 0.5*state`
+
+**Claim 5: "Archive bootstrapping accelerates convergence vs random init"**
+- **Prediction:** Archive-bootstrapped Pseudopods reach fitness > 0.5 in < 200 steps
+- **Risky test:** Random init should take > 500 steps
+- **Falsification:** If random init converges as fast, archive overhead is wasted → DISABLE BOOTSTRAPPING
+- **Probe:** `pod.fitness` trajectory for archive-sampled vs factory-spawned Pseudopods
+
+**Claim 6: "Mass conservation enables Flow-Lenia substrate stability"**
+- **Prediction:** CA mass conservation metric > 0.95 throughout training
+- **Risky test:** Remove mass constraint, should see divergence (conservation < 0.7)
+- **Falsification:** If unconstrained CA is as stable, mass conservation is unnecessary → SIMPLIFY
+- **Probe:** `pod._ca_metrics['CA_mass_conservation']` every forward pass
+
+**Claim 7: "MAP-Elites archive coverage correlates with generalization"**
+- **Prediction:** Test accuracy increases monotonically with archive coverage (0.2 → 0.8 coverage = +5% test acc)
+- **Risky test:** Artificially limit coverage to 0.3, should hurt test performance
+- **Falsification:** If coverage uncorrelated with test acc, archive is just overhead → QUESTION DESIGN
+- **Probe:** `len(archive.centroid_refs) / archive.num_centroids` vs test accuracy
+
+**Testing Implementation (tests/ablations/):**
+- **NOT:** Standalone Fisher information computers, generic nn.Module comparisons
+- **YES:** Probe live Organism state: `organism.archive`, `organism.pseudopod_pool._components`, CA metrics
+- **YES:** Track trajectories: coherence over time, coverage evolution, cell density histograms
+- **YES:** Mechanistic interventions: disable specific components, inject controlled noise
+- **YES:** Falsifiable assertions with specific numeric thresholds
+
+**Acceptance Criteria (Popperian):**
+- If ANY claim fails falsification test → component is broken or unnecessary
+- If claim survives RISKY test → provisionally corroborated (not "proven")
+- If component doesn't improve measurable metric → REMOVE IT (no "interesting but useless" components)
+- If test can't be made risky (no way to fail) → claim is unfalsifiable → INVALID TEST
 
 ## Computational Cost Analysis
 
