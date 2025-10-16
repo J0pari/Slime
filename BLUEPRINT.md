@@ -73,6 +73,16 @@
 
 No cycles. Archive doesn't call anything. Observability is passive collector.
 
+**Computation as ensemble over trajectories:**
+```python
+pseudopods = self.pseudopod_pool.get_at(behavior, max_count=self._max_pseudopods)
+for pod in pseudopods:
+    outputs.append(pod(pod_input, stim_input))
+merged = torch.stack(outputs).mean(0)  # Weighted sum over computational trajectories
+```
+
+Each forward pass computes the ensemble average over all active pseudopods at a behavioral location. The archive maintains the history of successful trajectories through configuration space, weighted by fitness. Selection collapses the ensemble to high-fitness trajectories that persist to the archive.
+
 ## Protocols
 
 ### proto.component.Component
@@ -111,6 +121,8 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 - Learned via gradient descent on downstream task loss
 - Warp-level GPU execution via proto.kernel.Kernel
 
+**Configuration space paths**: Each forward pass traces a trajectory through parameter space (CA weights, attention weights, normalization scales). The CA update rule defines local dynamics. Training modifies the landscape these trajectories traverse. Each pseudopod explores a different region of this configuration manifold.
+
 **Dependencies**: MUST use proto.kernel.Kernel for all compute, MUST implement proto.component.Component
 
 ### proto.model.Chemotaxis
@@ -126,6 +138,8 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 - High coherence() (learning fast) → low hunger → survive
 - Low coherence() (plateaued) → high hunger → sample new genome from archive
 - Natural selection via intrinsic curiosity, not external reward
+
+**Archive as trajectory history**: The archive stores successful parameter configurations that reached behavioral locations. When sampling from archive, the system retrieves trajectories that previously contributed non-negligible fitness at that location. Bootstrapping initializes new pseudopods from these historical trajectories, weighted by their fitness contributions.
 
 **Dependencies**: Uses memory.archive for spatial indexing (Adaptive Voronoi cells), NO direct component management
 
@@ -288,6 +302,8 @@ NOT activation entropy alone (doesn't correlate with task)
 **Hard limits:** MAX_POOL_SIZE=64, MAX_ARCHIVE_CENTROIDS=1000, MAX_LOSS_RATIO=10.0
 **Loss gates:** Freeze lifecycle if loss > 10× moving average
 **Training:** DIRESA learns embeddings online, annealing schedule for exploration→exploitation, curiosity-driven lifecycle
+
+**Cellular lattice as discrete spacetime:** The CA operates on a discrete spatial lattice where each cell undergoes local update rules. Mass conservation couples neighboring cells. Each forward pass applies the update rule across all lattice positions simultaneously (SIMD), computing one timestep of the discrete dynamics. Training gradient descent modifies the update rule parameters, changing which computational trajectories are accessible from given initial conditions.
 
 ## Architectural Decisions
 
