@@ -366,7 +366,7 @@ class SemanticDistiller:
         Returns:
             Dictionary with geometric properties, phase transitions, and recommendations
         """
-        geometry = StatisticalGeometry(device)
+        geometry = StatisticalGeometry(self.device, self.config, self.numerical_config)
 
         # Compute Fisher information at end of training
         fisher = geometry._compute_fisher_information(model, data_loader)
@@ -415,13 +415,13 @@ class SemanticDistiller:
         trace_fisher = torch.trace(fisher).item()
         trace_fisher_squared = torch.trace(fisher @ fisher).item()
 
-        intrinsic_dim = (trace_fisher ** 2) / (trace_fisher_squared + 1e-10)
+        intrinsic_dim = (trace_fisher ** 2) / (trace_fisher_squared + self.numerical_config.epsilon)
 
         return intrinsic_dim
 
     def _condition_number(self, fisher: torch.Tensor) -> float:
         """Compute condition number (ratio of largest to smallest eigenvalue)."""
-        eigvals = torch.linalg.eigvalsh(fisher + 1e-6 * torch.eye(fisher.shape[0], device=fisher.device))
+        eigvals = torch.linalg.eigvalsh(fisher + self.config.fisher_regularization * torch.eye(fisher.shape[0], device=fisher.device))
         return (eigvals.max() / eigvals.min()).item()
 
     def _analyze_information_flow(self, training_history: List[Dict]) -> Dict:
@@ -445,8 +445,8 @@ class SemanticDistiller:
         gradients = np.diff(losses)
         gradient_changes = np.abs(np.diff(gradients))
 
-        # Threshold: 2 std deviations above mean
-        threshold = np.mean(gradient_changes) + 2 * np.std(gradient_changes)
+        # Threshold: N std deviations above mean
+        threshold = np.mean(gradient_changes) + self.config.phase_transition_std_multiplier * np.std(gradient_changes)
 
         transitions = []
         for i, change in enumerate(gradient_changes):
@@ -472,21 +472,21 @@ class SemanticDistiller:
         recommendations = []
 
         # Overparameterization
-        if intrinsic_dim < nominal_params / 10:
+        if intrinsic_dim < nominal_params / self.config.overparameterization_ratio:
             recommendations.append(
                 f"Model is SEVERELY OVERPARAMETERIZED (intrinsic dim = {intrinsic_dim:.0f}, "
                 f"nominal = {nominal_params}). Consider pruning or using smaller architecture."
             )
 
         # Information flow
-        if info_flow['average_gain_per_epoch'] < 0.01:
+        if info_flow['average_gain_per_epoch'] < self.config.low_info_gain_threshold:
             recommendations.append(
                 "Information gain per epoch is LOW. Consider increasing learning rate or "
                 "adding curriculum learning."
             )
 
         # Phase transitions
-        if len(phase_transitions) > 5:
+        if len(phase_transitions) > self.config.high_phase_transition_count:
             recommendations.append(
                 f"Training had {len(phase_transitions)} phase transitions (unstable). "
                 "Consider adding gradient clipping or warmup schedule."
@@ -494,7 +494,7 @@ class SemanticDistiller:
 
         # Convergence
         final_loss = training_history[-1]['loss']
-        if final_loss > 1.0:
+        if final_loss > self.config.high_loss_threshold:
             recommendations.append(
                 f"High final loss ({final_loss:.2f}). Model may need more capacity or training time."
             )
@@ -512,9 +512,9 @@ class SemanticDistiller:
 
         reduction_ratio = (initial_loss - final_loss) / initial_loss
 
-        if reduction_ratio > 0.9:
+        if reduction_ratio > self.config.fast_convergence_ratio:
             return "fast"
-        elif reduction_ratio > 0.5:
+        elif reduction_ratio > self.config.moderate_convergence_ratio:
             return "moderate"
         else:
             return "slow"
@@ -524,11 +524,11 @@ class SemanticDistiller:
         losses = np.array([h['loss'] for h in training_history])
         loss_std = np.std(np.diff(losses))
 
-        if loss_std < 0.01:
+        if loss_std < self.config.very_stable_std:
             return "very_stable"
-        elif loss_std < 0.1:
+        elif loss_std < self.config.stable_std:
             return "stable"
-        elif loss_std < 1.0:
+        elif loss_std < self.config.moderate_std:
             return "moderate"
         else:
             return "unstable"
