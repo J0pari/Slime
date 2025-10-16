@@ -78,6 +78,54 @@ class NumericalConfig:
         assert self.attention_temperature > 0, f'attention_temperature must be positive, got {self.attention_temperature}'
 
 @dataclass(frozen=True)
+class StatisticalGeometryConfig:
+    """Configuration for statistical geometry computations."""
+    # Fisher information computation
+    fisher_num_samples: int
+    fisher_regularization: float
+    
+    # Fisher-Rao distance interpretation thresholds
+    fr_very_close: float
+    fr_similar: float
+    fr_different: float
+    
+    # Relative information threshold
+    rel_info_threshold: float
+    
+    # Jacobian correction coefficient
+    jacobian_coefficient: float
+    
+    # Recommendation thresholds
+    overparameterization_ratio: float  # intrinsic_dim < nominal/X is overparameterized
+    low_info_gain_threshold: float
+    high_phase_transition_count: int
+    high_loss_threshold: float
+    phase_transition_std_multiplier: float
+    
+    # Convergence speed thresholds
+    fast_convergence_ratio: float
+    moderate_convergence_ratio: float
+    
+    # Stability thresholds
+    very_stable_std: float
+    stable_std: float
+    moderate_std: float
+
+    def __post_init__(self):
+        assert self.fisher_num_samples > 0, f'fisher_num_samples must be positive, got {self.fisher_num_samples}'
+        assert self.fisher_regularization > 0, f'fisher_regularization must be positive, got {self.fisher_regularization}'
+        assert 0 < self.fr_very_close < self.fr_similar < self.fr_different, 'Fisher-Rao thresholds must be increasing'
+        assert self.rel_info_threshold > 0, f'rel_info_threshold must be positive, got {self.rel_info_threshold}'
+        assert self.jacobian_coefficient > 0, f'jacobian_coefficient must be positive, got {self.jacobian_coefficient}'
+        assert self.overparameterization_ratio > 1, f'overparameterization_ratio must be > 1, got {self.overparameterization_ratio}'
+        assert self.low_info_gain_threshold > 0, f'low_info_gain_threshold must be positive, got {self.low_info_gain_threshold}'
+        assert self.high_phase_transition_count > 0, f'high_phase_transition_count must be positive, got {self.high_phase_transition_count}'
+        assert self.high_loss_threshold > 0, f'high_loss_threshold must be positive, got {self.high_loss_threshold}'
+        assert self.phase_transition_std_multiplier > 0, f'phase_transition_std_multiplier must be positive, got {self.phase_transition_std_multiplier}'
+        assert 0 < self.moderate_convergence_ratio < self.fast_convergence_ratio < 1, 'Convergence ratios must be increasing and < 1'
+        assert 0 < self.very_stable_std < self.stable_std < self.moderate_std, 'Stability thresholds must be increasing'
+
+@dataclass(frozen=True)
 class ArchitectureConfig:
     dimensions: DimensionConfig
     behavioral_space: BehavioralSpaceConfig
@@ -85,6 +133,7 @@ class ArchitectureConfig:
     fitness: FitnessConfig
     test: TestConfig
     numerical: NumericalConfig
+    statistical_geometry: StatisticalGeometryConfig
     k_neighbors: int = 5
 
     def __post_init__(self):
@@ -98,6 +147,25 @@ TINY = ArchitectureConfig(
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=2, seq_len=16, pool_max_size=32, pool_min_size=4, test_pool_max_size=4, test_pool_min_size=2),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
+    statistical_geometry=StatisticalGeometryConfig(
+        fisher_num_samples=100,
+        fisher_regularization=1e-6,
+        fr_very_close=0.1,
+        fr_similar=1.0,
+        fr_different=10.0,
+        rel_info_threshold=1.0,
+        jacobian_coefficient=0.5,
+        overparameterization_ratio=10.0,
+        low_info_gain_threshold=0.01,
+        high_phase_transition_count=5,
+        high_loss_threshold=1.0,
+        phase_transition_std_multiplier=2.0,
+        fast_convergence_ratio=0.9,
+        moderate_convergence_ratio=0.5,
+        very_stable_std=0.01,
+        stable_std=0.1,
+        moderate_std=1.0
+    ),
     k_neighbors=5
 )
 
@@ -108,6 +176,25 @@ SMALL = ArchitectureConfig(
     fitness=FitnessConfig(ema_decay=0.9, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=4, seq_len=32, pool_max_size=64, pool_min_size=8, test_pool_max_size=8, test_pool_min_size=4),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
+    statistical_geometry=StatisticalGeometryConfig(
+        fisher_num_samples=100,
+        fisher_regularization=1e-6,
+        fr_very_close=0.1,
+        fr_similar=1.0,
+        fr_different=10.0,
+        rel_info_threshold=1.0,
+        jacobian_coefficient=0.5,
+        overparameterization_ratio=10.0,
+        low_info_gain_threshold=0.01,
+        high_phase_transition_count=5,
+        high_loss_threshold=1.0,
+        phase_transition_std_multiplier=2.0,
+        fast_convergence_ratio=0.9,
+        moderate_convergence_ratio=0.5,
+        very_stable_std=0.01,
+        stable_std=0.1,
+        moderate_std=1.0
+    ),
     k_neighbors=10
 )
 
@@ -118,6 +205,25 @@ MEDIUM = ArchitectureConfig(
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=8, seq_len=64, pool_max_size=128, pool_min_size=16, test_pool_max_size=16, test_pool_min_size=8),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
+    statistical_geometry=StatisticalGeometryConfig(
+        fisher_num_samples=100,
+        fisher_regularization=1e-6,
+        fr_very_close=0.1,
+        fr_similar=1.0,
+        fr_different=10.0,
+        rel_info_threshold=1.0,
+        jacobian_coefficient=0.5,
+        overparameterization_ratio=10.0,
+        low_info_gain_threshold=0.01,
+        high_phase_transition_count=5,
+        high_loss_threshold=1.0,
+        phase_transition_std_multiplier=2.0,
+        fast_convergence_ratio=0.9,
+        moderate_convergence_ratio=0.5,
+        very_stable_std=0.01,
+        stable_std=0.1,
+        moderate_std=1.0
+    ),
     k_neighbors=10
 )
 
@@ -128,5 +234,24 @@ LARGE = ArchitectureConfig(
     fitness=FitnessConfig(ema_decay=0.95, entropy_weight=1.0, magnitude_weight=1.0),
     test=TestConfig(batch_size=16, seq_len=128, pool_max_size=256, pool_min_size=32, test_pool_max_size=32, test_pool_min_size=16),
     numerical=NumericalConfig(epsilon=1e-10, svd_threshold=1e-06, attention_temperature=1.0),
+    statistical_geometry=StatisticalGeometryConfig(
+        fisher_num_samples=100,
+        fisher_regularization=1e-6,
+        fr_very_close=0.1,
+        fr_similar=1.0,
+        fr_different=10.0,
+        rel_info_threshold=1.0,
+        jacobian_coefficient=0.5,
+        overparameterization_ratio=10.0,
+        low_info_gain_threshold=0.01,
+        high_phase_transition_count=5,
+        high_loss_threshold=1.0,
+        phase_transition_std_multiplier=2.0,
+        fast_convergence_ratio=0.9,
+        moderate_convergence_ratio=0.5,
+        very_stable_std=0.01,
+        stable_std=0.1,
+        moderate_std=1.0
+    ),
     k_neighbors=15
 )

@@ -207,36 +207,36 @@ class Pseudopod(nn.Module):
         v_weight_norm = torch.norm(self.neural_ca.value_weight).item()
         metrics.extend([q_weight_norm, k_weight_norm, v_weight_norm])
 
-        # Attention sparsity - actual runtime behavior
-        attn_sparsity = (ca_pattern < 0.01).float().mean().item()
-        attn_sparsity_adaptive = (ca_pattern < (ca_pattern.mean() * 0.1)).float().mean().item()
-        attn_top1_mass = ca_pattern.max(dim=-1)[0].mean().item()  # concentration
-        metrics.extend([attn_sparsity, attn_sparsity_adaptive, attn_top1_mass])
+        # CA pattern sparsity - actual runtime behavior
+        ca_sparsity = (ca_pattern < 0.01).float().mean().item()
+        ca_sparsity_adaptive = (ca_pattern < (ca_pattern.mean() * 0.1)).float().mean().item()
+        ca_top1_mass = ca_pattern.max(dim=-1)[0].mean().item()  # concentration
+        metrics.extend([ca_sparsity, ca_sparsity_adaptive, ca_top1_mass])
 
         # === Activation Statistics (10 metrics) ===
         # Actual runtime tensor statistics
-        attn_variance = torch.var(ca_pattern).item()
+        ca_variance = torch.var(ca_pattern).item()
         output_variance = torch.var(output).item()
         output_mean = torch.mean(output).item()
         output_std = torch.std(output).item()
         output_max = torch.max(torch.abs(output)).item()
         output_min = torch.min(torch.abs(output)).item()
-        metrics.extend([attn_variance, output_variance, output_mean, output_std, output_max, output_min])
+        metrics.extend([ca_variance, output_variance, output_mean, output_std, output_max, output_min])
 
         # Information content
-        attn_entropy = -(ca_pattern * torch.log(ca_pattern + self.numerical_config.epsilon)).sum(dim=-1).mean().item()
-        metrics.append(attn_entropy)
+        ca_entropy = -(ca_pattern * torch.log(ca_pattern + self.numerical_config.epsilon)).sum(dim=-1).mean().item()
+        metrics.append(ca_entropy)
 
         # Dynamic range
-        attn_dynamic_range = (ca_pattern.max() - ca_pattern.min()).item()
+        ca_dynamic_range = (ca_pattern.max() - ca_pattern.min()).item()
         output_dynamic_range = (output.max() - output.min()).item()
-        metrics.extend([attn_dynamic_range, output_dynamic_range])
+        metrics.extend([ca_dynamic_range, output_dynamic_range])
 
         # === REAL Compute Metrics (8 metrics) ===
-        # Attention pattern complexity - affects compute
-        attn_unique_ratio = (torch.unique(ca_pattern.flatten()).numel() / ca_pattern.numel())  # uniqueness
-        attn_outlier_ratio = ((ca_pattern > ca_pattern.mean() + 2*ca_pattern.std()).float().mean().item())  # outliers
-        metrics.extend([attn_unique_ratio, attn_outlier_ratio])
+        # CA pattern complexity - affects compute
+        ca_unique_ratio = (torch.unique(ca_pattern.flatten()).numel() / ca_pattern.numel())  # uniqueness
+        ca_outlier_ratio = ((ca_pattern > ca_pattern.mean() + 2*ca_pattern.std()).float().mean().item())  # outliers
+        metrics.extend([ca_unique_ratio, ca_outlier_ratio])
 
         # Output activation patterns - actual compute behavior
         output_active_ratio = (torch.abs(output) > output.abs().mean() * 0.1).float().mean().item()
@@ -253,14 +253,14 @@ class Pseudopod(nn.Module):
 
         # Correlation structure - changes during training
         try:
-            attn_head_correlation = torch.corrcoef(ca_pattern.mean(dim=2).flatten(0, 1)).abs().mean().item() if num_heads > 1 else 0.0
+            ca_head_correlation = torch.corrcoef(ca_pattern.mean(dim=2).flatten(0, 1)).abs().mean().item() if num_heads > 1 else 0.0
         except:
-            attn_head_correlation = 0.0
+            ca_head_correlation = 0.0
         try:
             output_feature_correlation = torch.corrcoef(output.mean(dim=(0,1))).abs().mean().item() if head_dim > 1 else 0.0
         except:
             output_feature_correlation = 0.0
-        metrics.extend([attn_head_correlation, output_feature_correlation])
+        metrics.extend([ca_head_correlation, output_feature_correlation])
 
         # === REAL Parameter Evolution (8 metrics) ===
         # Track actual parameter changes during training

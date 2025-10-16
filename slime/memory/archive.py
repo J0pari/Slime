@@ -11,6 +11,8 @@ from scipy.spatial import distance
 # pairwise_distances moved to GPU implementation below
 from slime.config.dimensions import ArchitectureConfig
 from slime.memory.diresa import DIRESABehavioralEncoder
+from slime.topology.hybrid_metric import HybridMetric
+from slime.topology.hierarchy import BehavioralHierarchy
 logger = logging.getLogger(__name__)
 
 @dataclass

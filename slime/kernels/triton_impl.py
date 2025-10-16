@@ -13,6 +13,11 @@ Replaces attention mechanisms with Neural Cellular Automaton dynamics.
 """
 
 import torch
+try:
+    from slime.kernels.warp_ca_bindings import WarpCAKernel
+    HAS_WARP_CA = True
+except ImportError:
+    HAS_WARP_CA = False
 import triton
 import triton.language as tl
 from typing import Optional, Tuple

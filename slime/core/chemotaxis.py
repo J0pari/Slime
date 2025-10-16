@@ -1,5 +1,7 @@
 import torch
 from typing import Tuple, Optional, Dict, Literal
+from slime.topology.hybrid_metric import HybridMetric
+from slime.topology.hierarchy import BehavioralHierarchy
 import logging
 import numpy as np
 from slime.memory.archive import CVTArchive

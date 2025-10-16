@@ -14,11 +14,11 @@
 5. **Warp-Native GPU Kernels**: Like Polynesian navigator reading ocean/stars/birds as unified field, read warps/cache/tensor-cores as unified substrate
    - FlashAttention-style tiling (HBM ↔ SRAM), warp shuffles for zero-global-memory neighbor access, tensor cores for 256 FLOPs/cycle convolutions
 6. **Content-Addressable Low-Rank Archive**: SVD factorization + content-addressed delta compression (80-160x memory reduction)
-7. **Validated Behavioral Space**: Distance-preserving embeddings ensure dimensions correlate with hardware structure (ultrametric topology via p-adic/genealogy/hierarchy)
+7. **Validated Behavioral Space**: Distance-preserving embeddings ensure dimensions correlate with hardware structure (ultrametric topology via topology/{p_adic,genealogy,hierarchy,hybrid_metric})
 8. **DIRESA Learned Embeddings**: Adaptive dimensionality via distance-preserving nonlinear autoencoders, learns online, dimension count adapts via warp vote (2-10D)
 9. **Deterministic Random**: Hash-based seeded random for reproducibility
 10. **SRE Built-In**: Observability, SLOs, error budgets from day one (100% constraint satisfaction always)
-11. **GPU-Native Comonadic Perception**: GPU execution state AS comonad (extract local observation, extend with context-aware decisions)
+11. **Local-Hierarchical Duality**: Neural CA reads from spatial neighbors (local perception) while Archive/Genealogy broadcasts to descendants (hierarchical memory). GPU grid operations extract neighborhood context, phylogenetic tree propagates information through lineages. Complementary structures for different timescales
 12. **DRY Principle**: Single source of truth for each concept
 
 ## Dependency DAG
@@ -130,18 +130,18 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 **Dependencies**: Uses memory.archive for spatial indexing (Adaptive Voronoi cells), NO direct component management
 
 ### proto.model.Organism
-**Purpose**: Top-level orchestrator with comonadic GPU perception
+**Purpose**: Top-level orchestrator with context-aware GPU execution
 
 **Interface**:
 - forward(stimulus, state) → (output, new_state) - Collective Pseudopod updates
 - reset_state() → None - Reset organism state
 - stats() → dict - GPU occupancy, learning progress, archive coverage
 
-**Comonadic GPU Perception**:
-- GPU execution state AS comonad (not external orchestration)
+**Context-Aware GPU Execution**:
+- GPU state is the execution context (not external orchestration)
 - extract(warp_id) → LocalObservation (warp occupancy, neighbor state, cache hits)
-- extend(decision_fn) → Apply context-aware decisions (spawn/retire Pseudopods based on whole field)
-- Whole computational field (warps/cache/tensor-cores) informs local decisions
+- Context-aware decisions: spawn/retire Pseudopods based on whole computational field
+- Whole field (warps/cache/tensor-cores) informs local decisions
 
 **Dependencies**: Owns Pool[Pseudopod] + Archive + Chemotaxis, Uses Kernels via Pseudopods, Records Observability metrics
 
@@ -532,7 +532,7 @@ Hypothesis: Slime matches or exceeds task accuracy with 50-100x less total compu
 
 ## System Components
 
-**Complete Architecture**: Algebraic effect handlers, Ultrametric topology, DIRESA learned embeddings (adaptive 2-10D), Adaptive Voronoi MAP-Elites, Neural CA Pseudopods (Flow-Lenia substrate), Curiosity-driven lifecycle (learning progress), Comonadic GPU orchestration
+**Complete Architecture**: Algebraic effect handlers, Ultrametric topology, DIRESA learned embeddings (adaptive 2-10D), Adaptive Voronoi MAP-Elites, Neural CA Pseudopods (Flow-Lenia substrate), Curiosity-driven lifecycle (learning progress), Context-aware GPU execution
 
 ## References
 
@@ -725,7 +725,3 @@ slime/
     └── learned_optimizer.py
 ```
 
-## Wave 2 References
-
-- Chen, R. T. Q., et al. (2018). "Neural Ordinary Differential Equations." *NeurIPS 2018*
-- Ramsauer, H., et al. (2021). "Hopfield Networks is All You Need." *ICLR 2021*

@@ -7,6 +7,7 @@ import hashlib
 from slime.core.pseudopod import Pseudopod
 from slime.memory.pool import DynamicPool
 from slime.memory.archive import CVTArchive
+from slime.topology.genealogy import Genealogy
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -58,6 +59,7 @@ class SimulatedAnnealingLifecycle:
     def __init__(self, pool: DynamicPool, archive: CVTArchive, initial_temp: float=1.0, min_temp: float=0.01, cooling_schedule: str='linear', max_pool_size: int=64, min_pool_size: int=4, max_loss_ratio: float=10.0, loss_ema_alpha: float=0.99, seed: int=42):
         self.pool = pool
         self.archive = archive
+        self.genealogy = Genealogy()  # Track lineages
         self.initial_temp = initial_temp
         self.min_temp = min_temp
         self.cooling_schedule = cooling_schedule
@@ -73,6 +75,10 @@ class SimulatedAnnealingLifecycle:
         self._birth_history = []
         self._death_history = []
         self._temperature_history = []
+
+        # Register initial pool as genesis pseudopods
+        for component in self.pool._components:
+            self.genealogy.register_genesis(component.component_id)
 
     def _deterministic_random(self, context: str) -> float:
         hash_input = f'{self.seed}:{self.step}:{context}'.encode('utf-8')
@@ -133,10 +139,19 @@ class SimulatedAnnealingLifecycle:
         random_value = self._deterministic_random(f'birth:{behavior_hash}')
         if random_value < birth_prob:
             behavior_tuple = tuple(behavior.tolist())
+            # Find parent (closest behavior in pool)
+            parent_id = self.pool._components[0].component_id if len(self.pool._components) > 0 else None
+            
             component = self.archive.bootstrap_component(component_factory, behavior_tuple, k_neighbors=3, mutation_std=temperature * 0.5)
             if component is not None:
-                self._birth_history.append({'step': self.step, 'temperature': temperature, 'fitness': fitness, 'birth_prob': birth_prob, 'behavior': behavior_tuple})
-                logger.info(f'Spawned component: fitness={fitness:.4f}, temp={temperature:.3f}, prob={birth_prob:.3f}')
+                # Register spawn in genealogy
+                if parent_id is not None:
+                    self.genealogy.register_spawn(parent_id, component.component_id)
+                else:
+                    self.genealogy.register_genesis(component.component_id)
+                    
+                self._birth_history.append({'step': self.step, 'temperature': temperature, 'fitness': fitness, 'birth_prob': birth_prob, 'behavior': behavior_tuple, 'parent_id': parent_id})
+                logger.info(f'Spawned component {component.component_id} from parent {parent_id}: fitness={fitness:.4f}, temp={temperature:.3f}, prob={birth_prob:.3f}')
                 return component
         return None
 
@@ -204,7 +219,11 @@ class SimulatedAnnealingLifecycle:
             logger.info(f'Lifecycle step {self.step}: temp={temperature:.3f}, pool_size={len(self.pool._components)}, archive_size={self.archive.size()}, loss_ema={self.loss_ema:.4f}, frozen={self.lifecycle_frozen}')
 
     def get_statistics(self) -> dict:
-        return {'step': self.step, 'temperature': self.get_temperature(), 'pool_size': len(self.pool._components), 'archive_size': self.archive.size(), 'archive_coverage': self.archive.coverage(), 'loss_ema': self.loss_ema, 'frozen': self.lifecycle_frozen, 'total_births': len(self._birth_history), 'total_deaths': len(self._death_history), 'archive_max_fitness': self.archive.max_fitness()}
+        # Compute genealogy diversity
+        pool_ids = [c.component_id for c in self.pool._components]
+        phylo_diversity = self.genealogy.phylogenetic_diversity(pool_ids) if len(pool_ids) > 1 else 0.0
+        
+        return {'step': self.step, 'temperature': self.get_temperature(), 'pool_size': len(self.pool._components), 'archive_size': self.archive.size(), 'archive_coverage': self.archive.coverage(), 'loss_ema': self.loss_ema, 'frozen': self.lifecycle_frozen, 'total_births': len(self._birth_history), 'total_deaths': len(self._death_history), 'archive_max_fitness': self.archive.max_fitness(), 'phylogenetic_diversity': phylo_diversity}
 
     def clear_history(self):
         self._birth_history.clear()
