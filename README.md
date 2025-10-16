@@ -141,11 +141,11 @@ slime/
 
 ## References
 
-- MAP-Elites: Mouret & Clune (2015) arXiv:1504.04909
-- Flow-Lenia: Randazzo et al. (2023) arXiv:2212.07906
-- Neural CA: Béna (2025) arXiv:2505.13058
-- DIRESA: Zhang et al. (2025) arXiv:2404.18314
-- Flash Attention: Dao et al. (2022) NeurIPS
+- Illuminating search spaces by mapping elites. Mouret & Clune (2015) arXiv:1504.04909
+- Flow-Lenia: Towards open-ended evolution in cellular automata through mass conservation and parameter localization. Randazzo et al. (2023) arXiv:2212.07906
+- A Path to Universal Neural Cellular Automata. Béna et al. (2025) arXiv:2505.13058
+- DIRESA, a distance-preserving nonlinear dimension reduction technique based on regularized autoencoders. Geert De Paepe, Lesley De Cruz (2025) arXiv:2404.18314
+- FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness (2022) NEURIPS2022_67d57c32
 
 ## License
 
