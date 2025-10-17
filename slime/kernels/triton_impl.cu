@@ -1,5 +1,6 @@
 // slime/kernels/triton_impl.cu - Tiled operations for memory efficiency
-#pragma once
+#ifndef TRITON_IMPL_CU
+#define TRITON_IMPL_CU
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -191,3 +192,5 @@ __global__ void tiled_transpose_kernel(
         }
     }
 }
+
+#endif // TRITON_IMPL_CU

@@ -1,5 +1,6 @@
 // slime/memory/tubes.cu - Temporal memory with decay
-#pragma once
+#ifndef TUBES_CU
+#define TUBES_CU
 #include <cuda_runtime.h>
 
 constexpr int MAX_MEMORY_SIZE = 1024;
@@ -280,3 +281,5 @@ __global__ void memory_stats_kernel(
         atomicAdd(active_memories, shared_count[0]);
     }
 }
+
+#endif // TUBES_CU

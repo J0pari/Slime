@@ -1,12 +1,15 @@
 // slime/core/pseudopod.cu - Multi-head Neural CA with Flow-Lenia dynamics
-#pragma once
+#ifndef PSEUDOPOD_CU
+#define PSEUDOPOD_CU
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <cooperative_groups.h>
+#include <curand_kernel.h>
 
 namespace cg = cooperative_groups;
-using namespace nvcuda::wmma;
+namespace wmma = nvcuda::wmma;
 
 // Configuration from blueprint
 constexpr int NUM_HEADS = 8;
@@ -432,3 +435,4 @@ __global__ void init_multihead_ca_kernel(
         }
     }
 }
+#endif // PSEUDOPOD_CU

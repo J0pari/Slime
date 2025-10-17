@@ -1,5 +1,6 @@
 // slime/memory/archive.cu - MAP-Elites CVT Archive with FULL compression
-#pragma once
+#ifndef ARCHIVE_CU
+#define ARCHIVE_CU
 #include <cuda_runtime.h>
 #include <stdint.h>
 
@@ -29,7 +30,7 @@ struct VoronoiCell {
 // Archive configuration
 constexpr int MAX_ARCHIVE_SIZE = 10000;
 constexpr int MAX_CELLS = 1024;
-constexpr int BEHAVIORAL_DIM = 10;
+constexpr int ARCH_BEHAVIORAL_DIM = 10;
 constexpr int MAX_RANK = 32;
 
 // Generation counter in constant memory
@@ -227,7 +228,7 @@ __global__ void update_voronoi_density_kernel(
     // Count elites in this cell
     for (int i = 0; i < num_elites; i++) {
         float dist_sq = 0.0f;
-        for (int d = 0; d < BEHAVIORAL_DIM; d++) {
+        for (int d = 0; d < ARCH_BEHAVIORAL_DIM; d++) {
             float diff = elites[i].behavioral_coords[d] - cell->centroid[d];
             dist_sq += diff * diff;
         }
@@ -340,3 +341,5 @@ __global__ void adapt_embedding_dim_kernel(
         }
     }
 }
+
+#endif // ARCHIVE_CU

@@ -1,5 +1,6 @@
 // slime/memory/pool.cu - Component pool management 
-#pragma once
+#ifndef POOL_CU
+#define POOL_CU
 #include <cuda_runtime.h>
 #include <cuda/atomic>
 
@@ -393,3 +394,5 @@ __global__ void compute_pool_stats_kernel(
         atomicAdd(genetic_diversity, diversity / 10.0f);
     }
 }
+
+#endif // POOL_CU

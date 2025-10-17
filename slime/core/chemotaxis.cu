@@ -1,13 +1,15 @@
 // slime/core/chemotaxis.cu - Behavioral navigation and gradient following
-#pragma once
+#ifndef CHEMOTAXIS_CU
+#define CHEMOTAXIS_CU
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <cuda_fp16.h>
 #include <cooperative_groups.h>
 
 namespace cg = cooperative_groups;
 
 // Configuration
-constexpr int GRID_SIZE = 128;
+constexpr int CHEM_GRID_SIZE = 128;
 constexpr int BEHAVIORAL_DIM = 10;  // DIRESA embedding dimension
 constexpr int GRADIENT_HISTORY = 32;
 constexpr int NUM_ATTRACTORS = 8;
@@ -17,7 +19,7 @@ constexpr float SENSITIVITY_THRESHOLD = 0.01f;
 
 // Chemical field structure
 struct ChemicalField {
-    float* concentration;      // [GRID_SIZE][GRID_SIZE]
+    float* concentration;      // [CHEM_GRID_SIZE][CHEM_GRID_SIZE]
     float* gradient_x;         // Spatial gradients
     float* gradient_y;
     float* laplacian;          // For diffusion
@@ -85,8 +87,8 @@ __global__ void diffusion_reaction_kernel(
 
 // Compute behavioral gradients in DIRESA space
 __global__ void behavioral_gradient_kernel(
-    float* __restrict__ behavioral_field,     // [GRID_SIZE][GRID_SIZE][BEHAVIORAL_DIM]
-    float* __restrict__ behavioral_gradients, // [GRID_SIZE][GRID_SIZE][BEHAVIORAL_DIM][2]
+    float* __restrict__ behavioral_field,     // [CHEM_GRID_SIZE][CHEM_GRID_SIZE][BEHAVIORAL_DIM]
+    float* __restrict__ behavioral_gradients, // [CHEM_GRID_SIZE][CHEM_GRID_SIZE][BEHAVIORAL_DIM][2]
     int grid_size
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -416,3 +418,5 @@ __global__ void init_behavioral_state_kernel(
     agent->sensitivity = 1.0f;
     agent->memory_index = 0;
 }
+
+#endif // CHEMOTAXIS_CU

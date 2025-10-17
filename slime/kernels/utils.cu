@@ -1,5 +1,6 @@
 // slime/kernels/utils.cu - Warp primitives and reductions
-#pragma once
+#ifndef UTILS_CU
+#define UTILS_CU
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
 
@@ -106,3 +107,5 @@ __device__ unsigned long long content_hash(float* data, int size) {
     }
     return hash;
 }
+
+#endif // UTILS_CU
