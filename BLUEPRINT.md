@@ -4,12 +4,17 @@
 
 **ABSOLUTE FOUNDATION: GPU-NATIVE EXECUTION**
 
-This system is GPU-native from the ground up. No CPU fallbacks. No PyTorch as a crutch. Every operation is either:
-1. **Triton kernel** - for parallel operations that map to tensor cores
-2. **Custom CUDA** - for bespoke operations requiring warp-level control
-3. **Compilation error** - if GPU execution impossible
+**Multi-head CA maps to Tensor Core geometry**: Each of 8 CA heads operates on 16×16 tiles, matching WMMA fragment size. CA convolutions become matrix multiplies. Neighborhood operations fit exactly in Tensor Core accumulators.
 
-**NO FALLBACKS. NO COMPROMISES. GPU OR DEATH.**
+**Archive operations as dense linear algebra**: MAP-Elites CVT distance computations become batched matrix multiplies. Voronoi cell updates are tiled matrix ops. SVD Jacobi rotations map to WMMA operations.
+
+**Behavioral embeddings via Tensor Cores**: DIRESA autoencoder layers structured as 16×16×16 blocks. Forward and backward passes use mixed precision FP16 compute with FP32 accumulation.
+
+**Warp-level reductions avoid memory**: Fitness metrics computed via warp shuffles. No shared memory round-trips. Results stay in registers until final write.
+
+**Dynamic Parallelism Architecture**: Parent kernels spawn child kernels directly on GPU. Fitness computation launches SVD and coherence kernels as children. Archive operations spawn parallel Voronoi update kernels. Lifecycle decisions trigger cascading birth/death kernels. Requires `-rdc=true -lcudadevrt` compilation. Zero CPU synchronization between kernel generations.
+
+**IMPLEMENTATION LANGUAGE**: CUDA C++ with dynamic parallelism. Kernel-to-kernel launches without CPU synchronization. Compiled with nvcc -arch=sm_86 -rdc=true -lcudadevrt.
 
 **Foundation**: Conway → Lenia → Flow-Lenia → Neural Flow-Lenia evolution path. Our Slime Mold Transformer is a **Neural Flow-Lenia organism** where Pseudopods are learned CA update rules with spatially-localized parameters, mass-conservative dynamics, and intrinsic curiosity-driven lifecycle.
 
@@ -20,7 +25,7 @@ This system is GPU-native from the ground up. No CPU fallbacks. No PyTorch as a 
 3. **Flow-Lenia Neural CA Substrate**: Pseudopod updates are learned continuous CA rules with mass conservation, parameter localization, warp-level GPU execution
    - Conway (Level 1): Fixed rules, discrete states → Lenia (Level 2): Fixed rules, continuous states → Flow-Lenia (Level 3): Localized parameters, mass conservation → **Ours (Level 4)**: Learned rules, adaptive parameters, intrinsic motivation
 4. **Adaptive Voronoi MAP-Elites Core**: Archive-driven evolution with cells that grow/shrink based on density, DIRESA learned embeddings (adaptive 2-10D)
-5. **Warp-Native GPU Kernels**: Like Polynesian navigator reading ocean/stars/birds as unified field, read warps/cache/tensor-cores as unified substrate
+5. **Warp-Native GPU Kernels**: Read warps/cache/tensor-cores as unified substrate
    - FlashAttention-style tiling (HBM ↔ SRAM), warp shuffles for zero-global-memory neighbor access, tensor cores for 256 FLOPs/cycle convolutions
 6. **Content-Addressable Low-Rank Archive**: SVD factorization + content-addressed delta compression (80-160x memory reduction)
 7. **Validated Behavioral Space**: Distance-preserving embeddings ensure dimensions correlate with hardware structure (ultrametric topology via topology/{p_adic,genealogy,hierarchy,hybrid_metric})
@@ -37,36 +42,36 @@ This system is GPU-native from the ground up. No CPU fallbacks. No PyTorch as a 
 ### Dependency DAG
 
 **Layer 0: Protocols** (no dependencies)
-- proto/kernel.py
-- proto/memory.py
-- proto/model.py
-- proto/component.py
+- proto/kernel.cu
+- proto/memory.cu
+- proto/model.cu
+- proto/component.cu
 
 **Layer 1: Implementations** (depend only on Layer 0)
-- kernels/utils.py, kernels/triton_impl.py, kernels/warp_native.cu → proto.kernel
-- observability/metrics.py, observability/slo.py (passive collection/validation)
+- kernels/utils.cu, kernels/triton_impl.cu, kernels/warp_native.cu → proto.kernel
+- observability/metrics.cu, observability/slo.cu (passive collection/validation)
 
 **Layer 2: Data structures** (depend on Layer 0-1)
-- memory/archive.py, memory/pool.py → proto.component
-- memory/tubes.py → proto.memory
-- core/state.py (FlowState dataclass, no dependencies)
-- core/stencil.py (GPU-parallel spatial ops, no dependencies)
+- memory/archive.cu, memory/pool.cu → proto.component
+- memory/tubes.cu → proto.memory
+- core/state.cu (FlowState device struct, no dependencies)
+- core/stencil.cu (GPU-parallel spatial ops, no dependencies)
 
 **Layer 3: Components** (depend on Layer 0-2)
-- core/pseudopod.py → proto.model, proto.kernel, kernels/*, observability/*
-- core/chemotaxis.py → proto.model, memory/archive
-- memory/pool.py → core/stencil (batched spatial computation)
+- core/pseudopod.cu → proto.model, proto.kernel, kernels/*, observability/*
+- core/chemotaxis.cu → proto.model, memory/archive
+- memory/pool.cu → core/stencil (batched spatial computation)
 
 **Layer 4: Orchestration** (depend on Layer 0-3)
-- core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
+- core/organism.cu → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
 
 **Layer 5: API** (depend on Layer 0-4)
-- api/gpu_native.py → core/organism
+- api/gpu_native.cu → core/organism
 
 **Layer 6: Applications** (depend on Layer 0-5)
-- training/trainer.py, training/fitness.py, training/lifecycle.py
-- bench/profile.py, tools/export.py, tools/package.py
-- config/loader.py
+- training/trainer.cu, training/fitness.cu, training/lifecycle.cu
+- bench/profile.cu, tools/export.cu, tools/package.cu
+- config/loader.cu
 - tests/* (unit, integration, ablations, slo)
 
 ### Data Flow
@@ -86,16 +91,51 @@ This system is GPU-native from the ground up. No CPU fallbacks. No PyTorch as a 
 No cycles. Archive doesn't call anything. Observability is passive collector.
 
 **Computation as ensemble over trajectories:**
-```python
-pseudopods = self.pseudopod_pool.get_at(behavior, max_count=self._max_pseudopods)
-for pod in pseudopods:
-    outputs.append(pod(pod_input, stim_input))
-merged = triton_stack_mean(outputs)  # GPU-native weighted sum over computational trajectories
+```cuda
+// Parent kernel spawns child kernels for each pseudopod
+__global__ void ensemble_compute_kernel(
+    PseudopodState* pseudopods,
+    float* pod_input,
+    float* stim_input,
+    float* merged_output,
+    int num_pseudopods
+) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        // Dynamic parallelism: spawn kernel for each active pseudopod
+        dim3 grid(num_pseudopods);
+        dim3 block(256);
+        
+        pseudopod_forward_kernel<<<grid, block>>>(
+            pseudopods, pod_input, stim_input, merged_output
+        );
+        
+        // Parent waits for children
+        cudaDeviceSynchronize();
+        
+        // Launch reduction kernel to merge outputs
+        merge_outputs_kernel<<<1, 32>>>(merged_output, num_pseudopods);
+    }
+}
 ```
 
 Each forward pass computes the ensemble average over all active pseudopods at a behavioral location. The archive maintains the history of successful trajectories through configuration space, weighted by fitness. Selection collapses the ensemble to high-fitness trajectories that persist to the archive.
 
 ### Protocols
+
+#### Kernel Architecture Principles
+**SOLID for GPU Parallelism**:
+- **Single Responsibility**: Each kernel performs one atomic operation (map/reduce/spawn)
+- **Open/Closed**: Generic templates extensible via type parameters
+- **Liskov Substitution**: Any operation satisfying Op interface works
+- **Interface Segregation**: Separate map_kernel, reduce_kernel, spawn_kernel
+- **Dependency Inversion**: Kernels depend on abstract Op, not concrete types
+
+**DRY via Reusable Primitives**:
+- `warp_reduce_sum/max`: Warp-level reductions used everywhere
+- `block_reduce_sum`: Block-level reduction pattern
+- `map_kernel<T,Op>`: Generic mapping operation
+- `reduce_kernel<T,Op>`: Generic reduction operation
+- `spawn_kernel_tree`: Recursive kernel spawning
 
 #### proto.component.Component
 **Purpose**: Unified interface for ALL pooled components
@@ -109,7 +149,7 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 **Usage**: Archive stores any Component via to_dict(), Pools manage any Component via fitness property
 
 #### proto.memory.Memory
-**Purpose**: Temporal memory interface with decay (NOT for component lifecycle - that's pool.py)
+**Purpose**: Temporal memory interface with decay (NOT for component lifecycle - that's pool.cu)
 
 **Interface**:
 - store(data: Tensor, weight: float) → None - Store with decay weight
@@ -122,10 +162,10 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 **Purpose**: Sensory probe with Neural CA update rule (Flow-Lenia substrate)
 
 **Interface**:
-- forward(latent, stimulus) → output - Learned CA update with Flow-Lenia dynamics
-- correlation: Tensor (property) - Mass conservation metric (∑ output = ∑ input)
-- effective_rank() → Tensor - Parameter localization metric (spatial variation of update rule)
-- coherence() → Tensor - Learning progress metric for curiosity-driven lifecycle
+- `__global__ void forward(float* latent, float* stimulus, float* output)` - Learned CA update with Flow-Lenia dynamics
+- `float correlation` - Mass conservation metric (∑ output = ∑ input)
+- `__device__ float effective_rank()` - Parameter localization metric (spatial variation of update rule)
+- `__device__ float coherence()` - Learning progress metric for curiosity-driven lifecycle
 
 **Neural CA Substrate**:
 - forward() implements learned continuous CA rule with mass conservation
@@ -156,18 +196,21 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 **Dependencies**: Uses memory.archive for spatial indexing (Adaptive Voronoi cells), NO direct component management
 
 #### proto.model.Organism
-**Purpose**: Top-level orchestrator with context-aware GPU execution
+**Purpose**: Top-level orchestrator with dynamic parallelism control
 
 **Interface**:
-- forward(stimulus, state) → (output, new_state) - Collective Pseudopod updates
-- reset_state() → None - Reset organism state
-- stats() → dict - GPU occupancy, learning progress, archive coverage
+- `__global__ void forward(float* stimulus, float* state, float* output)` - Spawns child kernels for Pseudopods
+- `__global__ void reset_state()` - Reset organism state via parallel memset kernels
+- `__host__ void get_stats(Stats* stats)` - GPU occupancy, kernel launch counts, child kernel depths
 
-**Context-Aware GPU Execution**:
-- GPU state is the execution context (not external orchestration)
-- extract(warp_id) → LocalObservation (warp occupancy, neighbor state, cache hits)
-- Context-aware decisions: spawn/retire Pseudopods based on whole computational field
-- Whole field (warps/cache/tensor-cores) informs local decisions
+**Dynamic Parallelism Hierarchy**:
+- **Level 0** (Organism): Master kernel spawns Pool, Archive, Chemotaxis kernels
+- **Level 1** (Pool): Spawns per-Pseudopod forward kernels in parallel
+- **Level 2** (Pseudopod): Each spawns 8 CA head kernels (one per Tensor Core group)
+- **Level 3** (CA heads): Spawn neighborhood convolution kernels
+- **Level 4** (Fitness): Spawns SVD and coherence child kernels
+- Maximum nesting depth: 5 levels (hardware limit is 24)
+- Each level synchronizes only with its children, not globally
 
 **Dependencies**: Owns Pool[Pseudopod] + Archive + Chemotaxis, Uses Kernels via Pseudopods, Records Observability metrics
 
@@ -175,28 +218,28 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **Repository Layout**:
 - BLUEPRINT.md (system architecture), README.md (user documentation with examples)
-- setup.py, pyproject.toml, requirements.txt, .python-version
-- strip_docstrings.py (AST-based docstring removal tool)
+- Makefile (CUDA compilation rules)
+- slime.ld (linker script for bare-metal execution)
 
 **slime/ package structure**:
-- **proto/** - Protocol definitions (component, kernel, memory, model interfaces)
-- **kernels/** - GPU compute implementations (triton_impl, warp_native.cu, utils)
-- **observability/** - Passive metrics collection (metrics, slo, tracing)
-- **memory/** - Data structures (archive MAP-Elites storage, pool lifecycle, tubes temporal memory)
-- **core/** - Components (state FlowState dataclass, stencil GPU-parallel ops, pseudopod Neural CA, chemotaxis navigator, organism orchestrator)
-- **api/** - Public interface (gpu_native SlimeModel)
-- **training/** - Training loop (trainer, losses, stability, fitness computation, lifecycle decisions)
-- **config/** - Configuration (loader with validation, YAML files for model/training/slo)
-- **bench/** - Benchmarking (datasets loaders, baseline transformer, profiling, toy tasks)
+- **proto/** - Protocol definitions (component, kernel, memory, model interfaces as CUDA headers)
+- **kernels/** - GPU compute implementations (triton_impl.cu, warp_native.cu, utils.cu)
+- **observability/** - Passive metrics collection (metrics.cu, slo.cu, tracing.cu)
+- **memory/** - Data structures (archive.cu MAP-Elites storage, pool.cu lifecycle, tubes.cu temporal memory)
+- **core/** - Components (state.cu FlowState device struct, stencil.cu GPU-parallel ops, pseudopod.cu Neural CA, chemotaxis.cu navigator, organism.cu orchestrator)
+- **api/** - Public interface (gpu_native.cu SlimeModel)
+- **training/** - Training loop (trainer.cu, losses.cu, stability.cu, fitness.cu computation, lifecycle.cu decisions)
+- **config/** - Configuration (loader.cu with validation, YAML files for model/training/slo)
+- **bench/** - Benchmarking (datasets.cu loaders, baseline.cu transformer, profile.cu, toy_tasks.cu)
 - **tests/** - Test suites (unit/ protocol + implementation tests, integration/ end-to-end, ablations/ comparative studies, slo/ performance validation)
-- **tools/** - Utilities (visualize behavioral space, export CUDA graph, package .exe)
+- **tools/** - Utilities (visualize.cu behavioral space, export.cu CUDA graph, package.cu binary)
 
 ### Invariants (Structural Rules)
 
 **1. Dependency Direction** (DAG Enforcement)
-- Lower layers NEVER import from higher layers
-- Protocols NEVER import implementations
-- Components NEVER import API layer
+- Lower layers NEVER include from higher layers
+- Protocols NEVER include implementations
+- Components NEVER include API layer
 - **Violation = compilation error**
 
 **2. Ownership Hierarchy**
@@ -232,13 +275,19 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 ### Archive & Quality-Diversity
 
-**CVT-MAP-Elites with Content-Addressable Storage**
+**CVT-MAP-Elites with Dynamic Parallel Updates**
 
 **Core Properties**:
-- Adaptive Voronoi tessellation (centroids grow/shrink based on density)
-- DIRESA learned behavioral embeddings (2-10D adaptive, distance-preserving)
-- Low-rank storage: SVD factorization (8x compression) + delta compression (10-20x)
-- Content-addressable: SHA256 deduplication prevents duplicate storage
+- Adaptive Voronoi tessellation via parallel cell update kernels
+- DIRESA embedding kernel spawns per-dimension child kernels
+- Low-rank compression spawns SVD child kernel for factorization
+- Content-addressable hashing spawns parallel SHA256 kernels per elite
+
+**Dynamic Parallelism in Archive**:
+- add_elite() spawns: hash_kernel, compress_kernel, voronoi_update_kernel
+- sample() spawns: parallel k-NN search kernels per query
+- update_centroids() spawns: per-cell centroid adjustment kernels
+- garbage_collect() spawns: cascading mark-and-sweep kernels
 
 Fixed grid approaches scale as resolution^dims, causing exponential explosion (3D: 8k cells, 4D: 160k, 5D: 3.2M). CVT scales linearly with num_centroids (1000 centroids for any dimensionality).
 
@@ -279,10 +328,10 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 **Raw Behavioral Metrics** (dimensionality discovered via covariance rank):
 - CA pattern statistics: CA_mass_conservation, CA_neighborhood_coherence, CA_parameter_localization, CA_flow_divergence, CA_reaction_diffusion_balance
 - Weight gradient norms: gradient_flow_magnitude, gradient_variance, gradient_spatial_locality
-- Activation statistics: activation_sparsity, activation_magnitude, activation_entropy, activation_kurtosis
+- Activation statistics: activation_sparsity, activation_magnitude, activation_shannon_entropy, activation_kurtosis
 - Compute metrics: memory_access_locality, computational_intensity, cache_hit_rate, warp_divergence
 - Weight statistics: weight_magnitude, weight_sparsity, weight_spectral_norm, weight_condition_number
-- Correlation structure: effective_rank, mutual_information_with_loss, pairwise_correlation_entropy
+- Correlation structure: effective_rank, mutual_information_with_loss, pairwise_correlation_shannon_entropy
 - Hardware alignment: tensor_core_utilization, memory_bandwidth_efficiency, FLOP_efficiency
 
 **Dimensionality Discovery**: Track covariance matrix rank via eigenvalue spectrum. If top-k eigenvalues explain >95% variance, raw dimensionality is k. DIRESA further compresses to 2-10D learned embeddings.
@@ -309,35 +358,36 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 ### Lifecycle & Curiosity-Driven Selection
 
 **GPU-Native Fitness Metric**: `fitness = effective_rank() × coherence()`
-- effective_rank(): Computed via GPU-native SVD kernel (warp-level parallel eigendecomposition)
-- coherence(): GPU-native temporal difference via Triton reduction kernels
-- **CRITICAL**: Both operations MUST be GPU kernels, never CPU operations
-- The multiplication itself is a fused GPU operation, not separate ops
+- effective_rank(): Parent kernel spawns Jacobi SVD child kernel
+- coherence(): Parent kernel spawns temporal correlation child kernel
+- **Dynamic Parallelism**: fitness_fused_kernel launches both children concurrently
+- Children complete before parent multiplies results
+- Zero CPU involvement in entire fitness computation graph
 
 **Curiosity-Driven Dynamics**:
 - High fitness → survive and get archived
 - Low fitness → replaced by sampling from archive history
 - Learning progress drives which trajectories persist (intrinsic motivation)
 
-**Timescale Separation**:
+**Timescale Separation with Dynamic Kernel Hierarchy**:
 
-**Fast (every step)**:
-- Weight updates via backprop
-- Fitness tracking (EMA)
-- Metrics collection
-- Loss monitoring
+**Fast (every step)** - Depth 1 kernels:
+- gradient_kernel<<<>>> launches per-parameter update kernels
+- fitness_tracker_kernel<<<>>> spawns EMA update children
+- metrics_kernel<<<>>> spawns per-metric collection kernels
+- loss_monitor_kernel<<<>>> tracks via warp reductions
 
-**Medium (every 100 steps)**:
-- Fitness assessment
-- Archive elite updates
-- Pool spawn decisions
-- Loss gate check
+**Medium (every 100 steps)** - Depth 2 kernels:
+- fitness_assessment_kernel<<<>>> spawns SVD + coherence children
+- archive_update_kernel<<<>>> spawns compression + hash children
+- pool_spawn_kernel<<<>>> launches parallel pseudopod creation
+- loss_gate_kernel<<<>>> spawns threshold check children
 
-**Slow (every 1000 steps)**:
-- Pool culling
-- Memory budget enforcement
-- Behavioral space analysis
-- Hard limit enforcement
+**Slow (every 1000 steps)** - Depth 3 kernels:
+- pool_cull_kernel<<<>>> spawns parallel removal kernels
+- memory_enforce_kernel<<<>>> launches GC cascade
+- behavioral_analysis_kernel<<<>>> spawns DIRESA update
+- hard_limit_kernel<<<>>> triggers emergency culling cascade
 
 **Loss Gates (Training Stability)**:
 - Freeze lifecycle when loss > threshold × loss_ema
@@ -360,11 +410,30 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 
 ### GPU Kernel Architecture
 
-**IO-Aware Tiled Attention** (FlashAttention pattern)
-- Tile computation to fit in SRAM (HBM ↔ SRAM tiling)
-- Naive attention: O(M² × D) HBM accesses (load Q, K, V repeatedly for each output element)
-- Tiled attention: O(M² × D / SRAM_size) HBM accesses (load tiles once, compute in SRAM)
-- Implementation: BLOCK_M=128, BLOCK_N=128, BLOCK_D=64 (adaptive to GPU SRAM)
+**Dynamic Parallelism Tiled Operations**
+- Parent kernel manages HBM ↔ SRAM movement
+- Child kernels compute within SRAM tiles
+- Grandchild kernels handle Tensor Core WMMA ops
+- Great-grandchild kernels do warp-level reductions
+
+**Kernel Launch Hierarchy**:
+```
+spawn_kernel_tree<float>(root, max_depth=5)
+├── Level 1: pseudopod_forward_kernel (map_kernel<State,CAUpdate>)
+│   ├── Level 2: ca_update_kernel (8 parallel heads)
+│   │   ├── Level 3: tensor_core_kernel (WMMA ops)
+│   │   └── Level 3: mass_conservation (reduce_kernel<float,Sum>)
+│   └── Level 2: fitness_kernel
+│       ├── Level 3: effective_rank (reduce_kernel with SVD)
+│       └── Level 3: coherence (reduce_kernel with temporal correlation)
+├── Level 1: archive_update_kernel
+│   ├── Level 2: hash_kernel (map_kernel<Genome,SHA256>)
+│   ├── Level 2: compress_kernel (reduce_kernel with SVD)
+│   └── Level 2: voronoi_kernel (map_kernel<Cell,Update>)
+└── Level 1: lifecycle_kernel
+    ├── Level 2: spawn_kernel (conditional based on hunger)
+    └── Level 2: cull_kernel (reduce_kernel selecting survivors)
+```
 
 **GPU-Native Execution**: No fallbacks, GPU-only
 - Pseudopod uses Triton/CUDA kernels exclusively
@@ -389,7 +458,7 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Compute efficiency (20%): FLOPs, memory bandwidth, tensor core utilization
 - CA conservation quality (10%): Mass conservation correlation with targets
 
-**NOT activation entropy alone** (doesn't correlate with task performance)
+**NOT activation shannon_entropy alone** (doesn't correlate with task performance)
 
 **Why this formula**: Task accuracy alone won't discover hardware-optimal patterns. Fitness must reward efficiency so fast components survive and slow components get culled. CA mass conservation ensures substrate stability.
 
@@ -489,6 +558,18 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Probe: `len(archive.centroid_refs) / archive.num_centroids` vs test accuracy
 - If uncorrelated, archive is overhead
 
+**Dynamic parallelism reduces latency**
+- Prediction: Parent-child kernel launch < 10μs overhead
+- Counter-test: Sequential kernel launches should take >100μs
+- Probe: nvprof kernel launch times for nested vs sequential
+- If no speedup, remove dynamic parallelism
+
+**Kernel nesting improves occupancy**
+- Prediction: Child kernels achieve >80% SM occupancy
+- Counter-test: Monolithic kernel should achieve <50% occupancy
+- Probe: NSight Compute occupancy metrics at each nesting level
+- If same occupancy, flatten kernel hierarchy
+
 **Implementation**:
 - Probe live Organism state: `organism.archive`, `organism.pseudopod_pool._components`, CA metrics
 - Track trajectories: coherence over time, coverage evolution, density histograms
@@ -580,20 +661,20 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 ### Reproducibility Tests
 
 **Test: Same seed, same GPU**
-- Run: `python train.py --seed=42` twice
+- Run: `./slime --seed=42` twice
 - Check: `np.corrcoef(losses_run1, losses_run2)[0,1]`
 - Hypothesis: Deterministic RNG + sorted iteration → identical results
 - If different: Search for `random()` without seed, unsorted dict iteration, CUDA atomics
 
 **Test: Same seed, different GPU**
-- Run: `python train.py --seed=42` on two GPU models
-- Check: `scipy.stats.kendalltau(fitness_gpu1, fitness_gpu2)`
+- Run: `./slime --seed=42` on two GPU models
+- Check: Kendall tau correlation between fitness rankings
 - Hypothesis: FP rounding differs but rank order preserved
 - If rank order differs: Logic branches on hardware properties
 
 **Test: Different seeds**
-- Run: `for seed in range(10): python train.py --seed=$seed`
-- Check: `np.std([final_acc_seed0, final_acc_seed1, ...])`
+- Run: `for seed in 0..9; do ./slime --seed=$seed; done`
+- Check: Standard deviation of final accuracies
 - Hypothesis: Low std means system not sensitive to initialization
 - If high std: System explores different archive regions, check if some seeds consistently fail
 
@@ -640,42 +721,45 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 
 **When to Add Component to Pool?**
 ```
-Q: pool < min_size? → YES: Spawn immediately
-Q: step < 100? → YES: Don't spawn (warmup)
-Q: step < 500? → YES: Spawn only if step % 50 == 0 (gentle)
-Q: component with fitness < 0.1?
-  → YES: Q: coverage < 0.5?
-      → YES: Random centroid (exploration)
-      → NO: Fitness-weighted (exploitation)
-  → NO: Q: pool < max_size AND avg_fitness > 0.8?
-      → YES: Spawn from archive
-      → NO: Don't spawn
+if (pool_size < min_size) { spawn_immediate(); }
+else if (step < 100) { /* warmup - no spawn */ }
+else if (step < 500 && step % 50 == 0) { /* gentle spawning */ }
+else if (component_fitness < 0.1f) {
+    if (coverage < 0.5f) { spawn_random_centroid(); }  // exploration
+    else { spawn_fitness_weighted(); }  // exploitation
+}
+else if (pool_size < max_size && avg_fitness > 0.8f) {
+    spawn_from_archive();
+}
 ```
 
 **When to Cull from Pool?**
 ```
-Q: pool > max_size? → YES: Cull 30% immediately
-Q: step % 1000 == 0?
-  → YES: Q: loss > 10.0 × loss_ema? (loss gate)
-      → YES: Skip culling (unstable)
-      → NO: Q: pool > 1.5 × min_size?
-          → YES: Cull bottom 20%
-          → NO: Don't cull
+if (pool_size > max_size) { cull_percent(30); }  // immediate cull
+else if (step % 1000 == 0) {
+    if (loss > 10.0f * loss_ema) { /* skip - unstable */ }
+    else if (pool_size > 1.5f * min_size) {
+        cull_bottom_percent(20);
+    }
+}
 ```
 
 **When to Update Archive?**
 ```
 Q: Has component survived for > 100 steps?
-├─ NO → Don't archive (too young, fitness unstable)
-└─ YES → Q: Is fitness > current_elite_fitness at this centroid?
-    ├─ YES → Replace elite (found better solution)
-    └─ NO → Q: Is centroid empty?
-        ├─ YES → Add as first elite (expand coverage)
-        └─ NO → Q: Is centroid below capacity (10 elites per centroid)?
-            ├─ YES → Add as additional elite (maintain diversity within cell)
-            └─ NO → Q: Is fitness > worst_elite_fitness in this centroid?
-                ├─ YES → Replace worst elite
-                └─ NO → Don't archive (not competitive)
+if (age < min_age_for_archive) { return; }  // too young
+if (fitness > current_elite_fitness[centroid]) {
+    replace_elite(centroid);  // found better
+}
+else if (is_empty(centroid)) {
+    add_first_elite(centroid);  // expand coverage
+}
+else if (elite_count[centroid] < 10) {
+    add_elite(centroid);  // maintain diversity
+}
+else if (fitness > worst_elite_fitness[centroid]) {
+    replace_worst_elite(centroid);
+}
 ```
 
 **When to Activate DIRESA?**
@@ -727,11 +811,12 @@ Q: Elite in k=5 nearest? → YES: Sample from nearest
 
 **Adjust max_pseudopods?**
 ```
-Q: GPU memory > 90%? → Decrease 25%
-Q: GPU memory < 60%?
-  → Q: Occupancy > 70%? → Increase 25%
-                        → Keep (occupancy bottleneck)
-Q: Kernel launch failures? → Decrease 50%
+if (gpu_memory_usage > 0.9f) { decrease_pool_size(0.25f); }
+else if (gpu_memory_usage < 0.6f) {
+    if (occupancy > 0.7f) { increase_pool_size(0.25f); }
+    // else: occupancy bottleneck, keep current size
+}
+if (kernel_launch_failures > 0) { decrease_pool_size(0.5f); }
 ```
 
 **DIRESA Dimension Count?**
@@ -832,14 +917,16 @@ Q: Trustworthiness < 0.85? → Increase dims
 
 **Pattern**: Each Wave 2 feature is an algebraic effect that components can request:
 
-```python
-# Component requests capability
-@effect_handler('conformational_switching')
-def forward(self, x):
-    if has_effect('conformational_switching'):
-        return self.conformational_ode(x)
-    else:
-        return self.standard_forward(x)
+```cuda
+// Component requests capability via compile-time template
+template<bool HAS_CONFORMATIONAL_SWITCHING>
+__device__ float pseudopod_forward(PseudopodState* state, float* x) {
+    if constexpr (HAS_CONFORMATIONAL_SWITCHING) {
+        return conformational_ode_forward(state, x);
+    } else {
+        return standard_forward(state, x);
+    }
+}
 ```
 
 **Benefits**:
@@ -897,17 +984,17 @@ def forward(self, x):
 ```
 slime/
 ├── proto/effects/          # Wave 2 effect protocols
-│   ├── conformational.py
-│   ├── collective.py
-│   ├── reproduction.py
-│   └── meta_learning.py
-├── core/conformational_ode.py
-├── memory/collective_memory.py
+│   ├── conformational.cuh
+│   ├── collective.cuh
+│   ├── reproduction.cuh
+│   └── meta_learning.cuh
+├── core/conformational_ode.cu
+├── memory/collective_memory.cu
 ├── lifecycle/
-│   ├── mitotic_division.py
-│   ├── meiotic_recombination.py
-│   └── adaptive_strategy.py
+│   ├── mitotic_division.cu
+│   ├── meiotic_recombination.cu
+│   └── adaptive_strategy.cu
 └── meta/
-    ├── hypernetwork.py
-    └── learned_optimizer.py
+    ├── hypernetwork.cu
+    └── learned_optimizer.cu
 ```

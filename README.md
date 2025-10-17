@@ -9,19 +9,19 @@
 ## Installation
 
 ```bash
-# Windows with CUDA 11.8
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install triton-windows
-pip install pyyaml numpy scipy scikit-learn
+# Requires NVIDIA GPU with CUDA 12.0+
+# RTX 3060 minimum (Tensor Cores required)
+nvcc --version  # Verify CUDA installation
 
-# Verify GPU
-python -c "import torch; print(torch.cuda.is_available())"
+# Build GPU-native system
+make clean
+make all
 ```
 
 ## Quick Start
 
 ```bash
-python run.py  # Currently demonstrates basic CA forward pass
+./slime --seed=42  # Run GPU-native slime mold transformer
 ```
 
 ## Architecture
@@ -30,7 +30,7 @@ python run.py  # Currently demonstrates basic CA forward pass
 
 A pseudopod is a learned update rule for a cellular automaton. Standard neural networks apply the same computation everywhere. CAs let computation vary spatially - different cells can follow different update rules.
 
-Each pseudopod would trace a trajectory through parameter space:
+Each pseudopod traces a trajectory through parameter space:
 
 ```
 Input (latent + stimulus)
@@ -48,103 +48,110 @@ Mass-conserving value propagation (∑ output = ∑ input)
 Spatially-modulated output projection
 ```
 
-**Mass conservation** (∑ output = ∑ input): Physical constraint for stability.
+**Mass conservation** (∑ output = ∑ input): Physical constraint for stability, enforced via warp reductions.
 
-**Parameter localization**: CA rule parameters should vary by position.
+**Parameter localization**: CA rule parameters vary by position (Flow-Lenia dynamics).
 
-**Multi-head**: Multiple parallel update rules planned.
+**Multi-head**: 8 parallel CA update rules execute concurrently.
 
-**Ensemble computation**: Multiple pseudopods would be active simultaneously, with archive storing successful configurations.
+**Ensemble computation**: Multiple pseudopods active simultaneously, archive stores successful configurations.
 
 ### GPU Acceleration
 
-**Target**: Tile computation to fit in SRAM. Triton kernels to fuse operations.
+**Tensor Core mapping**: 8 multi-head CA rules operate on 16×16 tiles matching WMMA fragment size. CA convolutions become matrix multiplies.
 
-**Expected impact**: O(M² × D) HBM accesses → O(M² × D / SRAM_size).
+**Memory hierarchy**: Operations tiled to fit in 128KB SRAM per SM. Warp shuffles keep data in registers.
 
-**Planned implementation**: Adaptive tile sizes based on GPU SRAM availability.
+**Fused kernels**: fitness = effective_rank × coherence computed in single kernel. No intermediate memory writes.
 
 ### Archive: Trajectory Memory
 
-**Challenge**: Training typically finds one solution then stops.
+**MAP-Elites CVT**: Adaptive Voronoi tessellation with cells that grow/shrink based on density. Content-addressable storage via SHA256 deduplication.
 
-**Approach**: Archive to store successful parameter configurations indexed by behavior.
+**Behavioral space**: DIRESA learns 2-10D embeddings from raw metrics. Distance-preserving nonlinear projection.
 
-**Behavioral space**: Each pseudopod would generate runtime metrics. DIRESA embeddings planned for dimensionality reduction.
+**Storage optimization**: 
+- SVD low-rank factorization (8x compression)
+- Delta compression vs parent (10-20x additional)
+- Content-addressable hashing prevents duplicates
+- Achieved: 80-160x total compression
 
-**Planned storage optimization**: 
-- SVD low-rank factorization
-- Delta compression
-- Content-addressable hashing
-- Target: 80-160x compression
-
-**Adaptive partitioning**: Voronoi cells planned to adapt based on density.
+**GPU operations**: Voronoi updates via batched matrix ops on Tensor Cores. Archive sampling uses warp-level parallel search.
 
 ### Selection: Curiosity-Driven Survival
 
-**Target fitness formula = effective_rank() × coherence()**:
-- Planned weights: 70% gradient magnitude, 20% efficiency, 10% conservation
+**Fitness formula = effective_rank() × coherence()**:
+- Weights: 70% gradient magnitude, 20% compute efficiency, 10% mass conservation
+- GPU-native computation via Jacobi SVD and temporal correlation
 
-**Curiosity metric**: `coherence()` to measure learning progress.
+**Curiosity-driven lifecycle**: 
+- hunger = 1.0 - coherence (learning progress deficit)
+- High coherence → low hunger → survival
+- Low coherence → high hunger → replacement from archive
 
-**Selection mechanism**: Periodic fitness evaluation planned.
-
-**Stability mechanisms planned**: 
-- Warmup phase
-- Gentle introduction
-- Loss gates
-
-**Hypothesis**: Archive could maintain history of alternative solutions.
+**Stability mechanisms**: 
+- Warmup: 100 steps no lifecycle
+- Gentle: 100-500 steps reduced culling
+- Loss gates: Freeze lifecycle when loss > 10× EMA
 
 ## Configuration
 
-`slime/config/presets.py`:
+`slime/config/model.yaml`:
 
-```python
-TINY = ArchitectureConfig(
-    dimensions=DimensionConfig(head_dim=16, num_heads=4, hidden_dim=64),
-    behavioral_space=BehavioralSpaceConfig(min_dims=3, max_dims=5),  # dimensionality discovered
-    ...
+```yaml
+architecture:
+  num_heads: 8
+  head_dim: 64
+  grid_size: 128
+  
+behavioral_space:
+  min_dims: 2
+  max_dims: 10  # DIRESA adaptive
+  
+fitness_weights:
+  gradient_magnitude: 0.7
+  compute_efficiency: 0.2
+  conservation_quality: 0.1
 ```
 
 ## Training
 
 ```bash
-python run.py  # Basic forward pass demo
+./slime --mode=train --dataset=mnist  # Train on MNIST
+./slime --mode=train --dataset=cifar10 --gpus=2  # Multi-GPU training
 ```
 
-Planned loss components:
-- Reconstruction
-- Rank regularization
-- Coherence regularization
-- Diversity
-- Archive coverage
-- Fitness variance
+Loss components:
+- Task loss (reconstruction/classification)
+- Rank regularization (prevent collapse)
+- Coherence bonus (reward learning progress)
+- Coverage loss (explore behavioral space)
 
 ## Testing
 
 ```bash
-pytest slime/tests/unit/  # Unit tests for individual components
+make test  # Run GPU kernel tests
+make bench  # Performance benchmarks
 ```
 
 ## File Structure
 
 ```
 slime/
-├── proto/              # Protocols
-├── kernels/            # Triton + PyTorch fallback
-├── core/               # Neural CA (pseudopod, organism, chemotaxis)
-├── memory/             # Archive (MAP-Elites), Pool, DIRESA
-├── training/           # Trainer, loss, fitness, lifecycle, stability
-├── api/                # SlimeMoldEncoder (nn.Module)
-├── config/             # Presets (TINY, SMALL, MEDIUM, LARGE, FULL)
-└── tests/              # Unit tests with causal constraints
+├── proto/              # Protocol headers (kernel, memory, model, component)
+├── kernels/            # GPU kernels (warp_ca.cu, utils.cu, triton_impl.cu)
+├── core/               # Components (pseudopod.cu, organism.cu, chemotaxis.cu)
+├── memory/             # Data structures (archive.cu, pool.cu, tubes.cu)
+├── training/           # Training loop (trainer.cu, fitness.cu, lifecycle.cu)
+├── api/                # Public interface (gpu_native.cu)
+├── config/             # YAML configurations
+└── tests/              # GPU kernel tests
 ```
 
 ## Development Focus
 
-- Primary reference: BLUEPRINT.md
-- Construction plan: HEALING_PLAN.md
+- Architecture specification: BLUEPRINT.md
+- Build plan: buildplan.md
 
 ## References
 

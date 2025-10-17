@@ -1,33 +1,17 @@
-/*
- * Warp-level Neural CA kernel with zero global memory access.
- *
- * Flow-Lenia CA update entirely in registers:
- * - Warp shuffles for neighbor access (no shared/global memory)
- * - Tensor cores for 16x16 convolution (256 FLOPs/instruction)
- * - Mass conservation constraint enforced in registers
- *
- * Each warp (32 threads) operates on 32 CA cells in parallel.
- * Neighbors accessed via __shfl_sync() for zero-latency communication.
- */
+
 
 #include <cuda_fp16.h>
 #include <mma.h>
 
 using namespace nvcuda;
 
-// Constants
 #define WARP_SIZE 32
 #define KERNEL_SIZE 3
-#define BLOCK_DIM 16  // For tensor cores (16x16 wmma)
+#define BLOCK_DIM 16
+#define MAX_JACOBI_ITERS 30
+#define EPSILON 1e-7f
 
-/*
- * Warp shuffle pattern for 1D CA neighbors.
- *
- * Each thread holds one CA cell state.
- * Neighbor access via warp shuffle (no memory):
- *   - left = __shfl_up_sync()
- *   - right = __shfl_down_sync()
- */
+
 __device__ __forceinline__ float get_left_neighbor(float val, unsigned mask) {
     return __shfl_up_sync(mask, val, 1);
 }
@@ -36,12 +20,7 @@ __device__ __forceinline__ float get_right_neighbor(float val, unsigned mask) {
     return __shfl_down_sync(mask, val, 1);
 }
 
-/*
- * Warp shuffle pattern for 2D CA neighbors (8-way).
- *
- * Assumes 2D grid embedded in warp (e.g., 4x8 for 32 threads).
- * Neighbors accessed via appropriate shuffle distances.
- */
+
 __device__ __forceinline__ float get_neighbor_2d(
     float val,
     int dx,
@@ -67,13 +46,6 @@ __device__ __forceinline__ float get_neighbor_2d(
     return __shfl_sync(mask, val, neighbor_lane);
 }
 
-/*
- * Flow-Lenia growth function (bell curve).
- *
- * growth(x) = 2 * exp(-((x - center) / width)^2) - 1
- *
- * Computed in registers (no memory access).
- */
 __device__ __forceinline__ float growth_function(
     float potential,
     float center,
@@ -83,18 +55,7 @@ __device__ __forceinline__ float growth_function(
     return 2.0f * expf(-z * z) - 1.0f;
 }
 
-/*
- * 1D Neural CA kernel via warp shuffles.
- *
- * Args:
- *   state: [batch, seq_len, channels] - CA state
- *   kernel_weights: [channels, channels, kernel_size] - learned CA kernel
- *   growth_center: [channels] - Flow-Lenia growth centers
- *   growth_width: [channels] - Flow-Lenia growth widths
- *   out: [batch, seq_len, channels] - updated CA state
- *
- * Each warp processes 32 cells across seq_len dimension.
- */
+
 __global__ void neural_ca_1d_warp_shuffle(
     const float* __restrict__ state,
     const float* __restrict__ kernel_weights,
@@ -177,21 +138,151 @@ __global__ void neural_ca_1d_warp_shuffle(
     }
 }
 
-/*
- * 2D Neural CA kernel via warp shuffles + tensor cores.
- *
- * Tensor cores for 16x16 matrix multiply (256 FLOPs/instruction).
- * Warp shuffles for neighbor communication.
- *
- * Args:
- *   state: [batch, height, width, channels] - CA state
- *   kernel_weights: [channels, channels, 3, 3] - learned CA kernel
- *   growth_center: [channels] - Flow-Lenia growth centers
- *   growth_width: [channels] - Flow-Lenia growth widths
- *   out: [batch, height, width, channels] - updated CA state
- *
- * Each warp processes 16x16 tile using tensor cores.
- */
+__device__ void jacobi_rotation(float* A, int n, int p, int q, float* s, float* c) {
+    float app = A[p * n + p];
+    float aqq = A[q * n + q];
+    float apq = A[p * n + q];
+    
+    float tau = (aqq - app) / (2.0f * apq + EPSILON);
+    float t = 1.0f / (fabsf(tau) + sqrtf(1.0f + tau * tau));
+    if (tau < 0) t = -t;
+    
+    *c = 1.0f / sqrtf(1.0f + t * t);
+    *s = t * (*c);
+}
+
+__global__ void effective_rank_kernel(
+    float* __restrict__ correlation_matrix,
+    float* __restrict__ rank_out,
+    int n
+) {
+    __shared__ float A[32][32];
+    __shared__ float singular_values[32];
+    
+    int tid = threadIdx.x;
+    int lane_id = tid % WARP_SIZE;
+    
+    if (tid < n * n) {
+        A[tid / n][tid % n] = correlation_matrix[tid];
+    }
+    __syncthreads();
+    
+    for (int sweep = 0; sweep < MAX_JACOBI_ITERS; sweep++) {
+        for (int p = 0; p < n - 1; p++) {
+            for (int q = p + 1; q < n; q++) {
+                float c, s;
+                jacobi_rotation((float*)A, n, p, q, &s, &c);
+                
+                for (int i = 0; i < n; i++) {
+                    float aip = A[i][p];
+                    float aiq = A[i][q];
+                    A[i][p] = c * aip - s * aiq;
+                    A[i][q] = s * aip + c * aiq;
+                }
+            }
+        }
+    }
+    
+    if (tid < n) {
+        singular_values[tid] = sqrtf(fabsf(A[tid][tid]));
+    }
+    __syncthreads();
+    
+    float sum = 0.0f;
+    if (tid < n) {
+        sum = singular_values[tid];
+    }
+    
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+    }
+    
+    if (tid == 0) {
+        float total_sum = sum;
+        float entropy = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float p = singular_values[i] / (total_sum + EPSILON);
+            entropy -= p * logf(p + EPSILON);
+        }
+        *rank_out = expf(entropy);
+    }
+}
+
+__global__ void coherence_kernel(
+    float* __restrict__ prediction_errors,
+    float* __restrict__ coherence_out,
+    int history_length
+) {
+    int tid = threadIdx.x;
+    unsigned mask = 0xFFFFFFFF;
+    
+    float sum_x = 0.0f, sum_y = 0.0f, sum_xx = 0.0f, sum_xy = 0.0f;
+    
+    for (int i = tid; i < history_length; i += WARP_SIZE) {
+        float x = (float)i;
+        float y = prediction_errors[i];
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_xy += x * y;
+    }
+    
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum_x += __shfl_down_sync(mask, sum_x, offset);
+        sum_y += __shfl_down_sync(mask, sum_y, offset);
+        sum_xx += __shfl_down_sync(mask, sum_xx, offset);
+        sum_xy += __shfl_down_sync(mask, sum_xy, offset);
+    }
+    
+    if (tid == 0) {
+        float n = (float)history_length;
+        float slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x + EPSILON);
+        float learning_progress = -slope;
+        *coherence_out = 1.0f / (1.0f + expf(-learning_progress * 10.0f));
+    }
+}
+
+__global__ void fitness_fused_kernel(
+    float* __restrict__ correlation_matrix,
+    float* __restrict__ prediction_errors,
+    float* __restrict__ fitness_out,
+    int matrix_size,
+    int history_length
+) {
+    __shared__ float effective_rank;
+    __shared__ float coherence;
+    
+    if (blockIdx.x == 0 && threadIdx.x < 32) {
+        effective_rank_kernel<<<1, 32>>>(correlation_matrix, &effective_rank, matrix_size);
+    }
+    __syncthreads();
+    
+    if (blockIdx.x == 0 && threadIdx.x < 32) {
+        coherence_kernel<<<1, 32>>>(prediction_errors, &coherence, history_length);
+    }
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        fitness_out[blockIdx.x] = effective_rank * coherence;
+    }
+}
+
+__global__ void compute_hunger_kernel(
+    float* __restrict__ coherence_values,
+    float* __restrict__ hunger_values,
+    bool* __restrict__ should_survive,
+    int num_organisms
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_organisms) return;
+    
+    float coherence = coherence_values[idx];
+    float hunger = 1.0f - coherence;
+    hunger_values[idx] = hunger;
+    should_survive[idx] = (hunger < 0.5f);
+}
+
+
 __global__ void neural_ca_2d_tensor_core(
     const half* __restrict__ state,
     const half* __restrict__ kernel_weights,
@@ -240,13 +331,41 @@ __global__ void neural_ca_2d_tensor_core(
 
     __syncwarp();
 
-    // Tensor core matrix multiply for CA convolution
-    // Treat 16x16 tile as matrix, kernel as another matrix
-    // Note: This is simplified; full implementation requires proper tiling
-
-    wmma::load_matrix_sync(a_frag, &tile_state[0][0], BLOCK_DIM);
-    wmma::load_matrix_sync(b_frag, &tile_kernel[0][0], BLOCK_DIM);
-    wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+    for (int ky = -1; ky <= 1; ky++) {
+        for (int kx = -1; kx <= 1; kx++) {
+            __shared__ half neighbor_tile[BLOCK_DIM][BLOCK_DIM];
+            __shared__ half kernel_tile[BLOCK_DIM][BLOCK_DIM];
+            
+            for (int dy = 0; dy < BLOCK_DIM; dy++) {
+                for (int dx = 0; dx < BLOCK_DIM; dx++) {
+                    int global_ny = tile_y * BLOCK_DIM + dy + ky;
+                    int global_nx = tile_x * BLOCK_DIM + dx + kx;
+                    
+                    global_ny = max(0, min(global_ny, height - 1));
+                    global_nx = max(0, min(global_nx, width - 1));
+                    
+                    if (threadIdx.x == dy * BLOCK_DIM + dx && threadIdx.x < BLOCK_DIM * BLOCK_DIM) {
+                        int n_idx = b * height * width * channels +
+                                   global_ny * width * channels +
+                                   global_nx * channels + c;
+                        neighbor_tile[dy][dx] = state[n_idx];
+                        
+                        int kernel_idx = c * channels * 9 + c * 9 + (ky + 1) * 3 + (kx + 1);
+                        kernel_tile[dy][dx] = kernel_weights[kernel_idx];
+                    }
+                }
+            }
+            
+            __syncthreads();
+            
+            wmma::fragment<wmma::matrix_a, BLOCK_DIM, BLOCK_DIM, BLOCK_DIM, half, wmma::row_major> n_frag;
+            wmma::fragment<wmma::matrix_b, BLOCK_DIM, BLOCK_DIM, BLOCK_DIM, half, wmma::col_major> k_frag;
+            
+            wmma::load_matrix_sync(n_frag, &neighbor_tile[0][0], BLOCK_DIM);
+            wmma::load_matrix_sync(k_frag, &kernel_tile[0][0], BLOCK_DIM);
+            wmma::mma_sync(acc_frag, n_frag, k_frag, acc_frag);
+        }
+    }
 
     // Flow-Lenia growth function
     half center = growth_center[c];
@@ -278,12 +397,7 @@ __global__ void neural_ca_2d_tensor_core(
     }
 }
 
-/*
- * Mass conservation post-processing kernel.
- *
- * Enforce ∑ output = ∑ input across spatial dimensions.
- * Uses warp reduce for parallel sum.
- */
+
 __global__ void mass_conservation_kernel(
     const float* __restrict__ input,
     float* __restrict__ output,
