@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include "../core/organism.cu"
 
+// Forward declaration
+__global__ void extract_ca_channel_kernel(float* output, float* concentration, int grid_size);
+
 // Allocate and initialize organism on GPU
 extern "C" Organism* create_organism() {
     Organism* h_organism = new Organism();

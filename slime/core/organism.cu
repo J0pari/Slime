@@ -70,8 +70,7 @@ __global__ void organism_lifecycle_kernel(
     int generation
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Update generation counter in constant memory
-        cudaMemcpyToSymbol(d_generation_counter, &generation, sizeof(uint16_t));
+        // Generation counter handled by host before kernel launch
 
         dim3 component_grid((MAX_COMPONENTS + 255) / 256);
         dim3 component_block(256);
@@ -113,7 +112,7 @@ __global__ void organism_lifecycle_kernel(
             generation
         );
 
-        cudaDeviceSynchronize();
+        // Child kernels complete before parent returns
     }
 }
 
@@ -133,7 +132,7 @@ __global__ void component_evolution_kernel(
             coherence_history,
             generation
         );
-        cudaDeviceSynchronize();
+        // Parent waits for child kernels implicitly
 
         // Selection and reproduction (Level 3)
         selection_kernel<<<1, 32>>>(
@@ -141,7 +140,7 @@ __global__ void component_evolution_kernel(
             archive,
             generation
         );
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Spawn new components (Level 3)
         float spawn_prob = SPAWN_RATE * expf(-pool->active_count.load() / (float)MAX_COMPONENTS);
@@ -179,13 +178,14 @@ __global__ void fitness_computation_kernel(
         float* singular_values;
         float* prediction_errors;
 
-        cudaMalloc(&weight_matrix, GENOME_SIZE * sizeof(float));
-        cudaMalloc(&singular_values, 256 * sizeof(float));
-        cudaMalloc(&prediction_errors, 100 * sizeof(float));
+        cudaMalloc((void**)&weight_matrix, GENOME_SIZE * sizeof(float));
+        cudaMalloc((void**)&singular_values, 256 * sizeof(float));
+        cudaMalloc((void**)&prediction_errors, 100 * sizeof(float));
 
-        // Copy genome to weight matrix
-        cudaMemcpy(weight_matrix, pool->entries[idx].genome,
-                  GENOME_SIZE * sizeof(float), cudaMemcpyDeviceToDevice);
+        // Copy genome to weight matrix (device-to-device)
+        for (int i = 0; i < GENOME_SIZE; i++) {
+            weight_matrix[i] = pool->entries[idx].genome[i];
+        }
 
         // Launch SVD kernel (Level 4)
         svd_kernel<<<1, 256>>>(
@@ -464,8 +464,8 @@ __global__ void culling_kernel(
         // Cull based on hunger (low coherence)
         else if (entry->hunger > hunger_threshold) {
             entry->alive = false;
-            atomicAdd(&pool->total_culled, 1);
-            atomicSub(&pool->active_count, 1);
+            pool->total_culled.fetch_add(1);
+            pool->active_count.fetch_sub(1);
         }
     }
 }
