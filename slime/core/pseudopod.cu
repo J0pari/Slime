@@ -33,6 +33,8 @@ struct MultiHeadCAState {
     float* head_mixing_weights;   // [NUM_HEADS][NUM_HEADS]
     float* flow_kernels;          // [NUM_HEADS][3][3]
     float* mass_buffer;           // For conservation check
+    float* ca_input;              // [GRID_SIZE][GRID_SIZE][CHANNELS] - CA state buffer
+    float* ca_output;             // [GRID_SIZE][GRID_SIZE][CHANNELS] - CA output buffer
 };
 
 // Multi-head Neural CA kernel with tensor cores

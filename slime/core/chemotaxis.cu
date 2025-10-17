@@ -5,6 +5,7 @@
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
 #include <cooperative_groups.h>
+#include "../memory/tubes.cu"
 
 namespace cg = cooperative_groups;
 
@@ -17,7 +18,7 @@ constexpr float DIFFUSION_RATE = 0.1f;
 constexpr float DECAY_RATE = 0.95f;
 constexpr float SENSITIVITY_THRESHOLD = 0.01f;
 
-// Chemical field structure
+// Chemical field structure with temporal history
 struct ChemicalField {
     float* concentration;      // [CHEM_GRID_SIZE][CHEM_GRID_SIZE]
     float* gradient_x;         // Spatial gradients
@@ -25,6 +26,7 @@ struct ChemicalField {
     float* laplacian;          // For diffusion
     float* sources;            // Attractor positions
     float* decay_factors;      // Per-cell decay
+    TemporalTube* history;     // Temporal snapshots of concentration for prediction
 };
 
 // Behavioral state for navigation
@@ -37,6 +39,40 @@ struct BehavioralState {
     float sensitivity;         // Response strength
     int memory_index;          // Circular buffer index
 };
+
+// Store chemical field snapshot in history TemporalTube
+__device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time) {
+    TemporalTube* history = field->history;
+
+    // Get next entry index (circular buffer)
+    int next_head = (history->head + 1) % history->capacity;
+
+    // Copy concentration data to history entry
+    float* dest = history->entries[next_head].data;
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < field_size; i += blockDim.x * gridDim.x) {
+        dest[i] = field->concentration[i];
+    }
+    __syncthreads();
+
+    // Update entry metadata (single thread)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        history->entries[next_head].timestamp = global_time;
+        history->entries[next_head].decay_factor = 1.0f;
+        history->entries[next_head].importance = 1.0f;
+
+        // Advance head pointer
+        history->head = next_head;
+        if (history->count < history->capacity) {
+            history->count++;
+        }
+        history->global_time = global_time;
+    }
+}
+
+// Kernel wrapper to store snapshot after diffusion
+__global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_size, float global_time) {
+    store_chemical_snapshot(field, field_size, global_time);
+}
 
 // Compute chemical diffusion with reaction
 __global__ void diffusion_reaction_kernel(
@@ -96,11 +132,6 @@ __global__ void behavioral_gradient_kernel(
     int dim = blockIdx.z;
 
     if (x >= grid_size || y >= grid_size || dim >= BEHAVIORAL_DIM) return;
-
-    int field_idx = (y * grid_size + x) * BEHAVIORAL_DIM + dim;
-
-    // Use field_idx to access and update behavioral field
-    (void)field_idx;  // Suppress warning - field computation needed for future updates
 
     // Sobel operator for robust gradient estimation
     float sobel_x[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
@@ -420,6 +451,115 @@ __global__ void init_behavioral_state_kernel(
     agent->exploration_noise = 0.5f;
     agent->sensitivity = 1.0f;
     agent->memory_index = 0;
+}
+
+// Initialize chemical field arrays to zero
+__global__ void init_chemical_field_kernel(
+    ChemicalField* field,
+    int grid_size
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= grid_size || y >= grid_size) return;
+
+    int idx = y * grid_size + x;
+
+    // Zero all arrays
+    field->concentration[idx] = 0.0f;
+    field->gradient_x[idx] = 0.0f;
+    field->gradient_y[idx] = 0.0f;
+    field->laplacian[idx] = 0.0f;
+    field->sources[idx] = 0.0f;
+    field->decay_factors[idx] = DECAY_RATE;
+}
+
+// Set chemical sources from behavioral agent positions
+__global__ void set_chemical_sources_from_agents_kernel(
+    float* sources,
+    BehavioralState* agents,
+    int num_agents,
+    int grid_size
+) {
+    int agent_id = threadIdx.x;
+    if (agent_id >= num_agents) return;
+
+    BehavioralState* agent = &agents[agent_id];
+
+    // Convert agent position to grid coordinates
+    int grid_x = (int)(agent->position[0] * grid_size);
+    int grid_y = (int)(agent->position[1] * grid_size);
+    grid_x = min(max(grid_x, 0), grid_size - 1);
+    grid_y = min(max(grid_y, 0), grid_size - 1);
+
+    // Place Gaussian source at agent position
+    float sigma = 2.0f;  // Source spread in grid units
+    float strength = 1.0f;
+
+    for (int dy = -4; dy <= 4; dy++) {
+        for (int dx = -4; dx <= 4; dx++) {
+            int x = grid_x + dx;
+            int y = grid_y + dy;
+
+            // Toroidal wrap
+            x = (x + grid_size) % grid_size;
+            y = (y + grid_size) % grid_size;
+
+            int idx = y * grid_size + x;
+
+            float dist_sq = dx * dx + dy * dy;
+            float contribution = strength * expf(-dist_sq / (2.0f * sigma * sigma));
+
+            // Atomic add because multiple agents may write to same cell
+            atomicAdd(&sources[idx], contribution);
+        }
+    }
+}
+
+// Compute behavioral field from agent embeddings
+__global__ void compute_behavioral_field_kernel(
+    float* behavioral_field,  // [GRID_SIZE][GRID_SIZE][BEHAVIORAL_DIM]
+    BehavioralState* agents,
+    int num_agents,
+    int grid_size
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= grid_size || y >= grid_size) return;
+
+    // For each grid cell, compute weighted sum of agent behavioral coords
+    // based on distance to agents
+    float px = (float)x / grid_size;
+    float py = (float)y / grid_size;
+
+    // Accumulate contributions from all agents
+    for (int d = 0; d < BEHAVIORAL_DIM; d++) {
+        float field_value = 0.0f;
+        float weight_sum = 0.0f;
+
+        for (int agent_id = 0; agent_id < num_agents; agent_id++) {
+            BehavioralState* agent = &agents[agent_id];
+
+            // Compute toroidal distance
+            float dx = fabsf(px - agent->position[0]);
+            float dy = fabsf(py - agent->position[1]);
+            dx = fminf(dx, 1.0f - dx);
+            dy = fminf(dy, 1.0f - dy);
+            float dist_sq = dx * dx + dy * dy;
+
+            // Gaussian weighting
+            float sigma = 0.1f;  // Influence radius
+            float weight = expf(-dist_sq / (2.0f * sigma * sigma));
+
+            field_value += weight * agent->behavioral_coords[d];
+            weight_sum += weight;
+        }
+
+        // Store normalized field value
+        int field_idx = (y * grid_size + x) * BEHAVIORAL_DIM + d;
+        behavioral_field[field_idx] = weight_sum > 1e-8f ? field_value / weight_sum : 0.0f;
+    }
 }
 
 #endif // CHEMOTAXIS_CU

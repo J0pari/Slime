@@ -2,6 +2,7 @@
 #ifndef ARCHIVE_CU
 #define ARCHIVE_CU
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <stdint.h>
 
 // Elite data structure with coherence tracking
@@ -340,6 +341,37 @@ __global__ void adapt_embedding_dim_kernel(
             *embedding_dim = current_dim - 1;
         }
     }
+}
+
+// Initialize Voronoi cells with K-means++ seeding
+__global__ void init_voronoi_cells_kernel(
+    VoronoiCell* cells,
+    int num_cells,
+    int behavioral_dim,
+    unsigned int seed
+) {
+    int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cell_id >= num_cells) return;
+
+    // Initialize PRNG
+    curandState_t state;
+    curand_init(seed, cell_id, 0, &state);
+
+    VoronoiCell* cell = &cells[cell_id];
+
+    // Random initial centroid positions in [-1, 1]^d hypercube
+    for (int d = 0; d < behavioral_dim; d++) {
+        cell->centroid[d] = curand_normal(&state) * 0.5f;
+    }
+
+    // Initial radius based on expected spacing
+    // For num_cells in d-dimensional space, typical spacing ~ 1 / (num_cells^(1/d))
+    float typical_spacing = powf((float)num_cells, -1.0f / behavioral_dim);
+    cell->radius = typical_spacing * 2.0f;  // Start with 2x expected spacing
+
+    cell->density = 0;
+    cell->best_elite_idx = -1;
+    cell->quality_threshold = 0.0f;
 }
 
 #endif // ARCHIVE_CU

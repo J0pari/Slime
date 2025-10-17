@@ -27,6 +27,9 @@ struct Organism {
     // Core components
     ComponentPool* pool;
     GPUElite* archive;
+    int archive_size;
+    VoronoiCell* voronoi_cells;
+    int num_voronoi_cells;
     TemporalTube* memory_tubes;
     MultiHeadCAState* ca_state;
     BehavioralState* behavioral_agents;
@@ -48,16 +51,16 @@ struct Organism {
 };
 
 // Forward declarations for all kernels
-__global__ void component_evolution_kernel(ComponentPool* pool, GPUElite* archive, float* fitness_history, float* coherence_history, int generation);
+__global__ void component_evolution_kernel(ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, ChemicalField* chemical_field, BehavioralState* behavioral_agents, float* fitness_history, float* coherence_history, int generation);
 __global__ void neural_ca_update_kernel(MultiHeadCAState* ca_state, ChemicalField* chemical_field, float* effective_rank_history, int generation);
 __global__ void behavioral_update_kernel(BehavioralState* agents, ChemicalField* chemical_field, TemporalTube* memory_tubes, int generation);
 __global__ void memory_update_kernel(TemporalTube* tubes, float* fitness_history, float* coherence_history, int generation);
-__global__ void fitness_computation_kernel(ComponentPool* pool, float* fitness_history, float* coherence_history, int generation);
-__global__ void selection_kernel(ComponentPool* pool, GPUElite* archive, int generation);
+__global__ void fitness_computation_kernel(ComponentPool* pool, ChemicalField* chemical_field, float* fitness_history, float* coherence_history, int generation);
+__global__ void selection_kernel(ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, BehavioralState* behavioral_agents, int generation);
 __global__ void spawn_wave_kernel(ComponentPool* pool, float spawn_probability, int generation);
 __global__ void culling_kernel(ComponentPool* pool, float fitness_threshold, float hunger_threshold);
 __global__ void svd_kernel(float* matrix, float* singular_values, int size);
-__global__ void coherence_computation_kernel(float* prediction_errors, float* coherence_history, int history_length);
+__global__ void coherence_computation_kernel(float* genome, float* chemical_field_prev, float* chemical_field_current, int field_size, float* coherence_out);
 __global__ void effective_rank_from_svd_kernel(float* singular_values, float* fitness_out, float* coherence_out, int num_values);
 __global__ void jacobi_sweep_kernel(float* matrix, float* workspace, int size, int sweep);
 __global__ void initialize_ca_from_field_kernel(float* ca_state, float* chemical_concentration, int grid_size);
@@ -81,6 +84,11 @@ __global__ void organism_lifecycle_kernel(
         component_evolution_kernel<<<component_grid, component_block>>>(
             organism->pool,
             organism->archive,
+            organism->voronoi_cells,
+            organism->num_voronoi_cells,
+            &organism->archive_size,
+            organism->chemical_field,
+            organism->behavioral_agents,
             organism->fitness_history,
             organism->coherence_history,
             generation
@@ -120,6 +128,11 @@ __global__ void organism_lifecycle_kernel(
 __global__ void component_evolution_kernel(
     ComponentPool* pool,
     GPUElite* archive,
+    VoronoiCell* voronoi_cells,
+    int num_cells,
+    int* archive_size,
+    ChemicalField* chemical_field,
+    BehavioralState* behavioral_agents,
     float* fitness_history,
     float* coherence_history,
     int generation
@@ -128,6 +141,7 @@ __global__ void component_evolution_kernel(
         // Compute fitness for all components (Level 3)
         fitness_computation_kernel<<<(pool->capacity + 255) / 256, 256>>>(
             pool,
+            chemical_field,
             fitness_history,
             coherence_history,
             generation
@@ -138,6 +152,10 @@ __global__ void component_evolution_kernel(
         selection_kernel<<<1, 32>>>(
             pool,
             archive,
+            voronoi_cells,
+            num_cells,
+            archive_size,
+            behavioral_agents,
             generation
         );
         // Dynamic parallelism: parent waits for children
@@ -164,6 +182,7 @@ __global__ void component_evolution_kernel(
 // Level 3: Fitness computation (launches Level 4 kernels)
 __global__ void fitness_computation_kernel(
     ComponentPool* pool,
+    ChemicalField* chemical_field,
     float* fitness_history,
     float* coherence_history,
     int generation
@@ -194,11 +213,27 @@ __global__ void fitness_computation_kernel(
             GENOME_SIZE
         );
 
-        // Launch coherence kernel (Level 4)
-        coherence_computation_kernel<<<1, 256>>>(
-            prediction_errors,
-            coherence_history + idx * 100,
-            100
+        // Get previous and current chemical field states from history for prediction
+        float* prev_field = nullptr;
+        float* curr_field = chemical_field->concentration;
+        int field_size = GRID_SIZE * GRID_SIZE;
+        
+        // If we have at least 2 snapshots in history, use them
+        if (chemical_field->history->count >= 2) {
+            int prev_idx = (chemical_field->history->head - 2 + chemical_field->history->capacity) % chemical_field->history->capacity;
+            prev_field = chemical_field->history->entries[prev_idx].data;
+        } else {
+            // Use current field as both prev and current (zero error)
+            prev_field = curr_field;
+        }
+        
+        // Launch coherence kernel (Level 4) - uses genome to predict field evolution
+        coherence_computation_kernel<<<(field_size + 255) / 256, 256>>>(
+            pool->entries[idx].genome,
+            prev_field,
+            curr_field,
+            field_size,
+            &pool->entries[idx].coherence
         );
 
         // Dynamic parallelism: parent waits for children
@@ -292,33 +327,50 @@ __global__ void jacobi_sweep_kernel(
     }
 }
 
-// Level 4: Coherence computation
+// Level 4: Coherence computation - measures genome's ability to predict chemical field evolution
 __global__ void coherence_computation_kernel(
-    float* prediction_errors,
-    float* coherence_history,
-    int history_length
+    float* genome,
+    float* chemical_field_prev,
+    float* chemical_field_current,
+    int field_size,
+    float* coherence_out
 ) {
-    // Generate synthetic prediction errors based on genome evolution
-    int tid = threadIdx.x;
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    if (tid < history_length) {
-        // Use coherence history to generate realistic errors
-        float base_error = 1.0f / (1.0f + tid * 0.01f);  // Decreasing error over time
-        float noise = sinf(tid * 0.1f) * 0.1f;  // Oscillation
-        prediction_errors[tid] = base_error + noise;
+    __shared__ float error_sum;
+    if (threadIdx.x == 0) {
+        error_sum = 0.0f;
     }
     __syncthreads();
 
-    // Compute coherence as learning progress
-    float improvement_sum = 0.0f;
-    for (int i = 0; i < history_length - 1; i++) {
-        float curr = prediction_errors[i];
-        float next = prediction_errors[i + 1];
-        improvement_sum += fmaxf(0.0f, (curr - next) / (curr + 1e-10f));
-    }
+    // Use genome to predict next field state from previous state
+    // Genome acts as a linear prediction matrix
+    if (tid < field_size) {
+        float prediction = 0.0f;
 
-    if (tid == 0) {
-        coherence_history[0] = improvement_sum / (history_length - 1);
+        // Linear combination of genome weights with previous field values
+        // Sample subset of field for efficiency (every 8th position)
+        int step = field_size / min(GENOME_SIZE, field_size);
+        for (int i = 0; i < min(GENOME_SIZE, field_size / step); i++) {
+            int field_idx = i * step;
+            if (field_idx < field_size) {
+                prediction += genome[i] * chemical_field_prev[field_idx];
+            }
+        }
+
+        // Compute squared prediction error
+        float actual = chemical_field_current[tid];
+        float error = (prediction - actual) * (prediction - actual);
+
+        // Accumulate error
+        atomicAdd(&error_sum, error);
+    }
+    __syncthreads();
+
+    // Coherence is inverse of mean squared error (higher is better)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float mse = error_sum / field_size;
+        *coherence_out = 1.0f / (1.0f + mse);  // Maps [0, inf) error to (0, 1] coherence
     }
 }
 
@@ -353,6 +405,10 @@ __global__ void effective_rank_from_svd_kernel(
 __global__ void selection_kernel(
     ComponentPool* pool,
     GPUElite* archive,
+    VoronoiCell* voronoi_cells,
+    int num_cells,
+    int* archive_size,
+    BehavioralState* behavioral_agents,
     int generation
 ) {
     int tid = threadIdx.x;
@@ -390,8 +446,24 @@ __global__ void selection_kernel(
     // Archive the best
     if (tid == 0 && best_indices[0] >= 0) {
         PoolEntry* best = &pool->entries[best_indices[0]];
+        BehavioralState* agent = &behavioral_agents[best_indices[0]];
 
-        // Allocate elite on device memory for kernel launch
+        // Allocate compressed genome buffer
+        uint8_t* d_compressed;
+        uint32_t* d_compressed_size;
+        cudaMalloc(&d_compressed, GENOME_SIZE * sizeof(uint8_t));
+        cudaMalloc(&d_compressed_size, sizeof(uint32_t));
+
+        // Compress genome using SVD-based compression
+        compress_genome_kernel<<<1, 256>>>(
+            best->genome,
+            d_compressed,
+            d_compressed_size,
+            GENOME_SIZE,
+            MAX_RANK
+        );
+
+        // Allocate elite on device memory
         GPUElite* d_elite;
         cudaMalloc((void**)&d_elite, sizeof(GPUElite));
         
@@ -402,6 +474,33 @@ __global__ void selection_kernel(
         elite.effective_rank = best->fitness / (best->coherence + 1e-10f);
         elite.genome_hash = gpu_sha256(best->genome, GENOME_SIZE);
         elite.generation = generation;
+        elite.compressed_genome = d_compressed;
+        elite.compressed_size = 0;  // Will be read from d_compressed_size after kernel completes
+
+        // Copy behavioral_coords from agent's DIRESA embedding
+        for (int i = 0; i < 10; i++) {
+            elite.behavioral_coords[i] = agent->behavioral_coords[i];
+        }
+
+        // Extract raw behavioral metrics from agent state
+        elite.raw_metrics[0] = agent->position[0];
+        elite.raw_metrics[1] = agent->position[1];
+        elite.raw_metrics[2] = agent->velocity[0];
+        elite.raw_metrics[3] = agent->velocity[1];
+        elite.raw_metrics[4] = agent->exploration_noise;
+        elite.raw_metrics[5] = agent->sensitivity;
+
+        // Gradient memory statistics (32 * 2 = 64)
+        for (int i = 0; i < GRADIENT_HISTORY; i++) {
+            elite.raw_metrics[6 + i * 2] = agent->gradient_memory[i][0];
+            elite.raw_metrics[6 + i * 2 + 1] = agent->gradient_memory[i][1];
+        }
+
+        // Fitness metrics (4)
+        elite.raw_metrics[70] = best->fitness;
+        elite.raw_metrics[71] = best->coherence;
+        elite.raw_metrics[72] = best->hunger;
+        elite.raw_metrics[73] = (float)best->age;
         
         // Copy to device memory manually (device-to-device)
         d_elite->fitness = elite.fitness;
@@ -409,17 +508,26 @@ __global__ void selection_kernel(
         d_elite->effective_rank = elite.effective_rank;
         d_elite->genome_hash = elite.genome_hash;
         d_elite->generation = elite.generation;
+        d_elite->compressed_genome = elite.compressed_genome;
+        d_elite->compressed_size = elite.compressed_size;
+        for (int i = 0; i < 10; i++) {
+            d_elite->behavioral_coords[i] = elite.behavioral_coords[i];
+        }
+        for (int i = 0; i < 75; i++) {
+            d_elite->raw_metrics[i] = elite.raw_metrics[i];
+        }
 
         // Add to archive (with deduplication check)
         insert_elite_kernel<<<1, 1>>>(
             archive,
-            (int*)&pool->total_spawned,  // Reuse as archive size
+            archive_size,
             d_elite,
-            nullptr,
-            0
+            voronoi_cells,
+            num_cells
         );
         
         cudaFree(d_elite);
+        cudaFree(d_compressed_size);
     }
 }
 
@@ -491,11 +599,9 @@ __global__ void neural_ca_update_kernel(
     int generation
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Allocate CA buffers
-        float* ca_input;
-        float* ca_output;
-        cudaMalloc(&ca_input, GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float));
-        cudaMalloc(&ca_output, GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float));
+        // Use pre-allocated CA buffers from ca_state
+        float* ca_input = ca_state->ca_input;
+        float* ca_output = ca_state->ca_output;
 
         // Initialize from chemical field
         dim3 init_grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16);
@@ -555,10 +661,7 @@ __global__ void neural_ca_update_kernel(
         );
 
         // Dynamic parallelism: parent waits for children
-
-        // Cleanup
-        cudaFree(ca_input);
-        cudaFree(ca_output);
+        // CA buffers are persistent and freed in destroy_organism
     }
 }
 
@@ -641,11 +744,34 @@ __global__ void behavioral_update_kernel(
             0.01f  // dt
         );
 
+        // Store chemical field snapshot after diffusion
+        int field_size = GRID_SIZE * GRID_SIZE;
+        float global_time = (float)generation;
+        store_chemical_snapshot_kernel<<<field_grid, field_block>>>(
+            chemical_field,
+            field_size,
+            global_time
+        );
+
+        // Allocate behavioral field and gradients
+        float* behavioral_field;
+        float* behavioral_gradients;
+        cudaMalloc(&behavioral_field, GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * sizeof(float));
+        cudaMalloc(&behavioral_gradients, GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * 2 * sizeof(float));
+
+        // Compute behavioral field from agent embeddings (Level 3)
+        compute_behavioral_field_kernel<<<field_grid, field_block>>>(
+            behavioral_field,
+            agents,
+            num_agents,
+            GRID_SIZE
+        );
+
         // Compute behavioral gradients (Level 3)
         dim3 grad_grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16, BEHAVIORAL_DIM);
         behavioral_gradient_kernel<<<grad_grid, field_block>>>(
-            nullptr,  // Behavioral field computed from agents
-            nullptr,  // Gradients
+            behavioral_field,
+            behavioral_gradients,
             GRID_SIZE
         );
 
@@ -655,7 +781,7 @@ __global__ void behavioral_update_kernel(
             chemical_field->concentration,
             chemical_field->gradient_x,
             chemical_field->gradient_y,
-            nullptr,  // Behavioral gradients
+            behavioral_gradients,
             num_agents,
             GRID_SIZE,
             0.01f  // dt
@@ -667,6 +793,10 @@ __global__ void behavioral_update_kernel(
             memory_tubes,
             generation
         );
+
+        // Cleanup
+        cudaFree(behavioral_field);
+        cudaFree(behavioral_gradients);
 
         // Dynamic parallelism: parent waits for children
     }
@@ -784,6 +914,45 @@ __global__ void init_organism_kernel(
             organism->behavioral_agents,
             MAX_COMPONENTS,
             seed
+        );
+
+        // Dynamic parallelism: child kernel synchronizes implicitly when parent returns
+
+        // Initialize chemical field from behavioral agent positions
+        dim3 chem_grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16);
+        dim3 chem_block(16, 16);
+        
+        // First, zero out all fields
+        init_chemical_field_kernel<<<chem_grid, chem_block>>>(
+            organism->chemical_field,
+            GRID_SIZE
+        );
+        
+        // Then set sources from agent positions
+        set_chemical_sources_from_agents_kernel<<<1, MAX_COMPONENTS>>>(
+            organism->chemical_field->sources,
+            organism->behavioral_agents,
+            MAX_COMPONENTS,
+            GRID_SIZE
+        );
+        
+        // Run initial diffusion to populate concentration from sources
+        diffusion_reaction_kernel<<<chem_grid, chem_block>>>(
+            organism->chemical_field->concentration,
+            organism->chemical_field->gradient_x,
+            organism->chemical_field->gradient_y,
+            organism->chemical_field->laplacian,
+            organism->chemical_field->sources,
+            GRID_SIZE,
+            0.1f  // larger dt for initial spread
+        );
+
+        // Store initial chemical field snapshot
+        int field_size = GRID_SIZE * GRID_SIZE;
+        store_chemical_snapshot_kernel<<<chem_grid, chem_block>>>(
+            organism->chemical_field,
+            field_size,
+            0.0f  // initial time
         );
 
         // Dynamic parallelism: parent waits for children
