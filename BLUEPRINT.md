@@ -2,6 +2,15 @@
 
 ## Architecture Philosophy
 
+**ABSOLUTE FOUNDATION: GPU-NATIVE EXECUTION**
+
+This system is GPU-native from the ground up. No CPU fallbacks. No PyTorch as a crutch. Every operation is either:
+1. **Triton kernel** - for parallel operations that map to tensor cores
+2. **Custom CUDA** - for bespoke operations requiring warp-level control
+3. **Compilation error** - if GPU execution impossible
+
+**NO FALLBACKS. NO COMPROMISES. GPU OR DEATH.**
+
 **Foundation**: Conway → Lenia → Flow-Lenia → Neural Flow-Lenia evolution path. Our Slime Mold Transformer is a **Neural Flow-Lenia organism** where Pseudopods are learned CA update rules with spatially-localized parameters, mass-conservative dynamics, and intrinsic curiosity-driven lifecycle.
 
 **Core Principles**
@@ -34,7 +43,7 @@
 - proto/component.py
 
 **Layer 1: Implementations** (depend only on Layer 0)
-- kernels/utils.py, kernels/triton_impl.py, kernels/torch_fallback.py → proto.kernel
+- kernels/utils.py, kernels/triton_impl.py, kernels/warp_native.cu → proto.kernel
 - observability/metrics.py, observability/slo.py (passive collection/validation)
 
 **Layer 2: Data structures** (depend on Layer 0-1)
@@ -52,7 +61,7 @@
 - core/organism.py → proto.model, core/pseudopod, core/chemotaxis, memory/*, observability/*
 
 **Layer 5: API** (depend on Layer 0-4)
-- api/torch_compat.py, api/native.py → core/organism
+- api/gpu_native.py → core/organism
 
 **Layer 6: Applications** (depend on Layer 0-5)
 - training/trainer.py, training/fitness.py, training/lifecycle.py
@@ -62,7 +71,7 @@
 
 ### Data Flow
 
-**User Input** → **API Layer** (torch_compat, native)
+**User Input** → **API Layer** (gpu_native)
     ↓
 **Organism** (orchestrator, owns Pool + Archive + Chemotaxis)
     ↓ uses                    ↓ owns
@@ -81,7 +90,7 @@ No cycles. Archive doesn't call anything. Observability is passive collector.
 pseudopods = self.pseudopod_pool.get_at(behavior, max_count=self._max_pseudopods)
 for pod in pseudopods:
     outputs.append(pod(pod_input, stim_input))
-merged = torch.stack(outputs).mean(0)  # Weighted sum over computational trajectories
+merged = triton_stack_mean(outputs)  # GPU-native weighted sum over computational trajectories
 ```
 
 Each forward pass computes the ensemble average over all active pseudopods at a behavioral location. The archive maintains the history of successful trajectories through configuration space, weighted by fitness. Selection collapses the ensemble to high-fitness trajectories that persist to the archive.
@@ -171,16 +180,16 @@ Each forward pass computes the ensemble average over all active pseudopods at a 
 
 **slime/ package structure**:
 - **proto/** - Protocol definitions (component, kernel, memory, model interfaces)
-- **kernels/** - GPU compute implementations (triton_impl, torch_fallback, utils)
+- **kernels/** - GPU compute implementations (triton_impl, warp_native.cu, utils)
 - **observability/** - Passive metrics collection (metrics, slo, tracing)
 - **memory/** - Data structures (archive MAP-Elites storage, pool lifecycle, tubes temporal memory)
 - **core/** - Components (state FlowState dataclass, stencil GPU-parallel ops, pseudopod Neural CA, chemotaxis navigator, organism orchestrator)
-- **api/** - Public interfaces (torch_compat nn.Module, native SlimeModel)
+- **api/** - Public interface (gpu_native SlimeModel)
 - **training/** - Training loop (trainer, losses, stability, fitness computation, lifecycle decisions)
 - **config/** - Configuration (loader with validation, YAML files for model/training/slo)
 - **bench/** - Benchmarking (datasets loaders, baseline transformer, profiling, toy tasks)
 - **tests/** - Test suites (unit/ protocol + implementation tests, integration/ end-to-end, ablations/ comparative studies, slo/ performance validation)
-- **tools/** - Utilities (visualize behavioral space, export ONNX/TorchScript, package .exe)
+- **tools/** - Utilities (visualize behavioral space, export CUDA graph, package .exe)
 
 ### Invariants (Structural Rules)
 
@@ -295,13 +304,15 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Delayed activation: Use Euclidean distance for first 2000 steps
 - Accumulate ≥1000 behavioral samples before training
 - Train DIRESA for 500 steps, then validate
-- Fallback to PCA if validation fails after 3 retries
+- Retry with adjusted hyperparameters if validation fails after 3 retries
 
 ### Lifecycle & Curiosity-Driven Selection
 
-**Fitness Metric**: `fitness = effective_rank() × coherence()`
-- effective_rank(): Parameter localization (spatial variation of CA rule)
-- coherence(): Learning progress (how fast component is improving)
+**GPU-Native Fitness Metric**: `fitness = effective_rank() × coherence()`
+- effective_rank(): Computed via GPU-native SVD kernel (warp-level parallel eigendecomposition)
+- coherence(): GPU-native temporal difference via Triton reduction kernels
+- **CRITICAL**: Both operations MUST be GPU kernels, never CPU operations
+- The multiplication itself is a fused GPU operation, not separate ops
 
 **Curiosity-Driven Dynamics**:
 - High fitness → survive and get archived
@@ -355,20 +366,20 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Tiled attention: O(M² × D / SRAM_size) HBM accesses (load tiles once, compute in SRAM)
 - Implementation: BLOCK_M=128, BLOCK_N=128, BLOCK_D=64 (adaptive to GPU SRAM)
 
-**Kernel Injection**: Constructor injection pattern
-- Pseudopod accepts Kernel interface at construction
-- Allows Triton GPU, PyTorch CPU fallback, custom implementations
-- Scale with available hardware, not hardcoded assumptions
-- Bitter Lesson: Let user provide compute capability, don't hardcode our assumptions about what hardware is available
+**GPU-Native Execution**: No fallbacks, GPU-only
+- Pseudopod uses Triton/CUDA kernels exclusively
+- Custom CUDA kernels where Triton insufficient
+- No CPU path - this is a GPU-native system
+- Bitter Lesson: Commit to the hardware, don't hedge
 
 **Multi-GPU Hash Partitioning**:
 - Device assignment: `device_id = hash(behavior_coords) % num_gpus`
 - Scales to arbitrary GPU counts without manual partitioning
 - Hash function ensures load balancing
 
-**Graceful Degradation**:
-- Forward uses Triton (speed), backward uses PyTorch einsum (gradient flow)
-- Fallback to PyTorch if Triton kernel fails
+**GPU-Native Optimization**:
+- Forward AND backward use Triton/CUDA kernels
+- Kernel failure = compilation error, not runtime fallback
 - Adaptive tile sizes based on SRAM availability
 
 ### Fitness & Selection
@@ -508,7 +519,7 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - Failure: Behavioral embeddings fail to preserve distances → diversity loss
 - Why: Insufficient training data (needs ~1000 samples). Raw metrics fluctuate wildly during early training. Intrinsic dimensionality > learned dimensions (e.g., 8D manifold compressed to 3D). Training modifies behavioral distribution faster than DIRESA adapts.
 - Detection: Trustworthiness < 0.70, Continuity < 0.70, reconstruction error > 0.8, dimensions stuck at min/max for > 5000 steps
-- Mitigation: Delayed activation (2000 steps), EMA-smoothed metrics, adaptive dimension bounds (2-10D), fallback to PCA
+- Mitigation: Delayed activation (2000 steps), EMA-smoothed metrics, adaptive dimension bounds (2-10D), retry with different hyperparameters
 
 **3. Pool Collapse to Single Strategy**
 - Failure: All pseudopods converge to identical behavior → coverage stalls
@@ -519,13 +530,13 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 **4. Memory Budget Violation from Archive Growth**
 - Failure: Archive grows unbounded → OOM crash
 - Why: Every elite addition creates storage (low-rank + deltas). Delta chains grow without GC. Content-addressable hash table doesn't shrink (fragmentation). DIRESA autoencoder grows with dimension increases.
-- Detection: Memory growth > 10% per 1000 steps, archive size > 2 × num_centroids, delta chains > 50, torch.cuda.OutOfMemoryError
+- Detection: Memory growth > 10% per 1000 steps, archive size > 2 × num_centroids, delta chains > 50, CUDA out of memory
 - Mitigation: Hard limits (1000 centroids, 10 elites/centroid), aggressive GC every 100 additions, delta chain pruning (collapse > 20), remove oldest elites when tight
 
 **5. GPU Kernel Launch Failures**
-- Failure: Triton launches fail → fallback to slow PyTorch → throughput collapse
+- Failure: Triton launches fail → system halts with compilation error
 - Why: Too many pseudopods active (register pressure). Tile sizes too large for SRAM. Tensor shapes misaligned with warp size (32). CUDA context switching overhead from multi-GPU hash partitioning.
-- Detection: Fallback rate > 10%, occupancy < 50%, launch latency spikes > 2.0 × EMA, memory allocation retries
+- Detection: Kernel compilation errors, occupancy < 50%, launch latency spikes > 2.0 × EMA, memory allocation retries
 - Mitigation: Adaptive max_pseudopods (scale with GPU memory), tile size autotuning (start 128, reduce to 64), batched kernel launches, hash partition validation
 
 **6. Loss Gates Over-Trigger**
@@ -607,7 +618,7 @@ Application: apply_delta reconstructs weights by applying operations sequentiall
 - `max_archive_centroids = min(1000, int(gpu_memory_gb * 0.15 / memory_per_centroid_gb))`
 
 **Compute Budget (per-step, target 100ms)**:
-- Forward pass (50ms): Per-pseudopod 3ms Triton, 12ms PyTorch
+- Forward pass (50ms): Per-pseudopod 3ms Triton/CUDA
 - Backward pass (30ms): Gradients, optimizer
 - Lifecycle (5ms amortized): Birth/death every 100 steps
 - Archive ops (10ms amortized): Elite addition, sampling
@@ -674,7 +685,7 @@ Q: samples ≥ 1000? → NO: Continue Euclidean
 Q: Train 500 steps → Trustworthiness ≥ 0.70 AND Continuity ≥ 0.70?
   → YES: Activate DIRESA
   → NO: Retry < 3 times? → YES: Retrain 2× lr
-                         → NO: Fallback to PCA
+                         → NO: Retry with different hyperparameters
 ```
 
 **When to Trigger Loss Gate?**
@@ -702,7 +713,7 @@ Q: Launch succeeded?
                              → NO: Reduce 2×
   → NO: Q: Out of SRAM? → Reduce 2×
         Q: Out of registers? → Reduce BLOCK_D
-        → Otherwise: Fallback PyTorch
+        → Otherwise: Fix kernel parameters and retry
 ```
 
 **Archive Sampling vs Random Init?**

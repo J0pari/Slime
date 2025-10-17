@@ -2,7 +2,7 @@
 
 **Core idea**: A neural network learns multiple cellular automaton update rules simultaneously. Each rule explores a different computational path. Successful paths survive and get archived. Failed paths are replaced by sampling from archive history.
 
-**Why this works**: Traditional neural networks collapse to a single solution. This system maintains a population of diverse solutions, each specialized for different computational patterns. The archive prevents mode collapse while selection ensures quality.
+**Intended behavior**: Traditional neural networks collapse to a single solution. This system would maintain a population of diverse solutions, each specialized for different computational patterns. The archive should prevent mode collapse while selection ensures quality.
 
 **Implementation**: Multi-head Neural CAs with Flow-Lenia dynamics (mass-conserving learned update rules). CVT-MAP-Elites archive with distance-preserving embeddings. Curiosity-driven lifecycle where learning progress determines survival.
 
@@ -21,10 +21,8 @@ python -c "import torch; print(torch.cuda.is_available())"
 ## Quick Start
 
 ```bash
-python run.py
+python run.py  # Currently demonstrates basic CA forward pass
 ```
-
-Trains on MNIST (28x28 images → 10 classes) using TINY architecture (4 heads, 16-dim, 64 hidden).
 
 ## Architecture
 
@@ -32,7 +30,7 @@ Trains on MNIST (28x28 images → 10 classes) using TINY architecture (4 heads, 
 
 A pseudopod is a learned update rule for a cellular automaton. Standard neural networks apply the same computation everywhere. CAs let computation vary spatially - different cells can follow different update rules.
 
-Each pseudopod traces a trajectory through parameter space:
+Each pseudopod would trace a trajectory through parameter space:
 
 ```
 Input (latent + stimulus)
@@ -50,57 +48,53 @@ Mass-conserving value propagation (∑ output = ∑ input)
 Spatially-modulated output projection
 ```
 
-**Mass conservation** (∑ output = ∑ input): Physical constraint ensures stability. Unconstrained CAs diverge.
+**Mass conservation** (∑ output = ∑ input): Physical constraint for stability.
 
-**Parameter localization**: CA rule parameters vary by position, not global. Enables spatial specialization.
+**Parameter localization**: CA rule parameters should vary by position.
 
-**Multi-head**: 4 parallel update rules discover different computational strategies.
+**Multi-head**: Multiple parallel update rules planned.
 
-**Ensemble computation**: Multiple pseudopods active simultaneously. Outputs averaged. Archive stores which parameter configurations worked at which behavioral locations. Sampling from archive bootstraps new pseudopods from successful trajectories.
+**Ensemble computation**: Multiple pseudopods would be active simultaneously, with archive storing successful configurations.
 
 ### GPU Acceleration
 
-**Problem**: CA updates are embarrassingly parallel but memory-bound. Naive implementation loads weights from HBM repeatedly.
+**Target**: Tile computation to fit in SRAM. Triton kernels to fuse operations.
 
-**Solution**: Tile computation to fit in SRAM (on-chip fast memory). Load tiles once, compute entirely in SRAM, write results.
+**Expected impact**: O(M² × D) HBM accesses → O(M² × D / SRAM_size).
 
-**Impact**: O(M² × D) HBM accesses → O(M² × D / SRAM_size). 10-20x speedup on typical workloads.
-
-**Implementation**: Triton kernels fuse operations (multi-head projections, Flow-Lenia growth, mass-conserving propagation). Adaptive tile sizes (BLOCK=128/64/32) based on GPU SRAM availability. Forward uses Triton for speed, backward uses PyTorch einsum for correct gradients.
+**Planned implementation**: Adaptive tile sizes based on GPU SRAM availability.
 
 ### Archive: Trajectory Memory
 
-**Problem**: Training finds one solution then stops. Diverse solutions exist but gradient descent collapses to nearest local optimum.
+**Challenge**: Training typically finds one solution then stops.
 
-**Solution**: Archive stores successful parameter configurations indexed by behavior. When pool needs new pseudopods, sample from archive locations with similar behavior. This bootstraps from known-good trajectories instead of random initialization.
+**Approach**: Archive to store successful parameter configurations indexed by behavior.
 
-**Behavioral space**: Each pseudopod generates metrics during runtime (CA mass conservation, gradient magnitudes, activation patterns, hardware utilization). These form a high-dimensional behavioral description. Dimensionality discovered via covariance rank, then compressed to 3-5D using DIRESA (distance-preserving learned embeddings).
+**Behavioral space**: Each pseudopod would generate runtime metrics. DIRESA embeddings planned for dimensionality reduction.
 
-**Storage efficiency**: 
-- SVD low-rank factorization: 8x compression (D×D → D×k + k×D)
-- Delta compression: 10-20x (store diffs vs parent in same Voronoi cell)
-- Content-addressable hashing: Deduplicate identical elites
-- **Total: 80-160x compression** (4MB elite → 25-50KB)
+**Planned storage optimization**: 
+- SVD low-rank factorization
+- Delta compression
+- Content-addressable hashing
+- Target: 80-160x compression
 
-**Adaptive partitioning**: Voronoi cells grow in dense regions, shrink in sparse regions. Prevents unbalanced storage where some cells have 1000 elites and others have 0.
+**Adaptive partitioning**: Voronoi cells planned to adapt based on density.
 
 ### Selection: Curiosity-Driven Survival
 
-**Fitness = task performance × compute efficiency × CA quality**:
-- Task (70%): Gradient magnitude (high gradient = affects loss)
-- Efficiency (20%): Hardware utilization (FLOPs, bandwidth, tensor cores)
-- Conservation (10%): Mass conservation quality (stable CA dynamics)
+**Target fitness formula = effective_rank() × coherence()**:
+- Planned weights: 70% gradient magnitude, 20% efficiency, 10% conservation
 
-**Curiosity metric**: `coherence()` measures learning progress. High coherence = learning fast = survive. Low coherence = plateaued = replace with archive sample.
+**Curiosity metric**: `coherence()` to measure learning progress.
 
-**Selection pressure**: Every 100 steps, compute fitness for all pseudopods. Top performers survive and get archived. Bottom performers culled and replaced. This collapses the ensemble toward successful trajectories while archive maintains diversity.
+**Selection mechanism**: Periodic fitness evaluation planned.
 
-**Stability**: 
-- Warmup (0-100 steps): No lifecycle. Let gradients stabilize.
-- Gentle (100-500 steps): Reduced culling. Gradual pressure.
-- Loss gates: If loss spikes >10× EMA, freeze lifecycle until stable.
+**Stability mechanisms planned**: 
+- Warmup phase
+- Gentle introduction
+- Loss gates
 
-**Why this works**: Standard neural networks have no memory of alternative solutions. Once gradient descent finds a local optimum, training stops. Archive maintains history of all successful trajectories. Selection explores this history guided by current task performance.
+**Hypothesis**: Archive could maintain history of alternative solutions.
 
 ## Configuration
 
@@ -116,22 +110,21 @@ TINY = ArchitectureConfig(
 ## Training
 
 ```bash
-python run.py
+python run.py  # Basic forward pass demo
 ```
 
-Loss function (6 terms):
-- Reconstruction (1.0)
-- Rank regularization (0.01)
-- Coherence regularization (0.01)
-- Diversity (0.1)
-- Archive coverage (0.05)
-- Fitness variance (0.05)
+Planned loss components:
+- Reconstruction
+- Rank regularization
+- Coherence regularization
+- Diversity
+- Archive coverage
+- Fitness variance
 
 ## Testing
 
 ```bash
-pytest slime/tests/unit/test_triton_kernels.py -v  # 14/14, 33/33 constraints
-pytest slime/tests/unit/test_lifecycle.py -v        # 22 tests
+pytest slime/tests/unit/  # Unit tests for individual components
 ```
 
 ## File Structure
@@ -148,10 +141,10 @@ slime/
 └── tests/              # Unit tests with causal constraints
 ```
 
-## Current Status
+## Development Focus
 
-- Triton kernels: unit testing in progress
-- Integration: In progress
+- Primary reference: BLUEPRINT.md
+- Construction plan: HEALING_PLAN.md
 
 ## References
 
