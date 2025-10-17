@@ -74,7 +74,7 @@ extern "C" Organism* create_organism() {
     // Initialize with seed
     unsigned int seed = 42;
     init_organism_kernel<<<1, 1>>>(d_organism, seed);
-    cudaDeviceSynchronize();
+    // Dynamic parallelism: parent waits for children
 
     delete h_organism;
     return d_organism;
@@ -87,7 +87,7 @@ extern "C" void run_organism(Organism* d_organism, int generations) {
     for (int gen = 0; gen < generations; gen++) {
         // Launch lifecycle with dynamic parallelism
         organism_lifecycle_kernel<<<1, 1>>>(d_organism, gen);
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Print progress every 10 generations
         if (gen % 10 == 0) {

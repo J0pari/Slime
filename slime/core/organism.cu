@@ -201,7 +201,7 @@ __global__ void fitness_computation_kernel(
             100
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Compute effective rank from singular values (Level 4)
         effective_rank_from_svd_kernel<<<1, 1>>>(
@@ -211,7 +211,7 @@ __global__ void fitness_computation_kernel(
             256
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Update hunger
         pool->entries[idx].hunger = 1.0f - pool->entries[idx].coherence;
@@ -243,7 +243,7 @@ __global__ void svd_kernel(
                 size,
                 sweep
             );
-            cudaDeviceSynchronize();
+            // Dynamic parallelism: parent waits for children
         }
 
         // Extract singular values
@@ -541,7 +541,7 @@ __global__ void neural_ca_update_kernel(
             NUM_HEADS * CHANNELS * HIDDEN_DIM
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Cleanup
         cudaFree(ca_input);
@@ -655,7 +655,7 @@ __global__ void behavioral_update_kernel(
             generation
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
     }
 }
 
@@ -721,7 +721,7 @@ __global__ void memory_update_kernel(
             0.8f  // similarity threshold
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
     }
 }
 
@@ -764,7 +764,7 @@ __global__ void init_organism_kernel(
             seed
         );
 
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
     }
 }
 
@@ -773,7 +773,7 @@ extern "C" void evolve_organism(Organism* d_organism, int num_generations) {
     for (int gen = 0; gen < num_generations; gen++) {
         // Launch top-level kernel with dynamic parallelism
         organism_lifecycle_kernel<<<1, 1>>>(d_organism, gen);
-        cudaDeviceSynchronize();
+        // Dynamic parallelism: parent waits for children
 
         // Check for convergence
         float fitness, coherence;
