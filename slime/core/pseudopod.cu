@@ -192,12 +192,17 @@ __global__ void flow_lenia_dynamics_kernel(
         mass_after += ca_update[base_idx + channel_offset + c];
     }
 
-    // Mass conservation correction
+    // Mass conservation correction using shared memory value
     if (fabsf(mass_after) > MASS_CONSERVATION_EPSILON) {
-        float correction = mass_before / mass_after;
+        float correction = local_mass[threadIdx.y][threadIdx.x] / mass_after;
         for (int c = 0; c < HEAD_DIM; c++) {
             ca_update[base_idx + channel_offset + c] *= correction;
         }
+    }
+
+    // Store total mass in global buffer for monitoring
+    if (threadIdx.x == 0 && threadIdx.y == 0 && mass_buffer != nullptr) {
+        mass_buffer[head] = mass_after;
     }
 
     // Store mass for verification

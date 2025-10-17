@@ -9,15 +9,31 @@ int main(int argc, char** argv) {
     printf("=== Slime Mold Transformer - GPU Native ===\n");
     printf("Starting emergent CA evolution...\n\n");
 
-    // Check CUDA device
-    int device;
-    cudaGetDevice(&device);
+    // Initialize CUDA and check device
+    int device = 0;
+    cudaError_t err = cudaSetDevice(device);
+    if (err != cudaSuccess) {
+        const char* errStr = cudaGetErrorString(err);
+        printf("ERROR: Failed to set CUDA device (code %d): %s\n", err, errStr ? errStr : "unknown");
+        return 1;
+    }
+
+    err = cudaGetDevice(&device);
+    if (err != cudaSuccess) {
+        printf("ERROR: Failed to get CUDA device: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    
     cudaDeviceProp props;
-    cudaGetDeviceProperties(&props, device);
+    err = cudaGetDeviceProperties(&props, device);
+    if (err != cudaSuccess) {
+        printf("ERROR: Failed to get device properties: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
 
     printf("Device: %s\n", props.name);
     printf("Compute capability: %d.%d\n", props.major, props.minor);
-    printf("Dynamic parallelism: %s\n", props.major >= 3 && props.minor >= 5 ? "YES" : "NO");
+    printf("Dynamic parallelism: %s\n", (props.major > 3 || (props.major == 3 && props.minor >= 5)) ? "YES" : "NO");
     printf("Tensor cores: %s\n", props.major >= 7 ? "YES" : "NO");
     printf("\n");
 

@@ -99,6 +99,9 @@ __global__ void behavioral_gradient_kernel(
 
     int field_idx = (y * grid_size + x) * BEHAVIORAL_DIM + dim;
 
+    // Use field_idx to access and update behavioral field
+    (void)field_idx;  // Suppress warning - field computation needed for future updates
+
     // Sobel operator for robust gradient estimation
     float sobel_x[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
     float sobel_y[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};

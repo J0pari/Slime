@@ -391,6 +391,10 @@ __global__ void selection_kernel(
     if (tid == 0 && best_indices[0] >= 0) {
         PoolEntry* best = &pool->entries[best_indices[0]];
 
+        // Allocate elite on device memory for kernel launch
+        GPUElite* d_elite;
+        cudaMalloc((void**)&d_elite, sizeof(GPUElite));
+        
         // Create elite from best component
         GPUElite elite;
         elite.fitness = best->fitness;
@@ -398,15 +402,24 @@ __global__ void selection_kernel(
         elite.effective_rank = best->fitness / (best->coherence + 1e-10f);
         elite.genome_hash = gpu_sha256(best->genome, GENOME_SIZE);
         elite.generation = generation;
+        
+        // Copy to device memory manually (device-to-device)
+        d_elite->fitness = elite.fitness;
+        d_elite->coherence = elite.coherence;
+        d_elite->effective_rank = elite.effective_rank;
+        d_elite->genome_hash = elite.genome_hash;
+        d_elite->generation = elite.generation;
 
         // Add to archive (with deduplication check)
         insert_elite_kernel<<<1, 1>>>(
             archive,
             (int*)&pool->total_spawned,  // Reuse as archive size
-            &elite,
+            d_elite,
             nullptr,
             0
         );
+        
+        cudaFree(d_elite);
     }
 }
 
@@ -669,6 +682,9 @@ __global__ void store_navigation_history_kernel(
     if (tid >= MAX_COMPONENTS) return;
 
     // Pack agent state into memory
+    float* d_memory_data;
+    cudaMalloc((void**)&d_memory_data, (BEHAVIORAL_DIM + 4) * sizeof(float));
+    
     float memory_data[BEHAVIORAL_DIM + 4];
 
     // Position and velocity
@@ -681,6 +697,11 @@ __global__ void store_navigation_history_kernel(
     for (int i = 0; i < BEHAVIORAL_DIM; i++) {
         memory_data[4 + i] = agents[tid].behavioral_coords[i];
     }
+    
+    // Copy to device memory
+    for (int i = 0; i < BEHAVIORAL_DIM + 4; i++) {
+        d_memory_data[i] = memory_data[i];
+    }
 
     // Store with importance based on exploration
     float importance = agents[tid].exploration_noise;
@@ -688,10 +709,11 @@ __global__ void store_navigation_history_kernel(
     if (tid == 0) {
         store_memory_kernel<<<1, 1>>>(
             tubes,
-            memory_data,
+            d_memory_data,
             BEHAVIORAL_DIM + 4,
             importance
         );
+        cudaFree(d_memory_data);
     }
 }
 
