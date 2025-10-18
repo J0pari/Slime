@@ -193,8 +193,9 @@ __global__ void compress_genome_kernel(
         }
 
         // Store U matrix (quantized to 8-bit)
-        int u_elements = min(genome_length, 1024) * rank;
-        for (int i = 0; i < u_elements; i++) {
+        int u_rows = min(genome_length / 32, 1024 / rank);
+        int u_elements = u_rows * rank;
+        for (int i = 0; i < u_elements && i < 1024; i++) {
             compressed[offset++] = (uint8_t)((U[i] + 1.0f) * 127.5f);
         }
 
