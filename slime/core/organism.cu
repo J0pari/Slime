@@ -62,12 +62,12 @@ struct Organism {
 };
 
 // Forward declarations for all kernels
-__global__ void component_evolution_kernel(ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, ChemicalField* chemical_field, BehavioralState* behavioral_agents, float* fitness_history, float* coherence_history, int generation);
+__global__ void component_evolution_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, ChemicalField* chemical_field, BehavioralState* behavioral_agents, float* fitness_history, float* coherence_history, int generation);
 __global__ void neural_ca_update_kernel(MultiHeadCAState* ca_state, ChemicalField* chemical_field, float* effective_rank_history, int generation);
 __global__ void behavioral_update_kernel(BehavioralState* agents, ChemicalField* chemical_field, TemporalTube* memory_tubes, int generation);
 __global__ void memory_update_kernel(TemporalTube* tubes, float* fitness_history, float* coherence_history, int generation);
 __global__ void fitness_computation_kernel(ComponentPool* pool, ChemicalField* chemical_field, float* fitness_history, float* coherence_history, int generation);
-__global__ void selection_kernel(ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, BehavioralState* behavioral_agents, int generation);
+__global__ void selection_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, BehavioralState* behavioral_agents, int generation);
 __global__ void spawn_wave_kernel(ComponentPool* pool, float spawn_probability, int generation);
 __global__ void culling_kernel(ComponentPool* pool, float fitness_threshold, float hunger_threshold);
 __global__ void svd_kernel(float* matrix, float* singular_values, int size);
@@ -93,6 +93,7 @@ __global__ void organism_lifecycle_kernel(
 
         // Component evolution (Level 2)
         component_evolution_kernel<<<component_grid, component_block>>>(
+            organism,
             organism->pool,
             organism->archive,
             organism->voronoi_cells,
@@ -137,6 +138,7 @@ __global__ void organism_lifecycle_kernel(
 
 // Level 2: Component evolution (launches Level 3 kernels)
 __global__ void component_evolution_kernel(
+    Organism* organism,
     ComponentPool* pool,
     GPUElite* archive,
     VoronoiCell* voronoi_cells,
@@ -164,6 +166,7 @@ __global__ void component_evolution_kernel(
 
         // Selection and reproduction (Level 3)
         selection_kernel<<<1, 32>>>(
+            organism,
             pool,
             archive,
             voronoi_cells,
@@ -425,6 +428,7 @@ __global__ void effective_rank_from_svd_kernel(
 
 // Level 3: Selection and archiving
 __global__ void selection_kernel(
+    Organism* organism,
     ComponentPool* pool,
     GPUElite* archive,
     VoronoiCell* voronoi_cells,
@@ -470,11 +474,9 @@ __global__ void selection_kernel(
         PoolEntry* best = &pool->entries[best_indices[0]];
         BehavioralState* agent = &behavioral_agents[best_indices[0]];
 
-        // Allocate compressed genome buffer
-        uint8_t* d_compressed;
-        uint32_t* d_compressed_size;
-        cudaMalloc(&d_compressed, GENOME_SIZE * sizeof(uint8_t));
-        cudaMalloc(&d_compressed_size, sizeof(uint32_t));
+        // Use pre-allocated compressed genome pool
+        uint8_t* d_compressed = organism->compressed_genome_pool + (generation % MAX_ARCHIVE_SIZE) * GENOME_SIZE;
+        uint32_t* d_compressed_size = organism->compressed_size_pool + (generation % MAX_ARCHIVE_SIZE);
 
         // Compress genome using SVD-based compression
         compress_genome_kernel<<<1, 256>>>(
@@ -485,9 +487,8 @@ __global__ void selection_kernel(
             MAX_RANK
         );
 
-        // Allocate elite on device memory
-        GPUElite* d_elite;
-        cudaMalloc((void**)&d_elite, sizeof(GPUElite));
+        // Use pre-allocated elite staging pool
+        GPUElite* d_elite = organism->elite_staging_pool + (generation % MAX_ARCHIVE_SIZE);
         
         // Create elite from best component
         GPUElite elite;
@@ -548,8 +549,7 @@ __global__ void selection_kernel(
             num_cells
         );
         
-        cudaFree(d_elite);
-        cudaFree(d_compressed_size);
+        // No cudaFree needed - using pre-allocated pools
     }
 }
 
