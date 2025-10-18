@@ -64,7 +64,7 @@ struct Organism {
 // Forward declarations for all kernels
 __global__ void component_evolution_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, ChemicalField* chemical_field, BehavioralState* behavioral_agents, float* fitness_history, float* coherence_history, int generation);
 __global__ void neural_ca_update_kernel(MultiHeadCAState* ca_state, ChemicalField* chemical_field, float* effective_rank_history, int generation);
-__global__ void behavioral_update_kernel(BehavioralState* agents, ChemicalField* chemical_field, TemporalTube* memory_tubes, int generation);
+__global__ void behavioral_update_kernel(Organism* organism, BehavioralState* agents, ChemicalField* chemical_field, TemporalTube* memory_tubes, int generation);
 __global__ void memory_update_kernel(TemporalTube* tubes, float* fitness_history, float* coherence_history, int generation);
 __global__ void fitness_computation_kernel(ComponentPool* pool, ChemicalField* chemical_field, float* fitness_history, float* coherence_history, int generation);
 __global__ void selection_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, VoronoiCell* voronoi_cells, int num_cells, int* archive_size, BehavioralState* behavioral_agents, int generation);
@@ -76,7 +76,7 @@ __global__ void effective_rank_from_svd_kernel(float* singular_values, float* fi
 __global__ void jacobi_sweep_kernel(float* matrix, float* workspace, int size, int sweep);
 __global__ void initialize_ca_from_field_kernel(float* ca_state, float* chemical_concentration, int grid_size);
 __global__ void update_field_from_ca_kernel(float* chemical_concentration, float* ca_state, int grid_size);
-__global__ void store_navigation_history_kernel(BehavioralState* agents, TemporalTube* tubes, int generation);
+__global__ void store_navigation_history_kernel(Organism* organism, BehavioralState* agents, TemporalTube* tubes, int generation);
 
 // Level 1: Top-level organism kernel (launches Level 2 kernels)
 __global__ void organism_lifecycle_kernel(
@@ -118,6 +118,7 @@ __global__ void organism_lifecycle_kernel(
 
         // Behavioral navigation (Level 2)
         behavioral_update_kernel<<<component_grid, component_block>>>(
+            organism,
             organism->behavioral_agents,
             organism->chemical_field,
             organism->memory_tubes,
@@ -744,6 +745,7 @@ __global__ void update_field_from_ca_kernel(
 
 // Level 2: Behavioral update
 __global__ void behavioral_update_kernel(
+    Organism* organism,
     BehavioralState* agents,
     ChemicalField* chemical_field,
     TemporalTube* memory_tubes,
@@ -775,11 +777,9 @@ __global__ void behavioral_update_kernel(
             global_time
         );
 
-        // Allocate behavioral field and gradients
-        float* behavioral_field;
-        float* behavioral_gradients;
-        cudaMalloc(&behavioral_field, GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * sizeof(float));
-        cudaMalloc(&behavioral_gradients, GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * 2 * sizeof(float));
+        // Use pre-allocated behavioral pools
+        float* behavioral_field = organism->behavioral_field_pool;
+        float* behavioral_gradients = organism->behavioral_gradient_pool;
 
         // Compute behavioral field from agent embeddings (Level 3)
         compute_behavioral_field_kernel<<<field_grid, field_block>>>(
@@ -811,14 +811,13 @@ __global__ void behavioral_update_kernel(
 
         // Store navigation history in memory tubes (Level 3)
         store_navigation_history_kernel<<<1, 256>>>(
+            organism,
             agents,
             memory_tubes,
             generation
         );
 
-        // Cleanup
-        cudaFree(behavioral_field);
-        cudaFree(behavioral_gradients);
+        // No cudaFree needed - using pre-allocated pools
 
         // Dynamic parallelism: parent waits for children
     }
@@ -826,6 +825,7 @@ __global__ void behavioral_update_kernel(
 
 // Helper: Store navigation history
 __global__ void store_navigation_history_kernel(
+    Organism* organism,
     BehavioralState* agents,
     TemporalTube* tubes,
     int generation
@@ -833,9 +833,8 @@ __global__ void store_navigation_history_kernel(
     int tid = threadIdx.x;
     if (tid >= MAX_COMPONENTS) return;
 
-    // Pack agent state into memory
-    float* d_memory_data;
-    cudaMalloc((void**)&d_memory_data, (BEHAVIORAL_DIM + 4) * sizeof(float));
+    // Use pre-allocated memory data pool
+    float* d_memory_data = organism->memory_data_pool + tid * (BEHAVIORAL_DIM + 4);
     
     float memory_data[BEHAVIORAL_DIM + 4];
 
@@ -865,7 +864,6 @@ __global__ void store_navigation_history_kernel(
             BEHAVIORAL_DIM + 4,
             importance
         );
-        cudaFree(d_memory_data);
     }
 }
 
