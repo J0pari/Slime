@@ -48,6 +48,17 @@ struct Organism {
     float learning_rate;
     float mutation_rate;
     float exploration_rate;
+
+    // Pre-allocated memory pools to replace device-side cudaMalloc
+    uint8_t* compressed_genome_pool;      // Pool for compressed genomes (MAX_ARCHIVE_SIZE * GENOME_SIZE)
+    uint32_t* compressed_size_pool;       // Pool for compressed sizes (MAX_ARCHIVE_SIZE)
+    GPUElite* elite_staging_pool;         // Pool for elite staging (MAX_ARCHIVE_SIZE)
+    float* behavioral_field_pool;         // Pool for behavioral fields (MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM)
+    float* behavioral_gradient_pool;      // Pool for behavioral gradients (MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * 2)
+    float* svd_workspace_pool;            // Pool for SVD matrices (MAX_COMPONENTS * GENOME_SIZE * GENOME_SIZE)
+    float* svd_singular_values_pool;      // Pool for SVD singular values (MAX_COMPONENTS * GENOME_SIZE)
+    float* coherence_workspace_pool;      // Pool for coherence computation (MAX_COMPONENTS)
+    float* memory_data_pool;              // Pool for memory entries (MAX_COMPONENTS * (BEHAVIORAL_DIM + 4))
 };
 
 // Forward declarations for all kernels
@@ -139,7 +150,10 @@ __global__ void component_evolution_kernel(
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // Compute fitness for all components (Level 3)
-        fitness_computation_kernel<<<(pool->capacity + 255) / 256, 256>>>(
+        // Each warp processes one organism, 8 warps per block of 256 threads
+        int warps_per_block = 256 / 32;  // 8 warps
+        int num_blocks = (pool->capacity + warps_per_block - 1) / warps_per_block;
+        fitness_computation_kernel<<<num_blocks, 256>>>(
             pool,
             chemical_field,
             fitness_history,
@@ -187,79 +201,87 @@ __global__ void fitness_computation_kernel(
     float* coherence_history,
     int generation
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each warp processes one organism collaboratively
+    const int lane = threadIdx.x % 32;
+    const int warp_id = threadIdx.x / 32;
+    const int warps_per_block = blockDim.x / 32;
+    const int idx = blockIdx.x * warps_per_block + warp_id;
+
     if (idx >= pool->capacity || !pool->entries[idx].alive) return;
 
-    // Launch Level 4 kernels for SVD and coherence
-    if (threadIdx.x == 0) {
-        // Allocate temporary buffers
-        float* weight_matrix;
-        float* singular_values;
-        float* prediction_errors;
+    // Warp-level fitness computation - no memory allocations, pure register operations
 
-        cudaMalloc((void**)&weight_matrix, GENOME_SIZE * sizeof(float));
-        cudaMalloc((void**)&singular_values, 256 * sizeof(float));
-        cudaMalloc((void**)&prediction_errors, 100 * sizeof(float));
-
-        // Copy genome to weight matrix (device-to-device)
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            weight_matrix[i] = pool->entries[idx].genome[i];
+    float* genome = pool->entries[idx].genome;
+    
+    // Compute genome L2 norm via warp reduction (fitness proxy)
+    float local_sum = 0.0f;
+    for (int i = lane; i < GENOME_SIZE; i += 32) {
+        float val = genome[i];
+        local_sum += val * val;
+    }
+    
+    // Warp-level reduction using shuffle
+    for (int offset = 16; offset > 0; offset /= 2) {
+        local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    
+    float genome_magnitude = __shfl_sync(0xffffffff, local_sum, 0);
+    
+    // Compute coherence as correlation between genome and chemical field
+    float* curr_field = chemical_field->concentration;
+    int field_size = GRID_SIZE * GRID_SIZE;
+    int sample_stride = field_size / GENOME_SIZE;
+    
+    float correlation = 0.0f;
+    for (int i = lane; i < GENOME_SIZE; i += 32) {
+        int field_idx = i * sample_stride;
+        if (field_idx < field_size) {
+            correlation += genome[i] * curr_field[field_idx];
         }
-
-        // Launch SVD kernel (Level 4)
-        svd_kernel<<<1, 256>>>(
-            weight_matrix,
-            singular_values,
-            GENOME_SIZE
-        );
-
-        // Get previous and current chemical field states from history for prediction
-        float* prev_field = nullptr;
-        float* curr_field = chemical_field->concentration;
-        int field_size = GRID_SIZE * GRID_SIZE;
-        
-        // If we have at least 2 snapshots in history, use them
-        if (chemical_field->history->count >= 2) {
-            int prev_idx = (chemical_field->history->head - 2 + chemical_field->history->capacity) % chemical_field->history->capacity;
-            prev_field = chemical_field->history->entries[prev_idx].data;
-        } else {
-            // Use current field as both prev and current (zero error)
-            prev_field = curr_field;
+    }
+    
+    // Warp reduction for correlation
+    for (int offset = 16; offset > 0; offset /= 2) {
+        correlation += __shfl_down_sync(0xffffffff, correlation, offset);
+    }
+    
+    float coherence_val = __shfl_sync(0xffffffff, correlation, 0);
+    coherence_val = tanhf(coherence_val / (sqrtf(genome_magnitude) + 1e-6f));
+    coherence_val = (coherence_val + 1.0f) * 0.5f;  // Map [-1,1] to [0,1]
+    
+    // Effective rank approximation via genome entropy
+    float entropy = 0.0f;
+    for (int i = lane; i < GENOME_SIZE; i += 32) {
+        float p = fabsf(genome[i]) / (sqrtf(genome_magnitude) + 1e-6f);
+        if (p > 1e-6f) {
+            entropy -= p * log2f(p);
         }
+    }
+    
+    // Warp reduction for entropy
+    for (int offset = 16; offset > 0; offset /= 2) {
+        entropy += __shfl_down_sync(0xffffffff, entropy, offset);
+    }
+    
+    float effective_rank = __shfl_sync(0xffffffff, entropy, 0);
+    
+    // Only lane 0 writes results
+    if (lane == 0) {
+        float fitness_val = effective_rank * coherence_val;
         
-        // Launch coherence kernel (Level 4) - uses genome to predict field evolution
-        coherence_computation_kernel<<<(field_size + 255) / 256, 256>>>(
-            pool->entries[idx].genome,
-            prev_field,
-            curr_field,
-            field_size,
-            &pool->entries[idx].coherence
-        );
-
-        // Dynamic parallelism: parent waits for children
-
-        // Compute effective rank from singular values (Level 4)
-        effective_rank_from_svd_kernel<<<1, 1>>>(
-            singular_values,
-            &pool->entries[idx].fitness,
-            &pool->entries[idx].coherence,
-            256
-        );
-
-        // Dynamic parallelism: parent waits for children
-
-        // Update hunger
-        pool->entries[idx].hunger = 1.0f - pool->entries[idx].coherence;
-
-        // Store in history
+        pool->entries[idx].fitness = fitness_val;
+        pool->entries[idx].coherence = coherence_val;
+        pool->entries[idx].hunger = 1.0f - coherence_val;
+        
         int history_idx = generation * pool->capacity + idx;
-        fitness_history[history_idx] = pool->entries[idx].fitness;
-        coherence_history[history_idx] = pool->entries[idx].coherence;
-
-        // Cleanup
-        cudaFree(weight_matrix);
-        cudaFree(singular_values);
-        cudaFree(prediction_errors);
+        fitness_history[history_idx] = fitness_val;
+        coherence_history[history_idx] = coherence_val;
+        
+        // Debug: print first organism computation on first generation
+        if (idx == 0 && generation == 0) {
+            printf("[WARP_COMPUTE] idx=%d, genome_mag=%.4f, coherence=%.4f, entropy=%.4f, fitness=%.4f\n",
+                   idx, genome_magnitude, coherence_val, effective_rank, fitness_val);
+        }
     }
 }
 
@@ -914,6 +936,14 @@ __global__ void init_organism_kernel(
             organism->behavioral_agents,
             MAX_COMPONENTS,
             seed
+        );
+
+        // Initialize chemical field
+        dim3 chem_grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16);
+        dim3 chem_block(16, 16);
+        init_chemical_field_kernel<<<chem_grid, chem_block>>>(
+            organism->chemical_field,
+            GRID_SIZE
         );
 
         // Dynamic parallelism: child kernel synchronizes implicitly when parent returns
