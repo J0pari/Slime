@@ -171,19 +171,22 @@ __global__ void coherence_kernel(
 
 // Fused fitness kernel with dynamic parallelism (parent kernel)
 __global__ void fitness_fused_kernel(
+    Organism* organism,
     float* __restrict__ correlation_matrix,
     float* __restrict__ prediction_errors,
     float* __restrict__ fitness_out,
     int matrix_size,
     int history_length
 ) {
-    // Allocate device memory for intermediate results
-    float *S, *effective_rank_val, *coherence_val;
+    // Use pre-allocated pools for intermediate results
+    int tid = blockIdx.x;
+    if (tid >= MAX_COMPONENTS) return;
+    
+    float* S = organism->fitness_svd_pool + tid * GENOME_SIZE;
+    float* effective_rank_val = organism->fitness_rank_pool + tid;
+    float* coherence_val = organism->fitness_coherence_pool + tid;
 
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        cudaMalloc(&S, matrix_size * sizeof(float));
-        cudaMalloc(&effective_rank_val, sizeof(float));
-        cudaMalloc(&coherence_val, sizeof(float));
 
         // Launch child kernel for SVD
         gpu_svd_kernel<<<1, min(matrix_size, BLOCK_SIZE)>>>(

@@ -59,6 +59,9 @@ struct Organism {
     float* svd_singular_values_pool;      // Pool for SVD singular values (MAX_COMPONENTS * GENOME_SIZE)
     float* coherence_workspace_pool;      // Pool for coherence computation (MAX_COMPONENTS)
     float* memory_data_pool;              // Pool for memory entries (MAX_COMPONENTS * (BEHAVIORAL_DIM + 4))
+    float* fitness_svd_pool;              // Pool for fitness SVD singular values (MAX_COMPONENTS * GENOME_SIZE)
+    float* fitness_rank_pool;             // Pool for fitness effective rank (MAX_COMPONENTS)
+    float* fitness_coherence_pool;        // Pool for fitness coherence (MAX_COMPONENTS)
 };
 
 // Forward declarations for all kernels

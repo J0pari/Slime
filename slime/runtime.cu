@@ -300,6 +300,16 @@ extern "C" Organism* create_organism() {
     CUDA_CHECK(cudaMalloc(&d_memory_data_pool, MAX_COMPONENTS * (BEHAVIORAL_DIM + 4) * sizeof(float)));
     total_mem += MAX_COMPONENTS * (BEHAVIORAL_DIM + 4) * sizeof(float);
     
+    float* d_fitness_svd_pool;
+    float* d_fitness_rank_pool;
+    float* d_fitness_coherence_pool;
+    CUDA_CHECK(cudaMalloc(&d_fitness_svd_pool, MAX_COMPONENTS * GENOME_SIZE * sizeof(float)));
+    total_mem += MAX_COMPONENTS * GENOME_SIZE * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_fitness_rank_pool, MAX_COMPONENTS * sizeof(float)));
+    total_mem += MAX_COMPONENTS * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_fitness_coherence_pool, MAX_COMPONENTS * sizeof(float)));
+    total_mem += MAX_COMPONENTS * sizeof(float);
+    
     h_organism->compressed_genome_pool = d_compressed_genome_pool;
     h_organism->compressed_size_pool = d_compressed_size_pool;
     h_organism->elite_staging_pool = d_elite_staging_pool;
@@ -309,6 +319,9 @@ extern "C" Organism* create_organism() {
     h_organism->svd_singular_values_pool = d_svd_singular_values_pool;
     h_organism->coherence_workspace_pool = d_coherence_workspace_pool;
     h_organism->memory_data_pool = d_memory_data_pool;
+    h_organism->fitness_svd_pool = d_fitness_svd_pool;
+    h_organism->fitness_rank_pool = d_fitness_rank_pool;
+    h_organism->fitness_coherence_pool = d_fitness_coherence_pool;
 
     // Copy organism structure to device
     CUDA_CHECK(cudaMemcpy(d_organism, h_organism, sizeof(Organism), cudaMemcpyHostToDevice));
