@@ -948,16 +948,6 @@ __global__ void init_organism_kernel(
         );
 
         // Dynamic parallelism: child kernel synchronizes implicitly when parent returns
-
-        // Initialize chemical field from behavioral agent positions
-        dim3 chem_grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16);
-        dim3 chem_block(16, 16);
-        
-        // First, zero out all fields
-        init_chemical_field_kernel<<<chem_grid, chem_block>>>(
-            organism->chemical_field,
-            GRID_SIZE
-        );
         
         // Then set sources from agent positions
         set_chemical_sources_from_agents_kernel<<<1, MAX_COMPONENTS>>>(

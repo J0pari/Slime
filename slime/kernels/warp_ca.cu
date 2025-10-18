@@ -6,6 +6,11 @@
 #include <mma.h>
 #include <cooperative_groups.h>
 
+// Forward declaration of Organism struct
+struct Organism;
+constexpr int MAX_COMPONENTS = 256;
+constexpr int GENOME_SIZE = 1024;
+
 namespace cg = cooperative_groups;
 using namespace nvcuda::wmma;
 
