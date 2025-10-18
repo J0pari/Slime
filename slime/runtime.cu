@@ -1,9 +1,9 @@
-// slime/api/gpu_native.cu - Minimal API to launch the organism
-#ifndef GPU_NATIVE_CU
-#define GPU_NATIVE_CU
+// slime/runtime.cu - GPU runtime for organism lifecycle
+#ifndef RUNTIME_CU
+#define RUNTIME_CU
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include "../core/organism.cu"
+#include "core/organism.cu"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -22,36 +22,44 @@ __global__ void extract_ca_channel_kernel(float* output, float* concentration, i
 
 // Allocate and initialize organism on GPU
 extern "C" Organism* create_organism() {
-    printf("DEBUG: Creating organism...\n");
+    size_t total_mem = 0;
+    printf("[ALLOC] Starting organism initialization\n");
     Organism* h_organism = new Organism();
-    printf("DEBUG: Host organism allocated\n");
     Organism* d_organism;
 
     // Allocate organism structure on device
     CUDA_CHECK(cudaMalloc(&d_organism, sizeof(Organism)));
-    printf("DEBUG: Device organism allocated (%zu bytes)\n", sizeof(Organism));
+    total_mem += sizeof(Organism);
+    printf("[VERIFY] Device organism ptr=%p, size=%zu bytes, total=%zu MB\n", 
+           d_organism, sizeof(Organism), total_mem / (1024*1024));
 
     // Allocate all components
     ComponentPool* d_pool;
     PoolEntry* d_pool_entries;
     CUDA_CHECK(cudaMalloc(&d_pool, sizeof(ComponentPool)));
-    printf("DEBUG: ComponentPool allocated (%zu bytes)\n", sizeof(ComponentPool));
+    total_mem += sizeof(ComponentPool);
     CUDA_CHECK(cudaMalloc(&d_pool_entries, MAX_POOL_SIZE * sizeof(PoolEntry)));
-    printf("DEBUG: PoolEntry array allocated (%zu bytes)\n", MAX_POOL_SIZE * sizeof(PoolEntry));
+    total_mem += MAX_POOL_SIZE * sizeof(PoolEntry);
+    printf("[VERIFY] ComponentPool ptr=%p, entries ptr=%p, pool entries=%zu MB, total=%zu MB\n",
+           d_pool, d_pool_entries, (MAX_POOL_SIZE * sizeof(PoolEntry)) / (1024*1024), total_mem / (1024*1024));
 
     GPUElite* d_archive;
     VoronoiCell* d_voronoi_cells;
     CUDA_CHECK(cudaMalloc(&d_archive, MAX_ARCHIVE_SIZE * sizeof(GPUElite)));
-    printf("DEBUG: Archive allocated (%zu bytes)\n", MAX_ARCHIVE_SIZE * sizeof(GPUElite));
+    total_mem += MAX_ARCHIVE_SIZE * sizeof(GPUElite);
     CUDA_CHECK(cudaMalloc(&d_voronoi_cells, MAX_CELLS * sizeof(VoronoiCell)));
-    printf("DEBUG: Voronoi cells allocated (%zu bytes)\n", MAX_CELLS * sizeof(VoronoiCell));
+    total_mem += MAX_CELLS * sizeof(VoronoiCell);
+    printf("[VERIFY] Archive ptr=%p, Voronoi ptr=%p, archive=%zu MB, total=%zu MB\n",
+           d_archive, d_voronoi_cells, (MAX_ARCHIVE_SIZE * sizeof(GPUElite)) / (1024*1024), total_mem / (1024*1024));
 
     TemporalTube* d_tubes;
     MemoryEntry* d_tube_entries;
     CUDA_CHECK(cudaMalloc(&d_tubes, sizeof(TemporalTube)));
-    printf("DEBUG: TemporalTube allocated (%zu bytes)\n", sizeof(TemporalTube));
+    total_mem += sizeof(TemporalTube);
     CUDA_CHECK(cudaMalloc(&d_tube_entries, MAX_MEMORY_SIZE * sizeof(MemoryEntry)));
-    printf("DEBUG: MemoryEntry array allocated (%zu bytes)\n", MAX_MEMORY_SIZE * sizeof(MemoryEntry));
+    total_mem += MAX_MEMORY_SIZE * sizeof(MemoryEntry);
+    printf("[VERIFY] TemporalTube ptr=%p, entries ptr=%p, total=%zu MB\n",
+           d_tubes, d_tube_entries, total_mem / (1024*1024));
 
     MultiHeadCAState* d_ca_state;
     float* d_perception_weights;
@@ -63,27 +71,31 @@ extern "C" Organism* create_organism() {
     float* d_ca_input;
     float* d_ca_output;
     CUDA_CHECK(cudaMalloc(&d_ca_state, sizeof(MultiHeadCAState)));
-    printf("DEBUG: MultiHeadCAState allocated (%zu bytes)\n", sizeof(MultiHeadCAState));
+    total_mem += sizeof(MultiHeadCAState);
     CUDA_CHECK(cudaMalloc(&d_perception_weights, NUM_HEADS * CHANNELS * HIDDEN_DIM * sizeof(float)));
-    printf("DEBUG: Perception weights allocated\n");
+    total_mem += NUM_HEADS * CHANNELS * HIDDEN_DIM * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_interaction_weights, NUM_HEADS * CHANNELS * HIDDEN_DIM * sizeof(float)));
-    printf("DEBUG: Interaction weights allocated\n");
+    total_mem += NUM_HEADS * CHANNELS * HIDDEN_DIM * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_value_weights, NUM_HEADS * HIDDEN_DIM * CHANNELS * sizeof(float)));
-    printf("DEBUG: Value weights allocated\n");
+    total_mem += NUM_HEADS * HIDDEN_DIM * CHANNELS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_head_mixing_weights, NUM_HEADS * NUM_HEADS * sizeof(float)));
-    printf("DEBUG: Head mixing weights allocated\n");
+    total_mem += NUM_HEADS * NUM_HEADS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_flow_kernels, NUM_HEADS * 9 * sizeof(float)));
-    printf("DEBUG: Flow kernels allocated\n");
+    total_mem += NUM_HEADS * 9 * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_mass_buffer, NUM_HEADS * sizeof(float)));
-    printf("DEBUG: Mass buffer allocated\n");
+    total_mem += NUM_HEADS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_ca_input, GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float)));
-    printf("DEBUG: CA input buffer allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_ca_output, GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float)));
-    printf("DEBUG: CA output buffer allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * CHANNELS * sizeof(float);
+    printf("[VERIFY] MultiHeadCA state ptr=%p, 8 weight buffers allocated, total=%zu MB\n",
+           d_ca_state, total_mem / (1024*1024));
 
     BehavioralState* d_behavioral;
     CUDA_CHECK(cudaMalloc(&d_behavioral, MAX_COMPONENTS * sizeof(BehavioralState)));
-    printf("DEBUG: BehavioralState allocated (%zu bytes)\n", MAX_COMPONENTS * sizeof(BehavioralState));
+    total_mem += MAX_COMPONENTS * sizeof(BehavioralState);
+    printf("[VERIFY] BehavioralState ptr=%p, size=%zu KB, total=%zu MB\n",
+           d_behavioral, (MAX_COMPONENTS * sizeof(BehavioralState)) / 1024, total_mem / (1024*1024));
 
     ChemicalField* d_chemical;
     float* d_concentration;
@@ -95,34 +107,40 @@ extern "C" Organism* create_organism() {
     TemporalTube* d_chemical_history;
     MemoryEntry* d_chemical_history_entries;
     CUDA_CHECK(cudaMalloc(&d_chemical, sizeof(ChemicalField)));
-    printf("DEBUG: ChemicalField allocated (%zu bytes)\n", sizeof(ChemicalField));
+    total_mem += sizeof(ChemicalField);
     CUDA_CHECK(cudaMalloc(&d_concentration, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical concentration allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_gradient_x, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical gradient_x allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_gradient_y, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical gradient_y allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_laplacian, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical laplacian allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_sources, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical sources allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_decay_factors, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    printf("DEBUG: Chemical decay_factors allocated\n");
+    total_mem += GRID_SIZE * GRID_SIZE * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_chemical_history, sizeof(TemporalTube)));
-    printf("DEBUG: Chemical history TemporalTube allocated\n");
+    total_mem += sizeof(TemporalTube);
     CUDA_CHECK(cudaMalloc(&d_chemical_history_entries, MAX_HISTORY_LENGTH * sizeof(MemoryEntry)));
-    printf("DEBUG: Chemical history entries allocated (%zu bytes)\n", MAX_HISTORY_LENGTH * sizeof(MemoryEntry));
+    total_mem += MAX_HISTORY_LENGTH * sizeof(MemoryEntry);
+    printf("[VERIFY] ChemicalField ptr=%p, 6 field arrays + history, total=%zu MB\n",
+           d_chemical, total_mem / (1024*1024));
 
     // Allocate history buffers
     float* d_fitness_history;
     float* d_coherence_history;
     float* d_effective_rank_history;
     CUDA_CHECK(cudaMalloc(&d_fitness_history, MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float)));
-    printf("DEBUG: Fitness history allocated (%zu bytes)\n", MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float));
+    total_mem += MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_coherence_history, MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float)));
-    printf("DEBUG: Coherence history allocated (%zu bytes)\n", MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float));
+    total_mem += MAX_GENERATIONS * MAX_COMPONENTS * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_effective_rank_history, MAX_GENERATIONS * sizeof(float)));
-    printf("DEBUG: Effective rank history allocated (%zu bytes)\n", MAX_GENERATIONS * sizeof(float));
+    total_mem += MAX_GENERATIONS * sizeof(float);
+    printf("[VERIFY] History buffers: fitness=%p, coherence=%p, rank=%p, history=%zu MB, TOTAL GPU=%zu MB\n",
+           d_fitness_history, d_coherence_history, d_effective_rank_history,
+           (2 * MAX_GENERATIONS * MAX_COMPONENTS + MAX_GENERATIONS) * sizeof(float) / (1024*1024),
+           total_mem / (1024*1024));
 
     // Now set the nested pointers in the allocated structures
     ComponentPool h_pool;
@@ -132,7 +150,10 @@ extern "C" Organism* create_organism() {
     h_pool.total_spawned = 0;
     h_pool.total_culled = 0;
     CUDA_CHECK(cudaMemcpy(d_pool, &h_pool, sizeof(ComponentPool), cudaMemcpyHostToDevice));
-    printf("DEBUG: ComponentPool initialized with capacity=%d\n", MAX_POOL_SIZE);
+    ComponentPool verify_pool;
+    CUDA_CHECK(cudaMemcpy(&verify_pool, d_pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost));
+    printf("[VERIFY] ComponentPool: capacity=%d (actual on device), active=%d, spawned=%d\n",
+           verify_pool.capacity, verify_pool.active_count.load(), verify_pool.total_spawned.load());
 
     TemporalTube h_tubes;
     h_tubes.entries = d_tube_entries;
@@ -142,7 +163,10 @@ extern "C" Organism* create_organism() {
     h_tubes.global_time = 0.0f;
     h_tubes.decay_rate = 0.95f;
     CUDA_CHECK(cudaMemcpy(d_tubes, &h_tubes, sizeof(TemporalTube), cudaMemcpyHostToDevice));
-    printf("DEBUG: TemporalTube initialized with capacity=%d\n", MAX_MEMORY_SIZE);
+    TemporalTube verify_tubes;
+    CUDA_CHECK(cudaMemcpy(&verify_tubes, d_tubes, sizeof(TemporalTube), cudaMemcpyDeviceToHost));
+    printf("[VERIFY] TemporalTube: capacity=%d (actual), count=%d, decay_rate=%.3f\n",
+           verify_tubes.capacity, verify_tubes.count, verify_tubes.decay_rate);
 
     MultiHeadCAState h_ca_state;
     h_ca_state.perception_weights = d_perception_weights;
@@ -178,7 +202,10 @@ extern "C" Organism* create_organism() {
         CUDA_CHECK(cudaMemcpy(&d_chemical_history_entries[i], &entry, sizeof(MemoryEntry), cudaMemcpyHostToDevice));
     }
     CUDA_CHECK(cudaMemcpy(d_chemical_history, &h_chemical_history, sizeof(TemporalTube), cudaMemcpyHostToDevice));
-    printf("DEBUG: Chemical history TemporalTube initialized with %d entries\n", MAX_HISTORY_LENGTH);
+    TemporalTube verify_chem_hist;
+    CUDA_CHECK(cudaMemcpy(&verify_chem_hist, d_chemical_history, sizeof(TemporalTube), cudaMemcpyDeviceToHost));
+    printf("[VERIFY] Chemical history: capacity=%d (actual), count=%d, %d data buffers allocated\n",
+           verify_chem_hist.capacity, verify_chem_hist.count, MAX_HISTORY_LENGTH);
 
     ChemicalField h_chemical;
     h_chemical.concentration = d_concentration;
@@ -188,19 +215,23 @@ extern "C" Organism* create_organism() {
     h_chemical.sources = d_sources;
     h_chemical.decay_factors = d_decay_factors;
     h_chemical.history = d_chemical_history;
-    printf("DEBUG: ChemicalField host pointers: concentration=%p, gradient_x=%p, history=%p\n", 
-           h_chemical.concentration, h_chemical.gradient_x, h_chemical.history);
     CUDA_CHECK(cudaMemcpy(d_chemical, &h_chemical, sizeof(ChemicalField), cudaMemcpyHostToDevice));
     
     // Verify what was copied
-    ChemicalField h_chemical_verify;
-    CUDA_CHECK(cudaMemcpy(&h_chemical_verify, d_chemical, sizeof(ChemicalField), cudaMemcpyDeviceToHost));
-    printf("DEBUG: ChemicalField device pointers (read back): concentration=%p, gradient_x=%p\n",
-           h_chemical_verify.concentration, h_chemical_verify.gradient_x);
-    printf("DEBUG: All nested pointers set\n");
+    ChemicalField verify_chem;
+    CUDA_CHECK(cudaMemcpy(&verify_chem, d_chemical, sizeof(ChemicalField), cudaMemcpyDeviceToHost));
+    bool pointers_match = (verify_chem.concentration == d_concentration) && 
+                         (verify_chem.gradient_x == d_gradient_x) &&
+                         (verify_chem.history == d_chemical_history);
+    printf("[VERIFY] ChemicalField: concentration=%p, gradient_x=%p, history=%p, pointers_valid=%s\n",
+           verify_chem.concentration, verify_chem.gradient_x, verify_chem.history,
+           pointers_match ? "YES" : "CORRUPTED");
+    if (!pointers_match) {
+        printf("[ERROR] ChemicalField pointer corruption detected!\n");
+        exit(1);
+    }
 
     // Initialize Voronoi cells
-    printf("DEBUG: Initializing Voronoi cells...\n");
     int behavioral_dim = ARCH_BEHAVIORAL_DIM;  // From archive.cu
     unsigned int seed = 42;  // Fixed seed for reproducibility
     init_voronoi_cells_kernel<<<(MAX_CELLS + 255) / 256, 256>>>(
@@ -211,7 +242,19 @@ extern "C" Organism* create_organism() {
     );
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    printf("DEBUG: Voronoi cells initialized with %d cells in %dD space\n", MAX_CELLS, behavioral_dim);
+    
+    // Verify cells were actually initialized
+    VoronoiCell first_cell;
+    CUDA_CHECK(cudaMemcpy(&first_cell, d_voronoi_cells, sizeof(VoronoiCell), cudaMemcpyDeviceToHost));
+    bool initialized = false;
+    for (int i = 0; i < behavioral_dim && i < 10; i++) {
+        if (first_cell.centroid[i] != 0.0f) {
+            initialized = true;
+            break;
+        }
+    }
+    printf("[VERIFY] Voronoi: %d cells in %dD, first_cell.centroid[0]=%.4f, initialized=%s\n",
+           MAX_CELLS, behavioral_dim, first_cell.centroid[0], initialized ? "YES" : "NO");
 
     // Set pointers in organism structure
     h_organism->pool = d_pool;
@@ -226,27 +269,101 @@ extern "C" Organism* create_organism() {
     h_organism->fitness_history = d_fitness_history;
     h_organism->coherence_history = d_coherence_history;
     h_organism->effective_rank_history = d_effective_rank_history;
-    printf("DEBUG: All pointers set in host organism\n");
+
+    // Allocate pre-allocated memory pools to replace device-side cudaMalloc
+    uint8_t* d_compressed_genome_pool;
+    uint32_t* d_compressed_size_pool;
+    GPUElite* d_elite_staging_pool;
+    float* d_behavioral_field_pool;
+    float* d_behavioral_gradient_pool;
+    float* d_svd_workspace_pool;
+    float* d_svd_singular_values_pool;
+    float* d_coherence_workspace_pool;
+    float* d_memory_data_pool;
+    
+    CUDA_CHECK(cudaMalloc(&d_compressed_genome_pool, MAX_ARCHIVE_SIZE * GENOME_SIZE * sizeof(uint8_t)));
+    total_mem += MAX_ARCHIVE_SIZE * GENOME_SIZE * sizeof(uint8_t);
+    CUDA_CHECK(cudaMalloc(&d_compressed_size_pool, MAX_ARCHIVE_SIZE * sizeof(uint32_t)));
+    total_mem += MAX_ARCHIVE_SIZE * sizeof(uint32_t);
+    CUDA_CHECK(cudaMalloc(&d_elite_staging_pool, MAX_ARCHIVE_SIZE * sizeof(GPUElite)));
+    total_mem += MAX_ARCHIVE_SIZE * sizeof(GPUElite);
+    CUDA_CHECK(cudaMalloc(&d_behavioral_field_pool, MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * sizeof(float)));
+    total_mem += MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_behavioral_gradient_pool, MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * 2 * sizeof(float)));
+    total_mem += MAX_COMPONENTS * GRID_SIZE * GRID_SIZE * BEHAVIORAL_DIM * 2 * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_svd_workspace_pool, MAX_COMPONENTS * GENOME_SIZE * GENOME_SIZE * sizeof(float)));
+    total_mem += MAX_COMPONENTS * GENOME_SIZE * GENOME_SIZE * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_svd_singular_values_pool, MAX_COMPONENTS * GENOME_SIZE * sizeof(float)));
+    total_mem += MAX_COMPONENTS * GENOME_SIZE * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_coherence_workspace_pool, MAX_COMPONENTS * sizeof(float)));
+    total_mem += MAX_COMPONENTS * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_memory_data_pool, MAX_COMPONENTS * (BEHAVIORAL_DIM + 4) * sizeof(float)));
+    total_mem += MAX_COMPONENTS * (BEHAVIORAL_DIM + 4) * sizeof(float);
+    
+    h_organism->compressed_genome_pool = d_compressed_genome_pool;
+    h_organism->compressed_size_pool = d_compressed_size_pool;
+    h_organism->elite_staging_pool = d_elite_staging_pool;
+    h_organism->behavioral_field_pool = d_behavioral_field_pool;
+    h_organism->behavioral_gradient_pool = d_behavioral_gradient_pool;
+    h_organism->svd_workspace_pool = d_svd_workspace_pool;
+    h_organism->svd_singular_values_pool = d_svd_singular_values_pool;
+    h_organism->coherence_workspace_pool = d_coherence_workspace_pool;
+    h_organism->memory_data_pool = d_memory_data_pool;
 
     // Copy organism structure to device
     CUDA_CHECK(cudaMemcpy(d_organism, h_organism, sizeof(Organism), cudaMemcpyHostToDevice));
-    printf("DEBUG: Organism structure copied to device\n");
     
     // Verify organism was copied correctly
-    Organism h_organism_verify;
-    CUDA_CHECK(cudaMemcpy(&h_organism_verify, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost));
-    printf("DEBUG: Organism pointers (read back): pool=%p, chemical_field=%p\n",
-           h_organism_verify.pool, h_organism_verify.chemical_field);
+    Organism verify_organism;
+    CUDA_CHECK(cudaMemcpy(&verify_organism, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost));
+    bool organism_valid = (verify_organism.pool == d_pool) && 
+                         (verify_organism.chemical_field == d_chemical) &&
+                         (verify_organism.fitness_history == d_fitness_history);
+    printf("[VERIFY] Organism: pool=%p, chemical=%p, fitness_hist=%p, structure_valid=%s\n",
+           verify_organism.pool, verify_organism.chemical_field, verify_organism.fitness_history,
+           organism_valid ? "YES" : "CORRUPTED");
+    if (!organism_valid) {
+        printf("[ERROR] Organism structure corruption detected!\n");
+        exit(1);
+    }
 
     // Initialize organism with same seed as Voronoi cells
-    printf("DEBUG: Launching init_organism_kernel...\n");
     init_organism_kernel<<<1, 1>>>(d_organism, seed);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    printf("DEBUG: init_organism_kernel completed\n");
+    
+    // Verify pool was actually initialized with live organisms
+    ComponentPool verify_pool_post_init;
+    CUDA_CHECK(cudaMemcpy(&verify_pool_post_init, verify_organism.pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost));
+    int active_count = verify_pool_post_init.active_count.load();
+    int total_spawned = verify_pool_post_init.total_spawned.load();
+    
+    // Read back first organism to verify genome is initialized
+    PoolEntry first_organism;
+    CUDA_CHECK(cudaMemcpy(&first_organism, verify_pool_post_init.entries, sizeof(PoolEntry), cudaMemcpyDeviceToHost));
+    
+    float genome_sum = 0.0f;
+    for (int i = 0; i < 10 && i < GENOME_SIZE; i++) {
+        genome_sum += fabsf(first_organism.genome[i]);
+    }
+    
+    printf("[VERIFY] Post-init pool: active=%d/%d, spawned=%d, first_organism: id=%d, alive=%s, genome[0..9]_sum=%.4f\n",
+           active_count, verify_pool_post_init.capacity, total_spawned,
+           first_organism.id, first_organism.alive ? "YES" : "NO", genome_sum);
+    
+    if (active_count == 0) {
+        printf("[WARNING] Pool initialized with ZERO active organisms - evolution will not occur!\n");
+    }
+    if (!first_organism.alive && active_count > 0) {
+        printf("[WARNING] First organism dead but active_count=%d - index mismatch!\n", active_count);
+    }
+    if (genome_sum < 0.001f && first_organism.alive) {
+        printf("[WARNING] Live organism has near-zero genome - may produce zero fitness!\n");
+    }
 
     delete h_organism;
-    printf("DEBUG: create_organism completed successfully\n");
+    printf("[COMPLETE] Organism created: %zu MB GPU memory, %d organisms alive\n",
+           total_mem / (1024*1024), active_count);
     return d_organism;
 }
 
@@ -387,4 +504,4 @@ __global__ void extract_ca_channel_kernel(
     }
 }
 
-#endif // GPU_NATIVE_CU
+#endif // RUNTIME_CU
