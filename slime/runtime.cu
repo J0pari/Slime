@@ -384,6 +384,13 @@ extern "C" Organism* create_organism() {
 extern "C" void run_organism(Organism* d_organism, int max_generations) {
     printf("Starting organism evolution...\n");
     auto start_time = std::chrono::high_resolution_clock::now();
+    
+    FILE* json_file = fopen("evolution.json", "w");
+    if (!json_file) {
+        printf("ERROR: Cannot open evolution.json for writing\n");
+        return;
+    }
+    fprintf(json_file, "[\n");
 
     for (int gen = 0; max_generations == 0 || gen < max_generations; gen++) {
         // Launch lifecycle with dynamic parallelism
@@ -414,20 +421,22 @@ extern "C" void run_organism(Organism* d_organism, int max_generations) {
                 int sample_count = min(h_archive_size, 10);
                 CUDA_CHECK(cudaMemcpy(h_archive_sample, h_organism.archive, sample_count * sizeof(GPUElite), cudaMemcpyDeviceToHost));
                 
-                printf("{\"gen\":%d,\"fitness\":%.6f,\"coherence\":%.6f,\"active\":%d,\"archive\":%d,\"rate\":%.1f,\"elites\":[",
+                if (gen > 0) fprintf(json_file, ",\n");
+                fprintf(json_file, "{\"gen\":%d,\"fitness\":%.6f,\"coherence\":%.6f,\"active\":%d,\"archive\":%d,\"rate\":%.1f,\"elites\":[",
                        gen, fitness, coherence, h_pool.active_count.load(), h_archive_size, gen > 0 ? gen/total_elapsed : 0.0);
                 
                 for (int i = 0; i < sample_count; i++) {
-                    printf("{\"f\":%.4f,\"c\":%.4f,\"h\":%llu,\"bc\":[%.3f,%.3f,%.3f]}",
+                    fprintf(json_file, "{\"f\":%.4f,\"c\":%.4f,\"h\":%llu,\"bc\":[%.3f,%.3f,%.3f]}",
                            h_archive_sample[i].fitness,
                            h_archive_sample[i].coherence,
                            (unsigned long long)h_archive_sample[i].genome_hash,
                            h_archive_sample[i].behavioral_coords[0],
                            h_archive_sample[i].behavioral_coords[1],
                            h_archive_sample[i].behavioral_coords[2]);
-                    if (i < sample_count - 1) printf(",");
+                    if (i < sample_count - 1) fprintf(json_file, ",");
                 }
-                printf("]}\n");
+                fprintf(json_file, "]}");
+                fflush(json_file);
                 delete[] h_archive_sample;
             }
 
@@ -437,6 +446,10 @@ extern "C" void run_organism(Organism* d_organism, int max_generations) {
             }
         }
     }
+    
+    fprintf(json_file, "\n]\n");
+    fclose(json_file);
+    printf("Evolution data written to evolution.json\n");
 }
 
 // Cleanup organism
