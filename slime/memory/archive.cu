@@ -164,7 +164,7 @@ __global__ void compress_genome_kernel(
     __syncthreads();
 
     // Step 3: Compute U matrix
-    if (tid < genome_length) {
+    if (tid < genome_length / 32 && tid * rank + rank <= 1024) {
         for (int r = 0; r < rank; r++) {
             float u_val = 0.0f;
             for (int j = 0; j < 32; j++) {
