@@ -155,6 +155,10 @@ __global__ void component_evolution_kernel(
     int generation
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
+        if (generation == 0) {
+            printf("[COMPONENT_EVOLUTION] gen=%d, pool->capacity=%d, pool->active_count=%d\n",
+                   generation, pool->capacity, pool->active_count.load());
+        }
         // Compute fitness for all components (Level 3)
         // Each warp processes one organism, 8 warps per block of 256 threads
         int warps_per_block = 256 / 32;  // 8 warps
@@ -284,10 +288,10 @@ __global__ void fitness_computation_kernel(
         fitness_history[history_idx] = fitness_val;
         coherence_history[history_idx] = coherence_val;
         
-        // Debug: print first organism computation on first generation
-        if (idx == 0 && generation == 0) {
-            printf("[WARP_COMPUTE] idx=%d, genome_mag=%.4f, coherence=%.4f, entropy=%.4f, fitness=%.4f\n",
-                   idx, genome_magnitude, coherence_val, effective_rank, fitness_val);
+        // Debug prints
+        if (idx == 0) {
+            printf("[FITNESS_WRITE] gen=%d idx=%d history_idx=%d fitness=%.4f coherence=%.4f\n",
+                   generation, idx, history_idx, fitness_val, coherence_val);
         }
     }
 }

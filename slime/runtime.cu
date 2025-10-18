@@ -3,6 +3,7 @@
 #define RUNTIME_CU
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <chrono>
 #include "core/organism.cu"
 
 // CUDA error checking macro
@@ -380,19 +381,20 @@ extern "C" Organism* create_organism() {
     return d_organism;
 }
 
-// Run organism for N generations
-extern "C" void run_organism(Organism* d_organism, int generations) {
-    printf("Starting organism evolution for %d generations...\n", generations);
+extern "C" void run_organism(Organism* d_organism, int max_generations) {
+    printf("Starting organism evolution...\n");
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-    for (int gen = 0; gen < generations; gen++) {
+    for (int gen = 0; max_generations == 0 || gen < max_generations; gen++) {
         // Launch lifecycle with dynamic parallelism
         organism_lifecycle_kernel<<<1, 1>>>(d_organism, gen);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        // Print progress every 10 generations
-        if (gen % 10 == 0) {
-            // Get current stats
+        if (gen % 100 == 0) {
+            auto now = std::chrono::high_resolution_clock::now();
+            double total_elapsed = std::chrono::duration<double>(now - start_time).count();
+            
             Organism h_organism;
             CUDA_CHECK(cudaMemcpy(&h_organism, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost));
 
@@ -402,7 +404,8 @@ extern "C" void run_organism(Organism* d_organism, int generations) {
             CUDA_CHECK(cudaMemcpy(&coherence, h_organism.coherence_history + gen * MAX_COMPONENTS,
                       sizeof(float), cudaMemcpyDeviceToHost));
 
-            printf("Gen %4d: fitness=%.4f, coherence=%.4f\n", gen, fitness, coherence);
+            printf("[%8d] fitness=%.6f coherence=%.6f rate=%.1f/s\n", 
+                   gen, fitness, coherence, gen > 0 ? gen/total_elapsed : 0.0);
 
             // Check for convergence
             if (fitness > FITNESS_THRESHOLD && coherence > 0.9f) {
