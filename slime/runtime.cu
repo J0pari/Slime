@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <chrono>
 #include "core/organism.cu"
+#include "extract_state.cu"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -402,48 +403,8 @@ extern "C" void run_organism(Organism* d_organism, int max_generations) {
             auto now = std::chrono::high_resolution_clock::now();
             double total_elapsed = std::chrono::duration<double>(now - start_time).count();
             
-            Organism h_organism;
-            CUDA_CHECK(cudaMemcpy(&h_organism, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost));
-
-            ComponentPool h_pool;
-            CUDA_CHECK(cudaMemcpy(&h_pool, h_organism.pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost));
-
-            float fitness, coherence;
-            CUDA_CHECK(cudaMemcpy(&fitness, h_organism.fitness_history + gen * MAX_COMPONENTS,
-                      sizeof(float), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(&coherence, h_organism.coherence_history + gen * MAX_COMPONENTS,
-                      sizeof(float), cudaMemcpyDeviceToHost));
-
-            int h_archive_size = h_organism.archive_size;
-            
-            if (h_archive_size > 0) {
-                GPUElite* h_archive_sample = new GPUElite[min(h_archive_size, 10)];
-                int sample_count = min(h_archive_size, 10);
-                CUDA_CHECK(cudaMemcpy(h_archive_sample, h_organism.archive, sample_count * sizeof(GPUElite), cudaMemcpyDeviceToHost));
-                
-                if (gen > 0) fprintf(json_file, ",\n");
-                fprintf(json_file, "{\"gen\":%d,\"fitness\":%.6f,\"coherence\":%.6f,\"active\":%d,\"archive\":%d,\"rate\":%.1f,\"elites\":[",
-                       gen, fitness, coherence, h_pool.active_count.load(), h_archive_size, gen > 0 ? gen/total_elapsed : 0.0);
-                
-                for (int i = 0; i < sample_count; i++) {
-                    fprintf(json_file, "{\"f\":%.4f,\"c\":%.4f,\"h\":%llu,\"bc\":[%.3f,%.3f,%.3f]}",
-                           h_archive_sample[i].fitness,
-                           h_archive_sample[i].coherence,
-                           (unsigned long long)h_archive_sample[i].genome_hash,
-                           h_archive_sample[i].behavioral_coords[0],
-                           h_archive_sample[i].behavioral_coords[1],
-                           h_archive_sample[i].behavioral_coords[2]);
-                    if (i < sample_count - 1) fprintf(json_file, ",");
-                }
-                fprintf(json_file, "]}");
-                fflush(json_file);
-                delete[] h_archive_sample;
-            }
-
-            // Check for convergence
-            if (fitness > FITNESS_THRESHOLD && coherence > 0.9f) {
-                break;
-            }
+            if (gen > 0) fprintf(json_file, ",\n");
+            extract_system_state(d_organism, json_file, gen, total_elapsed);
         }
     }
     
