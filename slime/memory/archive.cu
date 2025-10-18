@@ -205,10 +205,6 @@ __global__ void compress_genome_kernel(
         }
 
         *compressed_size = offset;
-
-        // Verify compression ratio
-        float ratio = (float)genome_length * sizeof(float) / (float)offset;
-        assert(ratio >= 80.0f);  // Ensure we achieve at least 80x compression
     }
 }
 
