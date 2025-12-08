@@ -216,7 +216,7 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         for (int j = 0; j < weights->hidden2; j++) {
             sum += hidden2[j] * weights->encoder_w3[j * weights->output_dim + i];
         }
-        latent[i] = sum;  // Linear activation for latent space
+        latent[i] = sum;
     }
 }
 

@@ -234,55 +234,25 @@ __global__ void reintegration_redistribute_kernel(
 }
 
 
-__global__ void compute_effective_rank_kernel(
-    float* __restrict__ weights,
+__global__ void compute_effective_rank_from_latent_kernel(
+    float* __restrict__ latent_genome,
     float* __restrict__ effective_rank,
-    int num_params,
-    float renyi_q
+    int latent_dim
 ) {
-    __shared__ float singular_values[BLOCK_SIZE];
-
-    int tid = threadIdx.x;
-
-    if (tid < min(BLOCK_SIZE, num_params)) {
-        singular_values[tid] = 0.0f;
-        for (int i = tid; i < num_params; i += blockDim.x) {
-            singular_values[tid] += weights[i] * weights[i];
-        }
+    float mean = 0.0f;
+    for (int i = 0; i < latent_dim; i++) {
+        mean += latent_genome[i];
     }
-    __syncthreads();
+    mean /= latent_dim;
 
-    float sum = 0.0f;
-    for (int i = 0; i < min(BLOCK_SIZE, num_params); i++) {
-        sum += singular_values[i];
+    float variance = 0.0f;
+    for (int i = 0; i < latent_dim; i++) {
+        float diff = latent_genome[i] - mean;
+        variance += diff * diff;
     }
+    variance /= latent_dim;
 
-    if (sum > 0) {
-        for (int i = 0; i < min(BLOCK_SIZE, num_params); i++) {
-            singular_values[i] /= sum;
-        }
-    }
-
-    float entropy = 0.0f;
-    if (fabsf(renyi_q - 1.0f) < EPSILON_SMALL) {
-        for (int i = 0; i < min(BLOCK_SIZE, num_params); i++) {
-            if (singular_values[i] > EPSILON) {
-                entropy -= singular_values[i] * logf(singular_values[i]);
-            }
-        }
-    } else {
-        float renyi_sum = 0.0f;
-        for (int i = 0; i < min(BLOCK_SIZE, num_params); i++) {
-            if (singular_values[i] > EPSILON) {
-                renyi_sum += powf(singular_values[i], renyi_q);
-            }
-        }
-        entropy = logf(renyi_sum + EPSILON) / (1.0f - renyi_q);
-    }
-
-    if (tid == 0) {
-        *effective_rank = expf(entropy);
-    }
+    *effective_rank = sqrtf(variance + EPSILON) * latent_dim;
 }
 
 __global__ void compute_coherence_kernel(

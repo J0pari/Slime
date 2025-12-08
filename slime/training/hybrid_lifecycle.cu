@@ -544,11 +544,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             asm("trap;");
         }
 
-        compute_effective_rank_kernel<<<1, BLOCK_SIZE>>>(
-            organism->fp32_ca_workspace,
+        compute_effective_rank_from_latent_kernel<<<1, BLOCK_SIZE>>>(
+            organism->pool->entries[0].latent_genome,
             &organism->effective_rank_history[generation],
-            weight_count,
-            organism->pool->entries[0].renyi_q
+            GENOME_LATENT_DIM_MAX
         );
 
         err = cudaGetLastError();

@@ -128,55 +128,26 @@ __global__ void gpu_svd_kernel(
     }
 }
 
-__global__ void effective_rank_kernel(
-    float* __restrict__ S,
+__global__ void effective_rank_from_latent_kernel(
+    float* __restrict__ latent_genome,
     float* __restrict__ rank_out,
-    int n,
-    float renyi_q
+    int latent_dim
 ) {
-    __shared__ float s_normalized[BLOCK_SIZE];
-    __shared__ float entropy;
-
-    if (threadIdx.x == 0) entropy = 0.0f;
-    __syncthreads();
-
-    float sum = 0.0f;
-    if (threadIdx.x < n) {
-        sum = S[threadIdx.x];
+    float mean = 0.0f;
+    for (int i = 0; i < latent_dim; i++) {
+        mean += latent_genome[i];
     }
+    mean /= latent_dim;
 
-    __syncthreads();
-    sum = BlockReduce<BLOCK_SIZE>::sum(sum);
-
-    if (threadIdx.x < n) {
-        s_normalized[threadIdx.x] = S[threadIdx.x] / (sum + EPSILON);
+    float variance = 0.0f;
+    for (int i = 0; i < latent_dim; i++) {
+        float diff = latent_genome[i] - mean;
+        variance += diff * diff;
     }
-    __syncthreads();
-
-    // Rényi entropy: H_q = (1/(1-q)) * log(Σ p^q)
-    float local_renyi_term = 0.0f;
-    if (threadIdx.x < n) {
-        float p = s_normalized[threadIdx.x];
-        if (fabsf(renyi_q - 1.0f) < EPSILON_SMALL) {
-            // q ≈ 1: Shannon entropy (limit case)
-            local_renyi_term = -p * logf(p + EPSILON);
-        } else {
-            // q ≠ 1: Rényi generalization
-            local_renyi_term = powf(p + EPSILON, renyi_q);
-        }
-    }
-
-    float renyi_sum = BlockReduce<BLOCK_SIZE>::sum(local_renyi_term);
+    variance /= latent_dim;
 
     if (threadIdx.x == 0) {
-        if (fabsf(renyi_q - 1.0f) < EPSILON_SMALL) {
-            // Shannon case: already summed -p log p
-            entropy = renyi_sum;
-        } else {
-            // Rényi case: H_q = (1/(1-q)) * log(Σ p^q)
-            entropy = logf(renyi_sum + EPSILON) / (1.0f - renyi_q);
-        }
-        *rank_out = expf(entropy);
+        *rank_out = sqrtf(variance + EPSILON) * latent_dim;
     }
 }
 

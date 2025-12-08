@@ -1330,11 +1330,10 @@ __global__ void neural_ca_update_kernel(
             weight_count
         );
 
-        compute_effective_rank_kernel<<<1, BLOCK_SIZE>>>(
-            fp32_workspace,
+        compute_effective_rank_from_latent_kernel<<<1, BLOCK_SIZE>>>(
+            pool->entries[best_idx].latent_genome,
             &effective_rank_history[generation],
-            weight_count,
-            pool->entries[best_idx].renyi_q
+            GENOME_LATENT_DIM_MAX
         );
 
     }

@@ -1,19 +1,16 @@
 # Slime: GPU-Native Evolutionary Neural CA
 
-**Core idea**: Combine gradient-based learning with evolutionary diversity maintenance. Neural cellular automata learn via backpropagation on external task datasets while a MAP-Elites archive prevents mode collapse. Tensor cores accelerate both CA computation and task evaluation.
+**Core idea**: Evolutionary system combining gradient-based learning with quality-diversity archiving. Multi-head neural cellular automata (8 heads, 512-channel state) evolve via fitness selection while learning classification tasks through autodiff tape backpropagation. MAP-Elites archive maintains diverse elite strategies in 3-axis behavioral space (hardware efficiency, task accuracy, generalization gap). DIRESA autoencoders compress genomes (1024→128D, 8x) enabling latent-space mutations and archive storage. All computation device-side via CUDA Dynamic Parallelism.
 
-**Intended behavior**: Traditional neural networks collapse to single solutions. This system maintains a population of diverse CA update rules, each specialized for different task performance niches (accuracy vs generalization vs efficiency trade-offs). The archive preserves successful strategies across three behavioral axes: hardware efficiency, task performance, and generalization capacity.
+**Intended behavior**: Archive accumulates elites across behavioral niches - organisms specializing in different trade-offs (high-accuracy/low-efficiency vs balanced vs exploration-focused). Voronoi tessellation partitions concatenated 3D space (hw_coords + task_coords + gen_coords) with adaptive cells tracking density fluctuations. Power-law fitness (task^α × gen^β × rank^γ × efficiency^δ) drives task-grounded evolution where α,β,γ,δ exponents genome-evolved, enabling species that evolve their own selection criteria. Hybrid lifecycle: gradient learning every CHECKPOINT_INTERVAL=20 generations, evolutionary selection every generation.
 
-**Implementation**: Multi-head neural CAs with FP16 tensor core acceleration. MAP-Elites archive with adaptive Voronoi cells in concatenated 3D behavioral space (hardware + task + generalization). Power-law fitness composition: task_accuracy^α × generalization^β × effective_rank^γ × hardware_efficiency^δ where exponents are genome-evolved. All computation on GPU via dynamic parallelism.
+**Implementation**: Multi-head neural CAs with FP16 WMMA tensor core matrix operations (perception/interaction/value layers). MAP-Elites archive with adaptive Voronoi cells tessellating concatenated 3-axis behavioral space: hw_coords (hardware efficiency features → DIRESA embedding) + task_coords (classification performance) + gen_coords (train/test generalization). Power-law fitness: task^α × (1-gen_gap)^β × rank^γ × efficiency^δ where α,β,γ,δ exponents genome-derived via genome_to_param with contextual modulation. Genomes (1024 floats) compressed to 128D DIRESA latent space (8x ratio) stored in archive, enabling direct latent-space mutations without decompress/recompress cycles. Dynamic parallelism (CDP) with hybrid synchronization: warp-level CooperativeSync for DIRESA encode/decode ops, device-level cudaDeviceSynchronize for recursive kernel launches.
 
 ## Requirements
 
-```bash
-# NVIDIA GPU with Tensor Cores (sm_86+)
-# RTX 3060 or newer
-# CUDA 12.0+
-nvcc --version  # Verify installation
-```
+- NVIDIA GPU: sm_86+ (Ampere/Hopper) with Tensor Cores, 6GB+ VRAM
+- CUDA Toolkit: 12.0+
+- Windows: MSVC 2022 Build Tools (nvcc host compiler)
 
 ## Build
 
@@ -27,38 +24,19 @@ make  # Linux
 ## Quick Start
 
 ```bash
-./slime.exe  # Run evolution with default parameters
+cd build
+slime.exe  # Run evolution (Windows)
 ```
 
-Output: JSON snapshots every 100 generations containing archive state, fitness trajectories, and behavioral embeddings.
+Output: Console logs every 5 generations with pool/archive statistics, telemetry every 100 generations.
 
-## Python Tooling (developer helpers)
-
-Run common developer checks via a single entry point:
+## Scripts
 
 ```bash
-# Verify expected kernels were compiled (auto-detects PTX dir and exe)
-python tools/dev.py verify-kernels
-
-# Audit MNIST→CA training path against compiled artifacts (run build first or add --build)
-python tools/dev.py audit-connectivity --build
+scripts/commit.sh              # Commit with web-flow author, push to origin
+scripts/dev.py verify-kernels  # Check compiled PTX for expected kernels
+scripts/audit_connectivity.py  # Verify kernel launch connectivity
 ```
-
-- verify-kernels:
-  - Scans PTX and preprocessed sources (*.ii, *.ptx, *.cudafe1.cpp) for expected kernels, including MNIST gradient path components.
-  - PTX directory auto-detection: prefers build/logs/ptx (from compile.bat), falls back to logs/ptx.
-  - Executable default: build/slime.exe (if present). Override with: `python tools/dev.py verify-kernels --exe <path>`
-
-- audit-connectivity (real audit):
-  - Verifies required connections both in source and in compiled artifacts (preprocessed launches under logs/ptx). Fails if nothing is compiled unless `--allow-source-only` is provided.
-  - Add `--build` to invoke build/compile.bat automatically before auditing.
-  - Flags: `--ptx-dir <dir>`, `--exe <path>`, `--build`, `--allow-source-only`.
-  - Required kernel launch sites checked:
-    - MNIST→CA injection: mnist_to_ca_grid_kernel or inject_mnist_to_ca_kernel
-    - Features→Logits: classification_head_kernel
-    - Logits→Loss: cross_entropy_loss_kernel
-    - Backward: ad_backward_kernel
-    - Optimizer: adam_update_kernel or adam_update_fp16_kernel
 
 ## Architecture
 
@@ -86,169 +64,194 @@ Reintegration tracking: A^(t+dt)(x) = Σ_{x'} A^t(x') · I(x'→x)
                         where I(x'→x) is overlap integral at displaced position x' + dt·F^t(x')
 ```
 
-**Mass conservation**: Σ(A^(t+dt)) = Σ(A^t) emerges from reintegration geometry - each cell's mass redistributes to overlapping neighbors, overlap integrals sum to 1 per source. No rescaling needed.
+**Mass conservation**: Σ(A^(t+dt)) = Σ(A^t) emerges from reintegration geometry - each cell's mass redistributes to overlapping neighbors, overlap integrals sum to 1 per source. Gaussian overlap integral I(x'→x) computed via FlowLeniaOps::gaussian_overlap_integral with spatially-varying spread s (genome-derived). Atomic adds (atomicAdd) prevent race conditions during concurrent reintegration writes (reintegration_redistribute_kernel).
 
-**Parameter localization**: Multi-head CA weights define spatially-varying affinity landscape U^t. Each head's perception/interaction/value weights create different local preferences. Flow field F^t weights affinity gradient ∇U^t vs diffusion -∇A_Σ^t based on local mass concentration via α^t.
+**Parameter localization**: Multi-head CA weights define spatially-varying affinity landscape U^t. Each head's perception/interaction/value weights create different local preferences. Flow field F^t weights affinity gradient ∇U^t vs diffusion -∇A_Σ^t based on local mass concentration via α^t = [(A_Σ^t/β_A)^n]_0^1 where β_A (mass threshold) and n (flow steepness) genome-derived via genome_to_param.
 
-**Tensor core mapping**: Matrix dimensions align to 16×16 WMMA fragments
-**Throughput**: 256 TFLOPS/s vs 5 TFLOPS/s for scalar FP32 (50× speedup)
+**Tensor core mapping** (pseudopod_tensor.cu): Perception (512×256), interaction (512×256), value (256×512) matrices use nvcuda::wmma::load_matrix_sync/mma_sync/store_matrix_sync with wmma::fragment<matrix_a/matrix_b/accumulator, 16, 16, 16, half/float>. 16×16×16 tile size aligns to Ampere/Hopper WMMA fragment shape. Accumulation in FP32, weights in FP16 for 2× memory bandwidth vs FP32.
 
-### Fitness = effective_rank × coherence
+**Throughput**: Tensor cores: ~13 TFLOPS FP16 on RTX 3060 (sm_86, 28 SMs) vs ~0.4 TFLOPS scalar FP32 (30× speedup). CA forward pass (8 heads, 64×64 grid, 512 channels): ~2ms with tensor cores, ~60ms with scalar ops.
 
-**effective_rank** (parameter diversity):
-- Correlation matrix of CA weights
-- SVD via Jacobi sweeps (warp_ca.cu)
-- Shannon entropy of singular values
-- exp(entropy) = effective dimensionality
-- High rank = diverse parameter usage
+### Fitness = task^α × (1-gen_gap)^β × rank^γ × efficiency^δ
 
-**coherence** (learning progress):
-- Genome predicts chemical field evolution
-- prediction_errors[t] = ||predicted - actual||²
-- coherence = rate of error decrease
-- High coherence = organism learning fast
-- Computed via temporal correlation kernel
+**Power-law composition** via compute_fitness_from_diresa_kernel (organism.cu:661-696):
+- task^α: Classification accuracy, exponent α ∈ [0.3, 2.0] from FITNESS_TASK_EXPONENT_MIN/MAX
+- (1-gen_gap)^β: Train/test consistency (1 - |train_acc - test_acc|), β ∈ [0.3, 2.0] from FITNESS_GEN_EXPONENT_MIN/MAX
+- rank^γ: DIRESA latent variance → effective_rank = sqrt(variance) × latent_dim (manifold spread in 128D space), γ ∈ [0.3, 2.0] from FITNESS_RANK_EXPONENT_MIN/MAX
+- efficiency^δ: Weighted sum of hardware_features (IPC, bandwidth, occupancy, cache hits), δ ∈ [0.1, 1.5] from FITNESS_EFFICIENCY_EXPONENT_MIN/MAX
 
-**Schedule**: Prediction errors tracked every generation. Full fitness (SVD + coherence) computed every 100 generations.
+**Exponent derivation**: Each α,β,γ,δ computed via genome_to_param with 7-dimensional context: (metabolic, stress, morphogen, hash_entropy, novelty_gradient, behavioral_drift, task_accuracy). Enables adaptive fitness landscapes - organisms evolve their own selection criteria.
 
-### MAP-Elites Archive
+**Computation schedule** (organism.cu:507, triggered in component_evolution_kernel): Fitness computed every generation when pool->entries[0] updated. Exponents re-derived from current genome state each evaluation, allowing fitness function itself to evolve.
 
-**Behavioral space**: Hardware-geometric features → DIRESA embedding
-- 15D input: warp occupancy, memory throughput, IPC, cache hits, divergence, etc.
-- 2-10D output: Distance-preserving nonlinear projection
-- Adaptive dimensionality discovered via validation
-- Trustworthiness ≥ 0.70, Continuity ≥ 0.70 required for activation
+### MAP-Elites Archive (archive.cu, organism.cu:759-820)
 
-**DIRESA training schedule**:
-1. Steps 0-2000: Use Euclidean distance, accumulate samples
-2. Step 2000: Train encoder/decoder for 500 steps if ≥1000 samples
-3. Validate distance preservation
-4. Activate if validation passes, else retry 3× with 2× learning rate
-5. Fallback to Euclidean if all attempts fail
+**3-axis behavioral space** (GPUElite struct fields):
+- hw_coords: HARDWARE_FEATURES_DIM=15 (warp occupancy, memory throughput, IPC, cache hits, divergence) → DIRESA embedding → genome-derived hw_dim
+- task_coords: per-class classification accuracies → genome-derived task_dim
+- gen_coords: train/test generalization metrics → genome-derived gen_dim
 
-**Voronoi tessellation**: Adaptive cells partition behavioral space
-- Distance: ||elite.behavioral_coords - cell.centroid||
-- Cells reshape when DIRESA changes dimensionality
-- Density-based quality thresholds
+**Storage**: latent_genome (128D DIRESA compressed) + fitness/coherence/effective_rank scalars + parent_ids genealogy + hardware_features raw + task_performance + generation timestamp. Archive size MAX_ARCHIVE_SIZE with wraparound indexing.
 
-**Compression**: SVD low-rank (8×) + delta from parent (10-20×) = 80-160× total
+**Voronoi tessellation** (VoronoiCell struct): Cells track hw_centroid + task_centroid + gen_centroid, radius (power-law from density fluctuation), density/density_prev for gradient, best_elite_idx, quality_threshold. Distance via compute_three_axis_distance_sq concatenating all 3 subspaces.
 
-### Curiosity-Driven Lifecycle
+**Genome compression**: Delta encoding (delta.cu) stores only changed indices/values from parent. DIRESA latent (128D) stored in archive enables mutations without full decompression. Combined: sparse deltas reference DIRESA latent parents.
 
-**Hunger = 1.0 - coherence**:
-- High coherence → low hunger → survival
-- Low coherence → high hunger → culling
-- Archive sampling replaces culled organisms
+### Dynamic Parallelism (CUDA Dynamic Parallelism / CDP)
 
-**Warmup phases** (prevent early chaos):
-- 0-100 steps: No lifecycle, stabilize trajectories
-- 100-500 steps: Reduced culling frequency
-- 500+ steps: Full lifecycle operation
+**Zero CPU synchronization**: Parent kernels launch child kernels device-side via `<<<...>>>` syntax within __device__ code. All evolution computation GPU-resident - CPU only triggers top-level kernel, polls completion.
 
-**Loss gates**: Freeze lifecycle when loss > 10× EMA (prevent catastrophic forgetting)
+**Launch hierarchy** (organism.cu):
+- component_evolution_kernel (top-level) spawns:
+  - compute_fitness_from_diresa_kernel (fitness evaluation)
+  - selection_kernel (MAP-Elites behavioral selection)
+  - archive_update_kernel (Voronoi cell update)
+  - behavioral_update_kernel (3-axis coords update)
+  - lifecycle progression kernels (hunger, coherence, gradient fitness)
+- hybrid_lifecycle_kernel spawns:
+  - autodiff tape allocation/deallocation
+  - gradient descent steps
+  - DIRESA compression/decompression
 
-### Gradient + Evolution Dual Training
+**Synchronization**: cudaDeviceSynchronize() enforces global dependencies (e.g., fitness before selection). CooperativeSync::sync_warp() for warp-level deps (DIRESA warp reductions). No CPU round-trips during generation.
 
-**Gradient fitness**: Magnitude of weight updates during MNIST classification
-- Classification head: Spatial pooling → FC layer → logits
-- Cross-entropy loss → backprop through autodiff tape
-- Gradient magnitude = learning potential
+**Compilation**: `-rdc=true` (relocatable device code), `-lcudadevrt` (device runtime library), `-arch=sm_86` (Ampere minimum for CDP stack depth).
 
-**Evolutionary fitness**: effective_rank × coherence
-- Parameter diversity × learning progress
-- GPU-native via SVD and temporal correlation
+### Automatic Differentiation (Tape-based Reverse-mode AD)
 
-**Hybrid**: 70% gradient, 30% evolution weights
+**Tape recording** (autodiff_tape.cu): Forward pass records operations (matrix multiplies, activations) with operand indices, shapes, operation type. Each thread maintains tape_index counter incremented after recording. Overflow checks before every write - tape full triggers reallocation or gradient checkpoint.
 
-### Dynamic Parallelism
+**Backward pass**: Reverse-order tape traversal computes ∂loss/∂weights via chain rule. Matrix multiply gradients: ∂loss/∂A = ∂loss/∂C · B^T, ∂loss/∂B = A^T · ∂loss/∂C. Activation gradients: GELU derivative, ReLU mask. Accumulated in FP32 gradient buffers per weight matrix (perception_grads, interaction_grads, value_grads).
 
-**Zero CPU synchronization**: Parent kernels launch child kernels on GPU
-- 41 device-side kernel launches in organism.cu
-- component_evolution_kernel spawns: selection, archive, lifecycle kernels
-- Compilation flags: `-rdc=true -lcudadevrt -arch=sm_86`
+**CA integration** (autodiff_integration.cu): Perception/interaction/value matrix operations in multi_head_ca_kernel record to tape during forward pass. Tape indices threaded through kernel parameters. Gradient descent (hybrid_lifecycle.cu) applies accumulated gradients every CHECKPOINT_INTERVAL=20 generations with learning rate from genome_to_param (LR_MIN=1e-5, LR_MAX=1e-2 range).
 
-### Automatic Differentiation
+**Memory management**: Tape preallocated to TAPE_MAX_SIZE ops. Checkpointing: recompute forward from last checkpoint if tape overflows, trading compute for memory. Device-side tape allocation/free via cudaMalloc/cudaFree in CDP kernels.
 
-**Tape-based backprop**:
-- Record operations during CA forward pass
-- Thread tape indices: perception → interaction → value
-- Backward pass computes ∂loss/∂weights
-- Overflow checks before every tape operation
+## Training (Hybrid Gradient-Evolutionary Metalearning)
 
-**Integration**: autodiff_integration.cu threads indices through CA kernels
+**Dual timescales**: Gradient learning every CHECKPOINT_INTERVAL=20 generations (hybrid_lifecycle.cu), evolutionary selection every generation (selection_kernel).
 
-## Training
+**Gradient fitness** (gradient_fitness.cu): Organisms evaluated on learning speed - how fast CA weights improve classification accuracy via autodiff backprop. CAs with higher gradient magnitudes (∂loss/∂weights norm) receive fitness bonus, selecting for "learnability". Coherence bonus (loss improvement consistency across steps) rewards exploration vs exploitation balance.
 
-The system metalearns on MNIST: CAs that learn to classify digits faster have higher gradient fitness.
+**Lifecycle progression** (lifecycle_stages.cu): Hunger state (energy depletion) tracked per organism. Hunger increases each generation without fitness improvement, decreases when fitness exceeds threshold. Hunger ≥ hunger_threshold triggers archive resampling (replace stagnant organism with archive elite). Coherence (gradient_fitness.cu) measures training trajectory smoothness - organisms with erratic loss curves penalized.
 
-```bash
-./slime.exe  # MNIST metalearning enabled by default
-```
+**Dataset support**: 12 datasets registered (dataset_loader.cu) - MNIST, Fashion-MNIST, CIFAR-10, PathMNIST, ESC-50, Speech-Commands, UrbanSound8K, SVHN, EMNIST, QuickDraw, UCI-HAR, SST-2. Vision datasets (2D spatial), audio (spectral via mel-spectrogram), timeseries (1D temporal), text (embedding). Default: MNIST for rapid prototyping.
 
-Loss components:
-- Cross-entropy (classification accuracy)
-- Gradient magnitude (learning speed)
-- Coherence bonus (exploration reward)
+**Loss components** (losses.cu):
+- Cross-entropy: classification accuracy (∂CE/∂logits backpropped through CA)
+- Gradient magnitude: ||∂loss/∂weights||_2 (metalearning signal - select CAs that learn fast)
+- Coherence bonus: Σ_t max(0, (loss_t - loss_{t+1})/loss_t) / T (reward consistent improvement)
 
 ## Configuration
 
 Key constants in `config/config.cu`:
 
 ```cuda
-GRID_SIZE = 64
-CHANNELS = 512
-NUM_HEADS = 8
-HIDDEN_DIM = 256
-GENOME_SIZE = 1024
-MAX_COMPONENTS = 256
-MAX_ARCHIVE_SIZE = 10000
-BEHAVIORAL_DIM = 10  // Adaptive 2-10
-HARDWARE_FEATURES_DIM = 15
+// CA architecture
+GRID_SIZE = 64              // Spatial grid dimensions (64×64 cells)
+CHANNELS = 512              // CA state channels per cell
+NUM_HEADS = 8               // Multi-head attention heads
+HIDDEN_DIM = 256            // Perception/interaction hidden dim
+HEAD_DIM = 16               // Output dim per head (CHANNELS / NUM_HEADS = 512 / 8 = 64, compressed to 16)
+
+// Genome and compression
+GENOME_SIZE = 1024                  // Full genome float count
+GENOME_LATENT_DIM_MAX = 128         // DIRESA compressed latent dimension (8× compression)
+
+// Evolution
+MAX_COMPONENTS = 256                // Pool size (organisms per generation)
+MAX_ARCHIVE_SIZE = 10000            // MAP-Elites archive capacity
+CHECKPOINT_INTERVAL = 20            // Gradient learning frequency (generations)
+
+// Behavioral space
+BEHAVIORAL_DIM_MIN = 2              // Minimum behavioral coords dimension
+BEHAVIORAL_DIM_MAX = 10             // Maximum (genome-adaptive)
+HARDWARE_FEATURES_DIM = 15          // Hardware efficiency features
+
+// Fitness exponents (genome-derived ranges)
+FITNESS_TASK_EXPONENT_MIN/MAX = 0.3, 2.0        // task^α exponent
+FITNESS_GEN_EXPONENT_MIN/MAX = 0.3, 2.0         // (1-gen_gap)^β exponent
+FITNESS_RANK_EXPONENT_MIN/MAX = 0.3, 2.0        // effective_rank^γ exponent
+FITNESS_EFFICIENCY_EXPONENT_MIN/MAX = 0.1, 1.5  // efficiency^δ exponent
 ```
 
 ## File Structure
 
 ```
 slime/
-├── config/              # System constants
-├── core/                # CA kernels, organism lifecycle, behavioral navigation
-├── kernels/             # SVD, tensor cores, utilities
-├── memory/              # Archive, pools, temporal memory
-├── learning/            # Autodiff, DIRESA embedding
-├── training/            # Gradient fitness, classification, lifecycle
-├── lifecycle/           # Genealogy, archive sampling
-├── metrics/             # Hardware feature extraction
-├── data/                # MNIST loader
-├── compression/         # Delta compression
-├── tests/               # Unit tests
-├── runtime.cu           # Host-side orchestration
-└── extract_state.cu     # JSON logging
+├── config/              # System constants (GENOME_SIZE=1024, GENOME_LATENT_DIM_MAX=128, fitness exponent ranges)
+├── core/                # Multi-head CA kernels (pseudopod.cu, pseudopod_tensor.cu), organism lifecycle, behavioral navigation
+├── kernels/             # Tensor core utilities, warp operations
+├── memory/              # MAP-Elites archive (archive.cu), component pools (pool.cu), temporal memory tubes
+├── learning/            # Autodiff tape (autodiff_tape.cu), DIRESA autoencoder (diresa.cu)
+├── training/            # Gradient fitness (gradient_fitness.cu), classification (classification.cu), hybrid lifecycle (hybrid_lifecycle.cu)
+├── lifecycle/           # Genealogy tracking, archive elite sampling
+├── metrics/             # Hardware feature extraction (15D: IPC, bandwidth, occupancy, cache hits, divergence)
+├── data/                # 12 dataset loaders (MNIST, Fashion-MNIST, CIFAR-10, SVHN, etc.)
+├── compression/         # Delta compression (delta.cu) for sparse genome storage
+├── tests/               # Unit tests (autodiff, CA integration, lifecycle)
+├── runtime.cu           # Host-side orchestration, device memory allocation
+└── extract_state.cu     # JSON telemetry logging
 ```
 
 See `docs/ARCHITECTURE.md` for complete interface contracts.
 
 ## Testing
 
+**Unit tests** (tests/ directory): Autodiff tape recording/backprop, DIRESA compression/decompression, MAP-Elites archive insertion, lifecycle progression, gradient fitness computation.
+
 ```bash
 cd build
 compile.bat tests
-test_autodiff_tape.exe          # Gradient validation
-test_mnist_ca_integration.exe   # End-to-end classification
+
+# Autodiff validation
+test_autodiff_tape.exe
+# Tests: tape recording during matrix ops, backward pass gradient correctness (∂loss/∂A = ∂loss/∂C · B^T),
+# overflow handling, tape reallocation, checkpointing
+
+# End-to-end classification
+test_mnist_ca_integration.exe
+# Tests: CA forward pass with tensor cores, loss computation (cross-entropy + gradient magnitude),
+# autodiff backward through CA, weight updates, accuracy improvement over training steps
+
+# DIRESA compression
+test_diresa_embedding.exe
+# Tests: 1024→128D encoding, 128→1024D decoding, reconstruction error < threshold,
+# distance preservation (trustworthiness/continuity metrics), triplet loss convergence
+
+# Lifecycle mechanics
+test_lifecycle_stages.exe
+# Tests: hunger state updates, coherence tracking, archive resampling triggers,
+# fitness threshold evaluation, genealogy parent_ids correctness
 ```
+
+**Integration validation**: Compare tensor core vs scalar CA outputs (should match within FP16 epsilon). Verify MAP-Elites archive never stores duplicate elites in same Voronoi cell. Check DIRESA latent mutations produce valid genomes after decode.
 
 ## Performance
 
-**RTX 3060 (sm_86, 28 SMs)**:
-- Tensor core throughput: ~13 TFLOPS FP16
-- CA forward (8 heads): ~2ms
-- Fitness computation (every 100 gen): ~50ms
-- Archive insertion: ~5ms
-- Generation time: ~10ms
+**Reference hardware (sm_86 Ampere, 28 SMs, 6GB VRAM)**:
+- Tensor core throughput: ~13 TFLOPS FP16 (wmma::mma_sync), ~0.4 TFLOPS FP32 scalar
+- CA forward pass (8 heads, 64×64 grid, 512 channels): ~2ms with tensor cores, ~60ms scalar
+- DIRESA compression (1024→128D): ~0.5ms encode, ~0.5ms decode (warp reductions + matrix ops)
+- Fitness computation (compute_fitness_from_diresa_kernel): ~0.1ms per organism (latent variance calculation)
+- MAP-Elites archive insertion (Voronoi cell search + elite storage): ~5ms per generation
+- Gradient descent step (autodiff backward + weight update): ~15ms per checkpoint (every 20 gen)
+- Full generation (selection + mutation + fitness + archive): ~10-15ms average
+
+**Memory footprint** (6GB VRAM):
+- CA state (64×64×512 FP16): ~4MB per organism × 256 pool = ~1GB
+- Archive (128D latent + metadata): ~0.5KB per elite × 10000 = ~5MB
+- Autodiff tape (TAPE_MAX_SIZE ops): ~100MB preallocated
+- DIRESA autoencoder weights: ~50MB (encoder + decoder)
+- Perception/interaction/value weights (FP16): ~3MB per organism × 256 = ~768MB
+- Hardware feature buffers, temporal tubes, chemical fields: ~500MB
+- **Total**: ~2.5GB active, ~3.5GB peak during gradient checkpoints
 
 **Bottlenecks**:
-- SVD (Jacobi sweeps): O(n³) iterations
-- DIRESA training: 500-step triplet loss every 2000 steps
-- Memory compaction: Stream compaction when tubes full
+- DIRESA autoencoder training: 500-step triplet loss minimization every 2000 generation steps (distance preservation learning)
+- Voronoi tessellation density updates: O(archive_size × behavioral_dim) distance computations per elite insertion
+- Memory compaction: Stream compaction (thrust::remove_if) when temporal tubes exceed capacity
+- Autodiff tape overflow: Checkpoint/recomputation when tape exceeds TAPE_MAX_SIZE during long CA rollouts
 
 ## References
 
