@@ -1,0 +1,108 @@
+
+#ifndef ARCHIVE_SAMPLING_CU
+#define ARCHIVE_SAMPLING_CU
+
+#include "../config/config.cu"
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+#include "../memory/archive.cu"
+#include "../memory/pool.cu"
+#include "../core/chemotaxis.cu"
+
+__device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state) {
+    if (archive_size == 0) return -1;
+
+    int* sparse_cells;
+    cudaMalloc(&sparse_cells, sizeof(int) * num_cells);
+
+    int min_density = MIN_DENSITY_INIT;
+    int num_sparse = 0;
+
+    for (int i = 0; i < num_cells; i++) {
+        if (voronoi_cells[i].density < min_density + ARCHIVE_DENSITY_MARGIN) {
+            if (voronoi_cells[i].density < min_density) {
+                min_density = voronoi_cells[i].density;
+                num_sparse = 0;
+            }
+            sparse_cells[num_sparse++] = i;
+        }
+    }
+
+    int result;
+    if (num_sparse == 0) {
+        result = curand(rand_state) % archive_size;
+    } else {
+        int cell_idx = sparse_cells[curand(rand_state) % num_sparse];
+        int elite_idx = voronoi_cells[cell_idx].best_elite_idx;
+        result = (elite_idx >= 0 && elite_idx < archive_size) ? elite_idx : 0;
+    }
+
+    cudaFree(sparse_cells);
+    return result;
+}
+
+__global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (archive_size == 0) return;
+
+    curandState rand_state;
+    curand_init(seed, 0, 0, &rand_state);
+
+    int elite_idx = sample_from_archive_novel(archive, archive_size, voronoi_cells, num_cells, &rand_state);
+    if (elite_idx < 0 || elite_idx >= archive_size) return;
+
+    PoolEntry* entry = &pool->entries[pool_idx];
+
+    entry->parent_hash = archive->genome_hash[elite_idx];
+    entry->genome_hash = archive->genome_hash[elite_idx];
+    entry->num_deltas = 0;
+    entry->alive = true;
+
+    float* elite_genome = workspace_genome;
+    float* temp_parent = workspace_genome + GENOME_SIZE;
+    reconstruct_genome_from_archive(
+        entry->parent_hash,
+        archive,
+        archive_size,
+        entry->delta_indices,
+        entry->delta_values,
+        entry->num_deltas,
+        entry->max_deltas,
+        elite_genome,
+        GENOME_SIZE,
+        temp_parent,
+        diresa_genome_weights
+    );
+
+    int fitness_inherit_center_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_center");
+    int fitness_inherit_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_steepness");
+    float fitness_inherit_center = genome_to_param(elite_genome, entry->gradients, fitness_inherit_center_slot, 0.5f, 0.5f, 0.5f, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
+    float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, 0.5f, 0.5f, 0.5f, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
+    float fitness_modulation = NORMALIZED_MAX / (NORMALIZED_MAX + expf(-fitness_inherit_steepness * (archive->fitness[elite_idx] - fitness_inherit_center)));
+
+    entry->fitness = archive->fitness[elite_idx] * fitness_modulation;
+    entry->coherence = archive->coherence[elite_idx];
+    entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
+    entry->generation = archive->generation[elite_idx];
+
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    if (pool_idx < MAX_COMPONENTS) {
+        BehavioralState* agent = &behavioral_agents[pool_idx];
+        for (int i = 0; i < hw_dim; i++) {
+            agent->hw_coords[i] = archive->hw_coords[elite_idx * hw_dim + i];
+        }
+        for (int i = 0; i < task_dim; i++) {
+            agent->task_coords[i] = archive->task_coords[elite_idx * task_dim + i];
+        }
+        for (int i = 0; i < gen_dim; i++) {
+            agent->gen_coords[i] = archive->gen_coords[elite_idx * gen_dim + i];
+        }
+    }
+
+    Atomics::increment_int(pool->total_spawned);
+}
+
+#endif
