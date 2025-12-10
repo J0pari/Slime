@@ -887,6 +887,35 @@ struct DIRESAOps {
     }
 };
 
+// Safe size computation (prevents integer overflow in dataset size calculations)
+// Used in DATASET_REGISTRY_INIT to compute train_size_bytes and test_size_bytes
+struct SafeSize {
+    // 2D grayscale: samples × rows × cols (MNIST, Fashion-MNIST, ChestX-ray)
+    static constexpr size_t vision_2d(int samples, int rows, int cols) {
+        return static_cast<size_t>(samples) * rows * cols;
+    }
+
+    // 3D color: samples × rows × cols × channels (CIFAR-10, PathMNIST, RetinaMNIST)
+    static constexpr size_t vision_3d(int samples, int rows, int cols, int channels) {
+        return static_cast<size_t>(samples) * rows * cols * channels;
+    }
+
+    // Audio spectral: samples × time × mels × channels × sizeof(float) (ESC-50, Speech-Commands, UrbanSound8K)
+    static constexpr size_t audio_spectral(int samples, int time, int mels, int channels) {
+        return static_cast<size_t>(samples) * time * mels * channels * sizeof(float);
+    }
+
+    // Timeseries multi-feature: samples × timesteps × features × sizeof(float) (UCI-HAR, OPPORTUNITY)
+    static constexpr size_t timeseries_multi(int samples, int timesteps, int features) {
+        return static_cast<size_t>(samples) * timesteps * features * sizeof(float);
+    }
+
+    // Timeseries single: samples × timesteps × sizeof(float) (MIT-BIH-ECG)
+    static constexpr size_t timeseries_single(int samples, int timesteps) {
+        return static_cast<size_t>(samples) * timesteps * sizeof(float);
+    }
+};
+
 // Cooperative group sync wrapper (replaces cudaDeviceSynchronize)
 struct CooperativeSync {
     // Warp-level sync (32 threads, ~5 cycles)

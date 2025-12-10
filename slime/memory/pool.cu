@@ -3,6 +3,7 @@
 #define POOL_CU
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
+#include "../utils/tile_ops.cuh"
 #include "../compression/delta.cu"
 #include "../memory/archive.cu"
 #include "../memory/genome_ops.cuh"
@@ -438,12 +439,10 @@ __device__ __noinline__ float compute_genome_distance(
 
     if (idx1 < 0 || idx2 < 0) return 1e10f;  // Not in archive
 
-    float distance_squared = 0.0f;
-    for (int i = 0; i < GENOME_LATENT_DIM_MAX; i++) {
-        float diff = archive->latent_genome[idx1 * GENOME_LATENT_DIM_MAX + i] -
-                     archive->latent_genome[idx2 * GENOME_LATENT_DIM_MAX + i];
-        distance_squared += diff * diff;
-    }
+    // Use vectorized DIRESAOps warp-reduce distance (128D -> 32 float4 loads)
+    const float* latent1 = &archive->latent_genome[idx1 * GENOME_LATENT_DIM_MAX];
+    const float* latent2 = &archive->latent_genome[idx2 * GENOME_LATENT_DIM_MAX];
+    float distance_squared = DIRESAOps::compute_latent_distance_sq(latent1, latent2, GENOME_LATENT_DIM_MAX);
 
     return sqrtf(distance_squared / GENOME_LATENT_DIM_MAX);
 }

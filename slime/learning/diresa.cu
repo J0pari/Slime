@@ -2,6 +2,7 @@
 #define DIRESA_CU
 
 #include "../config/config.cu"
+#include "../utils/tile_ops.cuh"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
@@ -210,8 +211,30 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         hidden2[i] = relu(sum);
     }
 
-    // Layer 3: HIDDEN2 -> output_dim (linear output)
-    for (int i = 0; i < weights->output_dim; i++) {
+    // Layer 3: HIDDEN2 -> output_dim (linear output, vectorized with float4)
+    // Vectorize latent writes: 128 elements -> 32 float4 stores
+    int vec_output_dim = weights->output_dim / 4;
+    for (int i = 0; i < vec_output_dim; i++) {
+        float4 sum4 = make_float4(
+            weights->encoder_b3[i * 4 + 0],
+            weights->encoder_b3[i * 4 + 1],
+            weights->encoder_b3[i * 4 + 2],
+            weights->encoder_b3[i * 4 + 3]
+        );
+
+        for (int j = 0; j < weights->hidden2; j++) {
+            float h = hidden2[j];
+            sum4.x += h * weights->encoder_w3[j * weights->output_dim + i * 4 + 0];
+            sum4.y += h * weights->encoder_w3[j * weights->output_dim + i * 4 + 1];
+            sum4.z += h * weights->encoder_w3[j * weights->output_dim + i * 4 + 2];
+            sum4.w += h * weights->encoder_w3[j * weights->output_dim + i * 4 + 3];
+        }
+
+        reinterpret_cast<float4*>(latent)[i] = sum4;
+    }
+
+    // Handle remainder if output_dim not divisible by 4
+    for (int i = vec_output_dim * 4; i < weights->output_dim; i++) {
         float sum = weights->encoder_b3[i];
         for (int j = 0; j < weights->hidden2; j++) {
             sum += hidden2[j] * weights->encoder_w3[j * weights->output_dim + i];
@@ -225,12 +248,26 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
     float hidden1[DIRESA_HIDDEN2_MAX];
     float hidden2[DIRESA_HIDDEN1_MAX];
 
-    // Layer 1: output_dim -> HIDDEN2
+    // Layer 1: output_dim -> HIDDEN2 (vectorized latent reads with float4)
+    // Vectorize latent reads: 128 elements -> 32 float4 loads
+    int vec_output_dim = weights->output_dim / 4;
     for (int i = 0; i < weights->hidden2; i++) {
         float sum = weights->decoder_b1[i];
-        for (int j = 0; j < weights->output_dim; j++) {
+
+        // Vectorized accumulation
+        for (int j = 0; j < vec_output_dim; j++) {
+            float4 latent4 = reinterpret_cast<const float4*>(latent)[j];
+            sum += latent4.x * weights->decoder_w1[(j * 4 + 0) * weights->hidden2 + i];
+            sum += latent4.y * weights->decoder_w1[(j * 4 + 1) * weights->hidden2 + i];
+            sum += latent4.z * weights->decoder_w1[(j * 4 + 2) * weights->hidden2 + i];
+            sum += latent4.w * weights->decoder_w1[(j * 4 + 3) * weights->hidden2 + i];
+        }
+
+        // Handle remainder
+        for (int j = vec_output_dim * 4; j < weights->output_dim; j++) {
             sum += latent[j] * weights->decoder_w1[j * weights->hidden2 + i];
         }
+
         hidden1[i] = relu(sum);
     }
 
@@ -294,12 +331,8 @@ __global__ void diresa_distance_kernel(DIRESABatch* batch) {
     }
     batch->orig_distances[tid] = sqrtf(orig_dist_sq);
 
-    // Compute latent space distance: ||z_i - z_j||
-    float latent_dist_sq = 0.0f;
-    for (int k = 0; k < batch->output_dim; k++) {
-        float diff = latent_i[k] - latent_j[k];
-        latent_dist_sq += diff * diff;
-    }
+    // Compute latent space distance using DIRESAOps (vectorized warp-reduce, 128 -> 32 float4 loads)
+    float latent_dist_sq = DIRESAOps::compute_latent_distance_sq(latent_i, latent_j, batch->output_dim);
     batch->latent_distances[tid] = sqrtf(latent_dist_sq);
 }
 
