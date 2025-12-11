@@ -171,8 +171,9 @@ struct PRNGState {
         float alpha_phi = alpha * phi;
 
         float levy_num = sinf(alpha_phi);
-        float levy_denom = powf(cosf(phi) + EPSILON, (NORMALIZED_MAX / alpha));
-        float levy_factor = powf(cosf(xi) / (-logf(W + EPSILON) + EPSILON), ((NORMALIZED_MAX - alpha) / alpha));
+        float levy_denom = powf(fabsf(cosf(phi)) + EPSILON, (NORMALIZED_MAX / alpha));
+        float levy_base = fabsf(cosf(xi)) / (-logf(W + EPSILON) + EPSILON);
+        float levy_factor = powf(levy_base + EPSILON, ((NORMALIZED_MAX - alpha) / alpha));
 
         return (levy_num / levy_denom * levy_factor) * scale;
     }
@@ -696,6 +697,60 @@ __global__ void compute_pool_stats_kernel(
         params.diversity_normalization = 1.0f + (genome_diversity + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 1000.0f;
 
         atomicAdd(genetic_diversity, diversity / params.diversity_normalization);
+    }
+}
+
+struct PoolBuffers {
+    uint16_t* indices;
+    float* values;
+    float* gradients;
+};
+
+__global__ void init_pool_buffers_kernel(ComponentPool* pool, int capacity, PoolBuffers* buffers) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        size_t indices_size = sizeof(uint16_t) * GENOME_SIZE * capacity;
+        size_t values_size = sizeof(float) * GENOME_SIZE * capacity;
+        size_t gradients_size = sizeof(float) * GENOME_SIZE * capacity;
+        size_t total_mb = (indices_size + values_size + gradients_size) / BYTES_PER_MB;
+
+        printf("[pool_buffers] capacity=%d genome_size=%d total_mb=%llu\n", capacity, GENOME_SIZE, (unsigned long long)total_mb);
+
+        cudaError_t err = cudaMalloc(&buffers->indices, indices_size);
+        if (err != cudaSuccess) {
+            printf("[pool_buffers] indices alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)indices_size);
+            buffers->indices = nullptr;
+            buffers->values = nullptr;
+            buffers->gradients = nullptr;
+            return;
+        }
+        err = cudaMalloc(&buffers->values, values_size);
+        if (err != cudaSuccess) {
+            printf("[pool_buffers] values alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)values_size);
+            cudaFree(buffers->indices);
+            buffers->indices = nullptr;
+            buffers->values = nullptr;
+            buffers->gradients = nullptr;
+            return;
+        }
+        err = cudaMalloc(&buffers->gradients, gradients_size);
+        if (err != cudaSuccess) {
+            printf("[pool_buffers] gradients alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)gradients_size);
+            cudaFree(buffers->indices);
+            cudaFree(buffers->values);
+            buffers->indices = nullptr;
+            buffers->values = nullptr;
+            buffers->gradients = nullptr;
+            return;
+        }
+        printf("[pool_buffers] indices=%p values=%p gradients=%p\n", buffers->indices, buffers->values, buffers->gradients);
+
+        int pool_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        printf("[pool_buffers] launching init_pool_kernel: blocks=%d threads=%d\n", pool_blocks, BLOCK_SIZE);
+        init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(pool, capacity, buffers->indices, buffers->values, buffers->gradients);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("[pool_buffers] init_pool launch_err=%s\n", cudaGetErrorString(err));
+        }
     }
 }
 

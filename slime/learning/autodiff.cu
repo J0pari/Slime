@@ -47,6 +47,8 @@ __global__ void init_ad_tape_kernel(ADTape* tape, TapeEntry* entries_pool, float
         tape->current_size = 0;
         tape->value_capacity = value_capacity;
         tape->current_value_idx = 0;
+        printf("[ad_tape] tape=%p entries=%p values=%p grads=%p capacity=%d value_capacity=%d\n",
+               tape, entries_pool, values_pool, grads_pool, tape_capacity, value_capacity);
     }
 }
 

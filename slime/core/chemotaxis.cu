@@ -492,11 +492,14 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (agent_id == 0) printf("[D_BEHAV0] KERNEL ENTRY num_agents=%d hw_dim=%d task_dim=%d gen_dim=%d total=%d\n", num_agents, hw_dim, task_dim, gen_dim, behavioral_dim);
+    if (agent_id == 0) {
+        printf("[behavioral] agents=%p num=%d seed=%u genome=%p genome_hash=%llu organism_id=%d\n",
+               agents, num_agents, seed, genome, genome_hash, organism_id);
+        printf("[behavioral] dims: hw=%d task=%d gen=%d total=%d hw_coords=%p task_coords=%p gen_coords=%p\n",
+               hw_dim, task_dim, gen_dim, behavioral_dim, agents[0].hw_coords, agents[0].task_coords, agents[0].gen_coords);
+    }
 
     if (agent_id >= num_agents) return;
-
-    if (agent_id == 0) printf("[D_BEHAV1] Entry agent_id=0\n");
 
     uint64_t stream_seed = ((uint64_t)seed << 32) | (uint64_t)agent_id;
     stream_seed ^= stream_seed >> 33;
@@ -505,48 +508,30 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     stream_seed *= 0xc4ceb9fe1a85ec53ULL;
     stream_seed ^= stream_seed >> 33;
 
-    if (agent_id == 0) printf("[D_BEHAV2] stream_seed computed\n");
-
     PRNGState rng;
     rng.s0 = stream_seed;
     rng.s1 = stream_seed ^ 0x9e3779b97f4a7c15ULL;
 
-    if (agent_id == 0) printf("[D_BEHAV3] PRNGState initialized\n");
-
     BehavioralState* agent = &agents[agent_id];
 
-    if (agent_id == 0) printf("[D_BEHAV4] agent pointer obtained\n");
-
     float ctx_metabolic = (genome[slots.ctx_metabolic] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    if (agent_id == 0) printf("[D_BEHAV5] ctx_metabolic read\n");
-
     float ctx_stress = (genome[slots.ctx_stress] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    if (agent_id == 0) printf("[D_BEHAV6] ctx_stress read\n");
-
     float ctx_morphogen = (genome[slots.ctx_morphogen] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    if (agent_id == 0) printf("[D_BEHAV7] ctx_morphogen read\n");
 
     float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, AGENT_EMBEDDING_SCALE_BASE_MIN, AGENT_EMBEDDING_SCALE_BASE_MAX);
-    if (agent_id == 0) printf("[D_BEHAV8] embedding_scale computed\n");
-
     float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, INIT_EXPLORATION_BASE_MIN, INIT_EXPLORATION_BASE_MAX);
-    if (agent_id == 0) printf("[D_BEHAV9] init_exploration computed\n");
-
     float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, INIT_SENSITIVITY_BASE_MIN, INIT_SENSITIVITY_BASE_MAX);
-    if (agent_id == 0) printf("[D_BEHAV10] init_sensitivity computed\n");
-
     float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, CHEMOTAXIS_LEVY_ALPHA_MIN, CHEMOTAXIS_LEVY_ALPHA_MAX);
-    if (agent_id == 0) printf("[D_BEHAV10b] levy_alpha computed\n");
 
     agent->position[0] = rng.next();
-    if (agent_id == 0) printf("[D_BEHAV11] position[0] = rng.next()\n");
-
     agent->position[1] = rng.next();
-    if (agent_id == 0) printf("[D_BEHAV12] position[1] = rng.next()\n");
 
     agent->velocity[0] = 0.0f;
     agent->velocity[1] = 0.0f;
-    if (agent_id == 0) printf("[D_BEHAV13] velocity set\n");
+
+    if (agent_id == 0) {
+        printf("[behavioral] agent0 levy params: alpha=%f scale=%f\n", levy_alpha, embedding_scale);
+    }
 
     for (int i = 0; i < hw_dim; i++) {
         agent->hw_coords[i] = rng.levy_stable(levy_alpha, embedding_scale);
@@ -557,7 +542,11 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     for (int i = 0; i < gen_dim; i++) {
         agent->gen_coords[i] = rng.levy_stable(levy_alpha, embedding_scale);
     }
-    if (agent_id == 0) printf("[D_BEHAV14] three-axis behavioral_coords set (hw=%d task=%d gen=%d)\n", hw_dim, task_dim, gen_dim);
+
+    if (agent_id == 0) {
+        printf("[behavioral] agent0 coords assigned: hw[0]=%f task[0]=%f gen[0]=%f\n",
+               agent->hw_coords[0], agent->task_coords[0], agent->gen_coords[0]);
+    }
 
     for (int i = 0; i < GRADIENT_HISTORY; i++) {
         agent->gradient_memory[i][0] = 0.0f;
@@ -565,7 +554,6 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
         agent->velocity_history[i][0] = 0.0f;
         agent->velocity_history[i][1] = 0.0f;
     }
-    if (agent_id == 0) printf("[D_BEHAV15] gradient_memory and velocity_history set\n");
 
     agent->exploration_noise = init_exploration;
     agent->exploration = init_exploration;
@@ -574,7 +562,13 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     agent->genome_hash = genome_hash;
     agent->organism_id = organism_id;
 
-    if (agent_id == 0) printf("[D_BEHAV16] Exit agent_id=0 SUCCESS\n");
+    if (agent_id == 0) {
+        printf("[behavioral] agent0: pos=[%f,%f] vel=[%f,%f] exploration=%f sensitivity=%f levy_alpha=%f\n",
+               agent->position[0], agent->position[1], agent->velocity[0], agent->velocity[1],
+               init_exploration, init_sensitivity, levy_alpha);
+        printf("[behavioral] agent0: hw_coords[0]=%f task_coords[0]=%f gen_coords[0]=%f\n",
+               agent->hw_coords[0], agent->task_coords[0], agent->gen_coords[0]);
+    }
 }
 
 __global__ void init_chemical_field_kernel(
@@ -609,6 +603,14 @@ __global__ void init_chemical_field_kernel(
     field->laplacian[idx] = 0.0f;
     field->sources[idx] = 0.0f;
     field->decay_factors[idx] = chemical_decay;
+
+    if (x == 0 && y == 0) {
+        int null_check = (field->concentration == nullptr) + (field->gradient_x == nullptr) + (field->gradient_y == nullptr) + (field->laplacian == nullptr);
+        printf("[chemical_field] field=%p grid=%d field_size=%d decay=%f nulls=%d conc=%p grad_x=%p laplacian=%p\n",
+               field, grid_size, grid_size*grid_size, chemical_decay, null_check, field->concentration, field->gradient_x, field->laplacian);
+        printf("[chemical_field] verify idx0: conc=%f grad_x=%f grad_y=%f decay=%f\n",
+               field->concentration[0], field->gradient_x[0], field->gradient_y[0], field->decay_factors[0]);
+    }
 }
 
 __global__ void set_chemical_sources_from_agents_kernel(

@@ -1697,43 +1697,32 @@ __global__ void init_organism_kernel(
             return;
         }
 
-        uint16_t* pool_delta_indices_buffer;
-        float* pool_delta_values_buffer;
-        float* pool_gradients_buffer;
-
-        printf("[DEVICE] Allocating pool buffers: %zu MB total\n",
-               (sizeof(uint16_t) * GENOME_SIZE * MAX_POOL_SIZE +
-                sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE * 2) / (1024*1024));
-
-        err = cudaMalloc(&pool_delta_indices_buffer, sizeof(uint16_t) * GENOME_SIZE * MAX_POOL_SIZE);
+        PoolBuffers* pool_buffers_device;
+        err = cudaMalloc(&pool_buffers_device, sizeof(PoolBuffers));
         if (err != cudaSuccess) {
-            printf("[ERROR] pool_delta_indices_buffer malloc failed: %s\n", cudaGetErrorString(err));
+            printf("[organism] pool_buffers struct alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)sizeof(PoolBuffers));
             return;
         }
-        err = cudaMalloc(&pool_delta_values_buffer, sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE);
-        if (err != cudaSuccess) {
-            printf("[ERROR] pool_delta_values_buffer malloc failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        err = cudaMalloc(&pool_gradients_buffer, sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE);
-        if (err != cudaSuccess) {
-            printf("[ERROR] pool_gradients_buffer malloc failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[DEVICE] Pool buffers allocated successfully\n");
 
-        init_pool_kernel<<<(MAX_POOL_SIZE + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            organism->pool,
-            MAX_POOL_SIZE,
-            pool_delta_indices_buffer,
-            pool_delta_values_buffer,
-            pool_gradients_buffer
-        );
+        init_pool_buffers_kernel<<<1, 1>>>(organism->pool, MAX_POOL_SIZE, pool_buffers_device);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("[ERROR] init_pool_kernel launch failed: %s\n", cudaGetErrorString(err));
+            printf("[organism] init_pool_buffers launch_err=%s\n", cudaGetErrorString(err));
             return;
         }
+        printf("[organism] init_organism_phase1 complete: pool_init launched\n");
+    }
+}
+
+__global__ void init_organism_phase2_kernel(
+    Organism* organism,
+    Dataset** dataset_array,
+    unsigned int seed,
+    float* workspace_genomes
+) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        cudaError_t err;
+        printf("[organism] init_organism_phase2 entry: pool=%p\n", organism->pool);
 
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
@@ -1751,9 +1740,9 @@ __global__ void init_organism_kernel(
             organism->diresa_genome_weights
         );
 
-        printf("[DEVICE] Deriving behavioral dimensions from genome...\n");
         BehavioralDimensions dims;
         dims.derive_from_genome(organism->pool->entries[0].genome_hash, primary_genome);
+        printf("[organism] behavioral_dims: hw=%d task=%d gen=%d total=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, dims.total());
 
         organism->archive->hw_dim = dims.hw_dim;
         organism->archive->task_dim = dims.task_dim;
@@ -1803,11 +1792,10 @@ __global__ void init_organism_kernel(
             organism->voronoi_cells[i].gen_centroid = &voronoi_gen_centroid_buffer[i * dims.gen_dim];
         }
 
-        printf("[DEVICE] Computing decay rate...\n");
         int default_decay_rate_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "memory_default_decay_rate");
         float default_decay_rate_norm = (primary_genome[default_decay_rate_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
-        printf("[DEVICE] Launching init_tube_kernel...\n");
+        printf("[organism] decay_rate: slot=%d norm=%f rate=%f\n", default_decay_rate_slot, default_decay_rate_norm, default_decay_rate);
 
         init_tube_kernel<<<(MAX_HISTORY_LENGTH + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism->memory_tubes,
@@ -1816,10 +1804,9 @@ __global__ void init_organism_kernel(
         );
         
         if (err != cudaSuccess) {
-            printf("[ERROR] init_tube_kernel failed: %s\n", cudaGetErrorString(err));
+            printf("[organism] init_tube launch_err=%s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] init_tube_kernel completed\n");
 
         ArchitectureParams arch;
         arch.num_heads = organism->pool->entries[0].num_heads;
@@ -1827,10 +1814,8 @@ __global__ void init_organism_kernel(
         arch.hidden_dim = organism->pool->entries[0].hidden_dim;
         arch.head_dim = organism->pool->entries[0].head_dim;
         arch.grid_size = organism->pool->entries[0].grid_size;
-        printf("[DEVICE] Arch: heads=%d channels=%d hidden=%d head_dim=%d grid=%d\n", arch.num_heads, arch.channels, arch.hidden_dim, arch.head_dim, arch.grid_size);
-
-        printf("[ALLOC] Allocating genome-derived structures with memory reuse...\n");
         int field_size = arch.grid_size * arch.grid_size;
+        printf("[organism] arch from pool[0]: heads=%d channels=%d hidden=%d head_dim=%d grid=%d field_size=%d\n", arch.num_heads, arch.channels, arch.hidden_dim, arch.head_dim, arch.grid_size, field_size);
 
         cudaMalloc(&organism->ca_state, sizeof(MultiHeadCAState));
         cudaMalloc(&organism->chemical_field, sizeof(ChemicalField));
@@ -1933,43 +1918,59 @@ __global__ void init_organism_kernel(
         // sample dimensions from dataset->descriptor->sample_rows/cols
         // Dataset is_train flag already set by load_dataset_from_registry
 
-        // Allocate three-axis DIRESA encoders (DRY: same struct type, different instances)
-        size_t diresa_size = sizeof(DIRESAWeights) * first_entry->num_tempering_replicas;
+        size_t diresa_struct_size = sizeof(DIRESAWeights);
+        int num_replicas = first_entry->num_tempering_replicas;
+        size_t diresa_size = diresa_struct_size * num_replicas;
+        size_t diresa_mb = diresa_size / BYTES_PER_MB;
+
+        printf("[organism] diresa: struct_size=%llu replicas=%d total_size=%llu total_mb=%llu\n",
+               (unsigned long long)diresa_struct_size, num_replicas, (unsigned long long)diresa_size, (unsigned long long)diresa_mb);
 
         err = cudaMalloc(&organism->diresa_hw_weights, diresa_size);
         track_allocation("diresa_hw_weights", organism->diresa_hw_weights, diresa_size, err, &organism->telemetry->memory_allocation);
-        if (err != cudaSuccess) { printf("[FATAL] DIRESA hw allocation failed\n"); return; }
+        if (err != cudaSuccess) {
+            printf("[organism] diresa_hw alloc_err=%s size=%llu replicas=%d\n", cudaGetErrorString(err), (unsigned long long)diresa_size, num_replicas);
+            return;
+        }
 
         err = cudaMalloc(&organism->diresa_task_weights, diresa_size);
         track_allocation("diresa_task_weights", organism->diresa_task_weights, diresa_size, err, &organism->telemetry->memory_allocation);
-        if (err != cudaSuccess) { printf("[FATAL] DIRESA task allocation failed\n"); return; }
+        if (err != cudaSuccess) {
+            printf("[organism] diresa_task alloc_err=%s size=%llu replicas=%d\n", cudaGetErrorString(err), (unsigned long long)diresa_size, num_replicas);
+            return;
+        }
 
         err = cudaMalloc(&organism->diresa_gen_weights, diresa_size);
         track_allocation("diresa_gen_weights", organism->diresa_gen_weights, diresa_size, err, &organism->telemetry->memory_allocation);
-        if (err != cudaSuccess) { printf("[FATAL] DIRESA gen allocation failed\n"); return; }
+        if (err != cudaSuccess) {
+            printf("[organism] diresa_gen alloc_err=%s size=%llu replicas=%d\n", cudaGetErrorString(err), (unsigned long long)diresa_size, num_replicas);
+            return;
+        }
 
         err = cudaMalloc(&organism->diresa_genome_weights, diresa_size);
         track_allocation("diresa_genome_weights", organism->diresa_genome_weights, diresa_size, err, &organism->telemetry->memory_allocation);
-        if (err != cudaSuccess) { printf("[FATAL] DIRESA genome allocation failed\n"); return; }
+        if (err != cudaSuccess) {
+            printf("[organism] diresa_genome alloc_err=%s size=%llu replicas=%d\n", cudaGetErrorString(err), (unsigned long long)diresa_size, num_replicas);
+            return;
+        }
 
         organism->telemetry->memory_allocation.diresa_weights_size = diresa_size * 4;
 
-        // Initialize all four encoders with path-specific dimensions
-        init_diresa_kernel<<<first_entry->num_tempering_replicas, 1024>>>(
+        printf("[organism] launching init_diresa_kernel: blocks=%d threads=1024\n", num_replicas);
+        init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_hw_weights, HARDWARE_FEATURES_DIM, BEHAVIORAL_DIM_HW_MAX, first_entry, seed + 999999);
-        init_diresa_kernel<<<first_entry->num_tempering_replicas, 1024>>>(
+        init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_task_weights, BEHAVIORAL_DIM_TASK_MAX, BEHAVIORAL_DIM_TASK_MAX, first_entry, seed + 888888);
-        init_diresa_kernel<<<first_entry->num_tempering_replicas, 1024>>>(
+        init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_gen_weights, BEHAVIORAL_DIM_GEN_MAX, BEHAVIORAL_DIM_GEN_MAX, first_entry, seed + 777777);
-        init_diresa_kernel<<<first_entry->num_tempering_replicas, 1024>>>(
+        init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_genome_weights, GENOME_SIZE, GENOME_LATENT_DIM_MAX, first_entry, seed + 666666);
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("[ERROR] init_diresa_kernel failed: %s\n", cudaGetErrorString(err));
+            printf("[organism] init_diresa launch_err=%s blocks=%d\n", cudaGetErrorString(err), num_replicas);
             return;
         }
-        printf("[DEVICE] Three-axis DIRESA initialized (hw/task/gen) with %d replicas each\n", first_entry->num_tempering_replicas);
 
         // Initialize memory telemetry tracking
         organism->telemetry->memory_allocation.total_gpu_allocated = 0;
@@ -2395,16 +2396,26 @@ __global__ void persistent_evolution_kernel(
     float* organism_workspace_genomes;
     cudaMalloc(&organism_workspace_genomes, sizeof(float) * GENOME_SIZE * 4);
 
-    printf("[PERSISTENT-STEP8] Launching init_organism_kernel<<<1,1>>>\n");
+    printf("[PERSISTENT-STEP8] Launching init_organism_kernel phase1<<<1,1>>>\n");
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, seed, organism_workspace_genomes);
     err = cudaGetLastError();
-    printf("[PERSISTENT-STEP9] init_organism_kernel launch returned: err=%d\n", (int)err);
+    printf("[PERSISTENT-STEP9a] init_organism_phase1 launch returned: err=%d\n", (int)err);
+    if (err != cudaSuccess) {
+        printf("[PERSISTENT-ERROR] init_organism_phase1 launch failed: %d\n", (int)err);
+        return;
+    }
+
+    printf("[PERSISTENT-STEP9b] Launching init_organism_phase2<<<1,1>>>\n");
+    init_organism_phase2_kernel<<<1, 1>>>(organism, dataset_array, seed, organism_workspace_genomes);
+    err = cudaGetLastError();
+    printf("[PERSISTENT-STEP9c] init_organism_phase2 launch returned: err=%d\n", (int)err);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] init_organism_kernel launch failed: %d\n", (int)err);
         return;
     }
 
     printf("[PERSISTENT-STEP10] Calling cudaDeviceSynchronize\n");
+    err = cudaDeviceSynchronize();
     printf("[PERSISTENT-STEP11] cudaDeviceSynchronize returned: err=%d\n", (int)err);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] cudaDeviceSynchronize failed: %d\n", (int)err);
@@ -2484,10 +2495,16 @@ __global__ void persistent_evolution_kernel(
 
         // Telemetry every 100 generations
         if (generation % 100 == 0) {
-            printf("[GEN %d] Evolution running, gradient learning every %d gens\n",
-                   generation, CHECKPOINT_INTERVAL);
+            int active = Atomics::load_int(organism->pool->active_count);
+            int spawned = Atomics::load_int(organism->pool->total_spawned);
+            int culled = Atomics::load_int(organism->pool->total_culled);
+            printf("[GEN %d] pool: active=%d spawned=%d culled=%d archive=%d checkpoint_interval=%d\n",
+                   generation, active, spawned, culled, organism->archive_size, CHECKPOINT_INTERVAL);
         }
 
+        if (generation % 100 == 0 || generation < 5) {
+            printf("[LOOP] gen=%d: incrementing to gen=%d\n", generation, generation + 1);
+        }
         generation++;
     }
 

@@ -207,6 +207,7 @@ __global__ void init_tube_kernel(
         tube->count = 0;
         tube->global_time = 0.0f;
         tube->decay_rate = decay_rate;
+        printf("[tube] tube=%p capacity=%d decay_rate=%f entries=%p\n", tube, capacity, decay_rate, tube->entries);
     }
 }
 

@@ -244,6 +244,12 @@ __global__ void init_tensor_weights_kernel(
 
     float val = curand_normal(&rand_state) * sqrtf(2.0f / channels);
     weights[idx] = __float2half(val);
+
+    if (idx == 0) {
+        printf("[tensor_weights] weights=%p size=%d channels=%d seed=%u scale=%f\n",
+               weights, size, channels, seed, sqrtf(2.0f / channels));
+        printf("[tensor_weights] verify idx0: weight=%f (fp16 as fp32)\n", __half2float(weights[0]));
+    }
 }
 
 #endif

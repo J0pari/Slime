@@ -330,6 +330,10 @@ __global__ void init_voronoi_cells_kernel(
     cell->density = 0;
     cell->best_elite_idx = -1;
     cell->quality_threshold = 0.0f;
+
+    if (cell_id == 0) {
+        printf("[voronoi] cells=%p num=%d dims=%d radius=%f\n", cells, num_cells, total_dims, typical_spacing * 2.0f);
+    }
 }
 
 // Streaming genome element reconstruction - implementation here requires GPUElite definition
