@@ -49,7 +49,7 @@ bool test_tape_initialization() {
     h_tape.current_value_idx = 0;
     cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_size;
@@ -108,7 +108,7 @@ bool test_tape_record_single_op() {
     h_tape.current_value_idx = 0;
     cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     record_single_op_kernel<<<1, 1>>>(d_tape);
@@ -176,7 +176,7 @@ bool test_backward_gradient_computation() {
     h_tape.current_value_idx = 0;
     cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_y_idx;
@@ -232,7 +232,7 @@ bool test_tape_reset() {
     h_tape.current_value_idx = 0;
     cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     record_single_op_kernel<<<1, 1>>>(d_tape);
     cudaDeviceSynchronize();
 

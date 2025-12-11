@@ -2013,7 +2013,7 @@ __global__ void init_organism_kernel(
         TRACKED_ALLOC(organism->ad_tape_entries_pool, sizeof(TapeEntry) * MAX_TAPE_SIZE, &organism->telemetry->memory_allocation, organism->telemetry->memory_allocation.autodiff_tape_size);
         TRACKED_ALLOC(organism->ad_tape_values_pool, sizeof(float) * MAX_TAPE_VALUES, &organism->telemetry->memory_allocation, organism->telemetry->memory_allocation.autodiff_tape_size);
         TRACKED_ALLOC(organism->ad_tape_grads_pool, sizeof(float) * MAX_TAPE_VALUES, &organism->telemetry->memory_allocation, organism->telemetry->memory_allocation.autodiff_tape_size);
-        init_ad_tape_kernel<<<1, 1>>>(organism->ad_tape, MAX_TAPE_SIZE, MAX_TAPE_VALUES);
+        init_ad_tape_kernel<<<1, 1>>>(organism->ad_tape, organism->ad_tape_entries_pool, organism->ad_tape_values_pool, organism->ad_tape_grads_pool, MAX_TAPE_SIZE, MAX_TAPE_VALUES);
 
         // Allocate CA parameter map
         TRACKED_ALLOC(organism->param_map, sizeof(CAParameterMap), &organism->telemetry->memory_allocation, organism->telemetry->memory_allocation.ca_state_size);

@@ -38,8 +38,11 @@ struct ADTape {
     int current_value_idx;
 };
 
-__global__ void init_ad_tape_kernel(ADTape* tape, int tape_capacity, int value_capacity) {
+__global__ void init_ad_tape_kernel(ADTape* tape, TapeEntry* entries_pool, float* values_pool, float* grads_pool, int tape_capacity, int value_capacity) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
+        tape->entries = entries_pool;
+        tape->value_buffer = values_pool;
+        tape->grad_buffer = grads_pool;
         tape->capacity = tape_capacity;
         tape->current_size = 0;
         tape->value_capacity = value_capacity;
