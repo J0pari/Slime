@@ -10,9 +10,9 @@ echo
 echo "[1/5] Staging .cu, .cuh, scripts/, and README files..."
 rm -f nul 2>/dev/null || true
 
-git add slime/**/*.cu slime/**/*.cuh 2>/dev/null || true
-git add src/*.cu src/*.cuh 2>/dev/null || true
-git add tools/*.cu tools/*.cuh 2>/dev/null || true
+git add -A slime/ 2>/dev/null || true
+git add -A src/ 2>/dev/null || true
+git add -A tools/ 2>/dev/null || true
 git add scripts/ 2>/dev/null || true
 git add README.md 2>/dev/null || true
 echo "✓ Staged $(git diff --cached --numstat | wc -l) file changes"
