@@ -544,8 +544,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             asm("trap;");
         }
 
+        // Encode primary_genome to latent first, then compute effective rank from latent variance
+        // Reuse primary_parent_temp buffer (no longer needed after reconstruct_genome_from_archive)
+        float* temp_latent = primary_parent_temp;
+        diresa_encode(primary_genome, temp_latent, &organism->diresa_genome_weights[0]);
+
         compute_effective_rank_from_latent_kernel<<<1, BLOCK_SIZE>>>(
-            organism->pool->entries[0].latent_genome,
+            temp_latent,
             &organism->effective_rank_history[generation],
             GENOME_LATENT_DIM_MAX
         );

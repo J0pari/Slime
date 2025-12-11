@@ -1330,8 +1330,12 @@ __global__ void neural_ca_update_kernel(
             weight_count
         );
 
+        // Encode best_genome to latent first, then compute effective rank from latent variance
+        float* temp_latent = workspace_genome;  // Reuse workspace for temp latent (128 floats)
+        diresa_encode(best_genome, temp_latent, &organism->diresa_genome_weights[0]);
+
         compute_effective_rank_from_latent_kernel<<<1, BLOCK_SIZE>>>(
-            pool->entries[best_idx].latent_genome,
+            temp_latent,
             &effective_rank_history[generation],
             GENOME_LATENT_DIM_MAX
         );
@@ -1611,6 +1615,51 @@ __global__ void memory_update_kernel(
     }
 }
 
+__global__ void init_behavioral_dimensions_kernel(
+    Organism* organism,
+    float* workspace_genomes
+) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
+        float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
+        reconstruct_genome_from_archive(
+            organism->pool->entries[0].parent_hash,
+            (GPUElite*)organism->archive,
+            organism->archive_size,
+            organism->pool->entries[0].delta_indices,
+            organism->pool->entries[0].delta_values,
+            organism->pool->entries[0].num_deltas,
+            organism->pool->entries[0].max_deltas,
+            primary_genome,
+            GENOME_SIZE,
+            primary_parent_temp,
+            organism->diresa_genome_weights
+        );
+
+        BehavioralDimensions dims;
+        dims.derive_from_genome(organism->pool->entries[0].genome_hash, primary_genome);
+
+        organism->archive->hw_dim = dims.hw_dim;
+        organism->archive->task_dim = dims.task_dim;
+        organism->archive->gen_dim = dims.gen_dim;
+
+        float* behavioral_hw_coords_buffer;
+        float* behavioral_task_coords_buffer;
+        float* behavioral_gen_coords_buffer;
+        cudaMalloc(&behavioral_hw_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.hw_dim);
+        cudaMalloc(&behavioral_task_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.task_dim);
+        cudaMalloc(&behavioral_gen_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.gen_dim);
+
+        for (int i = 0; i < MAX_COMPONENTS; i++) {
+            organism->behavioral_agents[i].hw_coords = &behavioral_hw_coords_buffer[i * dims.hw_dim];
+            organism->behavioral_agents[i].task_coords = &behavioral_task_coords_buffer[i * dims.task_dim];
+            organism->behavioral_agents[i].gen_coords = &behavioral_gen_coords_buffer[i * dims.gen_dim];
+        }
+
+        // Continue with remaining allocations...
+    }
+}
+
 __global__ void init_organism_kernel(
     Organism* organism,
     Dataset** dataset_array,
@@ -1648,19 +1697,43 @@ __global__ void init_organism_kernel(
             return;
         }
 
-        printf("[DEVICE] About to launch init_pool_kernel\n");
-        init_pool_kernel<<<(MAX_POOL_SIZE + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            organism->pool,
-            MAX_POOL_SIZE
-        );
-        printf("[DEVICE] init_pool_kernel launched, syncing...\n");
-        
-        printf("[DEVICE] init_pool_kernel sync complete, error=%d\n", (int)err);
+        uint16_t* pool_delta_indices_buffer;
+        float* pool_delta_values_buffer;
+        float* pool_gradients_buffer;
+
+        printf("[DEVICE] Allocating pool buffers: %zu MB total\n",
+               (sizeof(uint16_t) * GENOME_SIZE * MAX_POOL_SIZE +
+                sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE * 2) / (1024*1024));
+
+        err = cudaMalloc(&pool_delta_indices_buffer, sizeof(uint16_t) * GENOME_SIZE * MAX_POOL_SIZE);
         if (err != cudaSuccess) {
-            printf("[ERROR] init_pool_kernel failed: %s\n", cudaGetErrorString(err));
+            printf("[ERROR] pool_delta_indices_buffer malloc failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] init_pool_kernel completed successfully\n");
+        err = cudaMalloc(&pool_delta_values_buffer, sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE);
+        if (err != cudaSuccess) {
+            printf("[ERROR] pool_delta_values_buffer malloc failed: %s\n", cudaGetErrorString(err));
+            return;
+        }
+        err = cudaMalloc(&pool_gradients_buffer, sizeof(float) * GENOME_SIZE * MAX_POOL_SIZE);
+        if (err != cudaSuccess) {
+            printf("[ERROR] pool_gradients_buffer malloc failed: %s\n", cudaGetErrorString(err));
+            return;
+        }
+        printf("[DEVICE] Pool buffers allocated successfully\n");
+
+        init_pool_kernel<<<(MAX_POOL_SIZE + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
+            organism->pool,
+            MAX_POOL_SIZE,
+            pool_delta_indices_buffer,
+            pool_delta_values_buffer,
+            pool_gradients_buffer
+        );
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("[ERROR] init_pool_kernel launch failed: %s\n", cudaGetErrorString(err));
+            return;
+        }
 
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
@@ -1686,12 +1759,19 @@ __global__ void init_organism_kernel(
         organism->archive->task_dim = dims.task_dim;
         organism->archive->gen_dim = dims.gen_dim;
 
-        printf("[DEVICE] Allocating three-axis behavioral coords for %d agents (hw=%d, task=%d, gen=%d)\n",
-               MAX_COMPONENTS, dims.hw_dim, dims.task_dim, dims.gen_dim);
+        // Allocate contiguous buffers for all behavioral agents (avoid 768 individual mallocs)
+        float* behavioral_hw_coords_buffer;
+        float* behavioral_task_coords_buffer;
+        float* behavioral_gen_coords_buffer;
+        cudaMalloc(&behavioral_hw_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.hw_dim);
+        cudaMalloc(&behavioral_task_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.task_dim);
+        cudaMalloc(&behavioral_gen_coords_buffer, sizeof(float) * MAX_COMPONENTS * dims.gen_dim);
+
+        // Set pointers into contiguous buffers
         for (int i = 0; i < MAX_COMPONENTS; i++) {
-            cudaMalloc(&organism->behavioral_agents[i].hw_coords, sizeof(float) * dims.hw_dim);
-            cudaMalloc(&organism->behavioral_agents[i].task_coords, sizeof(float) * dims.task_dim);
-            cudaMalloc(&organism->behavioral_agents[i].gen_coords, sizeof(float) * dims.gen_dim);
+            organism->behavioral_agents[i].hw_coords = &behavioral_hw_coords_buffer[i * dims.hw_dim];
+            organism->behavioral_agents[i].task_coords = &behavioral_task_coords_buffer[i * dims.task_dim];
+            organism->behavioral_agents[i].gen_coords = &behavioral_gen_coords_buffer[i * dims.gen_dim];
         }
 
         cudaMalloc(&organism->archive->fitness, sizeof(float) * MAX_ARCHIVE_SIZE);
@@ -1708,10 +1788,19 @@ __global__ void init_organism_kernel(
         cudaMalloc(&organism->archive->task_performance, sizeof(float) * MAX_ARCHIVE_SIZE);
         cudaMalloc(&organism->archive->per_class_accuracy, sizeof(float) * MAX_ARCHIVE_SIZE * NUM_CLASSES_MAX);
 
+        // Allocate contiguous buffers for all voronoi cell centroids (avoid 768 individual mallocs)
+        float* voronoi_hw_centroid_buffer;
+        float* voronoi_task_centroid_buffer;
+        float* voronoi_gen_centroid_buffer;
+        cudaMalloc(&voronoi_hw_centroid_buffer, sizeof(float) * MAX_COMPONENTS * dims.hw_dim);
+        cudaMalloc(&voronoi_task_centroid_buffer, sizeof(float) * MAX_COMPONENTS * dims.task_dim);
+        cudaMalloc(&voronoi_gen_centroid_buffer, sizeof(float) * MAX_COMPONENTS * dims.gen_dim);
+
+        // Set pointers into contiguous buffers
         for (int i = 0; i < MAX_COMPONENTS; i++) {
-            cudaMalloc(&organism->voronoi_cells[i].hw_centroid, sizeof(float) * dims.hw_dim);
-            cudaMalloc(&organism->voronoi_cells[i].task_centroid, sizeof(float) * dims.task_dim);
-            cudaMalloc(&organism->voronoi_cells[i].gen_centroid, sizeof(float) * dims.gen_dim);
+            organism->voronoi_cells[i].hw_centroid = &voronoi_hw_centroid_buffer[i * dims.hw_dim];
+            organism->voronoi_cells[i].task_centroid = &voronoi_task_centroid_buffer[i * dims.task_dim];
+            organism->voronoi_cells[i].gen_centroid = &voronoi_gen_centroid_buffer[i * dims.gen_dim];
         }
 
         printf("[DEVICE] Computing decay rate...\n");
@@ -1762,9 +1851,11 @@ __global__ void init_organism_kernel(
         }
         printf("[DEVICE] chemical_field history initialized\n");
 
-        // Allocate data arrays for each history entry AFTER init_tube_kernel
+        // Allocate contiguous buffer for all history entry data
+        float* history_data_buffer;
+        cudaMalloc(&history_data_buffer, field_size * sizeof(float) * MAX_HISTORY_LENGTH);
         for (int i = 0; i < MAX_HISTORY_LENGTH; i++) {
-            cudaMalloc(&organism->chemical_field->history->entries[i].data, field_size * sizeof(float));
+            organism->chemical_field->history->entries[i].data = &history_data_buffer[i * field_size];
         }
 
         int perception_size = arch.num_heads * arch.channels * arch.hidden_dim;

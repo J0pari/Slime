@@ -69,13 +69,14 @@ constexpr int FLOW_KERNEL_SIZE = 3;
 
 
 // Dataset registry
-constexpr int NUM_DATASETS = 12;  // Total datasets in registry
-constexpr int NUM_ACTIVE_DATASETS = 6;  // Active datasets for curriculum on this hardware
+constexpr int NUM_DATASETS = 12;
 
-// Active dataset IDs (skip large datasets on limited VRAM, scales to 12 on cloud GPU)
-__device__ __constant__ int ACTIVE_DATASET_IDS[6] = {0, 1, 2, 3, 5, 7};
-// 0=MNIST, 1=Fashion-MNIST, 2=CIFAR-10, 3=PathMNIST, 5=Speech-Commands, 7=UCI-HAR
-// Covers: vision(4) + audio(1) + timeseries(1) + medical(1) modalities
+// Active datasets: 0=MNIST, 1=Fashion-MNIST, 2=CIFAR-10, 3=PathMNIST, 7=UCI-HAR
+#define ACTIVE_DATASET_LIST 0, 1, 2, 3, 7
+constexpr int NUM_ACTIVE_DATASETS = 5;
+
+__device__ __constant__ int ACTIVE_DATASET_IDS[NUM_ACTIVE_DATASETS] = {ACTIVE_DATASET_LIST};
+constexpr int HOST_ACTIVE_DATASET_IDS[NUM_ACTIVE_DATASETS] = {ACTIVE_DATASET_LIST};
 
 // Genome-derived dataset dimension ranges (no hardcoded MNIST values)
 constexpr int NUM_CLASSES_MIN = 2;
