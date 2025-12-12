@@ -515,8 +515,6 @@ __global__ void init_pool_kernel(
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx == 0) printf("[KERNEL] Thread 0 started\n");
-
     if (idx < capacity) {
 
         PRNGState rng;
@@ -527,8 +525,6 @@ __global__ void init_pool_kernel(
         pool->entries[idx].delta_indices = &delta_indices_buffer[idx * GENOME_SIZE];
         pool->entries[idx].delta_values = &delta_values_buffer[idx * GENOME_SIZE];
         pool->entries[idx].gradients = &gradients_buffer[idx * GENOME_SIZE];
-
-        if (idx == 0) printf("[KERNEL] Buffers assigned\n");
 
         if (idx < MIN_POOL_SIZE) {
             pool->entries[idx].id = idx;
@@ -542,8 +538,6 @@ __global__ void init_pool_kernel(
             pool->entries[idx].parent_hash = 0;
             pool->entries[idx].num_deltas = GENOME_SIZE;
 
-            if (idx == 0) printf("[KERNEL] Metadata initialized\n");
-
             float temp_genome[GENOME_SIZE];
             for (int i = 0; i < GENOME_SIZE; i++) {
                 temp_genome[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
@@ -552,29 +546,17 @@ __global__ void init_pool_kernel(
                 pool->entries[idx].gradients[i] = 0.0f;
             }
 
-            if (idx == 0) printf("[KERNEL] temp_genome filled, calling gpu_sha256\n");
-
             pool->entries[idx].genome_hash = gpu_sha256(temp_genome, GENOME_SIZE);
-
-            if (idx == 0) printf("[KERNEL] SHA256 done, calling derive_from_genome\n");
 
             PoolInitParams init_params;
             init_params.derive_from_genome(pool->entries[idx].genome_hash, temp_genome);
             pool->entries[idx].hunger = init_params.initial_hunger;
 
-            if (idx == 0) printf("[KERNEL] derive_from_genome done, calling derive_architecture\n");
-
             derive_architecture(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-
-            if (idx == 0) printf("[KERNEL] derive_architecture done, calling derive_diresa\n");
 
             derive_diresa(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
 
-            if (idx == 0) printf("[KERNEL] derive_diresa done, calling derive_fitness_exponents\n");
-
             derive_fitness_exponents(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-
-            if (idx == 0) printf("[KERNEL] derive_fitness_exponents done\n");
         } else {
             pool->entries[idx].id = -1;
             pool->entries[idx].alive = false;
@@ -595,12 +577,10 @@ __global__ void init_pool_kernel(
     }
 
     if (idx == 0) {
-        printf("[KERNEL] About to set atomic fields\n");
         pool->capacity = capacity;
         pool->active_count = MIN_POOL_SIZE;
         pool->total_spawned = MIN_POOL_SIZE;
         pool->total_culled = 0;
-        printf("[KERNEL] Atomic fields set, kernel complete\n");
     }
 }
 
@@ -713,8 +693,6 @@ __global__ void init_pool_buffers_kernel(ComponentPool* pool, int capacity, Pool
         size_t gradients_size = sizeof(float) * GENOME_SIZE * capacity;
         size_t total_mb = (indices_size + values_size + gradients_size) / BYTES_PER_MB;
 
-        printf("[pool_buffers] capacity=%d genome_size=%d total_mb=%llu\n", capacity, GENOME_SIZE, (unsigned long long)total_mb);
-
         cudaError_t err = cudaMalloc(&buffers->indices, indices_size);
         if (err != cudaSuccess) {
             printf("[pool_buffers] indices alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)indices_size);
@@ -742,10 +720,8 @@ __global__ void init_pool_buffers_kernel(ComponentPool* pool, int capacity, Pool
             buffers->gradients = nullptr;
             return;
         }
-        printf("[pool_buffers] indices=%p values=%p gradients=%p\n", buffers->indices, buffers->values, buffers->gradients);
 
         int pool_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        printf("[pool_buffers] launching init_pool_kernel: blocks=%d threads=%d\n", pool_blocks, BLOCK_SIZE);
         init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(pool, capacity, buffers->indices, buffers->values, buffers->gradients);
         err = cudaGetLastError();
         if (err != cudaSuccess) {

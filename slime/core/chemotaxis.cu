@@ -48,43 +48,30 @@ struct BehavioralState {
 };
 
 __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome) {
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("[SNAPSHOT1] Entry field_size=%d\n", field_size);
-
     TemporalTube* history = field->history;
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("[SNAPSHOT2] history=%p\n", history);
 
     int next_head = (history->head + 1) % history->capacity;
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("[SNAPSHOT3] next_head=%d capacity=%d\n", next_head, history->capacity);
 
     float* dest = history->entries[next_head].data;
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("[SNAPSHOT4] dest=%p\n", dest);
 
     for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < field_size; i += blockDim.x * gridDim.x) {
         dest[i] = field->concentration[i];
     }
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("[SNAPSHOT5] Data copied\n");
     __syncthreads();
 
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        printf("[SNAPSHOT6] Thread 0 updating metadata\n");
         int decay_slot = derive_param_slot(genome_hash, "memory_decay_factor");
-        printf("[SNAPSHOT7] decay_slot=%d\n", decay_slot);
         int importance_slot = derive_param_slot(genome_hash, "memory_importance");
-        printf("[SNAPSHOT8] importance_slot=%d\n", importance_slot);
 
         history->entries[next_head].timestamp = global_time;
-        printf("[SNAPSHOT9] timestamp set\n");
         history->entries[next_head].decay_factor = (genome[decay_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        printf("[SNAPSHOT10] decay_factor set\n");
         history->entries[next_head].importance = (genome[importance_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        printf("[SNAPSHOT11] importance set\n");
 
         history->head = next_head;
         if (history->count < history->capacity) {
             history->count++;
         }
         history->global_time = global_time;
-        printf("[SNAPSHOT12] Exit SUCCESS\n");
     }
 }
 

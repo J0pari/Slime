@@ -182,34 +182,23 @@ extern "C" __global__ void organism_lifecycle_kernel(
     int generation,
     float* workspace_genomes
 ) {
-    printf("[ORGANISM_LIFECYCLE] ENTERED: tid=%d bid=%d gen=%d organism=%p\n", threadIdx.x, blockIdx.x, generation, organism);
-
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         cudaError_t err;
-
-        printf("[ORGANISM_LIFECYCLE] STARTED on device (gen=%d)\n", generation);
-        printf("[LIFECYCLE] Validating organism pointer...\n");
 
         if (!organism) {
             printf("FATAL: organism is nullptr!\n");
             asm("trap;");
         }
 
-        printf("[LIFECYCLE] organism=%p, checking pool...\n", organism);
-
         if (!organism->pool) {
             printf("FATAL: organism->pool is nullptr!\n");
             asm("trap;");
         }
 
-        printf("[LIFECYCLE] pool=%p, checking entries...\n", organism->pool);
-
         if (!organism->pool->entries) {
             printf("FATAL: organism->pool->entries is nullptr!\n");
             asm("trap;");
         }
-
-        printf("[LIFECYCLE] All pointers valid, proceeding...\n");
 
         float* primary_genome = &workspace_genomes[0];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE];
@@ -1667,12 +1656,8 @@ __global__ void init_organism_kernel(
     float* workspace_genomes
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("[STEP9] init_organism_kernel ENTRY: thread=%d block=%d\n", threadIdx.x, blockIdx.x);
-
         organism->generation = 0;
         organism->active_components = MIN_POOL_SIZE;
-
-        printf("[ALLOC] Allocating ComponentPool...\n");
         cudaMalloc(&organism->pool, sizeof(ComponentPool));
         cudaMalloc(&organism->pool->entries, sizeof(PoolEntry) * MAX_POOL_SIZE);
         organism->pool->capacity = MAX_POOL_SIZE;
@@ -1710,7 +1695,6 @@ __global__ void init_organism_kernel(
             printf("[organism] init_pool_buffers launch_err=%s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[organism] init_organism_phase1 complete: pool_init launched\n");
     }
 }
 
@@ -1722,7 +1706,6 @@ __global__ void init_organism_phase2_kernel(
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         cudaError_t err;
-        printf("[organism] init_organism_phase2 entry: pool=%p\n", organism->pool);
 
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
@@ -1795,7 +1778,6 @@ __global__ void init_organism_phase2_kernel(
         int default_decay_rate_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "memory_default_decay_rate");
         float default_decay_rate_norm = (primary_genome[default_decay_rate_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
-        printf("[organism] decay_rate: slot=%d norm=%f rate=%f\n", default_decay_rate_slot, default_decay_rate_norm, default_decay_rate);
 
         init_tube_kernel<<<(MAX_HISTORY_LENGTH + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism->memory_tubes,
@@ -1823,18 +1805,16 @@ __global__ void init_organism_phase2_kernel(
         cudaMalloc(&organism->chemical_field->history, sizeof(TemporalTube));
         cudaMalloc(&organism->chemical_field->history->entries, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH);
 
-        printf("[DEVICE] Launching init_tube_kernel for chemical_field history...\n");
         init_tube_kernel<<<(MAX_HISTORY_LENGTH + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism->chemical_field->history,
             MAX_HISTORY_LENGTH,
             default_decay_rate
         );
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] init_tube_kernel for chemical_field->history failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] chemical_field history initialized\n");
 
         // Allocate contiguous buffer for all history entry data
         float* history_data_buffer;
@@ -1923,9 +1903,6 @@ __global__ void init_organism_phase2_kernel(
         size_t diresa_size = diresa_struct_size * num_replicas;
         size_t diresa_mb = diresa_size / BYTES_PER_MB;
 
-        printf("[organism] diresa: struct_size=%llu replicas=%d total_size=%llu total_mb=%llu\n",
-               (unsigned long long)diresa_struct_size, num_replicas, (unsigned long long)diresa_size, (unsigned long long)diresa_mb);
-
         err = cudaMalloc(&organism->diresa_hw_weights, diresa_size);
         track_allocation("diresa_hw_weights", organism->diresa_hw_weights, diresa_size, err, &organism->telemetry->memory_allocation);
         if (err != cudaSuccess) {
@@ -1956,7 +1933,6 @@ __global__ void init_organism_phase2_kernel(
 
         organism->telemetry->memory_allocation.diresa_weights_size = diresa_size * 4;
 
-        printf("[organism] launching init_diresa_kernel: blocks=%d threads=1024\n", num_replicas);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_hw_weights, HARDWARE_FEATURES_DIM, BEHAVIORAL_DIM_HW_MAX, first_entry, seed + 999999);
         init_diresa_kernel<<<num_replicas, 1024>>>(
@@ -2106,28 +2082,23 @@ __global__ void init_organism_phase2_kernel(
             printf("[ERROR] Full system allocation failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] ALL SYSTEMS ALLOCATED\n");
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("[ALLOC] FAILED: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[ALLOC] Genome-derived allocation complete (shared workspace pattern)\n");
-
-        printf("[DEVICE] Launching init_multihead_ca_kernel...\n");
 
         init_multihead_ca_kernel<<<(arch.num_heads * arch.channels * arch.hidden_dim + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism->ca_state,
             seed,
             arch
         );
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] init_multihead_ca_kernel failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] init_multihead_ca_kernel completed\n");
 
         BehavioralInitSlots behavioral_slots;
         behavioral_slots.agent_embedding_scale = derive_param_slot(organism->pool->entries[0].genome_hash, "chemotaxis_agent_embedding_scale");
@@ -2136,23 +2107,6 @@ __global__ void init_organism_phase2_kernel(
         behavioral_slots.ctx_metabolic = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_metabolic");
         behavioral_slots.ctx_stress = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_stress");
         behavioral_slots.ctx_morphogen = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_morphogen");
-
-        // VALIDATE ALL PARAMETERS BEFORE KERNEL LAUNCH
-        printf("[VALIDATE-1] organism->behavioral_agents=%p\n", organism->behavioral_agents);
-        printf("[VALIDATE-2] primary_genome=%p\n", primary_genome);
-        printf("[VALIDATE-3] organism->pool->entries[0].gradients=%p\n", organism->pool->entries[0].gradients);
-        printf("[VALIDATE-4] dims: hw=%d task=%d gen=%d total=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, dims.total());
-        printf("[VALIDATE-5] behavioral_slots: emb_scale=%d exploration=%d sensitivity=%d levy=%d\n",
-            behavioral_slots.agent_embedding_scale, behavioral_slots.init_exploration,
-            behavioral_slots.init_sensitivity, behavioral_slots.levy_alpha);
-        printf("[VALIDATE-6] ctx values: metabolic=%f niche=%f learning=%f performance=%f\n",
-            organism->telemetry->genome_complexity.hash_entropy,
-            organism->telemetry->archive_topology.novelty_gradient,
-            organism->telemetry->diresa_evolution.behavioral_drift_rate,
-            organism->telemetry->task_performance.accuracy);
-
-        printf("[DEVICE] Launching init_behavioral_state_kernel...\n");
-        printf("[DEVICE-DBG] MAX_COMPONENTS=%d BLOCK_SIZE=%d blocks=%d\n", MAX_COMPONENTS, BLOCK_SIZE, (MAX_COMPONENTS + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
 
         init_behavioral_state_kernel<<<(MAX_COMPONENTS + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->behavioral_agents,
             MAX_COMPONENTS,
@@ -2189,14 +2143,12 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy
         );
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] init_chemical_field_kernel failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] init_chemical_field_kernel completed\n");
 
-        printf("[DEVICE] Launching set_chemical_sources_from_agents_kernel...\n");
         set_chemical_sources_from_agents_kernel<<<1, MAX_COMPONENTS>>>(
             organism->chemical_field->sources,
             organism->behavioral_agents,
@@ -2210,12 +2162,11 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy
         );
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] set_chemical_sources_from_agents_kernel failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] set_chemical_sources_from_agents_kernel completed\n");
 
         int voronoi_init_dt_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "voronoi_init_dt");
         float voronoi_init_dt_norm = (primary_genome[voronoi_init_dt_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
@@ -2230,7 +2181,6 @@ __global__ void init_organism_phase2_kernel(
         float ctx_stress = (primary_genome[ctx_stress_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         float ctx_morphogen = (primary_genome[ctx_morphogen_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
 
-        printf("[DEVICE] Launching diffusion_reaction_kernel...\n");
         diffusion_reaction_kernel<<<chem_grid, chem_block>>>(
             organism->chemical_field->concentration,
             organism->chemical_field->gradient_x,
@@ -2250,24 +2200,19 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy
         );
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] diffusion_reaction_kernel failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] diffusion_reaction_kernel completed\n");
 
-        printf("[DEVICE] Storing chemical snapshot...\n");
         store_chemical_snapshot_kernel<<<chem_grid, chem_block>>>(organism->chemical_field, field_size, (float)organism->generation, organism->pool->entries[0].genome_hash, primary_genome);
-        
+
         if (err != cudaSuccess) {
             printf("[ERROR] store_chemical_snapshot failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] store_chemical_snapshot completed\n");
 
-        // Initialize adaptive curriculum with organism's genome and context
-        printf("[DEVICE] Initializing adaptive curriculum...\n");
         init_curriculum_kernel<<<1, 1>>>(
             organism->curriculum,
             primary_genome,
@@ -2286,9 +2231,6 @@ __global__ void init_organism_phase2_kernel(
             printf("[ERROR] init_curriculum_kernel failed: %s\n", cudaGetErrorString(err));
             return;
         }
-        printf("[DEVICE] Curriculum initialized with genome-derived thresholds\n");
-
-        printf("[DEVICE] init_organism_kernel COMPLETED SUCCESSFULLY\n");
 
     }
 }
@@ -2378,51 +2320,37 @@ __global__ void persistent_evolution_kernel(
     unsigned int seed,
     Dataset** dataset_array
 ) {
-    printf("[PERSISTENT-STEP1] Kernel started, checking thread ID\n");
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    printf("[PERSISTENT-STEP2] Thread 0 active\n");
-    printf("[PERSISTENT-STEP3] Attempting cudaMalloc for Organism, size=%zu bytes\n", sizeof(Organism));
     Organism* organism;
     cudaError_t err = cudaMalloc(&organism, sizeof(Organism));
-    printf("[PERSISTENT-STEP4] cudaMalloc returned: err=%d organism=%p\n", (int)err, organism);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] cudaMalloc failed for Organism: %d\n", (int)err);
         return;
     }
 
-    printf("[PERSISTENT-STEP7] All %d datasets pre-loaded, organism switches between them\n", NUM_ACTIVE_DATASETS);
-
     float* organism_workspace_genomes;
     cudaMalloc(&organism_workspace_genomes, sizeof(float) * GENOME_SIZE * 4);
 
-    printf("[PERSISTENT-STEP8] Launching init_organism_kernel phase1<<<1,1>>>\n");
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, seed, organism_workspace_genomes);
     err = cudaGetLastError();
-    printf("[PERSISTENT-STEP9a] init_organism_phase1 launch returned: err=%d\n", (int)err);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] init_organism_phase1 launch failed: %d\n", (int)err);
         return;
     }
 
-    printf("[PERSISTENT-STEP9b] Launching init_organism_phase2<<<1,1>>>\n");
     init_organism_phase2_kernel<<<1, 1>>>(organism, dataset_array, seed, organism_workspace_genomes);
     err = cudaGetLastError();
-    printf("[PERSISTENT-STEP9c] init_organism_phase2 launch returned: err=%d\n", (int)err);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] init_organism_kernel launch failed: %d\n", (int)err);
         return;
     }
 
-    printf("[PERSISTENT-STEP10] Calling cudaDeviceSynchronize\n");
     err = cudaDeviceSynchronize();
-    printf("[PERSISTENT-STEP11] cudaDeviceSynchronize returned: err=%d\n", (int)err);
     if (err != cudaSuccess) {
         printf("[PERSISTENT-ERROR] cudaDeviceSynchronize failed: %d\n", (int)err);
         return;
     }
-
-    printf("[PERSISTENT] Starting evolution loop\n");
 
     int generation = 0;
     while (true) {
