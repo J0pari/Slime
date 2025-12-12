@@ -172,7 +172,9 @@ struct PRNGState {
 
         float levy_num = sinf(alpha_phi);
         float levy_denom = powf(fabsf(cosf(phi)) + EPSILON, (NORMALIZED_MAX / alpha));
-        float levy_base = fabsf(cosf(xi)) / (-logf(W + EPSILON) + EPSILON);
+
+        float log_w = fabsf(-logf(W + EPSILON));
+        float levy_base = fabsf(cosf(xi)) / (log_w + EPSILON);
         float levy_factor = powf(levy_base + EPSILON, ((NORMALIZED_MAX - alpha) / alpha));
 
         return (levy_num / levy_denom * levy_factor) * scale;
