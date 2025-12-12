@@ -160,14 +160,14 @@ __global__ void cross_entropy_loss_kernel(
         if (threadIdx.x == 0 && batch_idx == 0) {
             printf("FATAL [cross_entropy_loss]: NULL pointer detected\n");
         }
-        asm("trap;");
+        
         return;
     }
 
     if (label < 0 || label >= num_classes) {
         printf("FATAL [cross_entropy_loss]: Invalid label %d at batch %d (must be 0-%d)\n",
                label, batch_idx, num_classes - 1);
-        asm("trap;");
+        
         return;
     }
 
@@ -181,7 +181,7 @@ __global__ void cross_entropy_loss_kernel(
             if (isnan(val) || isinf(val)) {
                 printf("FATAL [cross_entropy_loss]: Invalid logit %f at batch %d class %d\n",
                        val, batch_idx, i);
-                asm("trap;");
+                
             }
             max_logit = fmaxf(max_logit, val);
         }
@@ -196,7 +196,7 @@ __global__ void cross_entropy_loss_kernel(
 
         if (isnan(nll) || isinf(nll) || nll < 0.0f) {
             printf("FATAL [cross_entropy_loss]: Invalid NLL %f at batch %d\n", nll, batch_idx);
-            asm("trap;");
+            
         }
 
         atomicAdd(loss_out, nll / batch_size);

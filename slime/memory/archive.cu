@@ -226,9 +226,15 @@ __global__ void insert_elite_kernel(
     }
     __syncthreads();
 
-    if (threadIdx.x == 0 && blockIdx.x == 0 && !block_has_duplicate) {
-        int idx = atomicAdd(archive_size, 1);
-        if (idx < MAX_ARCHIVE_SIZE) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        if (block_has_duplicate) {
+            printf("[ARCHIVE-REJECT] gen=%d reason=duplicate hash=%llu\n",
+                   generation_val, (unsigned long long)genome_hash_val);
+        } else {
+            int idx = atomicAdd(archive_size, 1);
+            printf("[ARCHIVE-INSERT] gen=%d new_idx=%d new_size=%d fitness=%.6f\n",
+                   generation_val, idx, idx+1, fitness_val);
+            if (idx < MAX_ARCHIVE_SIZE) {
             int hw_dim = archive->hw_dim;
             int task_dim = archive->task_dim;
             int gen_dim = archive->gen_dim;
@@ -272,6 +278,7 @@ __global__ void insert_elite_kernel(
 
             atomicAdd(&cells[closest_cell].density, 1);
             cells[closest_cell].best_elite_idx = idx;
+            }
         }
     }
 }

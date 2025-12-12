@@ -63,6 +63,16 @@ struct TelemetryBuffer {
     bool valid;
 };
 
+__device__ void print_size(const char* prefix, const char* label, size_t size_bytes, const char* suffix) {
+    if (size_bytes < BYTES_PER_KB) {
+        printf("%s%s: %llu bytes%s\n", prefix, label, (unsigned long long)size_bytes, suffix);
+    } else if (size_bytes < BYTES_PER_MB) {
+        printf("%s%s: %.2f KB%s\n", prefix, label, size_bytes / (float)BYTES_PER_KB, suffix);
+    } else {
+        printf("%s%s: %.2f MB%s\n", prefix, label, size_bytes / (float)BYTES_PER_MB, suffix);
+    }
+}
+
 __device__ void track_allocation(
     const char* label,
     void* ptr,
@@ -70,20 +80,24 @@ __device__ void track_allocation(
     cudaError_t result,
     MemoryAllocationMetrics* metrics
 ) {
-    float size_mb = size_bytes / (1024.0f * 1024.0f);
-
     if (result != cudaSuccess) {
-        printf("[MEM ERROR] %s FAILED: %s (requested %.2f MB)\n",
-               label, cudaGetErrorString(result), size_mb);
+        printf("[MEM ERROR] %s FAILED: %s (requested %llu bytes)\n",
+               label, cudaGetErrorString(result), (unsigned long long)size_bytes);
         return;
     }
 
     if (ptr == nullptr) {
-        printf("[MEM ERROR] %s returned nullptr (requested %.2f MB)\n", label, size_mb);
+        printf("[MEM ERROR] %s returned nullptr (requested %llu bytes)\n", label, (unsigned long long)size_bytes);
         return;
     }
 
-    printf("[MEM OK] %s: %.2f MB at %p\n", label, size_mb, ptr);
+    if (size_bytes < BYTES_PER_KB) {
+        printf("[MEM OK] %s: %llu bytes at %p\n", label, (unsigned long long)size_bytes, ptr);
+    } else if (size_bytes < BYTES_PER_MB) {
+        printf("[MEM OK] %s: %.2f KB at %p\n", label, size_bytes / (float)BYTES_PER_KB, ptr);
+    } else {
+        printf("[MEM OK] %s: %.2f MB at %p\n", label, size_bytes / (float)BYTES_PER_MB, ptr);
+    }
     metrics->total_gpu_allocated += size_bytes;
 }
 
@@ -122,7 +136,8 @@ __global__ void genome_complexity_probe_kernel(
     for (int i = 0; i < active_count && i < MAX_POOL_SIZE; i++) {
         if (!pool->entries[i].alive) continue;
 
-        uint64_t hash = pool->entries[i].genome_hash;
+        PoolEntry* e = &pool->entries[i];
+        uint64_t hash = e->genome_hash;
         bool found = false;
         for (int j = 0; j < unique_count; j++) {
             if (seen_hashes[j] == hash) {
@@ -137,7 +152,19 @@ __global__ void genome_complexity_probe_kernel(
             unique_count++;
         }
 
-        total_deltas += pool->entries[i].num_deltas;
+        total_deltas += e->num_deltas;
+    }
+
+    int display_limit = active_count < 10 ? active_count : 10;
+    printf("[POOL-DIVERSITY] active=%d unique=%d showing top %d organisms\n", active_count, unique_count, display_limit);
+    for (int i = 0; i < display_limit; i++) {
+        if (!pool->entries[i].alive) continue;
+        PoolEntry* e = &pool->entries[i];
+        printf("  [%3d] fit=%.6f task=%.4f gen_gap=%.4f hw_eff=%.4f age=%d deltas=%d\n",
+               i, e->fitness, e->task_accuracy, e->generalization_gap, e->hardware_efficiency, e->age, e->num_deltas);
+        printf("        exp(α=%.3f β=%.3f γ=%.3f δ=%.3f) arch(h=%d ch=%d grid=%d) diresa(h1=%d h2=%d)\n",
+               e->fitness_task_exponent, e->fitness_gen_exponent, e->fitness_rank_exponent, e->fitness_efficiency_exponent,
+               e->num_heads, e->channels, e->grid_size, e->diresa_hidden1, e->diresa_hidden2);
     }
 
     metrics->unique_hashes = unique_count;
@@ -206,6 +233,17 @@ __global__ void archive_topology_probe_kernel(
 
     metrics->novelty_gradient = (float)occupied / num_cells;
     metrics->hash_clustering_coefficient = 1.0f - metrics->novelty_gradient;
+
+    int display_limit = archive_size < 10 ? archive_size : 10;
+    printf("[ARCHIVE-ELITES] size=%d showing %d niche specializations\n", archive_size, display_limit);
+    for (int i = 0; i < display_limit; i++) {
+        GPUElite* e = &archive[i];
+        printf("  [%3d] gen=%d fit=%.6f hw[%.3f,%.3f,%.3f,%.3f] task[%.3f,%.3f,%.3f,%.3f] gen[%.3f,%.3f]\n",
+               i, e->generation, e->fitness,
+               e->hw_coords[0], e->hw_coords[1], e->hw_coords[2], e->hw_coords[3],
+               e->task_coords[0], e->task_coords[1], e->task_coords[2], e->task_coords[3],
+               e->gen_coords[0], e->gen_coords[1]);
+    }
 }
 
 __global__ void diresa_evolution_probe_kernel(
@@ -227,6 +265,9 @@ __global__ void diresa_evolution_probe_kernel(
     float sum_hw_corr = 0.0f;
     int recent_count = 0;
 
+    int display_limit = archive_size < 5 ? archive_size : 5;
+    printf("[DIRESA-LATENT] showing %d/%d elite latent coordinates\n", display_limit, archive_size);
+
     for (int i = 0; i < archive_size && i < MAX_ARCHIVE_SIZE; i++) {
         if (archive[i].generation > 0 && recent_count < 100) {
             float drift = 0.0f;
@@ -247,6 +288,13 @@ __global__ void diresa_evolution_probe_kernel(
                 hw_sum += archive[i].hardware_features[h];
             }
             sum_hw_corr += hw_sum / (WMMA_TILE_DIM - 1);
+
+            if (i < display_limit) {
+                printf("  [%3d] drift=%.4f hw_feat_avg=%.4f latent[%.3f,%.3f,%.3f,%.3f...]\n",
+                       i, drift / total_dims, hw_sum / (WMMA_TILE_DIM - 1),
+                       archive[i].latent_genome[0], archive[i].latent_genome[1],
+                       archive[i].latent_genome[2], archive[i].latent_genome[3]);
+            }
 
             recent_count++;
         }

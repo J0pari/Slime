@@ -185,12 +185,12 @@ constexpr int BIT_DEPTH_16 = 16;
 
 constexpr int SHA256_HASH_SIZE = 32;
 constexpr int PATH_BUFFER_SIZE = 512;
-constexpr int BYTES_PER_MB = 1024 * 1024;
-constexpr int VERBOSE_LOGGING_INTERVAL = 10;
-constexpr int EARLY_GENERATIONS_THRESHOLD = 20;
-constexpr int LOGGING_INTERVAL = 10;
-constexpr int CHECKPOINT_INTERVAL = 20;
-constexpr int EARLY_CHECKPOINT_GENERATIONS = 3;
+constexpr int BYTES_PER_KB = 1024;
+constexpr int BYTES_PER_MB = BYTES_PER_KB * BYTES_PER_KB;
+constexpr int TELEMETRY_EVERY_GEN = 1;
+constexpr int TELEMETRY_DETAILED = 10;
+constexpr int TELEMETRY_COMPREHENSIVE = 100;
+constexpr int CHECKPOINT_INTERVAL = TELEMETRY_DETAILED;
 
 
 

@@ -40,11 +40,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     int generation,
     float* workspace_genomes
 ) {
-    printf("[HYBRID] Kernel ENTERED: tid=%d bid=%d gen=%d\n", threadIdx.x, blockIdx.x, generation);
-
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    printf("[HYBRID] Kernel STARTED on device (gen=%d)\n", generation);
+    printf("[HYBRID-ENTRY] gen=%d\n", generation);
 
     float* primary_genome = &workspace_genomes[0];
     float* primary_parent_temp = &workspace_genomes[GENOME_SIZE];
@@ -90,6 +88,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
     cudaError_t err;
 
+    printf("[HYBRID-DBG] use_grad=%d batch_sz=%d dataset=%p batch_img=%p ca=%p tape=%p\n",
+           training_mode->use_gradients, training_mode->batch_size,
+           organism->current_dataset, training_mode->batch_images,
+           organism->ca_state, organism->ad_tape);
+
     if (training_mode->use_gradients) {
 
         // Sample batch from current pre-loaded dataset (switches per curriculum)
@@ -103,51 +106,50 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: sample_batch launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         if (organism == nullptr) {
             printf("FATAL [hybrid_lifecycle]: organism is NULL\n");
-            asm("trap;");
+            
         }
         if (organism->ad_tape == nullptr) {
             printf("FATAL [hybrid_lifecycle]: ad_tape is NULL\n");
-            asm("trap;");
+            
         }
         if (organism->ca_state == nullptr) {
             printf("FATAL [hybrid_lifecycle]: ca_state is NULL\n");
-            asm("trap;");
+            
         }
         if (training_mode == nullptr) {
             printf("FATAL [hybrid_lifecycle]: training_mode is NULL\n");
-            asm("trap;");
+            
         }
         if (param_map == nullptr) {
             printf("FATAL [hybrid_lifecycle]: param_map is NULL\n");
-            asm("trap;");
+            
         }
 
-        printf("[HYBRID-DBG1] About to launch reset_tape_kernel: blocks=%d, threads=%d, tape=%p\n",
-               (VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, organism->ad_tape);
-        printf("[HYBRID-DBG2] tape->entries=%p tape->value_buffer=%p tape->grad_buffer=%p\n",
-               organism->ad_tape->entries, organism->ad_tape->value_buffer, organism->ad_tape->grad_buffer);
-        printf("[HYBRID-DBG3] tape->capacity=%d tape->value_capacity=%d\n",
-               organism->ad_tape->capacity, organism->ad_tape->value_capacity);
+        printf("[HYBRID-DBG] tape=%p entries=%p sz=%d cap=%d vcap=%d\n",
+               organism->ad_tape, organism->ad_tape->entries,
+               organism->ad_tape->current_size, organism->ad_tape->capacity,
+               organism->ad_tape->value_capacity);
 
         reset_tape_kernel<<<(VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->ad_tape);
 
         err = cudaGetLastError();
-        printf("[HYBRID-DBG4] reset_tape_kernel launch returned, err=%d\n", (int)err);
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: reset_tape launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
-        printf("[HYBRID-DBG5] reset_tape_kernel launched (async, no sync needed)\n");
 
         if (training_mode->batch_images != nullptr) {
 
             dim3 sample_grid((arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, (arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, 1);
             dim3 sample_block(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
+
+            printf("[HYBRID-DBG] inject: grid=%d ch=%d ca_conc=%p\n",
+                   arch.grid_size, arch.channels, organism->ca_state->ca_concentration);
 
             inject_sample_to_ca_kernel<<<sample_grid, sample_block>>>(
                 training_mode->batch_images,
@@ -160,9 +162,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: Sample injection failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
         } else {
+            printf("[HYBRID-DBG] init_ca: grid=%d field=%p ca=%p\n",
+                   arch.grid_size, organism->chemical_field->concentration,
+                   organism->ca_state->ca_concentration);
 
             initialize_ca_from_field_kernel<<<field_grid, field_block>>>(
                 organism->ca_state->ca_concentration,
@@ -173,9 +178,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: initialize_ca_from_field launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
         }
+
+        printf("[HYBRID-DBG] ca: h=%d ch=%d hid=%d hdim=%d g=%d pmap=%p\n",
+               arch.num_heads, arch.channels, arch.hidden_dim, arch.head_dim,
+               arch.grid_size, param_map);
 
         multi_head_ca_with_tape_kernel<<<ca_grid, ca_block>>>(
             organism->ca_state->ca_concentration,
@@ -191,8 +200,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: multi_head_ca_with_tape launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
+
+        printf("[HYBRID-DBG] ca complete\n");
 
         if (training_mode->batch_images != nullptr) {
 
@@ -210,7 +221,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: spatial_pooling launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             float* logits = organism->gradient_logits_pool;
@@ -228,7 +239,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: classification_head launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             float* loss_out = organism->gradient_loss_pool;
@@ -239,7 +250,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: zero_scalar launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             cross_entropy_loss_kernel<<<1, WARP_SIZE>>>(
@@ -254,7 +265,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: cross_entropy_loss launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             task_performance_probe_kernel<<<1, 1>>>(
@@ -269,7 +280,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: cross_entropy_loss launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             // Backprop through classifier
@@ -287,7 +298,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: classification_head_backward launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
 
             // Backprop through spatial pooling
@@ -306,7 +317,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: spatial_pooling_backward launch failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
         }
 
@@ -320,7 +331,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             err = cudaGetLastError();
             if (err != cudaSuccess) {
                 printf("FATAL [hybrid_lifecycle]: Backward pass failed: %s\n", cudaGetErrorString(err));
-                asm("trap;");
+                
             }
         } else {
             printf("WARN [hybrid_lifecycle]: Tape empty, skipping backward pass\n");
@@ -364,7 +375,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: Adam update (CA FP16) failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         dim3 pooling_adam_grid((arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -385,7 +396,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: Adam update (pooling weights FP32) failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         int fc_weights_size = num_classes * behavioral_dim;
@@ -407,7 +418,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: Adam update (fc_weights FP32) failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         dim3 fc_bias_adam_grid((num_classes + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -428,7 +439,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: Adam update (fc_bias FP32) failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         training_mode->adam_timestep++;
@@ -446,7 +457,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: extract_head_gradient_magnitudes launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         compute_gradient_fitness_kernel<<<(MAX_COMPONENTS + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
@@ -461,7 +472,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: compute_gradient_fitness launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
     }
 
@@ -487,7 +498,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("FATAL [hybrid_lifecycle]: component_evolution launch failed: %s\n", cudaGetErrorString(err));
-        asm("trap;");
+        
     }
 
     if (!training_mode->use_gradients) {
@@ -512,7 +523,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: neural_ca_update launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
     } else {
 
@@ -525,7 +536,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: update_field_from_ca launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         int weight_count = arch.num_heads * arch.channels * arch.hidden_dim;
@@ -541,7 +552,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: convert_weights_to_fp32 launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
 
         // Encode primary_genome to latent first, then compute effective rank from latent variance
@@ -558,7 +569,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("FATAL [hybrid_lifecycle]: compute_effective_rank launch failed: %s\n", cudaGetErrorString(err));
-            asm("trap;");
+            
         }
     }
 
@@ -578,7 +589,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("FATAL [hybrid_lifecycle]: behavioral_update launch failed: %s\n", cudaGetErrorString(err));
-        asm("trap;");
+        
     }
 
     uint64_t mem_genome_hash = organism->pool->entries[0].genome_hash;
@@ -615,11 +626,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("FATAL [hybrid_lifecycle]: memory_update launch failed: %s\n", cudaGetErrorString(err));
-        asm("trap;");
+        
     }
 
     cudaFree(component_workspace_genomes);
     cudaFree(behavioral_workspace_genomes);
+
+    printf("[HYBRID-EXIT] gen=%d completed\n", generation);
 }
 
 

@@ -655,11 +655,6 @@ __global__ void set_chemical_sources_from_agents_kernel(
             atomicAdd(&sources[idx], contribution);
         }
     }
-
-    if (agent_id == 0) {
-        printf("[SOURCES] agent0: pos=[%f,%f] grid=[%d,%d] strength=%f sigma=%f\n",
-               agent->position[0], agent->position[1], grid_x, grid_y, source_strength, source_sigma);
-    }
 }
 
 __global__ void compute_behavioral_field_kernel(float* behavioral_field, BehavioralState* agents, int num_agents, int grid_size, const float* genome, const float* gradients, uint64_t genome_hash, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int hw_dim, int task_dim, int gen_dim){

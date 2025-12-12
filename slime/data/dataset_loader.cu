@@ -565,14 +565,12 @@ __global__ void inject_sample_to_ca_kernel(
         if (threadIdx.x == 0 && threadIdx.y == 0 && batch_idx == 0) {
             printf("FATAL [inject_sample_to_ca]: ca_state is NULL\n");
         }
-        asm("trap;");
         return;
     }
 
     if (isnan(sample_value) || isinf(sample_value)) {
         printf("FATAL [inject_sample_to_ca]: Invalid sample value %f at batch=%d y=%d x=%d\n",
                sample_value, batch_idx, y, x);
-        asm("trap;");
         return;
     }
 

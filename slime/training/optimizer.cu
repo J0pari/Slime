@@ -25,7 +25,7 @@ __global__ void adam_update_kernel(
         if (idx == 0) {
             printf("FATAL [adam_update]: NULL pointer detected\n");
         }
-        asm("trap;");
+        
         return;
     }
 
@@ -33,7 +33,7 @@ __global__ void adam_update_kernel(
 
     if (isnan(g) || isinf(g)) {
         printf("FATAL [adam_update]: Invalid gradient %f at index %d\n", g, idx);
-        asm("trap;");
+        
         return;
     }
 
@@ -56,7 +56,7 @@ __global__ void adam_update_kernel(
         printf("FATAL [adam_update]: Weight corruption at index %d\n", idx);
         printf("  weight: %f, gradient: %f, m_hat: %f, v_hat: %f, delta: %f\n",
                weights[idx], g, m_hat, v_hat, weight_delta);
-        asm("trap;");
+        
     }
 
     gradients[idx] = 0.0f;
@@ -82,7 +82,7 @@ __global__ void adam_update_fp16_kernel(
         if (idx == 0) {
             printf("FATAL [adam_update_fp16]: NULL pointer detected\n");
         }
-        asm("trap;");
+        
         return;
     }
 
@@ -92,7 +92,7 @@ __global__ void adam_update_fp16_kernel(
     if (isnan(g) || isinf(g) || isnan(weight) || isinf(weight)) {
         printf("FATAL [adam_update_fp16]: Invalid values at index %d (w=%f, g=%f)\n",
                idx, weight, g);
-        asm("trap;");
+        
         return;
     }
 
@@ -111,7 +111,7 @@ __global__ void adam_update_fp16_kernel(
     if (isnan(weight) || isinf(weight)) {
         printf("FATAL [adam_update_fp16]: Weight corruption at index %d (new weight: %f)\n",
                idx, weight);
-        asm("trap;");
+        
     }
 
     weights_fp16[idx] = __float2half(weight);
