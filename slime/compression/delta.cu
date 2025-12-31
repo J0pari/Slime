@@ -3,7 +3,7 @@
 #define DELTA_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
 // Forward declarations for DIRESA functions (defined in diresa.cu, included by organism.cu)

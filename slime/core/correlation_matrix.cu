@@ -2,7 +2,7 @@
 #define CORRELATION_MATRIX_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
 __global__ void compute_correlation_matrix_kernel(
@@ -51,7 +51,13 @@ __global__ void compute_correlation_matrix_kernel(
         }
     }
 
-    float correlation = covariance / (sqrtf(var_row * var_col) + EPSILON);
+    float denom = sqrtf(var_row * var_col);
+    if (denom <= 0.0f || isnan(denom) || isinf(denom)) {
+        printf("FATAL [correlation_matrix]: denom=%f var_row=%f var_col=%f\n", denom, var_row, var_col);
+        correlation_matrix[row * genome_size + col] = 0.0f;
+        return;
+    }
+    float correlation = covariance / denom;
     correlation_matrix[row * genome_size + col] = correlation;
 }
 

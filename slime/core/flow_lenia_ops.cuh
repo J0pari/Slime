@@ -1,7 +1,7 @@
 #ifndef FLOW_LENIA_OPS_CUH
 #define FLOW_LENIA_OPS_CUH
 
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f

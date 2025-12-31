@@ -3,7 +3,7 @@
 #define REPORT_GENERATOR_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdint.h>

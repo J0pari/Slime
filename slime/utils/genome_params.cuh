@@ -1,7 +1,7 @@
 #ifndef GENOME_PARAMS_CUH
 #define GENOME_PARAMS_CUH
 
-#include "tile_ops.cuh"
+#include "cuda_primitives.cuh"
 #include "../memory/genome_ops.cuh"
 
 
@@ -228,10 +228,6 @@ struct TrainingParams {
     }
 };
 
-
-
-
-
 __global__ void clear_buffer_kernel(float* buffer, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
@@ -239,11 +235,5 @@ __global__ void clear_buffer_kernel(float* buffer, int size) {
     }
 }
 
-__global__ void copy_buffer_kernel(const float* src, float* dst, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        dst[idx] = src[idx];
-    }
-}
 
 #endif

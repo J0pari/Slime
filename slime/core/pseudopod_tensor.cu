@@ -3,9 +3,10 @@
 #define PSEUDOPOD_TENSOR_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include "../utils/genome_params.cuh"
 #include "../learning/autodiff.cu"
+#include "../metrics/hardware_geometry.cu"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -35,7 +36,8 @@ __global__ void multi_head_ca_tensor_kernel(
     int grid_size,
     int num_heads,
     ArchitectureParams arch,
-    ADTape* tape = nullptr
+    ADTape* tape = nullptr,
+    TraceBuffer* trace_buffer = nullptr
 ) {
 
     int head_id = blockIdx.y;
@@ -44,6 +46,16 @@ __global__ void multi_head_ca_tensor_kernel(
     int cell_y = blockIdx.x * blockDim.y + threadIdx.y;
 
     if (cell_x >= grid_size || cell_y >= grid_size) return;
+
+    // Record hardware trace metrics
+    if (trace_buffer != nullptr && trace_buffer->current_idx < trace_buffer->capacity) {
+        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+        if (trace_idx < trace_buffer->capacity) {
+            ExecutionTrace* trace = &trace_buffer->traces[trace_idx];
+            int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
+            record_warp_metrics(trace, warp_id);
+        }
+    }
 
     __shared__ float neighborhood[3][3][MAX_HEAD_DIM + BANK_PAD];
 
@@ -70,9 +82,9 @@ __global__ void multi_head_ca_tensor_kernel(
 
         for (int dy = 0; dy < 3; dy++) {
             for (int dx = 0; dx < 3; dx++) {
-                for (int c = 0; c < arch.head_dim; c++) {
-                    int weight_idx = head_id * arch.channels * arch.hidden_dim +
-                                    c * arch.hidden_dim + i;
+                for (int c = 0; c < arch.channels; c++) {
+                    int weight_idx = head_id * arch.channels * arch.head_dim +
+                                    c * arch.head_dim + i;
 
                     float neighbor_val = neighborhood[dy][dx][c];
                     float weight_val = __half2float(perception_weights[weight_idx]);
@@ -105,8 +117,8 @@ __global__ void multi_head_ca_tensor_kernel(
         float accum = 0.0f;
 
         for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = head_id * arch.channels * arch.hidden_dim +
-                           j * arch.hidden_dim + i;
+            int weight_idx = head_id * arch.head_dim * arch.head_dim +
+                           j * arch.head_dim + i;
 
             float weight_val = __half2float(interaction_weights[weight_idx]);
             accum += perception[j] * weight_val;
@@ -140,17 +152,17 @@ __global__ void multi_head_ca_tensor_kernel(
         }
     }
 
-    float output[MAX_HEAD_DIM];
+    float output[MAX_CHANNELS];
 
-    for (int i = 0; i < arch.head_dim; i++) {
+    for (int i = 0; i < arch.channels; i++) {
         float accum = 0.0f;
 
-        for (int j = 0; j < arch.hidden_dim; j++) {
-            int weight_idx = head_id * arch.hidden_dim * arch.channels +
+        for (int j = 0; j < arch.head_dim; j++) {
+            int weight_idx = head_id * arch.head_dim * arch.channels +
                            j * arch.channels + i;
 
             float weight_val = __half2float(value_weights[weight_idx]);
-            accum += interaction[j % arch.head_dim] * weight_val;
+            accum += interaction[j] * weight_val;
         }
 
         output[i] = accum;
@@ -163,7 +175,7 @@ __global__ void multi_head_ca_tensor_kernel(
 
             if (entry_idx < tape->capacity && output_tape_idx < tape->value_capacity) {
                 float output_norm = 0.0f;
-                for (int i = 0; i < arch.head_dim; i++) {
+                for (int i = 0; i < arch.channels; i++) {
                     output_norm += output[i] * output[i];
                 }
 
@@ -179,12 +191,12 @@ __global__ void multi_head_ca_tensor_kernel(
         }
     }
 
-    int out_idx = batch_id * num_heads * grid_size * grid_size * arch.head_dim +
-                  head_id * grid_size * grid_size * arch.head_dim +
-                  cell_y * grid_size * arch.head_dim +
-                  cell_x * arch.head_dim;
+    int out_idx = batch_id * num_heads * grid_size * grid_size * arch.channels +
+                  head_id * grid_size * grid_size * arch.channels +
+                  cell_y * grid_size * arch.channels +
+                  cell_x * arch.channels;
 
-    for (int i = 0; i < arch.head_dim; i++) {
+    for (int i = 0; i < arch.channels; i++) {
         ca_output[out_idx + i] = output[i];
     }
 }
@@ -277,7 +289,7 @@ __global__ void tensor_core_conv3x3_kernel(
     mass_after = WarpReduce<WARP_SIZE>::sum(mass_after);
 
     // Use warpId to coordinate multi-warp convergence check via ballot primitives
-    int mass_conserved = (fabsf(mass_after - mass_before) < EPSILON);
+    int mass_conserved = approx_equal(mass_after, mass_before);
     unsigned int ballot = WarpReduce<WARP_SIZE>::ballot(mass_conserved);
 
     // Store per-warp ballot results in shared memory indexed by warpId
@@ -294,7 +306,7 @@ __global__ void tensor_core_conv3x3_kernel(
     );
 
     // Only apply normalization if mass conservation converged globally
-    if (all_converged && laneId == 0 && mass_after > EPSILON) {
+    if (all_converged && laneId == 0 && is_meaningful(mass_after, mass_before)) {
         float scale = mass_before / mass_after;
 
         // Broadcast scale to all lanes in warp using cooperative groups
@@ -329,7 +341,12 @@ __global__ void compute_effective_rank_from_latent_tensor_kernel(
     }
     variance /= latent_dim;
 
-    *effective_rank = sqrtf(variance + EPSILON) * latent_dim;
+    if (variance < 0.0f) {
+        printf("FATAL [effective_rank_tensor]: variance=%f\n", variance);
+        *effective_rank = 0.0f;
+        return;
+    }
+    *effective_rank = sqrtf(variance) * latent_dim;
 }
 
 __global__ void compute_coherence_tensor_kernel(
@@ -345,9 +362,11 @@ __global__ void compute_coherence_tensor_kernel(
         float current_loss = loss_history[tid];
         float next_loss = loss_history[tid + 1];
 
-        if (current_loss > EPSILON) {
-            local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
+        if (current_loss <= 0.0f) {
+            printf("FATAL [compute_coherence_tensor]: current_loss[%d]=%f\n", tid, current_loss);
+            return;
         }
+        local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
     }
 
     float total = BlockReduce<BLOCK_SIZE>::sum(local_improvement);
@@ -362,33 +381,33 @@ __global__ void init_multihead_ca_tensor_kernel(
     unsigned int seed,
     int num_heads,
     int channels,
-    int hidden_dim
+    int head_dim
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     curandState_t rand_state;
     curand_init(seed, tid, 0, &rand_state);
 
-    int perception_size = num_heads * channels * hidden_dim;
+    int perception_size = num_heads * channels * head_dim;
     if (tid < perception_size) {
         float fan_in = (float)channels;
-        float fan_out = (float)hidden_dim;
+        float fan_out = (float)head_dim;
         float scale = sqrtf(2.0f / (fan_in + fan_out));
-        float val = curand_normal(&rand_state) * scale;
+        float val = validated_curand_normal(&rand_state, "init_tensor_ca_perception", tid) * scale;
         state->perception_weights[tid] = __float2half(val);
     }
 
-    int interaction_size = num_heads * channels * hidden_dim;
+    int interaction_size = num_heads * head_dim * head_dim;
     if (tid < interaction_size) {
-        float scale = sqrtf(2.0f / (float)channels);
-        float val = curand_normal(&rand_state) * scale;
+        float scale = sqrtf(2.0f / (float)head_dim);
+        float val = validated_curand_normal(&rand_state, "init_tensor_ca_interaction", tid) * scale;
         state->interaction_weights[tid] = __float2half(val);
     }
 
-    int value_size = num_heads * hidden_dim * channels;
+    int value_size = num_heads * head_dim * channels;
     if (tid < value_size) {
-        float scale = sqrtf(2.0f / (float)hidden_dim);
-        float val = curand_normal(&rand_state) * scale;
+        float scale = sqrtf(2.0f / (float)head_dim);
+        float val = validated_curand_normal(&rand_state, "init_tensor_ca_value", tid) * scale;
         state->value_weights[tid] = __float2half(val);
     }
 }
@@ -418,9 +437,9 @@ __global__ void pipelined_ca_kernel(
     AsyncCopy<WARP_SIZE>::commit_group();
 
     int head_id = blockIdx.z;
-    half* perc_w = perception_weights + head_id * arch.channels * arch.hidden_dim;
-    half* inter_w = interaction_weights + head_id * arch.hidden_dim * arch.hidden_dim;
-    half* val_w = value_weights + head_id * arch.hidden_dim * arch.channels;
+    half* perc_w = perception_weights + head_id * arch.channels * arch.head_dim;
+    half* inter_w = interaction_weights + head_id * arch.head_dim * arch.head_dim;
+    half* val_w = value_weights + head_id * arch.head_dim * arch.channels;
 
     AsyncCopy<WARP_SIZE>::wait_group();
 
@@ -432,7 +451,7 @@ __global__ void pipelined_ca_kernel(
     __syncthreads();
 
     float inter_accum = 0.0f;
-    for (int i = 0; i < arch.hidden_dim; i++) {
+    for (int i = 0; i < arch.head_dim; i++) {
         inter_accum += perception_out[threadIdx.x] * __half2float(inter_w[i]);
     }
     interaction_out[threadIdx.x] = fmaxf(0.0f, inter_accum);

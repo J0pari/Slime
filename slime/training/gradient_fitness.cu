@@ -27,10 +27,8 @@ __global__ void extract_head_gradient_magnitudes_kernel(
 
     for (int i = threadIdx.x; i < count; i += blockDim.x) {
         int param_idx = start_idx + i;
-        if (param_idx < tape->current_value_idx) {
-            float grad = tape->grad_buffer[param_idx];
-            local_sum += grad * grad;
-        }
+        float grad = tape->grad_buffer[param_idx];
+        local_sum += grad * grad;
     }
 
     unsigned mask = __activemask();
@@ -74,11 +72,12 @@ __global__ void compute_gradient_fitness_kernel(
             float diff = gradient_magnitudes[i] - mean_grad;
             var += diff * diff;
         }
-        std_grad = sqrtf(var / num_heads + EPSILON);
+        std_grad = sqrtf(var / num_heads);
     }
     __syncthreads();
 
-    float grad_fitness = (grad_mag - mean_grad) / std_grad;
+    // z-score: when std=0 all values are identical, z-score is 0 by definition
+    float grad_fitness = is_meaningful(std_grad, 1.0f) ? (grad_mag - mean_grad) / std_grad : 0.0f;
 
     fitness_out[head_id] = gradient_weight * fmaxf(0.0f, grad_fitness) +
                           coherence_weight * coherence;
@@ -153,17 +152,18 @@ __global__ void compute_relative_fitness_kernel(
     }
     neighbor_mean /= k_neighbors;
 
-    float neighbor_std = 0.0f;
+    float neighbor_var = 0.0f;
     for (int i = 0; i < k_neighbors; i++) {
         if (neighbor_ids[i] >= 0) {
             float diff = absolute_fitness[neighbor_ids[i]] - neighbor_mean;
-            neighbor_std += diff * diff;
+            neighbor_var += diff * diff;
         }
     }
-    neighbor_std = sqrtf(neighbor_std / k_neighbors + EPSILON);
+    float neighbor_std = sqrtf(neighbor_var / k_neighbors);
 
     float my_fitness = absolute_fitness[comp_id];
-    relative_fitness[comp_id] = (my_fitness - neighbor_mean) / neighbor_std;
+    // z-score: when std=0 all neighbors have identical fitness, z-score is 0
+    relative_fitness[comp_id] = is_meaningful(neighbor_std, 1.0f) ? (my_fitness - neighbor_mean) / neighbor_std : 0.0f;
 }
 
 #endif

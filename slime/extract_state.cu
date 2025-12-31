@@ -7,6 +7,15 @@
 #include <cuda_runtime.h>
 #include "core/organism.cu"
 
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            printf("FATAL CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            return; \
+        } \
+    } while(0)
+
 struct SystemSnapshot {
 
     float* chemical_concentration;
@@ -50,10 +59,10 @@ struct SystemSnapshot {
 
 extern "C" void extract_system_state(Organism* d_organism, FILE* json_file, int generation, double elapsed_time) {
     Organism h_organism;
-    cudaMemcpy(&h_organism, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_organism, d_organism, sizeof(Organism), cudaMemcpyDeviceToHost));
 
     ComponentPool h_pool;
-    cudaMemcpy(&h_pool, h_organism.pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_pool, h_organism.pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost));
 
     int grid_size = h_pool.entries[0].grid_size;
 
@@ -64,13 +73,13 @@ extern "C" void extract_system_state(Organism* d_organism, FILE* json_file, int 
     float* h_chemical = new float[sample_size * sample_size];
 
     ChemicalField h_chem_field;
-    cudaMemcpy(&h_chem_field, h_organism.chemical_field, sizeof(ChemicalField), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_chem_field, h_organism.chemical_field, sizeof(ChemicalField), cudaMemcpyDeviceToHost));
 
     fprintf(json_file, "\"chemical\":{\"concentration\":[");
     for (int y = 0; y < sample_size; y++) {
         for (int x = 0; x < sample_size; x++) {
             float val;
-            cudaMemcpy(&val, h_chem_field.concentration + (offset + y) * grid_size + (offset + x), sizeof(float), cudaMemcpyDeviceToHost);
+            CUDA_CHECK(cudaMemcpy(&val, h_chem_field.concentration + (offset + y) * grid_size + (offset + x), sizeof(float), cudaMemcpyDeviceToHost));
             fprintf(json_file, "%.4f", val);
             if (y < sample_size - 1 || x < sample_size - 1) fprintf(json_file, ",");
         }
@@ -79,7 +88,7 @@ extern "C" void extract_system_state(Organism* d_organism, FILE* json_file, int 
 
 
     BehavioralState* h_agents = new BehavioralState[h_pool.active_count.load()];
-    cudaMemcpy(h_agents, h_organism.behavioral_agents, h_pool.active_count.load() * sizeof(BehavioralState), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_agents, h_organism.behavioral_agents, h_pool.active_count.load() * sizeof(BehavioralState), cudaMemcpyDeviceToHost));
 
     fprintf(json_file, "\"agents\":[");
     for (int i = 0; i < h_pool.active_count.load(); i++) {
@@ -98,7 +107,7 @@ extern "C" void extract_system_state(Organism* d_organism, FILE* json_file, int 
 
     int voronoi_sample = min(VORONOI_EXPORT_LIMIT, h_organism.num_voronoi_cells);
     VoronoiCell* h_voronoi = new VoronoiCell[voronoi_sample];
-    cudaMemcpy(h_voronoi, h_organism.voronoi_cells, voronoi_sample * sizeof(VoronoiCell), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_voronoi, h_organism.voronoi_cells, voronoi_sample * sizeof(VoronoiCell), cudaMemcpyDeviceToHost));
 
     fprintf(json_file, "\"voronoi\":[");
     for (int i = 0; i < voronoi_sample; i++) {
@@ -117,7 +126,7 @@ extern "C" void extract_system_state(Organism* d_organism, FILE* json_file, int 
     int archive_sample = min(BEHAVIORAL_DIM, h_organism.archive_size);
     if (archive_sample > 0) {
         GPUElite* h_archive = new GPUElite[archive_sample];
-        cudaMemcpy(h_archive, h_organism.archive, archive_sample * sizeof(GPUElite), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(h_archive, h_organism.archive, archive_sample * sizeof(GPUElite), cudaMemcpyDeviceToHost));
 
         fprintf(json_file, "\"archive\":{\"size\":%d,\"elites\":[", h_organism.archive_size);
         for (int i = 0; i < archive_sample; i++) {

@@ -2,7 +2,7 @@
 #define LIFECYCLE_STAGES_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include "../memory/pool.cu"
 #include "../memory/archive.cu"
 #include <cuda_runtime.h>
@@ -154,7 +154,10 @@ __device__ int sample_from_niche_aware(
             gen_coords,
             voronoi_cells[c].hw_centroid,
             voronoi_cells[c].task_centroid,
-            voronoi_cells[c].gen_centroid
+            voronoi_cells[c].gen_centroid,
+            archive->hw_dim,
+            archive->task_dim,
+            archive->gen_dim
         );
 
         if (dist < min_dist) {
@@ -184,7 +187,7 @@ __device__ int sample_from_niche_aware(
     return (elite_idx >= 0 && elite_idx < archive_size) ? elite_idx : 0;
 }
 
-__global__ void lifecycle_transition_kernel(
+extern "C" __global__ void lifecycle_transition_kernel(
     ComponentPool* pool,
     GPUElite* archive,
     int archive_size,
@@ -242,26 +245,9 @@ __global__ void lifecycle_transition_kernel(
     float ctx_stress = entry->hunger;
 
 
-    float ctx_morphogen = 0.0f;
-    if (entry->alive) {
-        int center_x = idx % grid_size;
-        int center_y = idx / grid_size;
-        int sample_count = 0;
-
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                int nx = center_x + dx;
-                int ny = center_y + dy;
-                if (nx >= 0 && nx < grid_size && ny >= 0 && ny < grid_size) {
-                    ctx_morphogen += chemical_field->concentration[ny * grid_size + nx];
-                    sample_count++;
-                }
-            }
-        }
-        ctx_morphogen = (sample_count > 0) ? (ctx_morphogen / sample_count) : 0.5f;
-    } else {
-        ctx_morphogen = 0.5f;
-    }
+    float ctx_morphogen = entry->alive
+        ? sample_neighborhood(chemical_field->concentration, idx, grid_size)
+        : nanf("");
 
     LifecyclePhase new_phase = local_state.decide_transition(local_idx, entry->alive, entry->genome_hash, entry_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
@@ -346,9 +332,16 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
 ) {
     int tid = threadIdx.x;
     int block_id = blockIdx.x;
-    int global_id = block_id * blockDim.x + tid;
+    int compact_idx = block_id * blockDim.x + tid;
 
-    if (global_id >= pool->capacity) return;
+    if (tid == 0 && block_id == 0) {
+        printf("[HIERARCHICAL-LIFECYCLE] ENTER gen=%d alive_count=%d\n", generation, pool->alive_indices_count);
+    }
+
+    bool valid = compact_idx < pool->alive_indices_count;
+
+    int actual_idx = valid ? pool->alive_indices[compact_idx] : 0;
+    PoolEntry* entry = valid ? &pool->entries[actual_idx] : nullptr;
 
     float ctx_complexity = telemetry->genome_complexity.hash_entropy;
     float ctx_niche = telemetry->archive_topology.novelty_gradient;
@@ -356,13 +349,38 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     float ctx_performance = telemetry->task_performance.accuracy;
 
     LocalOrganismState<BLOCK_SIZE>& local_state = thread_sections[block_id];
-    local_state.observe(tid, pool, generation);
+    if (valid) {
+        local_state.organism_indices[tid] = actual_idx;
+        local_state.local_fitness[tid] = entry->fitness;
+        local_state.local_coherence[tid] = entry->coherence;
+        for (int i = 7; i > 0; i--) {
+            local_state.gradient_history[tid][i] = local_state.gradient_history[tid][i-1];
+        }
+        float grad_mag = 0.0f;
+        for (int g = 0; g < GENOME_SIZE && g < 100; g++) {
+            float grad = entry->gradients[g];
+            grad_mag += grad * grad;
+        }
+        local_state.gradient_history[tid][0] = sqrtf(grad_mag / 100.0f);
+    } else {
+        local_state.local_fitness[tid] = 0.0f;
+        local_state.local_coherence[tid] = 0.0f;
+    }
+    __syncthreads();
 
-    PoolEntry* entry = &pool->entries[global_id];
+    float* entry_genome = nullptr;
+    float* parent_genome_temp = nullptr;
+    float ctx_metabolic = 0.0f;
+    float ctx_stress = 0.0f;
+    float ctx_morphogen = 0.0f;
+    uint64_t entry_hash = 0;
+    const float* entry_gradients = nullptr;
+    LifecyclePhase new_phase = LifecyclePhase::DORMANT;
 
-    float* entry_genome = &workspace_genomes[global_id * GENOME_SIZE * 2];
-    float* parent_genome_temp = &workspace_genomes[global_id * GENOME_SIZE * 2 + GENOME_SIZE];
-    if (entry->alive) {
+    if (valid) {
+        entry_genome = &workspace_genomes[compact_idx * GENOME_SIZE * 2];
+        parent_genome_temp = &workspace_genomes[compact_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+
         reconstruct_genome_from_archive(
             entry->parent_hash,
             archive,
@@ -376,72 +394,44 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             parent_genome_temp,
             diresa_genome_weights
         );
+
+        ctx_metabolic = entry->fitness;
+        ctx_stress = entry->hunger;
+        ctx_morphogen = sample_neighborhood(chemical_field->concentration, actual_idx, grid_size);
+
+        entry_hash = entry->genome_hash;
+        entry_gradients = entry->gradients;
+
+        new_phase = local_state.decide_transition(tid, true, entry_hash, entry_genome, entry_gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
     }
 
-    float ctx_metabolic = entry->fitness;
-    float ctx_stress = entry->hunger;
-
-    float ctx_morphogen = 0.0f;
-    if (entry->alive) {
-        int center_x = global_id % grid_size;
-        int center_y = global_id / grid_size;
-        int sample_count = 0;
-        for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-                int nx = center_x + dx;
-                int ny = center_y + dy;
-                if (nx >= 0 && nx < grid_size && ny >= 0 && ny < grid_size) {
-                    ctx_morphogen += chemical_field->concentration[ny * grid_size + nx];
-                    sample_count++;
-                }
-            }
-        }
-        ctx_morphogen = (sample_count > 0) ? (ctx_morphogen / sample_count) : 0.5f;
-    } else {
-        ctx_morphogen = 0.5f;
-    }
-
-    LifecyclePhase new_phase = local_state.decide_transition(tid, entry->alive, entry->genome_hash, entry_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-
-    float my_fitness = local_state.local_fitness[tid];
-    float my_coherence = local_state.local_coherence[tid];
+    float my_fitness = valid ? local_state.local_fitness[tid] : 0.0f;
+    float my_coherence = valid ? local_state.local_coherence[tid] : 0.0f;
 
     __shared__ float block_avg_fitness;
     __shared__ float block_avg_coherence;
     __shared__ int block_active_count;
 
-    float total_fitness = BlockReduce<BLOCK_SIZE>::sum(pool->entries[global_id].alive ? my_fitness : 0.0f);
-    float total_coherence = BlockReduce<BLOCK_SIZE>::sum(pool->entries[global_id].alive ? my_coherence : 0.0f);
-    int active_in_block = BlockReduce<BLOCK_SIZE>::sum(pool->entries[global_id].alive ? 1 : 0);
+    int threads_in_block = min((int)blockDim.x, pool->alive_indices_count - block_id * blockDim.x);
+    if (threads_in_block < 0) threads_in_block = 0;
+
+    float total_fitness = BlockReduce<BLOCK_SIZE>::sum(my_fitness);
+    float total_coherence = BlockReduce<BLOCK_SIZE>::sum(my_coherence);
 
     if (tid == 0) {
-        block_avg_fitness = active_in_block > 0 ? total_fitness / active_in_block : 0.0f;
-        block_avg_coherence = active_in_block > 0 ? total_coherence / active_in_block : 0.0f;
-        block_active_count = active_in_block;
+        block_avg_fitness = total_fitness / threads_in_block;
+        block_avg_coherence = total_coherence / threads_in_block;
+        block_active_count = threads_in_block;
     }
     __syncthreads();
 
-    uint64_t block_genome_hash = pool->entries[block_id * blockDim.x].genome_hash;
+    int block_leader_compact = block_id * blockDim.x;
+    int block_leader_actual = pool->alive_indices[block_leader_compact];
+    uint64_t block_genome_hash = pool->entries[block_leader_actual].genome_hash;
 
-    int block_base_idx = block_id * blockDim.x;
-    float* block_genome = &workspace_genomes[block_base_idx * GENOME_SIZE * 2];
-    float* block_parent_temp = &workspace_genomes[block_base_idx * GENOME_SIZE * 2 + GENOME_SIZE];
-    if (pool->entries[block_base_idx].alive) {
-        reconstruct_genome_from_archive(
-            pool->entries[block_base_idx].parent_hash,
-            archive,
-            *archive_size,
-            pool->entries[block_base_idx].delta_indices,
-            pool->entries[block_base_idx].delta_values,
-            pool->entries[block_base_idx].num_deltas,
-            pool->entries[block_base_idx].max_deltas,
-            block_genome,
-            GENOME_SIZE,
-            block_parent_temp,
-            diresa_genome_weights
-        );
-    }
-    const float* block_gradients = pool->entries[block_id * blockDim.x].gradients;
+    // block_genome already reconstructed at line 384 when tid=0 processed its entry
+    float* block_genome = &workspace_genomes[block_leader_compact * GENOME_SIZE * 2];
+    const float* block_gradients = pool->entries[block_leader_actual].gradients;
 
     int boost_threshold_center_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_center");
     int boost_threshold_steepness_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_steepness");
@@ -462,9 +452,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     float elite_coherence_reset = genome_to_param(block_genome, block_gradients, elite_coherence_reset_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_COHERENCE_RESET_MIN, LIFECYCLE_ELITE_COHERENCE_RESET_MAX);
 
     float boost_prob = 1.0f / (1.0f + expf(-boost_threshold_steepness * (block_avg_fitness - boost_threshold_center)));
-    if (pool->entries[global_id].alive && boost_prob > 0.5f) {
+    if (valid && boost_prob > 0.5f) {
         if (my_fitness < block_avg_fitness * 0.5f) {
-            pool->entries[global_id].coherence = fminf(1.0f, my_coherence + 0.1f);
+            entry->coherence = fminf(1.0f, my_coherence + 0.1f);
         }
     }
 
@@ -480,33 +470,43 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     if (block_in_crisis && tid == 0) {
         atomicAdd((int*)&pool->total_culled, 1);
 
-        unsigned int seed = block_id * MAX_POOL_SIZE + generation;
+        unsigned int seed = block_id * POOL_CAPACITY_MAX + generation;
         curandState_t rand_state;
         curand_init(seed, 0, 0, &rand_state);
 
         int sample_idx = (int)(curand_uniform(&rand_state) * (*archive_size)) % (*archive_size);
         if (sample_idx >= 0 && sample_idx < *archive_size) {
-            int worst_idx = -1;
+            int worst_tid = 0;
             float worst_fitness = 1e9f;
-            for (int i = 0; i < blockDim.x; i++) {
-                int idx = block_id * blockDim.x + i;
-                if (idx < pool->capacity && pool->entries[idx].alive) {
-                    if (pool->entries[idx].fitness < worst_fitness) {
-                        worst_fitness = pool->entries[idx].fitness;
-                        worst_idx = i;
-                    }
+            for (int i = 0; i < threads_in_block; i++) {
+                int ci = block_id * blockDim.x + i;
+                int ai = pool->alive_indices[ci];
+                if (pool->entries[ai].fitness < worst_fitness) {
+                    worst_fitness = pool->entries[ai].fitness;
+                    worst_tid = i;
                 }
             }
 
-            if (worst_idx == tid && pool->entries[global_id].alive) {
-                local_state.phases[tid] = LifecyclePhase::REACTIVATING;
-                pool->entries[global_id].fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
-                pool->entries[global_id].coherence = elite_coherence_reset;
+            if (worst_tid == 0) {
+                int worst_actual = pool->alive_indices[block_id * blockDim.x + worst_tid];
+                local_state.phases[worst_tid] = LifecyclePhase::REACTIVATING;
+                pool->entries[worst_actual].fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
+                pool->entries[worst_actual].coherence = elite_coherence_reset;
             }
         }
     }
 
-    local_state.phases[tid] = new_phase;
+    if (valid) {
+        local_state.phases[tid] = new_phase;
+    }
+
+    __syncthreads();
+    if (tid == 0) {
+        int total_active = Atomics::load_int(pool->active_count);
+        if (total_active <= 0) {
+            printf("FATAL [hierarchical_lifecycle]: total population extinction - active_count=%d gen=%d block=%d\n", total_active, generation, blockIdx.x);
+        }
+    }
 }
 
 #endif

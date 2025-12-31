@@ -35,14 +35,9 @@ __global__ void store_memory_kernel(
         tube->entries[idx].importance = importance;
         tube->entries[idx].decay_factor = 1.0f;
 
-        if (data && size > 0) {
-            if (tube->entries[idx].data == nullptr) {
-                cudaMalloc(&tube->entries[idx].data, sizeof(float) * size);
-            }
-            if (tube->entries[idx].data) {
-                for (int i = 0; i < size; i++) {
-                    tube->entries[idx].data[i] = data[i];
-                }
+        if (data && size > 0 && tube->entries[idx].data) {
+            for (int i = 0; i < size; i++) {
+                tube->entries[idx].data[i] = data[i];
             }
         }
 
@@ -58,6 +53,7 @@ __global__ void apply_decay_kernel(
     float timestep
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("[APPLY-DECAY] ENTER count=%d\n", tube->count);
 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
@@ -116,6 +112,7 @@ __global__ void prune_memories_kernel(
     float decay_threshold
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("[PRUNE-MEM] ENTER count=%d\n", tube->count);
 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
@@ -148,6 +145,7 @@ __global__ void consolidate_memories_kernel(
     __shared__ bool merged[MAX_MEMORY_SIZE + BANK_PAD];
 
     int idx = threadIdx.x;
+    if (idx == 0) printf("[CONSOLIDATE-MEM] ENTER count=%d\n", tube->count);
     if (idx < tube->count) {
         merged[idx] = false;
     }
@@ -165,10 +163,15 @@ __global__ void consolidate_memories_kernel(
 
             float similarity = 0.0f;
             if (entry->data && other->data) {
-                for (int k = 0; k < min(entry->size, other->size); k++) {
+                int min_size = min(entry->size, other->size);
+                if (min_size <= 0) {
+                    printf("FATAL [consolidate_memories]: min_size=%d entry->size=%d other->size=%d\n", min_size, entry->size, other->size);
+                    return;
+                }
+                for (int k = 0; k < min_size; k++) {
                     similarity += entry->data[k] * other->data[k];
                 }
-                similarity /= sqrtf((float)min(entry->size, other->size));
+                similarity /= sqrtf((float)min_size);
             }
 
             if (similarity > similarity_threshold) {
@@ -208,6 +211,23 @@ __global__ void init_tube_kernel(
         tube->global_time = 0.0f;
         tube->decay_rate = decay_rate;
         printf("[tube] tube=%p capacity=%d decay_rate=%f entries=%p\n", tube, capacity, decay_rate, tube->entries);
+    }
+}
+
+__global__ void wire_tube_data_kernel(
+    TemporalTube* tube,
+    float* data_buffer,
+    int entry_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= tube->capacity) return;
+
+    tube->entries[idx].data = &data_buffer[idx * entry_size];
+    tube->entries[idx].size = entry_size;
+
+    if (idx == 0) {
+        printf("[wire_tube] tube=%p capacity=%d entry_size=%d data_buffer=%p\n",
+               tube, tube->capacity, entry_size, data_buffer);
     }
 }
 

@@ -3,7 +3,7 @@
 #define CLASSIFICATION_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include "training_types.cu"
 #include "losses.cu"
 #include <cuda_runtime.h>
@@ -39,7 +39,17 @@ __global__ void spatial_pooling_kernel(
 
     if ((threadIdx.x % WARP_SIZE) == 0) {
         float avg = sum / spatial_size;
-        float weighted = avg * pooling_weights[channel];
+        float weight = pooling_weights[channel];
+
+        if (channel == 0 && batch_idx == 0) {
+            printf("[spatial_pooling] avg=%.6f weight[0]=%.6f ca_state[0]=%.6f\n", avg, weight, ca_state[base_idx]);
+        }
+
+        float weighted = avg * weight;
+        if (isnan(weighted) || isinf(weighted)) {
+            printf("FATAL [spatial_pooling]: NaN/Inf result! avg=%.6f weight=%.6f weighted=%.6f\n", avg, weight, weighted);
+            return;
+        }
         features[batch_idx * channels + channel] = weighted;
     }
 }
@@ -58,6 +68,34 @@ __global__ void classification_head_kernel(
 
     if (batch_idx >= batch_size || class_idx >= num_classes) return;
 
+    // Validate pointers and first values
+    if (batch_idx == 0 && class_idx == 0) {
+        if (features == nullptr) {
+            printf("FATAL [classification_head]: features is nullptr\n");
+            return;
+        }
+        if (fc_weights == nullptr) {
+            printf("FATAL [classification_head]: fc_weights is nullptr\n");
+            return;
+        }
+        if (fc_bias == nullptr) {
+            printf("FATAL [classification_head]: fc_bias is nullptr\n");
+            return;
+        }
+        if (isnan(features[0])) {
+            printf("FATAL [classification_head]: features[0]=NaN\n");
+            return;
+        }
+        if (isnan(fc_weights[0])) {
+            printf("FATAL [classification_head]: fc_weights[0]=NaN\n");
+            return;
+        }
+        if (isnan(fc_bias[0])) {
+            printf("FATAL [classification_head]: fc_bias[0]=NaN\n");
+            return;
+        }
+    }
+
     __shared__ float dot_products[NUM_CLASSES_MAX];
 
     float acc = fc_bias[class_idx];
@@ -74,6 +112,10 @@ __global__ void classification_head_kernel(
     __syncthreads();
 
     if (class_idx < num_classes) {
+        if (isnan(dot_products[class_idx]) || isinf(dot_products[class_idx])) {
+            printf("FATAL [classification_head]: logit[%d]=NaN/Inf acc=%.6f\n", class_idx, acc);
+            return;
+        }
         logits[batch_idx * num_classes + class_idx] = dot_products[class_idx];
     }
 }
@@ -167,7 +209,6 @@ __global__ void cross_entropy_loss_kernel(
     if (label < 0 || label >= num_classes) {
         printf("FATAL [cross_entropy_loss]: Invalid label %d at batch %d (must be 0-%d)\n",
                label, batch_idx, num_classes - 1);
-        
         return;
     }
 
@@ -181,7 +222,7 @@ __global__ void cross_entropy_loss_kernel(
             if (isnan(val) || isinf(val)) {
                 printf("FATAL [cross_entropy_loss]: Invalid logit %f at batch %d class %d\n",
                        val, batch_idx, i);
-                
+                return;
             }
             max_logit = fmaxf(max_logit, val);
         }
@@ -196,7 +237,7 @@ __global__ void cross_entropy_loss_kernel(
 
         if (isnan(nll) || isinf(nll) || nll < 0.0f) {
             printf("FATAL [cross_entropy_loss]: Invalid NLL %f at batch %d\n", nll, batch_idx);
-            
+            return;
         }
 
         atomicAdd(loss_out, nll / batch_size);
@@ -256,6 +297,15 @@ __global__ void spatial_pooling_backward_kernel(
     if (batch_idx >= batch_size || channel >= channels) return;
 
     float feat_grad = features_grad[batch_idx * channels + channel];
+
+    // Guard against NaN causing infinite atomic loops
+    if (isnan(feat_grad) || isinf(feat_grad)) {
+        if (threadIdx.x == 0 && channel == 0) {
+            printf("FATAL [spatial_pooling_backward]: NaN/Inf in features_grad[%d,%d]=%f\n", batch_idx, channel, feat_grad);
+        }
+        return;
+    }
+
     int spatial_size = grid_size * grid_size;
     int base_idx = batch_idx * spatial_size * channels;
 
@@ -309,7 +359,9 @@ __global__ void init_classification_head_kernel(
 
     for (int c = 0; c < num_classes; c++) {
         for (int f = 0; f < num_features; f++) {
-            fc_weights[c * num_features + f] = (curand_uniform(&rng) - 0.5f) * 2.0f * scale;
+            int idx = c * num_features + f;
+            float rand_val = validated_curand_uniform(&rng, "init_classification_fc", idx);
+            fc_weights[idx] = (rand_val - 0.5f) * 2.0f * scale;
         }
     }
 

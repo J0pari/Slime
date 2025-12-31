@@ -9,11 +9,10 @@
 #include "../memory/pool.cu"
 #include "../core/chemotaxis.cu"
 
-__device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state) {
+__device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state, int* sparse_cells_buffer) {
     if (archive_size == 0) return -1;
 
-    int* sparse_cells;
-    cudaMalloc(&sparse_cells, sizeof(int) * num_cells);
+    int* sparse_cells = sparse_cells_buffer;
 
     int min_density = MIN_DENSITY_INIT;
     int num_sparse = 0;
@@ -37,7 +36,6 @@ __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, Vo
         result = (elite_idx >= 0 && elite_idx < archive_size) ? elite_idx : 0;
     }
 
-    cudaFree(sparse_cells);
     return result;
 }
 
@@ -48,7 +46,8 @@ __global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archi
     curandState rand_state;
     curand_init(seed, 0, 0, &rand_state);
 
-    int elite_idx = sample_from_archive_novel(archive, archive_size, voronoi_cells, num_cells, &rand_state);
+    int* sparse_cells_buffer = (int*)(workspace_genome + 2 * GENOME_SIZE);
+    int elite_idx = sample_from_archive_novel(archive, archive_size, voronoi_cells, num_cells, &rand_state, sparse_cells_buffer);
     if (elite_idx < 0 || elite_idx >= archive_size) return;
 
     PoolEntry* entry = &pool->entries[pool_idx];
@@ -89,7 +88,7 @@ __global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archi
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
-    if (pool_idx < MAX_COMPONENTS) {
+    if (pool_idx < POOL_CAPACITY_MAX) {
         BehavioralState* agent = &behavioral_agents[pool_idx];
         for (int i = 0; i < hw_dim; i++) {
             agent->hw_coords[i] = archive->hw_coords[elite_idx * hw_dim + i];

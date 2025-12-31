@@ -15,10 +15,10 @@ constexpr int WARP_SIZE = 32;
 constexpr int BANK_PAD = 1;
 
 // CUDA Dynamic Parallelism (CDP) configuration
-constexpr int CDP_SYNC_DEPTH = 13;                  // Maximum nesting depth for device kernel launches (max tested: 13)
-constexpr int CDP_PENDING_LAUNCH_COUNT = 2048;       // Maximum outstanding device-side kernel launches (testing memory impact)
-constexpr int CDP_STACK_SIZE = 16384;               // Stack size per thread in bytes (init_organism needs 13416)
-constexpr size_t DEVICE_MALLOC_HEAP_MB = 512;       // Device malloc heap size in MB (actual allocation need ~22MB)        
+constexpr int CDP_SYNC_DEPTH = 4;
+constexpr int CDP_PENDING_LAUNCH_COUNT = 2048;
+constexpr int CDP_STACK_SIZE = 16384;
+constexpr size_t DEVICE_MALLOC_HEAP_MB = 512;        
 
 
 constexpr int TILE_M = WMMA_TILE_DIM;
@@ -35,9 +35,8 @@ constexpr int TILE_DIM = 2 * WMMA_TILE_DIM;
 
 
 constexpr int GENOME_SIZE = 1024;
-constexpr int MAX_POOL_SIZE = 256;
-constexpr int MIN_POOL_SIZE = 8;
-constexpr int MAX_COMPONENTS = MAX_POOL_SIZE;
+constexpr int POOL_CAPACITY_MIN = 8;
+constexpr int POOL_CAPACITY_MAX = 64;
 constexpr int MAX_ARCHIVE_SIZE = 10000;
 constexpr int PARENT_COUNT = 2;
 constexpr int MAX_CELLS = GENOME_SIZE;
@@ -46,15 +45,11 @@ constexpr int TAPE_CAPACITY = 10 * GENOME_SIZE;
 constexpr int VALUE_CAPACITY = 50 * GENOME_SIZE;
 constexpr int TRACE_CAPACITY = GENOME_SIZE;
 constexpr int MAX_HISTORY_LENGTH = GENOME_SIZE;
-constexpr int MAX_RANK = MAX_POOL_SIZE;
 constexpr int MAX_DELTAS_PER_ENTRY = 128;
 constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY;
 constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY;
-constexpr int MAX_GENERATIONS = 1000;
-constexpr int MAX_ITERATIONS = 30;       
 constexpr int MAX_JACOBI_SWEEPS = 100;   
 constexpr int MAX_SPARSE_NEIGHBORS = 10;
-constexpr int MAX_GRID_SIZE = 256;
 constexpr int MAX_CA_KERNEL_SIZE = 3;
 constexpr int MAX_FLOW_KERNEL_SIZE = 3;
 constexpr int CA_KERNEL_SIZE = 3;
@@ -209,11 +204,10 @@ constexpr int HARDWARE_FEATURES_DIM = 15;
 
 
 
-constexpr int GRADIENT_HISTORY = 2 * WMMA_TILE_DIM;  
+constexpr int GRADIENT_HISTORY = 2 * WMMA_TILE_DIM;
 constexpr int NUM_CHEMICAL_FIELD_ARRAYS = 6;
-constexpr int GRADIENT_SAMPLE_SIZE = 100;  
-constexpr int VORONOI_EXPORT_LIMIT = 100;  
-constexpr float DEFAULT_FITNESS = 0.0f;  
+constexpr int GRADIENT_SAMPLE_SIZE = 100;
+constexpr int VORONOI_EXPORT_LIMIT = 100;
 constexpr float OCCUPANCY_VARIANCE_WEIGHT = 1.0f;  
 constexpr float ARCHIVE_DENSITY_MARGIN = 0.1f;  
 
@@ -230,11 +224,6 @@ constexpr int BLOCK_K = WMMA_TILE_DIM / 2;
 
 
 
-constexpr float EPSILON = 1e-10f;
-constexpr float EPSILON_SMALL = 1e-8f;
-constexpr float MASS_CONSERVATION_EPSILON = 1e-6f;
-constexpr float EPSILON_GRADIENT = 1e-5f;
-constexpr float GENOME_EPSILON = 1e-6f;
 
 
 
@@ -274,19 +263,18 @@ constexpr float RECONSTRUCTION_GRADIENT_SCALE = 2.0f;
 
 
 constexpr int RNG_MASK_BITS = 24;
-constexpr int XORSHIFT_STATE_BITS = 63;
+constexpr int XORSHIFT_STATE_BITS = 64;
 constexpr float RNG_NORMALIZATION_SCALE = (float)(1u << RNG_MASK_BITS);
-constexpr double XORSHIFT_NORMALIZATION_SCALE = (double)(1ull << XORSHIFT_STATE_BITS);
+constexpr double XORSHIFT_NORMALIZATION_SCALE = 18446744073709551616.0;
 constexpr float FRACTIONAL_OU_KERNEL_OFFSET = 1.5f;
 
 constexpr unsigned int RNG_SEED_MULTIPLIER = 1337u;
 constexpr unsigned int LCG_MULTIPLIER = 1664525u;
 constexpr unsigned int LCG_INCREMENT = 1013904223u;
 
-constexpr int XORSHIFT_A = 17;
-constexpr int XORSHIFT_B = 11;
-constexpr int XORSHIFT_C = 25;
-constexpr int XORSHIFT_D = 28;
+constexpr int XORSHIFT128_ROTL_A = 24;
+constexpr int XORSHIFT128_ROTL_B = 37;
+constexpr int XORSHIFT128_SHIFT_C = 16;
 
 constexpr int JENKINS_SHIFT_1 = 3;
 constexpr int JENKINS_SHIFT_2 = 2;
@@ -300,6 +288,7 @@ constexpr int JENKINS_MIX_ROTATE = 57;
 
 constexpr int JENKINS_FINAL_SHIFT_A = 6;
 constexpr int JENKINS_FINAL_SHIFT_B = 11;
+constexpr int HASH_FINALIZER_SHIFT = 33;
 
 constexpr unsigned int DIRESA_INIT_SEED = 42;
 
@@ -386,6 +375,15 @@ constexpr int BEHAVIORAL_DIM_GEN_MAX = 16;
 
 // Compile-time maximum for stack allocations (sum of three axes)
 constexpr int BEHAVIORAL_DIM_MAX = BEHAVIORAL_DIM_HW_MAX + BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_GEN_MAX;
+
+// DIRESA weight pool strides (6-layer autoencoder: in→H1→H2→latent→H2→H1→out)
+constexpr size_t DIRESA_HW_STRIDE = HARDWARE_FEATURES_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * BEHAVIORAL_DIM_HW_MAX + BEHAVIORAL_DIM_HW_MAX + BEHAVIORAL_DIM_HW_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * HARDWARE_FEATURES_DIM + HARDWARE_FEATURES_DIM;
+constexpr size_t DIRESA_TASK_STRIDE = BEHAVIORAL_DIM_TASK_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_TASK_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_TASK_MAX;
+constexpr size_t DIRESA_GEN_STRIDE = 1 * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * BEHAVIORAL_DIM_GEN_MAX + BEHAVIORAL_DIM_GEN_MAX + BEHAVIORAL_DIM_GEN_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * 1 + 1;
+constexpr size_t DIRESA_GENOME_STRIDE = GENOME_SIZE * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX * GENOME_SIZE + GENOME_SIZE;
+
+// Behavioral embedding update frequency
+constexpr int EMBEDDING_UPDATE_FREQ = 10;
 
 // Adaptive curriculum thresholds
 constexpr float CURRICULUM_ACCURACY_THRESHOLD_MIN = 0.5f;
@@ -587,16 +585,34 @@ constexpr float MAX_AGENT_VELOCITY_BASE_MAX = 0.1f;
 
 constexpr int NUM_HEADS_MIN = 1;
 constexpr int NUM_HEADS_MAX = 8;
-constexpr int CHANNELS_MIN = 1;
-constexpr int CHANNELS_MAX = 16;
-constexpr int HEAD_DIM_MIN = 8;
-constexpr int HEAD_DIM_MAX = 64;
+
+constexpr int WMMA_ALIGNMENT = 8;
+constexpr int HEAD_DIM_TILES_MIN = 1;
+constexpr int HEAD_DIM_TILES_MAX = 4;
+constexpr int CHANNELS_OCTETS_MIN = 1;
+constexpr int CHANNELS_OCTETS_MAX = 2;
+
+constexpr int HEAD_DIM_MIN = HEAD_DIM_TILES_MIN * WMMA_TILE_DIM;
+constexpr int HEAD_DIM_MAX = HEAD_DIM_TILES_MAX * WMMA_TILE_DIM;
+constexpr int CHANNELS_MIN = CHANNELS_OCTETS_MIN * WMMA_ALIGNMENT;
+constexpr int CHANNELS_MAX = CHANNELS_OCTETS_MAX * WMMA_ALIGNMENT;
+constexpr int HIDDEN_DIM_MIN = HEAD_DIM_MIN;
+constexpr int HIDDEN_DIM_MAX = NUM_HEADS_MAX * HEAD_DIM_MAX;
 constexpr int GRID_SIZE_MIN = 64;
 constexpr int GRID_SIZE_MAX = 128;
 constexpr int MAX_HEAD_DIM = HEAD_DIM_MAX;
 constexpr int MAX_CHANNELS = CHANNELS_MAX;
-constexpr int MAX_HIDDEN_DIM = NUM_HEADS_MAX * HEAD_DIM_MAX;
 
+constexpr int FLOW_FIELD_DIMS = 2;
+constexpr int AFFINITY_REDUCED_DIMS = 1;
+
+constexpr int CA_FIELD_SIZE = GRID_SIZE_MAX * GRID_SIZE_MAX;
+constexpr int CA_CONCENTRATION_SIZE = CA_FIELD_SIZE * CHANNELS_MAX;
+constexpr int CA_OUTPUT_SIZE = CA_FIELD_SIZE * NUM_HEADS_MAX * HEAD_DIM_MAX;
+constexpr int CA_AFFINITY_SIZE = CA_FIELD_SIZE * AFFINITY_REDUCED_DIMS;
+constexpr int CA_FLOW_SIZE = CA_FIELD_SIZE * FLOW_FIELD_DIMS;
+constexpr int CA_REINTEGRATION_SIZE = CA_FIELD_SIZE * CHANNELS_MAX;
+constexpr int CA_STATE_STRIDE = CA_CONCENTRATION_SIZE + CA_OUTPUT_SIZE + CA_AFFINITY_SIZE + CA_FLOW_SIZE + CA_REINTEGRATION_SIZE;
 
 constexpr float LEARNING_RATE_MIN = 0.0001f;
 constexpr float LEARNING_RATE_MAX = 0.01f;
@@ -671,5 +687,33 @@ constexpr float RESOURCE_NOISE_MAX = 0.3f;
 
 constexpr float ARCHIVE_ACCEPTANCE_NOVELTY_WEIGHT = 0.5f;
 constexpr float ARCHIVE_ACCEPTANCE_QUALITY_WEIGHT = 0.5f;
+
+constexpr int AUDIT_SAMPLE_COUNT = 8;
+constexpr int AUDIT_IMAGE_SIZE = 28 * 28;
+constexpr int AUDIT_CA_SNAPSHOT_SIZE = 64 * 64;
+
+struct AuditBuffer {
+    volatile int ready;
+    volatile int consumed;
+    int generation;
+    int batch_size;
+    int num_classes;
+    int grid_size;
+    int correct_count;
+    float loss;
+    float accuracy;
+
+    unsigned char sample_images[AUDIT_SAMPLE_COUNT * AUDIT_IMAGE_SIZE];
+    int sample_labels[AUDIT_SAMPLE_COUNT];
+    float sample_logits[AUDIT_SAMPLE_COUNT * NUM_CLASSES_MAX];
+    int sample_predictions[AUDIT_SAMPLE_COUNT];
+    float sample_confidences[AUDIT_SAMPLE_COUNT];
+
+    float ca_snapshot[AUDIT_CA_SNAPSHOT_SIZE];
+
+    float train_accuracy;
+    float test_accuracy;
+    float generalization_gap;
+};
 
 #endif

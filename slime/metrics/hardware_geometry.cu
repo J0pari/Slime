@@ -58,9 +58,33 @@ struct TraceBuffer {
 };
 
 __global__ void init_trace_buffer_kernel(TraceBuffer* buffer, int capacity) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (tid == 0) {
         buffer->capacity = capacity;
         buffer->current_idx = 0;
+    }
+    
+    // Initialize all trace entries to zero
+    if (tid < capacity) {
+        ExecutionTrace* trace = &buffer->traces[tid];
+        trace->active_warps = 0;
+        trace->divergent_branches = 0;
+        trace->total_branches = 0;
+        trace->global_loads = 0;
+        trace->global_stores = 0;
+        trace->l2_transactions = 0;
+        trace->dram_transactions = 0;
+        trace->shared_loads = 0;
+        trace->shared_stores = 0;
+        trace->bank_conflicts = 0;
+        trace->inst_executed = 0;
+        trace->inst_issued = 0;
+        trace->cycles_elapsed = 0;
+        trace->tensor_core_cycles = 0;
+        trace->sm_occupancy = 0.0f;
+        trace->achieved_bandwidth = 0.0f;
+        trace->peak_bandwidth = 0.0f;
     }
 }
 
@@ -100,8 +124,8 @@ __device__ void compute_hardware_geometry(ExecutionTrace* trace, HardwareGeometr
 
     if (trace->total_branches > 0) {
         float divergence_rate = (float)trace->divergent_branches / trace->total_branches;
-        geom->warp_divergence_entropy = -divergence_rate * logf(divergence_rate + EPSILON_SMALL)
-                                       - (1.0f - divergence_rate) * logf(1.0f - divergence_rate + EPSILON_SMALL);
+        geom->warp_divergence_entropy = -divergence_rate * safe_log(divergence_rate)
+                                       - (1.0f - divergence_rate) * safe_log(1.0f - divergence_rate);
         geom->warp_convergence_rate = 1.0f - divergence_rate;
         geom->active_thread_fraction = (float)trace->active_warps / (trace->total_branches * (float)WARP_SIZE);
     } else {
@@ -194,6 +218,7 @@ __global__ void aggregate_hardware_geometry_kernel(
     int tid = threadIdx.x;
 
     if (tid == 0) {
+        printf("[AGGREGATE-HW-GEOM] ENTER tid=0 buffer=%p current_idx=%d\n", buffer, buffer ? buffer->current_idx : -1);
         aggregate_trace.active_warps = 0;
         aggregate_trace.divergent_branches = 0;
         aggregate_trace.total_branches = 0;
@@ -235,7 +260,9 @@ __global__ void aggregate_hardware_geometry_kernel(
     __syncthreads();
 
     if (tid == 0) {
+        printf("[AGGREGATE-HW-GEOM] About to compute_hardware_geometry tid=0\n");
         compute_hardware_geometry(&aggregate_trace, output_geom);
+        printf("[AGGREGATE-HW-GEOM] EXIT tid=0\n");
     }
 }
 

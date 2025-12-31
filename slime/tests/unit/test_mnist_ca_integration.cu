@@ -8,6 +8,15 @@
 #include <curand_kernel.h>
 #include <stdio.h>
 
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            printf("FATAL CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(1); \
+        } \
+    } while(0)
+
 __global__ void extract_ca_mass_kernel(
     float* ca_state,
     float* total_mass_out,
@@ -61,21 +70,21 @@ bool test_mnist_to_ca_grid_conversion() {
     uint64_t test_genome_hash = 12345ULL;
     int* d_grid_size;
     int* d_channels;
-    cudaMalloc(&d_grid_size, sizeof(int));
-    cudaMalloc(&d_channels, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_grid_size, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_channels, sizeof(int)));
 
     get_arch_kernel<<<1, 1>>>(test_genome_hash, d_grid_size, d_channels);
     cudaDeviceSynchronize();
 
     int grid_size, channels;
-    cudaMemcpy(&grid_size, d_grid_size, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&channels, d_channels, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&grid_size, d_grid_size, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&channels, d_channels, sizeof(int), cudaMemcpyDeviceToHost));
 
     cudaFree(d_grid_size);
     cudaFree(d_channels);
 
     unsigned char* d_mnist_img;
-    cudaMalloc(&d_mnist_img, MNIST_IMAGE_PIXELS);
+    CUDA_CHECK(cudaMalloc(&d_mnist_img, MNIST_IMAGE_PIXELS));
 
     unsigned char h_img[MNIST_IMAGE_PIXELS];
     for (int y = 0; y < 28; y++) {
@@ -83,10 +92,10 @@ bool test_mnist_to_ca_grid_conversion() {
             h_img[y * 28 + x] = (x + y) * 3;
         }
     }
-    cudaMemcpy(d_mnist_img, h_img, MNIST_IMAGE_PIXELS, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_mnist_img, h_img, MNIST_IMAGE_PIXELS, cudaMemcpyHostToDevice));
 
     float* d_ca_grid;
-    cudaMalloc(&d_ca_grid, GRID_SIZE_MAX * GRID_SIZE_MAX * MAX_CHANNELS * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&d_ca_grid, GRID_SIZE_MAX * GRID_SIZE_MAX * MAX_CHANNELS * sizeof(float)));
 
     dim3 grid_dim((grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, (grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
     dim3 block(WMMA_TILE_DIM, WMMA_TILE_DIM);
@@ -101,7 +110,7 @@ bool test_mnist_to_ca_grid_conversion() {
     cudaDeviceSynchronize();
 
     float* h_ca_sample = (float*)malloc(MNIST_NUM_CLASSES * sizeof(float));
-    cudaMemcpy(h_ca_sample, d_ca_grid, MNIST_NUM_CLASSES * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_ca_sample, d_ca_grid, MNIST_NUM_CLASSES * sizeof(float), cudaMemcpyDeviceToHost));
 
     bool in_range = true;
     for (int i = 0; i < MNIST_NUM_CLASSES; i++) {
@@ -162,21 +171,21 @@ bool test_multi_head_ca_diversity() {
     int* d_channels;
     int* d_head_dim;
     int* d_hidden_dim;
-    cudaMalloc(&d_grid_size, sizeof(int));
-    cudaMalloc(&d_num_heads, sizeof(int));
-    cudaMalloc(&d_channels, sizeof(int));
-    cudaMalloc(&d_head_dim, sizeof(int));
-    cudaMalloc(&d_hidden_dim, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_grid_size, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_num_heads, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_channels, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_head_dim, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_hidden_dim, sizeof(int)));
 
     get_full_arch_kernel<<<1, 1>>>(test_genome_hash, d_grid_size, d_num_heads, d_channels, d_head_dim, d_hidden_dim);
     cudaDeviceSynchronize();
 
     int grid_size, num_heads, channels, head_dim, hidden_dim;
-    cudaMemcpy(&grid_size, d_grid_size, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&num_heads, d_num_heads, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&channels, d_channels, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&head_dim, d_head_dim, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&hidden_dim, d_hidden_dim, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&grid_size, d_grid_size, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&num_heads, d_num_heads, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&channels, d_channels, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&head_dim, d_head_dim, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&hidden_dim, d_hidden_dim, sizeof(int), cudaMemcpyDeviceToHost));
 
     cudaFree(d_grid_size);
     cudaFree(d_num_heads);
@@ -200,33 +209,33 @@ bool test_multi_head_ca_diversity() {
     int state_size = GRID_SIZE_MAX * GRID_SIZE_MAX * MAX_CHANNELS;
     int output_size = NUM_HEADS_MAX * GRID_SIZE_MAX * GRID_SIZE_MAX * MAX_HEAD_DIM;
 
-    cudaMalloc(&d_ca_state, state_size * sizeof(float));
-    cudaMalloc(&d_ca_output, output_size * sizeof(float));
-    cudaMalloc(&d_perception_weights, MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(half));
-    cudaMalloc(&d_interaction_weights, MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(half));
-    cudaMalloc(&d_value_weights, MAX_HIDDEN_DIM * MAX_HIDDEN_DIM * MAX_CHANNELS * sizeof(half));
+    CUDA_CHECK(cudaMalloc(&d_ca_state, state_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_ca_output, output_size * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_perception_weights, HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&d_interaction_weights, HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&d_value_weights, HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * MAX_CHANNELS * sizeof(half)));
 
     float* h_state = (float*)malloc(state_size * sizeof(float));
     for (int i = 0; i < state_size; i++) {
         h_state[i] = ((float)rand() / RAND_MAX) * 0.2f;
     }
-    cudaMemcpy(d_ca_state, h_state, state_size * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_ca_state, h_state, state_size * sizeof(float), cudaMemcpyHostToDevice));
 
     srand(12345);
-    float* h_weights_fp32 = (float*)malloc(MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(float));
-    half* h_weights_fp16 = (half*)malloc(MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(half));
+    float* h_weights_fp32 = (float*)malloc(HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(float));
+    half* h_weights_fp16 = (half*)malloc(HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(half));
     for (int i = 0; i < arch.num_heads * arch.channels * arch.hidden_dim; i++) {
         h_weights_fp32[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
         h_weights_fp16[i] = __float2half(h_weights_fp32[i]);
     }
-    cudaMemcpy(d_perception_weights, h_weights_fp16, MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(half), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_interaction_weights, h_weights_fp16, MAX_HIDDEN_DIM * MAX_CHANNELS * MAX_HIDDEN_DIM * sizeof(half), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_perception_weights, h_weights_fp16, HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(half), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_interaction_weights, h_weights_fp16, HIDDEN_DIM_MAX * MAX_CHANNELS * HIDDEN_DIM_MAX * sizeof(half), cudaMemcpyHostToDevice));
 
     for (int i = 0; i < arch.num_heads * arch.hidden_dim * arch.channels; i++) {
         h_weights_fp32[i % (arch.num_heads * arch.channels * arch.hidden_dim)] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
         h_weights_fp16[i % (arch.num_heads * arch.channels * arch.hidden_dim)] = __float2half(h_weights_fp32[i % (arch.num_heads * arch.channels * arch.hidden_dim)]);
     }
-    cudaMemcpy(d_value_weights, h_weights_fp16, MAX_HIDDEN_DIM * MAX_HIDDEN_DIM * MAX_CHANNELS * sizeof(half), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_value_weights, h_weights_fp16, HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * MAX_CHANNELS * sizeof(half), cudaMemcpyHostToDevice));
 
     dim3 grid_dim((grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, arch.num_heads, 1);
     dim3 block(WMMA_TILE_DIM, WMMA_TILE_DIM);
@@ -247,8 +256,8 @@ bool test_multi_head_ca_diversity() {
     float* h_head0 = (float*)malloc(head_output_size * sizeof(float));
     float* h_head1 = (float*)malloc(head_output_size * sizeof(float));
 
-    cudaMemcpy(h_head0, d_ca_output, head_output_size * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_head1, &d_ca_output[head_output_size], head_output_size * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_head0, d_ca_output, head_output_size * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_head1, &d_ca_output[head_output_size], head_output_size * sizeof(float), cudaMemcpyDeviceToHost));
 
     float dot = 0.0f, norm0 = 0.0f, norm1 = 0.0f;
     for (int i = 0; i < head_output_size; i++) {
@@ -256,7 +265,7 @@ bool test_multi_head_ca_diversity() {
         norm0 += h_head0[i] * h_head0[i];
         norm1 += h_head1[i] * h_head1[i];
     }
-    float correlation = dot / (sqrtf(norm0 * norm1) + EPSILON);
+    float correlation = dot / fmaxf(sqrtf(norm0 * norm1), 1e-10f);
 
     bool diverse = (correlation < 0.95f);
 

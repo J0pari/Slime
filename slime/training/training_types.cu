@@ -91,33 +91,33 @@ struct AdaptiveCurriculum {
 
 __global__ void init_ca_param_map_kernel(CAParameterMap* param_map, ArchitectureParams arch) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        param_map->perception_size = arch.num_heads * arch.channels * arch.hidden_dim;
-        param_map->interaction_size = arch.num_heads * arch.hidden_dim * arch.hidden_dim;
-        param_map->value_size = arch.num_heads * arch.hidden_dim * arch.head_dim;
+        param_map->perception_size = arch.num_heads * arch.channels * arch.head_dim;
+        param_map->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
+        param_map->value_size = arch.num_heads * arch.head_dim * arch.channels;
         param_map->total_ca_params = param_map->perception_size + param_map->interaction_size + param_map->value_size;
         param_map->grid_size = arch.grid_size;
         param_map->channels = arch.channels;
-        param_map->hidden_dim = arch.hidden_dim;
+        param_map->hidden_dim = arch.head_dim;
 
         int offset = 0;
         for (int h = 0; h < arch.num_heads; h++) {
             param_map->perception_start[h] = offset;
-            offset += arch.channels * arch.hidden_dim;
+            offset += arch.channels * arch.head_dim;
 
             param_map->interaction_start[h] = offset;
-            offset += arch.hidden_dim * arch.hidden_dim;
+            offset += arch.head_dim * arch.head_dim;
 
             param_map->value_start[h] = offset;
-            offset += arch.hidden_dim * arch.head_dim;
+            offset += arch.head_dim * arch.channels;
 
             param_map->head_param_offsets[h] = param_map->perception_start[h];
-            param_map->head_param_counts[h] = arch.channels * arch.hidden_dim + arch.hidden_dim * arch.hidden_dim + arch.hidden_dim * arch.head_dim;
+            param_map->head_param_counts[h] = arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels;
         }
         param_map->total_params = offset;
     }
 }
 
-__global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_size) {
+__global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_size, float* batch_images, int* batch_labels) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         mode->use_gradients = true;
         mode->use_selection = true;
@@ -126,10 +126,11 @@ __global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_siz
         mode->batch_size = 64;
         mode->learning_rate = 0.001f;
         mode->gradient_clip_norm = 1.0f;
-        mode->adam_timestep = 0;
+        mode->adam_timestep = 1;
 
-        cudaMalloc(&mode->batch_images, sizeof(float) * mode->batch_size * grid_size * grid_size);
-        cudaMalloc(&mode->batch_labels, sizeof(int) * mode->batch_size);
+        // Use preallocated buffers instead of device cudaMalloc
+        mode->batch_images = batch_images;
+        mode->batch_labels = batch_labels;
     }
 }
 
@@ -137,7 +138,6 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (tid == 0) {
-        // Allocate from workspace instead of device malloc
         classifier->pooling_weights = workspace;
         classifier->fc_weights = workspace + input_dim;
         classifier->fc_bias = workspace + input_dim + (input_dim * num_classes);
@@ -148,16 +148,45 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
     curand_init(seed + tid, 0, 0, &state);
 
     if (tid < input_dim) {
-        classifier->pooling_weights[tid] = curand_normal(&state) * 0.1f;
+        float val = curand_normal(&state) * 0.1f;
+        if (isnan(val) || isinf(val)) {
+            printf("FATAL [init_classifier]: pooling_weights[%d]=%f\n", tid, val);
+            return;
+        }
+        classifier->pooling_weights[tid] = val;
     }
 
     if (tid < input_dim * num_classes) {
         float scale = sqrtf(2.0f / (input_dim + num_classes));
-        classifier->fc_weights[tid] = curand_normal(&state) * scale;
+        float val = curand_normal(&state) * scale;
+        if (isnan(val) || isinf(val)) {
+            printf("FATAL [init_classifier]: fc_weights[%d]=%f\n", tid, val);
+            return;
+        }
+        classifier->fc_weights[tid] = val;
     }
 
     if (tid < num_classes) {
         classifier->fc_bias[tid] = 0.0f;
+    }
+
+    __syncthreads();
+
+    if (tid == 0) {
+        for (int i = 0; i < input_dim && i < 10; i++) {
+            if (isnan(classifier->pooling_weights[i])) {
+                printf("FATAL [init_classifier]: pooling_weights[%d]=NaN\n", i);
+                return;
+            }
+        }
+        for (int i = 0; i < input_dim * num_classes && i < 10; i++) {
+            if (isnan(classifier->fc_weights[i])) {
+                printf("FATAL [init_classifier]: fc_weights[%d]=NaN\n", i);
+                return;
+            }
+        }
+        printf("[CLASSIFIER-INIT-OK] input_dim=%d classes=%d pool[0]=%.6f fc[0]=%.6f bias[0]=%.6f\n",
+               input_dim, num_classes, classifier->pooling_weights[0], classifier->fc_weights[0], classifier->fc_bias[0]);
     }
 }
 
@@ -217,6 +246,7 @@ __global__ void init_curriculum_kernel(
             ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
             CURRICULUM_MIN_GENERATIONS_MIN, CURRICULUM_MIN_GENERATIONS_MAX
         );
+        printf("[RULED-OUT] init_curriculum completed - NOT the hang\n");
     }
 }
 
@@ -262,7 +292,12 @@ __global__ void update_curriculum_kernel(
                 entropy -= p * logf(p);
             }
         }
-        current_stats->niche_diversity = entropy / logf((float)num_voronoi_cells);
+        if (num_voronoi_cells <= 1) {
+            printf("FATAL [niche_diversity]: num_voronoi_cells=%d must be > 1\n", num_voronoi_cells);
+            return;
+        }
+        float log_cells = logf((float)num_voronoi_cells);
+        current_stats->niche_diversity = entropy / log_cells;
 
         // Check if thresholds met for current dataset
         bool acc_met = current_stats->population_mean_accuracy >= curriculum->accuracy_threshold;

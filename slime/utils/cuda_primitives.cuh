@@ -1,13 +1,114 @@
-#ifndef TILE_OPS_CUH
-#define TILE_OPS_CUH
+#ifndef CUDA_PRIMITIVES_CUH
+#define CUDA_PRIMITIVES_CUH
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda/atomic>
+#include <curand_kernel.h>
 
 struct PoolEntry;
 
+// =============================================================================
+// UNIFIED EPSILON SYSTEM
+// One mechanism for all numerical stability needs. Context emerges from data.
+// =============================================================================
+
+// Machine epsilon: smallest x such that 1.0f + x != 1.0f
+constexpr float MACHINE_EPS = 1.192092896e-07f;  // FLT_EPSILON
+
+// Minimum positive normalized float (prevents underflow to denormals)
+constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  // FLT_MIN
+
+// Context-driven epsilon: scales with the magnitude of the reference value
+// Use this for ALL numerical stability (divisions, logs, sqrt, powers, etc.)
+__device__ __forceinline__ float safe_epsilon(float reference_scale) {
+    // Epsilon proportional to magnitude, but never smaller than minimum normal
+    return fmaxf(MACHINE_EPS * fabsf(reference_scale), FLOAT_MIN_NORMAL);
+}
+
+// For threshold checks: "is this value meaningfully non-zero?"
+// Uses reference to determine what "meaningful" means in context
+__device__ __forceinline__ bool is_meaningful(float value, float reference_scale) {
+    return fabsf(value) > safe_epsilon(reference_scale);
+}
+
+// For conservation checks: "are these values equal within numerical precision?"
+__device__ __forceinline__ bool approx_equal(float a, float b) {
+    float scale = fmaxf(fabsf(a), fabsf(b));
+    return fabsf(a - b) <= safe_epsilon(scale);
+}
+
+// Safe division: prevents div-by-zero using context-appropriate epsilon
+__device__ __forceinline__ float safe_div(float numerator, float denominator) {
+    return numerator / (denominator + safe_epsilon(denominator));
+}
+
+// Safe log: prevents log(0) using context-appropriate epsilon
+__device__ __forceinline__ float safe_log(float x) {
+    return logf(fmaxf(x, safe_epsilon(1.0f)));
+}
+
+// Safe sqrt denominator: for 1/sqrt(x) patterns
+__device__ __forceinline__ float safe_sqrt_denom(float x) {
+    return sqrtf(x) + safe_epsilon(x);
+}
+
+// Average field values in neighborhood around idx-derived position
+// Returns NaN on invalid input - let it propagate and reveal integration failures
+__device__ __forceinline__ float sample_neighborhood(
+    const float* field, int idx, int grid_size, int radius = 1
+) {
+    if (!field) {
+        printf("[NaN-TRACE] sample_neighborhood: null field at idx=%d\n", idx);
+        return nanf("");
+    }
+    if (grid_size <= 0) {
+        printf("[NaN-TRACE] sample_neighborhood: invalid grid_size=%d at idx=%d\n", grid_size, idx);
+        return nanf("");
+    }
+    int cx = idx % grid_size, cy = idx / grid_size;
+    float sum = 0.0f;
+    int n = 0;
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            int x = cx + dx, y = cy + dy;
+            if (x >= 0 && x < grid_size && y >= 0 && y < grid_size) {
+                sum += field[y * grid_size + x];
+                n++;
+            }
+        }
+    }
+    if (n == 0) {
+        printf("[NaN-TRACE] sample_neighborhood: zero samples at idx=%d grid_size=%d\n", idx, grid_size);
+        return nanf("");
+    }
+    return sum / n;
+}
+
+// Validated curand wrappers - FATAL on NaN/Inf
+__device__ __forceinline__ float validated_curand_normal(curandState* state, const char* caller, int idx) {
+    float val = curand_normal(state);
+    if (isnan(val) || isinf(val)) {
+        printf("FATAL [%s]: curand_normal returned %f at idx=%d\n", caller, val, idx);
+        __trap();
+    }
+    return val;
+}
+
+__device__ __forceinline__ float validated_curand_uniform(curandState* state, const char* caller, int idx) {
+    float val = curand_uniform(state);
+    if (isnan(val) || isinf(val) || val < 0.0f || val > 1.0f) {
+        printf("FATAL [%s]: curand_uniform returned %f at idx=%d\n", caller, val, idx);
+        __trap();
+    }
+    return val;
+}
+
 __device__ __forceinline__ float ldg_float(const float* ptr) {
+    if (ptr == nullptr) {
+        printf("FATAL [ldg_float]: null pointer\n");
+        __trap();
+    }
     #if __CUDA_ARCH__ >= 350
     return __ldg(ptr);
     #else
@@ -16,6 +117,10 @@ __device__ __forceinline__ float ldg_float(const float* ptr) {
 }
 
 __device__ __forceinline__ float4 ldg_float4(const float4* ptr) {
+    if (ptr == nullptr) {
+        printf("FATAL [ldg_float4]: null pointer\n");
+        __trap();
+    }
     #if __CUDA_ARCH__ >= 350
     return __ldg(ptr);
     #else
@@ -141,6 +246,39 @@ __global__ void convert_weights_to_fp32(
     if (idx < size) {
         weights_fp32[idx] = __half2float(weights_fp16[idx]);
     }
+}
+
+// Strided FP32->FP16: copies batch_size slices of slice_size elements each
+// Source has src_stride between slices (for multi-head interleaved layout), dest is contiguous
+__global__ void convert_fp32_to_fp16_strided(
+    const float* __restrict__ src, half* __restrict__ dst,
+    int batch_size, int slice_size, int src_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch_size * slice_size;
+    if (idx >= total) return;
+
+    int batch_id = idx / slice_size;
+    int local_idx = idx % slice_size;
+    int src_idx = batch_id * src_stride + local_idx;
+
+    dst[idx] = __float2half(src[src_idx]);
+}
+
+// Strided memcpy: copies from contiguous source to strided dest (for multi-head layout)
+__global__ void memcpy_to_strided(
+    const float* __restrict__ src, float* __restrict__ dst,
+    int batch_size, int slice_size, int dst_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch_size * slice_size;
+    if (idx >= total) return;
+
+    int batch_id = idx / slice_size;
+    int local_idx = idx % slice_size;
+    int dst_idx = batch_id * dst_stride + local_idx;
+
+    dst[dst_idx] = src[idx];
 }
 
 template<typename T, int ALIGN = 16>
@@ -492,6 +630,14 @@ struct Atomics {
 
     __device__ static void add_float(float* address, float val) {
         atomicAdd(address, val);
+    }
+
+    __device__ static size_t add_size(size_t* address, size_t val) {
+        return atomicAdd((unsigned long long*)address, (unsigned long long)val);
+    }
+
+    __device__ static size_t load_size(const size_t* address) {
+        return *((volatile unsigned long long*)address);
     }
 
     __device__ static float cas_float(float* address, float compare, float val) {
@@ -916,25 +1062,334 @@ struct SafeSize {
     }
 };
 
-// Cooperative group sync wrapper (replaces cudaDeviceSynchronize)
+__global__ void batched_tensor_core_gemm_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    float* __restrict__ C,
+    int M, int N, int K,
+    int A_head_stride,
+    int B_head_stride,
+    int C_head_stride
+) {
+    int head_id = blockIdx.z;
+    const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    const int warpN = blockIdx.y;
+
+    const int tile_row = warpM * WMMA_TILE_DIM;
+    const int tile_col = warpN * WMMA_TILE_DIM;
+
+    if (tile_row >= M || tile_col >= N) return;
+
+    const half* A_head = A + head_id * A_head_stride;
+    const half* B_head = B + head_id * B_head_stride;
+    float* C_head = C + head_id * C_head_stride;
+
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> b_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+
+    nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+
+    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+        if (k_tile + WMMA_TILE_DIM <= K) {
+            nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * K + k_tile, K);
+            nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
+            nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+    }
+    nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
+}
+
+__global__ void batched_tensor_core_gemm_transA_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    float* __restrict__ C,
+    int M, int N, int K,
+    int A_head_stride,
+    int B_head_stride,
+    int C_head_stride
+) {
+    int head_id = blockIdx.z;
+    const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
+    const int warpN = blockIdx.y;
+
+    const int tile_row = warpM * WMMA_TILE_DIM;
+    const int tile_col = warpN * WMMA_TILE_DIM;
+
+    if (tile_row >= M || tile_col >= N) return;
+
+    const half* A_head = A + head_id * A_head_stride;
+    const half* B_head = B + head_id * B_head_stride;
+    float* C_head = C + head_id * C_head_stride;
+
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+
+    nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+
+    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+        if (k_tile + WMMA_TILE_DIM <= K) {
+            nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * M + tile_row, M);
+            nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
+            nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+    }
+    nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
+}
+
+__global__ void batched_transpose_fp16_kernel(
+    const half* __restrict__ A,
+    half* __restrict__ B,
+    int M, int N,
+    int A_head_stride,
+    int B_head_stride
+) {
+    int head_id = blockIdx.z;
+    __shared__ half tile[WMMA_TILE_DIM][WMMA_TILE_DIM + 1];
+
+    int bx = blockIdx.x * WMMA_TILE_DIM, by = blockIdx.y * WMMA_TILE_DIM;
+    int x = bx + threadIdx.x, y = by + threadIdx.y;
+
+    const half* A_head = A + head_id * A_head_stride;
+    half* B_head = B + head_id * B_head_stride;
+
+    if (y < M && x < N) tile[threadIdx.y][threadIdx.x] = A_head[y * N + x];
+    __syncthreads();
+
+    int out_x = by + threadIdx.x, out_y = bx + threadIdx.y;
+    if (out_y < N && out_x < M) B_head[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
+}
+
+__global__ void batched_convert_fp32_to_fp16_strided(
+    const float* __restrict__ src,
+    half* __restrict__ dst,
+    int num_heads,
+    int batch_size,
+    int slice_size,
+    int src_head_stride,
+    int src_batch_stride,
+    int dst_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * batch_size * slice_size;
+    if (idx >= total) return;
+
+    int head_id = idx / (batch_size * slice_size);
+    int remainder = idx % (batch_size * slice_size);
+    int batch_id = remainder / slice_size;
+    int local_idx = remainder % slice_size;
+
+    int src_idx = head_id * src_head_stride + batch_id * src_batch_stride + local_idx;
+    int dst_idx = head_id * dst_head_stride + batch_id * slice_size + local_idx;
+
+    dst[dst_idx] = __float2half(src[src_idx]);
+}
+
+__global__ void batched_memcpy_to_strided(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int num_heads,
+    int batch_size,
+    int slice_size,
+    int src_head_stride,
+    int dst_head_stride,
+    int dst_batch_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * batch_size * slice_size;
+    if (idx >= total) return;
+
+    int head_id = idx / (batch_size * slice_size);
+    int remainder = idx % (batch_size * slice_size);
+    int batch_id = remainder / slice_size;
+    int local_idx = remainder % slice_size;
+
+    int src_idx = head_id * src_head_stride + batch_id * slice_size + local_idx;
+    int dst_idx = head_id * dst_head_stride + batch_id * dst_batch_stride + local_idx;
+
+    dst[dst_idx] = src[src_idx];
+}
+
+__global__ void batched_accumulate_weight_grads_kernel(
+    const float* __restrict__ dW,
+    float* __restrict__ grad_buffer,
+    const int* __restrict__ head_offsets,
+    int weight_size,
+    int num_heads,
+    int dW_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * weight_size;
+    if (idx >= total) return;
+
+    int head_id = idx / weight_size;
+    int local_idx = idx % weight_size;
+
+    int src_idx = head_id * dW_head_stride + local_idx;
+    int dst_idx = head_offsets[head_id] + local_idx;
+
+    grad_buffer[dst_idx] = dW[src_idx];
+}
+
+__global__ void batched_gelu_backward_kernel(
+    const float* __restrict__ dL_dI,
+    const float* __restrict__ pre_gelu,
+    float* __restrict__ dL_dpregelu,
+    int num_heads,
+    int elements_per_head,
+    int src_head_stride,
+    int dst_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * elements_per_head;
+    if (idx >= total) return;
+
+    int head_id = idx / elements_per_head;
+    int local_idx = idx % elements_per_head;
+
+    int src_idx = head_id * src_head_stride + local_idx;
+    int dst_idx = head_id * dst_head_stride + local_idx;
+
+    float x = pre_gelu[src_idx];
+    float x2 = x * x, x3 = x2 * x;
+    float inner = GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x3);
+    float tanh_inner = tanhf(inner);
+    float sech2 = 1.0f - tanh_inner * tanh_inner;
+    float d_inner = GELU_SQRT_2_OVER_PI * (1.0f + 3.0f * GELU_CUBIC_COEFFICIENT * x2);
+
+    dL_dpregelu[dst_idx] = dL_dI[src_idx] * GELU_SCALE *
+        ((GELU_OFFSET + tanh_inner) + x * sech2 * d_inner);
+}
+
+__global__ void batched_relu_backward_kernel(
+    const float* __restrict__ dL_dP,
+    const float* __restrict__ P,
+    float* __restrict__ dL_dprerelu,
+    int num_heads,
+    int elements_per_head,
+    int src_head_stride,
+    int dst_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_heads * elements_per_head;
+    if (idx >= total) return;
+
+    int head_id = idx / elements_per_head;
+    int local_idx = idx % elements_per_head;
+
+    int src_idx = head_id * src_head_stride + local_idx;
+    int dst_idx = head_id * dst_head_stride + local_idx;
+
+    dL_dprerelu[dst_idx] = dL_dP[src_idx] * ((P[src_idx] > 0.0f) ? 1.0f : 0.0f);
+}
+
+__global__ void batched_im2col_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ col,
+    int num_heads,
+    int batch_size,
+    int grid_size,
+    int channels,
+    int input_head_stride,
+    int col_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_cells = grid_size * grid_size;
+    int total = num_heads * batch_size * num_cells;
+    if (idx >= total) return;
+
+    int head_id = idx / (batch_size * num_cells);
+    int remainder = idx % (batch_size * num_cells);
+    int batch_id = remainder / num_cells;
+    int cell_idx = remainder % num_cells;
+    int cell_y = cell_idx / grid_size;
+    int cell_x = cell_idx % grid_size;
+
+    int col_width = 9 * channels;
+    int col_row = batch_id * num_cells + cell_idx;
+
+    const float* input_head = input + head_id * input_head_stride;
+    float* col_head = col + head_id * col_head_stride;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int ny = max(0, min(grid_size - 1, cell_y + dy));
+            int nx = max(0, min(grid_size - 1, cell_x + dx));
+            int patch_idx = (dy + 1) * 3 + (dx + 1);
+
+            int input_base = batch_id * grid_size * grid_size * channels +
+                            ny * grid_size * channels + nx * channels;
+
+            for (int c = 0; c < channels; c++) {
+                col_head[col_row * col_width + patch_idx * channels + c] =
+                    input_head[input_base + c];
+            }
+        }
+    }
+}
+
+__global__ void batched_col2im_kernel(
+    const float* __restrict__ col,
+    float* __restrict__ output_grad,
+    int num_heads,
+    int batch_size,
+    int grid_size,
+    int channels,
+    int col_head_stride,
+    int output_head_stride
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_cells = grid_size * grid_size;
+    int total = num_heads * batch_size * num_cells;
+    if (idx >= total) return;
+
+    int head_id = idx / (batch_size * num_cells);
+    int remainder = idx % (batch_size * num_cells);
+    int batch_id = remainder / num_cells;
+    int cell_idx = remainder % num_cells;
+    int cell_y = cell_idx / grid_size;
+    int cell_x = cell_idx % grid_size;
+
+    int col_width = 9 * channels;
+
+    const float* col_head = col + head_id * col_head_stride;
+    float* output_head = output_grad + head_id * output_head_stride;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int out_y = cell_y - dy;
+            int out_x = cell_x - dx;
+            if (out_y < 0 || out_y >= grid_size || out_x < 0 || out_x >= grid_size) continue;
+
+            int out_cell = batch_id * num_cells + out_y * grid_size + out_x;
+            int patch_idx = (dy + 1) * 3 + (dx + 1);
+
+            int output_base = batch_id * grid_size * grid_size * channels +
+                             cell_y * grid_size * channels + cell_x * channels;
+
+            for (int c = 0; c < channels; c++) {
+                atomicAdd(&output_head[output_base + c],
+                         col_head[out_cell * col_width + patch_idx * channels + c]);
+            }
+        }
+    }
+}
+
 struct CooperativeSync {
-    // Warp-level sync (32 threads, ~5 cycles)
     __device__ static void sync_warp() {
         auto warp = cg::tiled_partition<32>(cg::this_thread_block());
         warp.sync();
     }
 
-    // Block-level sync (slower but still better than device sync)
     __device__ static void sync_block() {
         __syncthreads();
     }
 
-    // Grid-level sync (avoid if possible, use streams instead)
     __device__ static void sync_grid() {
         cg::this_grid().sync();
     }
 
-    // Conditional warp sync
     __device__ static void sync_warp_if(bool condition) {
         if (condition) {
             auto warp = cg::tiled_partition<32>(cg::this_thread_block());

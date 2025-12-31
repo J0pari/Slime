@@ -2,7 +2,7 @@
 #ifndef ARCHIVE_CU
 #define ARCHIVE_CU
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include "behavioral_ops.cuh"
 #include "genome_ops.cuh"
 #include <cuda_runtime.h>
@@ -50,7 +50,8 @@ __device__ __forceinline__ float elite_to_cell_distance_sq(
         &archive->hw_coords[elite_idx * hw_dim],
         &archive->task_coords[elite_idx * task_dim],
         &archive->gen_coords[elite_idx * gen_dim],
-        cell->hw_centroid, cell->task_centroid, cell->gen_centroid
+        cell->hw_centroid, cell->task_centroid, cell->gen_centroid,
+        hw_dim, task_dim, gen_dim
     );
 }
 
@@ -67,7 +68,7 @@ __device__ uint64_t gpu_sha256(float* genome, uint32_t size) {
         hash += (hash << (WMMA_TILE_DIM - 1));
 
         hash *= 0xc4ceb9fe1a85ec53ULL;
-        hash ^= hash >> XORSHIFT_D;
+        hash ^= hash >> HASH_FINALIZER_SHIFT;
     }
 
     return hash;
@@ -113,6 +114,12 @@ __global__ void update_voronoi_density_kernel(
     float ctx_learning,
     float ctx_performance
 ) {
+    if (num_cells <= 0) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+            printf("FATAL [update_voronoi_density]: num_cells=%d\n", num_cells);
+        }
+        return;
+    }
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (cell_id >= num_cells) return;
 
@@ -177,13 +184,15 @@ __global__ void update_voronoi_density_kernel(
 
         for (int i = 0; i < blockDim.x && (blockIdx.x * blockDim.x + i) < num_cells; i++) {
             int idx = blockIdx.x * blockDim.x + i;
-            cells[idx].density_fluctuation = fabsf((float)cells[idx].density - (float)cells[idx].density_prev) / (density_mean + EPSILON);
+
+            if (density_mean <= 0.0f) {
+                printf("FATAL [archive]: density_mean=%f\n", density_mean);
+                return;
+            }
+            cells[idx].density_fluctuation = fabsf((float)cells[idx].density - (float)cells[idx].density_prev) / density_mean;
             cells[idx].density_prev = cells[idx].density;
 
-            // Power-law correlation length: ξ ∝ fluctuation^(-ν)
-            if (cells[idx].density_fluctuation > EPSILON) {
-                cells[idx].radius = powf(cells[idx].density_fluctuation, -correlation_exponent);
-            }
+            cells[idx].radius = powf(fmaxf(cells[idx].density_fluctuation, safe_epsilon(1.0f)), -correlation_exponent);
         }
     }
 }
@@ -227,13 +236,8 @@ __global__ void insert_elite_kernel(
     __syncthreads();
 
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        if (block_has_duplicate) {
-            printf("[ARCHIVE-REJECT] gen=%d reason=duplicate hash=%llu\n",
-                   generation_val, (unsigned long long)genome_hash_val);
-        } else {
+        if (!block_has_duplicate) {
             int idx = atomicAdd(archive_size, 1);
-            printf("[ARCHIVE-INSERT] gen=%d new_idx=%d new_size=%d fitness=%.6f\n",
-                   generation_val, idx, idx+1, fitness_val);
             if (idx < MAX_ARCHIVE_SIZE) {
             int hw_dim = archive->hw_dim;
             int task_dim = archive->task_dim;
@@ -309,7 +313,9 @@ __global__ void adapt_embedding_dim_kernel(
 __global__ void init_voronoi_cells_kernel(
     VoronoiCell* cells,
     int num_cells,
-    int behavioral_dim,
+    int hw_dim,
+    int task_dim,
+    int gen_dim,
     unsigned int seed
 ) {
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -320,17 +326,17 @@ __global__ void init_voronoi_cells_kernel(
 
     VoronoiCell* cell = &cells[cell_id];
 
-    for (int d = 0; d < BEHAVIORAL_DIM_HW_MAX; d++) {
-        cell->hw_centroid[d] = curand_normal(&state) * 0.5f;
+    for (int d = 0; d < hw_dim; d++) {
+        cell->hw_centroid[d] = validated_curand_normal(&state, "init_voronoi_hw", cell_id * hw_dim + d) * 0.5f;
     }
-    for (int d = 0; d < BEHAVIORAL_DIM_TASK_MAX; d++) {
-        cell->task_centroid[d] = curand_normal(&state) * 0.5f;
+    for (int d = 0; d < task_dim; d++) {
+        cell->task_centroid[d] = validated_curand_normal(&state, "init_voronoi_task", cell_id * task_dim + d) * 0.5f;
     }
-    for (int d = 0; d < BEHAVIORAL_DIM_GEN_MAX; d++) {
-        cell->gen_centroid[d] = curand_normal(&state) * 0.5f;
+    for (int d = 0; d < gen_dim; d++) {
+        cell->gen_centroid[d] = validated_curand_normal(&state, "init_voronoi_gen", cell_id * gen_dim + d) * 0.5f;
     }
 
-    int total_dims = BEHAVIORAL_DIM_HW_MAX + BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_GEN_MAX;
+    int total_dims = hw_dim + task_dim + gen_dim;
     float typical_spacing = powf((float)num_cells, -1.0f / total_dims);
     cell->radius = typical_spacing * 2.0f;
 

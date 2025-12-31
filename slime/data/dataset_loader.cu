@@ -4,7 +4,7 @@
 
 #include "../config/config.cu"
 #include "../training/training_types.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cufft.h>
@@ -415,9 +415,19 @@ __global__ void compute_phase_velocity_kernel(
 
     float phase_diff = phase_curr[bin] - phase_prev[bin];
 
+    if (isnan(phase_diff) || isinf(phase_diff)) {
+        printf("FATAL [phase_velocity]: phase_diff=%f bin=%d phase_curr=%f phase_prev=%f\n",
+               phase_diff, bin, phase_curr[bin], phase_prev[bin]);
+        return;
+    }
+
     while (phase_diff > TAU * 0.5f) phase_diff -= TAU;
     while (phase_diff < -TAU * 0.5f) phase_diff += TAU;
 
+    if (hop_length <= 0.0f) {
+        printf("FATAL [phase_velocity]: hop_length=%f\n", hop_length);
+        return;
+    }
     phase_velocity[bin] = phase_diff * sample_rate / hop_length;
 }
 
@@ -480,9 +490,9 @@ __global__ void mel_filterbank_kernel(
     total_weight = warp_reduce_sum(total_weight);
 
     if (threadIdx.x == 0) {
-        mel_magnitude[mel_bin] = log10f(weighted_mag + 1e-10f);
+        mel_magnitude[mel_bin] = log10f(fmaxf(weighted_mag, safe_epsilon(1.0f)));
         mel_phase[mel_bin] = atan2f(weighted_phase_imag, weighted_phase_real);
-        mel_phase_velocity[mel_bin] = weighted_pv / (total_weight + 1e-10f);
+        mel_phase_velocity[mel_bin] = safe_div(weighted_pv, total_weight);
     }
 }
 
@@ -582,10 +592,16 @@ __global__ void inject_sample_to_ca_kernel(
 
 __host__ bool read_binary_blob(const char* path, void* buffer, size_t size, size_t skip_bytes) {
     FILE* f = fopen(path, "rb");
-    if (!f) return false;
+    if (!f) {
+        fprintf(stderr, "[read_binary_blob] ERROR: Failed to open file: %s\n", path);
+        return false;
+    }
     if (skip_bytes > 0) fseek(f, skip_bytes, SEEK_SET);
     size_t read = fread(buffer, 1, size, f);
     fclose(f);
+    if (read != size) {
+        fprintf(stderr, "[read_binary_blob] ERROR: Read %zu bytes but expected %zu from %s\n", read, size, path);
+    }
     return read == size;
 }
 
@@ -607,13 +623,27 @@ __host__ cudaError_t load_dataset_from_registry(
     printf("[load_dataset] Loading %s (%s split)\n", h_descriptor->name, is_train ? "train" : "test");
 
     Dataset* h_dataset = (Dataset*)malloc(sizeof(Dataset));
+    if (!h_dataset) {
+        fprintf(stderr, "[load_dataset] FATAL: malloc failed for Dataset\n");
+        return cudaErrorMemoryAllocation;
+    }
     h_dataset->is_train = is_train;
     h_dataset->num_samples = is_train ? h_descriptor->num_train : h_descriptor->num_test;
 
     size_t data_size = is_train ? h_descriptor->train_size_bytes : h_descriptor->test_size_bytes;
 
     unsigned char* h_samples = (unsigned char*)malloc(data_size);
+    if (!h_samples) {
+        fprintf(stderr, "[load_dataset] FATAL: malloc failed for samples (%zu bytes)\n", data_size);
+        free(h_dataset);
+        return cudaErrorMemoryAllocation;
+    }
     unsigned char* h_labels = (unsigned char*)malloc(h_dataset->num_samples);
+    if (!h_labels) {
+        fprintf(stderr, "[load_dataset] FATAL: malloc failed for labels (%d bytes)\n", h_dataset->num_samples);
+        free(h_samples); free(h_dataset);
+        return cudaErrorMemoryAllocation;
+    }
 
     if (h_descriptor->format == FORMAT_IDX_UBYTE) {
         char img_path[512], lbl_path[512];
@@ -629,6 +659,11 @@ __host__ cudaError_t load_dataset_from_registry(
     }
     else if (h_descriptor->format == FORMAT_CIFAR_BIN) {
         unsigned char* temp_batch = (unsigned char*)malloc(10000 * 3073);
+        if (!temp_batch) {
+            fprintf(stderr, "[load_dataset] FATAL: malloc failed for temp_batch (%d bytes)\n", 10000 * 3073);
+            free(h_samples); free(h_labels); free(h_dataset);
+            return cudaErrorMemoryAllocation;
+        }
 
         if (is_train) {
             for (int batch = 0; batch < 5; batch++) {
@@ -719,23 +754,71 @@ __host__ cudaError_t load_dataset_from_registry(
         return cudaErrorNotSupported;
     }
 
-    cudaMalloc(&h_dataset->samples, data_size);
-    cudaMalloc(&h_dataset->labels, h_dataset->num_samples);
-    cudaMemcpy(h_dataset->samples, h_samples, data_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(h_dataset->labels, h_labels, h_dataset->num_samples, cudaMemcpyHostToDevice);
+    cudaError_t err = cudaMalloc(&h_dataset->samples, data_size);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: samples cudaMalloc failed: %s\n", cudaGetErrorString(err));
+        free(h_samples); free(h_labels); free(h_dataset);
+        return err;
+    }
+    err = cudaMalloc(&h_dataset->labels, h_dataset->num_samples);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: labels cudaMalloc failed: %s\n", cudaGetErrorString(err));
+        cudaFree(h_dataset->samples);
+        free(h_samples); free(h_labels); free(h_dataset);
+        return err;
+    }
+    err = cudaMemcpy(h_dataset->samples, h_samples, data_size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: samples cudaMemcpy failed: %s\n", cudaGetErrorString(err));
+        cudaFree(h_dataset->samples);
+        cudaFree(h_dataset->labels);
+        free(h_samples); free(h_labels); free(h_dataset);
+        return err;
+    }
+    err = cudaMemcpy(h_dataset->labels, h_labels, h_dataset->num_samples, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: labels cudaMemcpy failed: %s\n", cudaGetErrorString(err));
+        cudaFree(h_dataset->samples);
+        cudaFree(h_dataset->labels);
+        free(h_samples); free(h_labels); free(h_dataset);
+        return err;
+    }
 
     free(h_samples);
     free(h_labels);
 
     Dataset* d_dataset;
-    cudaMalloc(&d_dataset, sizeof(Dataset));
+    err = cudaMalloc(&d_dataset, sizeof(Dataset));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: d_dataset cudaMalloc failed: %s\n", cudaGetErrorString(err));
+        cudaFree(h_dataset->samples);
+        cudaFree(h_dataset->labels);
+        free(h_dataset);
+        return err;
+    }
 
     const DatasetDescriptor* d_descriptor_ptr = nullptr;
-    cudaGetSymbolAddress((void**)&d_descriptor_ptr, DATASET_REGISTRY);
+    err = cudaGetSymbolAddress((void**)&d_descriptor_ptr, DATASET_REGISTRY);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: cudaGetSymbolAddress failed: %s\n", cudaGetErrorString(err));
+        cudaFree(d_dataset);
+        cudaFree(h_dataset->samples);
+        cudaFree(h_dataset->labels);
+        free(h_dataset);
+        return err;
+    }
     d_descriptor_ptr += dataset_id;
     h_dataset->descriptor = d_descriptor_ptr;
 
-    cudaMemcpy(d_dataset, h_dataset, sizeof(Dataset), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_dataset, h_dataset, sizeof(Dataset), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[load_dataset] FATAL: d_dataset cudaMemcpy failed: %s\n", cudaGetErrorString(err));
+        cudaFree(d_dataset);
+        cudaFree(h_dataset->samples);
+        cudaFree(h_dataset->labels);
+        free(h_dataset);
+        return err;
+    }
 
     *out_dataset = d_dataset;
 

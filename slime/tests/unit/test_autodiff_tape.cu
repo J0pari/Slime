@@ -5,6 +5,15 @@
 #include <stdio.h>
 #include <assert.h>
 
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            printf("FATAL CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(1); \
+        } \
+    } while(0)
+
 struct TestResult {
     bool passed;
     float measured_value;
@@ -30,14 +39,14 @@ __global__ void extract_tape_state_kernel(
 
 bool test_tape_initialization() {
     ADTape* d_tape;
-    cudaMalloc(&d_tape, sizeof(ADTape));
+    CUDA_CHECK(cudaMalloc(&d_tape, sizeof(ADTape)));
 
     TapeEntry* entries;
     float* values;
     float* grads;
-    cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry));
-    cudaMalloc(&values, VALUE_CAPACITY * sizeof(float));
-    cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
+    CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
 
     ADTape h_tape;
     h_tape.entries = entries;
@@ -47,22 +56,22 @@ bool test_tape_initialization() {
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
-    cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
     init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_size;
     int* d_value_idx;
-    cudaMalloc(&d_size, sizeof(int));
-    cudaMalloc(&d_value_idx, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_size, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_value_idx, sizeof(int)));
 
     extract_tape_state_kernel<<<1, 1>>>(d_tape, d_size, d_value_idx, nullptr);
     cudaDeviceSynchronize();
 
     int h_size, h_value_idx;
-    cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bool passed = (h_size == 0) && (h_value_idx == 0);
 
@@ -89,14 +98,14 @@ __global__ void record_single_op_kernel(ADTape* tape) {
 
 bool test_tape_record_single_op() {
     ADTape* d_tape;
-    cudaMalloc(&d_tape, sizeof(ADTape));
+    CUDA_CHECK(cudaMalloc(&d_tape, sizeof(ADTape)));
 
     TapeEntry* entries;
     float* values;
     float* grads;
-    cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry));
-    cudaMalloc(&values, VALUE_CAPACITY * sizeof(float));
-    cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
+    CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
 
     ADTape h_tape;
     h_tape.entries = entries;
@@ -106,7 +115,7 @@ bool test_tape_record_single_op() {
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
-    cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
     init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
@@ -116,15 +125,15 @@ bool test_tape_record_single_op() {
 
     int* d_size;
     int* d_value_idx;
-    cudaMalloc(&d_size, sizeof(int));
-    cudaMalloc(&d_value_idx, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_size, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_value_idx, sizeof(int)));
 
     extract_tape_state_kernel<<<1, 1>>>(d_tape, d_size, d_value_idx, nullptr);
     cudaDeviceSynchronize();
 
     int h_size, h_value_idx;
-    cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bool passed = (h_size == 1) && (h_value_idx == 1);
 
@@ -157,14 +166,14 @@ __global__ void forward_test_kernel(ADTape* tape, int* y_idx_out) {
 
 bool test_backward_gradient_computation() {
     ADTape* d_tape;
-    cudaMalloc(&d_tape, sizeof(ADTape));
+    CUDA_CHECK(cudaMalloc(&d_tape, sizeof(ADTape)));
 
     TapeEntry* entries;
     float* values;
     float* grads;
-    cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry));
-    cudaMalloc(&values, VALUE_CAPACITY * sizeof(float));
-    cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
+    CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
 
     ADTape h_tape;
     h_tape.entries = entries;
@@ -174,27 +183,27 @@ bool test_backward_gradient_computation() {
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
-    cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
     init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_y_idx;
-    cudaMalloc(&d_y_idx, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_y_idx, sizeof(int)));
 
     forward_test_kernel<<<1, 1>>>(d_tape, d_y_idx);
     cudaDeviceSynchronize();
 
     int h_y_idx;
-    cudaMemcpy(&h_y_idx, d_y_idx, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_y_idx, d_y_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     ad_backward_kernel<<<1, 32>>>(d_tape, h_y_idx, 1.0f);
     cudaDeviceSynchronize();
 
     float h_grad;
     float* d_grad_buffer;
-    cudaMemcpy(&d_grad_buffer, &(((ADTape*)d_tape)->grad_buffer), sizeof(void*), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_grad, &d_grad_buffer[0], sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&d_grad_buffer, &(((ADTape*)d_tape)->grad_buffer), sizeof(void*), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_grad, &d_grad_buffer[0], sizeof(float), cudaMemcpyDeviceToHost));
 
     float expected = 6.0f;
     float tolerance = EPSILON_GRADIENT;
@@ -213,14 +222,14 @@ bool test_backward_gradient_computation() {
 
 bool test_tape_reset() {
     ADTape* d_tape;
-    cudaMalloc(&d_tape, sizeof(ADTape));
+    CUDA_CHECK(cudaMalloc(&d_tape, sizeof(ADTape)));
 
     TapeEntry* entries;
     float* values;
     float* grads;
-    cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry));
-    cudaMalloc(&values, VALUE_CAPACITY * sizeof(float));
-    cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float));
+    CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
+    CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
 
     ADTape h_tape;
     h_tape.entries = entries;
@@ -230,7 +239,7 @@ bool test_tape_reset() {
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
-    cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
     init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
     record_single_op_kernel<<<1, 1>>>(d_tape);
@@ -241,15 +250,15 @@ bool test_tape_reset() {
 
     int* d_size;
     int* d_value_idx;
-    cudaMalloc(&d_size, sizeof(int));
-    cudaMalloc(&d_value_idx, sizeof(int));
+    CUDA_CHECK(cudaMalloc(&d_size, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_value_idx, sizeof(int)));
 
     extract_tape_state_kernel<<<1, 1>>>(d_tape, d_size, d_value_idx, nullptr);
     cudaDeviceSynchronize();
 
     int h_size, h_value_idx;
-    cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&h_size, d_size, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bool passed = (h_size == 0) && (h_value_idx == 0);
 

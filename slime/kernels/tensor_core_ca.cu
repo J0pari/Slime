@@ -4,6 +4,8 @@
 
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
+#include "../core/pseudopod.cu"
+#include "../memory/pool.cu"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -84,10 +86,10 @@ __global__ void tensor_core_perception_kernel(
     const int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int num_cells = grid_size * grid_size;
 
-    const int tile_row = (warp_id / ((arch.hidden_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM)) * WMMA_TILE_DIM;
-    const int tile_col = (warp_id % ((arch.hidden_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM)) * WMMA_TILE_DIM;
+    const int tile_row = (warp_id / ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM)) * WMMA_TILE_DIM;
+    const int tile_col = (warp_id % ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM)) * WMMA_TILE_DIM;
 
-    if (tile_row >= num_cells || tile_col >= arch.hidden_dim) return;
+    if (tile_row >= num_cells || tile_col >= arch.head_dim) return;
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
@@ -95,28 +97,28 @@ __global__ void tensor_core_perception_kernel(
 
     wmma::fill_fragment(c_frag, 0.0f);
 
-    int weight_offset = head_id * arch.head_dim * arch.hidden_dim;
+    int weight_offset = head_id * arch.channels * arch.head_dim;
 
-    for (int k = 0; k < arch.head_dim; k += WMMA_TILE_DIM) {
-        if (k + WMMA_TILE_DIM <= arch.head_dim) {
+    for (int k = 0; k < arch.channels; k += WMMA_TILE_DIM) {
+        if (k + WMMA_TILE_DIM <= arch.channels) {
 
             wmma::load_matrix_sync(a_frag,
-                neighborhood_fp16 + tile_row * arch.head_dim + k,
-                arch.head_dim);
+                neighborhood_fp16 + tile_row * arch.channels + k,
+                arch.channels);
 
             wmma::load_matrix_sync(b_frag,
-                perception_weights + weight_offset + k * arch.hidden_dim + tile_col,
-                arch.hidden_dim);
+                perception_weights + weight_offset + k * arch.head_dim + tile_col,
+                arch.head_dim);
 
             wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
     }
 
-    int output_offset = head_id * num_cells * arch.hidden_dim;
+    int output_offset = head_id * num_cells * arch.head_dim;
     wmma::store_matrix_sync(
-        perception_out + output_offset + tile_row * arch.hidden_dim + tile_col,
+        perception_out + output_offset + tile_row * arch.head_dim + tile_col,
         c_frag,
-        arch.hidden_dim,
+        arch.head_dim,
         wmma::mem_row_major
     );
 }
@@ -142,92 +144,116 @@ __global__ void gelu_kernel(
     }
 }
 
-__global__ void multi_head_ca_tensor_kernel(
-    float* __restrict__ ca_state_fp32,
-    half* __restrict__ perception_weights,
-    half* __restrict__ interaction_weights,
-    half* __restrict__ value_weights,
-    float* __restrict__ ca_output_fp32,
-    half* __restrict__ fp16_workspace,
-    float* __restrict__ fp32_workspace,
-    int grid_size,
-    ArchitectureParams arch
+__global__ void prepare_ca_fp16_kernel(
+    ComponentPool* __restrict__ pool,
+    int max_grid_size,
+    ArchitectureParams arch,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
+    int num_cells = grid_size * grid_size;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_cells * arch.channels;
+
+    if (idx >= total) return;
+
+    MultiHeadCAState* ca_state = entry->ca_state;
+    ca_state->fp16_workspace[idx] = __float2half(ca_state->ca_concentration[idx]);
+}
+
+__global__ void multi_head_ca_tensor_kernel(
+    ComponentPool* __restrict__ pool,
+    int max_grid_size,
+    ArchitectureParams arch,
+    TraceBuffer* trace_buffer,
+    int entry_idx
+) {
+    int head = blockIdx.y;
+
+    if (entry_idx >= pool->capacity) return;
+    if (head >= arch.num_heads) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
+    int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;
 
-    convert_fp32_to_fp16_kernel<<<(num_cells * arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        ca_state_fp32,
+    MultiHeadCAState* ca_state = entry->ca_state;
+    half* fp16_workspace = ca_state->fp16_workspace;
+    float* fp32_workspace = ca_state->fp32_workspace;
+    half* perception_weights = ca_state->perception_weights;
+    half* interaction_weights = ca_state->interaction_weights;
+    half* value_weights = ca_state->value_weights;
+    float* ca_output_fp32 = ca_state->ca_output;
+
+    int num_warps = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+
+    tensor_core_perception_kernel<<<(num_warps * WARP_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
         fp16_workspace,
-        num_cells,
-        arch.channels
+        perception_weights,
+        fp32_workspace,
+        grid_size,
+        head,
+        arch
     );
 
-    for (int head = 0; head < arch.num_heads; head++) {
+    relu_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+        fp32_workspace + head * num_cells * arch.head_dim,
+        num_cells * arch.head_dim
+    );
 
-        int num_warps = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.hidden_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+    half* interaction_input = fp16_workspace + num_cells * arch.channels;
+    convert_fp32_to_fp16_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+        fp32_workspace + head * num_cells * arch.head_dim,
+        interaction_input,
+        num_cells,
+        arch.head_dim
+    );
 
-        tensor_core_perception_kernel<<<(num_warps * WARP_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            fp16_workspace,
-            perception_weights,
-            fp32_workspace,
-            grid_size,
-            head,
-            arch
-        );
+    float* interaction_output = fp32_workspace + arch.num_heads * num_cells * arch.head_dim;
 
-        relu_kernel<<<(num_cells * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            fp32_workspace + head * num_cells * arch.hidden_dim,
-            num_cells * arch.hidden_dim
-        );
+    int num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+    tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
+        interaction_input,
+        interaction_weights + head * arch.head_dim * arch.head_dim,
+        interaction_output,
+        num_cells,
+        arch.head_dim,
+        arch.head_dim
+    );
 
-        half* interaction_input = fp16_workspace + num_cells * arch.channels;
-        convert_fp32_to_fp16_kernel<<<(num_cells * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            fp32_workspace + head * num_cells * arch.hidden_dim,
-            interaction_input,
-            num_cells,
-            arch.hidden_dim
-        );
+    gelu_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+        interaction_output,
+        num_cells * arch.head_dim
+    );
 
-        float* interaction_output = fp32_workspace + arch.num_heads * num_cells * arch.hidden_dim;
+    half* value_input = interaction_input;
+    convert_fp32_to_fp16_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
+        interaction_output,
+        value_input,
+        num_cells,
+        arch.head_dim
+    );
 
-        int num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.hidden_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
-        tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
-            interaction_input,
-            interaction_weights + head * arch.hidden_dim * arch.hidden_dim,
-            interaction_output,
-            num_cells,
-            arch.hidden_dim,
-            arch.hidden_dim
-        );
+    float* head_output = ca_output_fp32 + head * num_cells * arch.channels;
 
-        gelu_kernel<<<(num_cells * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            interaction_output,
-            num_cells * arch.hidden_dim
-        );
-
-        half* value_input = interaction_input;
-        convert_fp32_to_fp16_kernel<<<(num_cells * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            interaction_output,
-            value_input,
-            num_cells,
-            arch.hidden_dim
-        );
-
-        float* head_output = ca_output_fp32 + head * num_cells * arch.channels;
-
-        num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
-        tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
-            value_input,
-            value_weights + head * arch.hidden_dim * arch.channels,
-            head_output,
-            num_cells,
-            arch.channels,
-            arch.hidden_dim
-        );
-    }
-
+    num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+    tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
+        value_input,
+        value_weights + head * arch.head_dim * arch.channels,
+        head_output,
+        num_cells,
+        arch.channels,
+        arch.head_dim
+    );
 }
 
 __global__ void init_tensor_weights_kernel(
@@ -243,6 +269,13 @@ __global__ void init_tensor_weights_kernel(
     curand_init(seed + idx, 0, 0, &rand_state);
 
     float val = curand_normal(&rand_state) * sqrtf(2.0f / channels);
+
+    if (isnan(val) || isinf(val) || fabsf(val) > 65000.0f) {
+        printf("FATAL [init_tensor_weights]: idx=%d val=%f seed=%u channels=%d\n",
+               idx, val, seed + idx, channels);
+        return;
+    }
+
     weights[idx] = __float2half(val);
 
     if (idx == 0) {

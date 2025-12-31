@@ -4,6 +4,7 @@
 
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
+#include "../memory/pool.cu"
 #include "flow_lenia_ops.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -15,15 +16,16 @@ namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
 struct MultiHeadCAState {
-    half* perception_weights;       
-    half* interaction_weights;      
-    half* value_weights;            
-    float* ca_concentration;        
-    float* ca_output;               
-    float* affinity_reduced;        
-    float* flow_field;              
-    float* reintegration_buffer;    
-    
+    half* perception_weights;
+    half* interaction_weights;
+    half* value_weights;
+    float* ca_concentration;
+    float* ca_output;
+    float* affinity_reduced;
+    float* flow_field;
+    float* reintegration_buffer;
+    half* fp16_workspace;
+    float* fp32_workspace;
 };
 
 __global__ void multi_head_ca_kernel(
@@ -70,9 +72,9 @@ __global__ void multi_head_ca_kernel(
 
         for (int dy = 0; dy < 3; dy++) {
             for (int dx = 0; dx < 3; dx++) {
-                for (int c = 0; c < arch.head_dim; c++) {
-                    int weight_idx = head_id * arch.channels * arch.hidden_dim +
-                                    c * arch.hidden_dim + i;
+                for (int c = 0; c < arch.channels; c++) {
+                    int weight_idx = head_id * arch.channels * arch.head_dim +
+                                    c * arch.head_dim + i;
 
                     float neighbor_val = neighborhood[dy][dx][c];
                     float weight_val = __half2float(perception_weights[weight_idx]);
@@ -90,8 +92,8 @@ __global__ void multi_head_ca_kernel(
         float accum = 0.0f;
 
         for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = head_id * arch.channels * arch.hidden_dim +
-                           j * arch.hidden_dim + i;
+            int weight_idx = head_id * arch.head_dim * arch.head_dim +
+                           j * arch.head_dim + i;
 
             float weight_val = __half2float(interaction_weights[weight_idx]);
             accum += perception[j] * weight_val;
@@ -101,83 +103,100 @@ __global__ void multi_head_ca_kernel(
         interaction[i] = GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
     }
 
-    float output[MAX_HEAD_DIM];
+    float output[MAX_CHANNELS];
 
-    for (int i = 0; i < arch.head_dim; i++) {
+    for (int i = 0; i < arch.channels; i++) {
         float accum = 0.0f;
 
-        for (int j = 0; j < arch.hidden_dim; j++) {
-            int weight_idx = head_id * arch.hidden_dim * arch.channels +
+        for (int j = 0; j < arch.head_dim; j++) {
+            int weight_idx = head_id * arch.head_dim * arch.channels +
                            j * arch.channels + i;
 
             float weight_val = __half2float(value_weights[weight_idx]);
-            accum += interaction[j % arch.head_dim] * weight_val;
+            accum += interaction[j] * weight_val;
         }
 
         output[i] = accum;
     }
 
-    int out_idx = batch_id * arch.num_heads * grid_size * grid_size * arch.head_dim +
-                  head_id * grid_size * grid_size * arch.head_dim +
-                  cell_y * grid_size * arch.head_dim +
-                  cell_x * arch.head_dim;
+    int out_idx = batch_id * arch.num_heads * grid_size * grid_size * arch.channels +
+                  head_id * grid_size * grid_size * arch.channels +
+                  cell_y * grid_size * arch.channels +
+                  cell_x * arch.channels;
 
-    for (int i = 0; i < arch.head_dim; i++) {
+    for (int i = 0; i < arch.channels; i++) {
         ca_output[out_idx + i] = output[i];
     }
 }
 
 __global__ void reduce_affinity_kernel(
-    const float* __restrict__ ca_output,
-    float* __restrict__ affinity_reduced,
-    int grid_size,
-    ArchitectureParams arch
+    ComponentPool* __restrict__ pool,
+    int max_grid_size,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_cells = grid_size * grid_size;
 
     if (cell_idx >= total_cells) return;
 
+    MultiHeadCAState* ca_state = entry->ca_state;
+    ArchitectureParams arch;
+    arch.num_heads = entry->num_heads;
+    arch.head_dim = entry->head_dim;
+
     float U = FlowLeniaOps::reduce_affinity_warp(
-        ca_output, cell_idx, grid_size, arch.num_heads, arch.head_dim
+        ca_state->ca_output, cell_idx, grid_size, arch.num_heads, arch.head_dim
     );
 
     int lane = threadIdx.x % WARP_SIZE;
     if (lane == 0) {
-        affinity_reduced[cell_idx] = U;
+        ca_state->affinity_reduced[cell_idx] = U;
     }
 }
 
 __global__ void compute_flow_field_kernel(
-    const float* __restrict__ affinity_reduced,
-    const float* __restrict__ ca_concentration,
-    float* __restrict__ flow_field,
-    int grid_size,
-    float beta_A,
-    float n,
-    ArchitectureParams arch
+    ComponentPool* __restrict__ pool,
+    int max_grid_size,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
 
+    MultiHeadCAState* ca_state = entry->ca_state;
+    float beta_A = entry->flow_beta_A;
+    float n = entry->flow_n;
+    int channels = entry->channels;
+
     int cell_idx = y * grid_size + x;
 
-    float U_center = affinity_reduced[cell_idx];
+    float U_center = ca_state->affinity_reduced[cell_idx];
     int x_E = min(x + 1, grid_size - 1);
     int y_N = min(y + 1, grid_size - 1);
-    float U_E = affinity_reduced[y * grid_size + x_E];
-    float U_N = affinity_reduced[y_N * grid_size + x];
+    float U_E = ca_state->affinity_reduced[y * grid_size + x_E];
+    float U_N = ca_state->affinity_reduced[y_N * grid_size + x];
 
     float A_sum_center = 0.0f;
     float A_sum_E = 0.0f;
     float A_sum_N = 0.0f;
 
-    for (int c = 0; c < arch.channels; c++) {
-        A_sum_center += ca_concentration[cell_idx * arch.channels + c];
-        A_sum_E += ca_concentration[(y * grid_size + x_E) * arch.channels + c];
-        A_sum_N += ca_concentration[(y_N * grid_size + x) * arch.channels + c];
+    for (int c = 0; c < channels; c++) {
+        A_sum_center += ca_state->ca_concentration[cell_idx * channels + c];
+        A_sum_E += ca_state->ca_concentration[(y * grid_size + x_E) * channels + c];
+        A_sum_N += ca_state->ca_concentration[(y_N * grid_size + x) * channels + c];
     }
 
     float2 F = FlowLeniaOps::compute_flow_at(
@@ -186,28 +205,35 @@ __global__ void compute_flow_field_kernel(
         beta_A, n
     );
 
-    flow_field[cell_idx * 2 + 0] = F.x;
-    flow_field[cell_idx * 2 + 1] = F.y;
+    ca_state->flow_field[cell_idx * 2 + 0] = F.x;
+    ca_state->flow_field[cell_idx * 2 + 1] = F.y;
 }
 
 __global__ void reintegration_redistribute_kernel(
-    const float* __restrict__ ca_concentration,
-    const float* __restrict__ flow_field,
-    float* __restrict__ reintegration_buffer,
-    int grid_size,
-    float dt,
-    float s,
-    ArchitectureParams arch
+    ComponentPool* __restrict__ pool,
+    int max_grid_size,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
     int source_x = blockIdx.x;
     int source_y = blockIdx.y;
 
     if (source_x >= grid_size || source_y >= grid_size) return;
 
+    MultiHeadCAState* ca_state = entry->ca_state;
+    float dt = entry->flow_resource_dt;
+    float s = entry->flow_s;
+    int channels = entry->channels;
+
     int source_idx = source_y * grid_size + source_x;
 
-    float Fx = flow_field[source_idx * 2 + 0];
-    float Fy = flow_field[source_idx * 2 + 1];
+    float Fx = ca_state->flow_field[source_idx * 2 + 0];
+    float Fy = ca_state->flow_field[source_idx * 2 + 1];
 
     float displaced_x = (float)source_x + dt * Fx;
     float displaced_y = (float)source_y + dt * Fy;
@@ -225,20 +251,56 @@ __global__ void reintegration_redistribute_kernel(
 
             int target_idx = ty * grid_size + tx;
 
-            for (int c = threadIdx.x; c < arch.channels; c += blockDim.x) {
-                float mass = ca_concentration[source_idx * arch.channels + c] * I_val;
-                atomicAdd(&reintegration_buffer[target_idx * arch.channels + c], mass);
+            for (int c = threadIdx.x; c < channels; c += blockDim.x) {
+                float mass = ca_state->ca_concentration[source_idx * channels + c] * I_val;
+                atomicAdd(&ca_state->reintegration_buffer[target_idx * channels + c], mass);
             }
         }
     }
 }
 
+__global__ void clear_reintegration_buffer_kernel(ComponentPool* pool, int max_buffer_size, int entry_idx) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int buffer_size = entry->grid_size * entry->grid_size * entry->channels;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < buffer_size) {
+        entry->ca_state->reintegration_buffer[idx] = 0.0f;
+    }
+}
+
+__global__ void copy_reintegration_to_concentration_kernel(ComponentPool* pool, int max_buffer_size, int entry_idx) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int buffer_size = entry->grid_size * entry->grid_size * entry->channels;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < buffer_size) {
+        entry->ca_state->ca_concentration[idx] = entry->ca_state->reintegration_buffer[idx];
+    }
+}
 
 __global__ void compute_effective_rank_from_latent_kernel(
-    float* __restrict__ latent_genome,
-    float* __restrict__ effective_rank,
-    int latent_dim
+    ComponentPool* pool,
+    float* effective_rank_history,
+    float* workspace_genomes,
+    int latent_dim,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    float* latent_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
+
     float mean = 0.0f;
     for (int i = 0; i < latent_dim; i++) {
         mean += latent_genome[i];
@@ -252,7 +314,10 @@ __global__ void compute_effective_rank_from_latent_kernel(
     }
     variance /= latent_dim;
 
-    *effective_rank = sqrtf(variance + EPSILON) * latent_dim;
+    if (variance < 0.0f) {
+        return;
+    }
+    effective_rank_history[entry_idx] = sqrtf(variance) * latent_dim;
 }
 
 __global__ void compute_coherence_kernel(
@@ -268,9 +333,11 @@ __global__ void compute_coherence_kernel(
         float current_loss = loss_history[tid];
         float next_loss = loss_history[tid + 1];
 
-        if (current_loss > EPSILON) {
-            local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
+        if (current_loss <= 0.0f) {
+            printf("FATAL [compute_coherence]: current_loss[%d]=%f\n", tid, current_loss);
+            return;
         }
+        local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
     }
 
     float total = BlockReduce<BLOCK_SIZE>::sum(local_improvement);
@@ -280,37 +347,46 @@ __global__ void compute_coherence_kernel(
     }
 }
 
-__global__ void init_multihead_ca_kernel(
-    MultiHeadCAState* state,
-    unsigned int seed,
+__global__ void init_organism_ca_weights_kernel(
+    ComponentPool* __restrict__ pool,
     ArchitectureParams arch
 ) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int entry_idx = blockIdx.y;
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    MultiHeadCAState* ca_state = entry->ca_state;
+    int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int perception_size = arch.num_heads * arch.channels * arch.head_dim;
+    int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
+    int value_size = arch.num_heads * arch.head_dim * arch.channels;
+
+    uint64_t organism_seed = entry->genome_hash ^ (entry->id * 0x9E3779B97F4A7C15ULL);
 
     curandState_t rand_state;
-    curand_init(seed, tid, 0, &rand_state);
+    curand_init(organism_seed, weight_idx, 0, &rand_state);
 
-    int perception_size = arch.num_heads * arch.channels * arch.hidden_dim;
-    if (tid < perception_size) {
+    if (weight_idx < perception_size) {
         float fan_in = (float)arch.channels;
-        float fan_out = (float)arch.hidden_dim;
+        float fan_out = (float)arch.head_dim;
         float scale = sqrtf(2.0f / (fan_in + fan_out));
         float val = curand_normal(&rand_state) * scale;
-        state->perception_weights[tid] = __float2half(val);
+        ca_state->perception_weights[weight_idx] = __float2half(val);
     }
 
-    int interaction_size = arch.num_heads * arch.channels * arch.hidden_dim;
-    if (tid < interaction_size) {
-        float scale = sqrtf(2.0f / (float)arch.channels);
+    if (weight_idx < interaction_size) {
+        float scale = sqrtf(2.0f / (float)arch.head_dim);
         float val = curand_normal(&rand_state) * scale;
-        state->interaction_weights[tid] = __float2half(val);
+        ca_state->interaction_weights[weight_idx] = __float2half(val);
     }
 
-    int value_size = arch.num_heads * arch.hidden_dim * arch.channels;
-    if (tid < value_size) {
-        float scale = sqrtf(2.0f / (float)arch.hidden_dim);
+    if (weight_idx < value_size) {
+        float scale = sqrtf(2.0f / (float)arch.head_dim);
         float val = curand_normal(&rand_state) * scale;
-        state->value_weights[tid] = __float2half(val);
+        ca_state->value_weights[weight_idx] = __float2half(val);
     }
 }
 

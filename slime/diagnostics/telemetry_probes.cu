@@ -4,6 +4,7 @@
 #include "../config/config.cu"
 #include "../memory/archive.cu"
 #include "../memory/pool.cu"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
 struct GenomeComplexityMetrics {
@@ -51,6 +52,8 @@ struct MemoryAllocationMetrics {
     size_t behavioral_pools_size;
     size_t diresa_weights_size;
     size_t autodiff_tape_size;
+    size_t device_heap_limit;        // Set at init from cudaDeviceGetLimit
+    size_t device_heap_allocated;    // Running counter of our allocations
 };
 
 struct TelemetryBuffer {
@@ -103,12 +106,30 @@ __device__ void track_allocation(
 
 #define TRACKED_ALLOC(ptr, size, metrics, category_size) \
     do { \
-        cudaError_t alloc_err = cudaMalloc(&(ptr), (size)); \
-        track_allocation(#ptr, (void*)(ptr), (size), alloc_err, (metrics)); \
-        if (alloc_err != cudaSuccess) { \
-            printf("[FATAL] Allocation failed: %s\n", #ptr); \
+        size_t heap_limit = Atomics::load_size(&(metrics)->device_heap_limit); \
+        size_t heap_used = Atomics::load_size(&(metrics)->device_heap_allocated); \
+        size_t heap_free = heap_limit - heap_used; \
+        printf("[ALLOC START] %s: %llu bytes | heap: %llu used + %llu req = %llu / %llu limit\n", \
+               #ptr, (unsigned long long)(size), (unsigned long long)heap_used, (unsigned long long)(size), \
+               (unsigned long long)(heap_used + (size)), (unsigned long long)heap_limit); \
+        if (heap_free < (size)) { \
+            printf("[FATAL] %s cudaMalloc WILL FAIL: requested %llu bytes but only %llu free (deficit: %lld bytes)\n", \
+                   #ptr, (unsigned long long)(size), (unsigned long long)heap_free, \
+                   (long long)((size) - heap_free)); \
             return; \
         } \
+        cudaError_t alloc_err = cudaMalloc(&(ptr), (size)); \
+        printf("[ALLOC DONE] %s\n", #ptr); \
+        if (alloc_err != cudaSuccess) { \
+            printf("[FATAL] %s cudaMalloc FAILED: %s (requested %llu bytes)\n", #ptr, cudaGetErrorString(alloc_err), (unsigned long long)(size)); \
+            return; \
+        } \
+        if ((ptr) == nullptr) { \
+            printf("[FATAL] %s cudaMalloc returned nullptr (requested %llu bytes)\n", #ptr, (unsigned long long)(size)); \
+            return; \
+        } \
+        Atomics::add_size(&(metrics)->device_heap_allocated, (size)); \
+        track_allocation(#ptr, (void*)(ptr), (size), alloc_err, (metrics)); \
         (category_size) += (size); \
     } while(0)
 
@@ -118,8 +139,8 @@ __global__ void genome_complexity_probe_kernel(
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    int active_count = Atomics::load_int(pool->active_count);
-    if (active_count == 0) {
+    int capacity = pool->capacity;
+    if (capacity == 0) {
         metrics->delta_diversity = 0.0f;
         metrics->hash_entropy = 0.0f;
         metrics->parameter_variance = 0.0f;
@@ -128,13 +149,15 @@ __global__ void genome_complexity_probe_kernel(
         return;
     }
 
-    uint64_t seen_hashes[MAX_POOL_SIZE];
+    uint64_t seen_hashes[POOL_CAPACITY_MAX];
     int unique_count = 0;
     float total_deltas = 0.0f;
-    float hash_frequencies[MAX_POOL_SIZE];
+    float hash_frequencies[POOL_CAPACITY_MAX];
+    int alive_count = 0;
 
-    for (int i = 0; i < active_count && i < MAX_POOL_SIZE; i++) {
+    for (int i = 0; i < capacity; i++) {
         if (!pool->entries[i].alive) continue;
+        alive_count++;
 
         PoolEntry* e = &pool->entries[i];
         uint64_t hash = e->genome_hash;
@@ -146,7 +169,7 @@ __global__ void genome_complexity_probe_kernel(
                 break;
             }
         }
-        if (!found && unique_count < MAX_POOL_SIZE) {
+        if (!found && unique_count < POOL_CAPACITY_MAX) {
             seen_hashes[unique_count] = hash;
             hash_frequencies[unique_count] = 1.0f;
             unique_count++;
@@ -155,9 +178,18 @@ __global__ void genome_complexity_probe_kernel(
         total_deltas += e->num_deltas;
     }
 
-    int display_limit = active_count < 10 ? active_count : 10;
-    printf("[POOL-DIVERSITY] active=%d unique=%d showing top %d organisms\n", active_count, unique_count, display_limit);
-    for (int i = 0; i < display_limit; i++) {
+    if (alive_count == 0) {
+        metrics->delta_diversity = 0.0f;
+        metrics->hash_entropy = 0.0f;
+        metrics->parameter_variance = 0.0f;
+        metrics->unique_hashes = 0;
+        metrics->avg_deltas_per_genome = 0.0f;
+        return;
+    }
+
+    int display_count = 0;
+    printf("[POOL-DIVERSITY] alive=%d unique=%d capacity=%d\n", alive_count, unique_count, capacity);
+    for (int i = 0; i < capacity && display_count < 10; i++) {
         if (!pool->entries[i].alive) continue;
         PoolEntry* e = &pool->entries[i];
         printf("  [%3d] fit=%.6f task=%.4f gen_gap=%.4f hw_eff=%.4f age=%d deltas=%d\n",
@@ -165,21 +197,22 @@ __global__ void genome_complexity_probe_kernel(
         printf("        exp(α=%.3f β=%.3f γ=%.3f δ=%.3f) arch(h=%d ch=%d grid=%d) diresa(h1=%d h2=%d)\n",
                e->fitness_task_exponent, e->fitness_gen_exponent, e->fitness_rank_exponent, e->fitness_efficiency_exponent,
                e->num_heads, e->channels, e->grid_size, e->diresa_hidden1, e->diresa_hidden2);
+        display_count++;
     }
 
     metrics->unique_hashes = unique_count;
-    metrics->avg_deltas_per_genome = total_deltas / active_count;
+    metrics->avg_deltas_per_genome = total_deltas / alive_count;
 
     float entropy = 0.0f;
     for (int i = 0; i < unique_count; i++) {
-        float p = hash_frequencies[i] / active_count;
+        float p = hash_frequencies[i] / alive_count;
         if (p > 0.0f) {
             entropy -= p * log2f(p);
         }
     }
     metrics->hash_entropy = entropy;
 
-    metrics->delta_diversity = (float)unique_count / active_count;
+    metrics->delta_diversity = (float)unique_count / alive_count;
     metrics->parameter_variance = 0.0f;
 }
 
@@ -271,16 +304,16 @@ __global__ void diresa_evolution_probe_kernel(
     for (int i = 0; i < archive_size && i < MAX_ARCHIVE_SIZE; i++) {
         if (archive[i].generation > 0 && recent_count < 100) {
             float drift = 0.0f;
-            for (int d = 0; d < BEHAVIORAL_DIM_HW_MAX; d++) {
-                drift += fabsf(archive[i].hw_coords[d]);
+            for (int d = 0; d < archive->hw_dim; d++) {
+                drift += fabsf(archive->hw_coords[i * archive->hw_dim + d]);
             }
-            for (int d = 0; d < BEHAVIORAL_DIM_TASK_MAX; d++) {
-                drift += fabsf(archive[i].task_coords[d]);
+            for (int d = 0; d < archive->task_dim; d++) {
+                drift += fabsf(archive->task_coords[i * archive->task_dim + d]);
             }
-            for (int d = 0; d < BEHAVIORAL_DIM_GEN_MAX; d++) {
-                drift += fabsf(archive[i].gen_coords[d]);
+            for (int d = 0; d < archive->gen_dim; d++) {
+                drift += fabsf(archive->gen_coords[i * archive->gen_dim + d]);
             }
-            int total_dims = BEHAVIORAL_DIM_HW_MAX + BEHAVIORAL_DIM_TASK_MAX + BEHAVIORAL_DIM_GEN_MAX;
+            int total_dims = archive->hw_dim + archive->task_dim + archive->gen_dim;
             sum_drift += drift / total_dims;
 
             float hw_sum = 0.0f;
@@ -314,7 +347,10 @@ __global__ void task_performance_probe_kernel(
     TaskPerformanceMetrics* metrics,
     bool is_train_batch
 ) {
+    printf("[TASK-PERF-PRE-FILTER] tid=%d bid=%d batch=%d classes=%d\n", threadIdx.x, blockIdx.x, batch_size, num_classes);
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    printf("[TASK-PERF-ENTRY] batch=%d classes=%d\n", batch_size, num_classes);
 
     int correct = 0;
     float total_loss = 0.0f;
@@ -344,6 +380,8 @@ __global__ void task_performance_probe_kernel(
 
     float computed_accuracy = (float)correct / batch_size;
 
+    printf("[TASK-PERF-RESULT] correct=%d/%d acc=%f loss=%f\n", correct, batch_size, computed_accuracy, total_loss / batch_size);
+
     metrics->correct_predictions = correct;
     metrics->total_predictions = batch_size;
     metrics->accuracy = computed_accuracy;
@@ -355,6 +393,106 @@ __global__ void task_performance_probe_kernel(
     } else {
         metrics->test_accuracy = computed_accuracy;
     }
+}
+
+__device__ void populate_audit_buffer(
+    AuditBuffer* audit,
+    int generation,
+    float* logits,
+    int* labels,
+    float* batch_images,
+    int batch_size,
+    int num_classes,
+    float* ca_concentration,
+    int grid_size,
+    float train_accuracy,
+    float test_accuracy
+) {
+    if (!audit->consumed && audit->ready) return;
+
+    audit->generation = generation;
+    audit->batch_size = batch_size;
+    audit->num_classes = num_classes;
+    audit->grid_size = grid_size;
+
+    int samples_to_copy = (batch_size < AUDIT_SAMPLE_COUNT) ? batch_size : AUDIT_SAMPLE_COUNT;
+
+    for (int s = 0; s < samples_to_copy; s++) {
+        int pred = 0;
+        float max_logit = logits[s * num_classes];
+        for (int c = 1; c < num_classes; c++) {
+            if (logits[s * num_classes + c] > max_logit) {
+                max_logit = logits[s * num_classes + c];
+                pred = c;
+            }
+        }
+
+        audit->sample_labels[s] = labels[s];
+        audit->sample_predictions[s] = pred;
+
+        float sum_exp = 0.0f;
+        for (int c = 0; c < num_classes; c++) {
+            sum_exp += expf(logits[s * num_classes + c] - max_logit);
+        }
+        audit->sample_confidences[s] = 1.0f / sum_exp;
+
+        for (int c = 0; c < num_classes; c++) {
+            audit->sample_logits[s * NUM_CLASSES_MAX + c] = logits[s * num_classes + c];
+        }
+    }
+
+    int correct = 0;
+    float total_loss = 0.0f;
+    for (int b = 0; b < batch_size; b++) {
+        int pred = 0;
+        float max_logit = logits[b * num_classes];
+        for (int c = 1; c < num_classes; c++) {
+            if (logits[b * num_classes + c] > max_logit) {
+                max_logit = logits[b * num_classes + c];
+                pred = c;
+            }
+        }
+        if (pred == labels[b]) correct++;
+
+        float sum_exp = 0.0f;
+        for (int c = 0; c < num_classes; c++) {
+            sum_exp += expf(logits[b * num_classes + c] - max_logit);
+        }
+        total_loss -= (logits[b * num_classes + labels[b]] - max_logit - logf(sum_exp));
+    }
+
+    audit->correct_count = correct;
+    audit->accuracy = (float)correct / batch_size;
+    audit->loss = total_loss / batch_size;
+    audit->train_accuracy = train_accuracy;
+    audit->test_accuracy = test_accuracy;
+    audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
+
+    if (batch_images) {
+        for (int s = 0; s < samples_to_copy; s++) {
+            for (int p = 0; p < AUDIT_IMAGE_SIZE; p++) {
+                float val = batch_images[s * AUDIT_IMAGE_SIZE + p];
+                val = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
+                audit->sample_images[s * AUDIT_IMAGE_SIZE + p] = (unsigned char)(val * 255.0f);
+            }
+        }
+    }
+
+    if (ca_concentration) {
+        int snap_grid = 64;
+        for (int y = 0; y < snap_grid && y < grid_size; y++) {
+            for (int x = 0; x < snap_grid && x < grid_size; x++) {
+                int src_idx = y * grid_size + x;
+                int dst_idx = y * snap_grid + x;
+                audit->ca_snapshot[dst_idx] = ca_concentration[src_idx];
+            }
+        }
+    }
+
+    __threadfence_system();
+    audit->consumed = 0;
+    audit->ready = 1;
+    __threadfence_system();
 }
 
 #endif

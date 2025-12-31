@@ -3,7 +3,8 @@
 #define PARALLEL_COMPACTION_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
+#include "../learning/autodiff.cu"
 #include "tubes.cu"
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
@@ -27,9 +28,46 @@ __global__ void mark_valid_entries_kernel(
     }
 }
 
-__global__ void exclusive_scan_kernel(
+// Single-block inclusive scan (building block for multi-block)
+__device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
+    __shared__ int warp_sums[WARP_SIZE];
+
+    int val = (threadIdx.x < n) ? data[threadIdx.x] : 0;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int x = warp.shfl_up(val, offset);
+        if (lane >= offset) val += x;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int x = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += x;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
+
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    if (threadIdx.x < n) {
+        data[threadIdx.x] = warp_offset + val;
+    }
+}
+
+// Phase 1: Each block does local inclusive scan, stores block total
+__global__ void scan_phase1_kernel(
     int* input,
     int* output,
+    int* block_sums,
     int N
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -66,12 +104,68 @@ __global__ void exclusive_scan_kernel(
     __syncthreads();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
-
-    int exclusive_val = warp_offset + val - ((tid < N) ? input[tid] : 0);
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < N) ? input[tid] : 0);
 
     if (tid < N) {
         output[tid] = exclusive_val;
     }
+
+    // Last thread in block stores block total
+    if (threadIdx.x == blockDim.x - 1) {
+        block_sums[blockIdx.x] = inclusive_val;
+    }
+}
+
+// Phase 3: Add block prefix to each element
+__global__ void scan_phase3_kernel(
+    int* output,
+    int* block_prefixes,
+    int N
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < N && blockIdx.x > 0) {
+        output[tid] += block_prefixes[blockIdx.x - 1];
+    }
+}
+
+// Device-side recursive multi-block exclusive scan (CDP)
+// workspace must have size >= N (partitioned across recursion levels)
+__global__ void exclusive_scan_recursive_kernel(
+    int* input,
+    int* output,
+    int* workspace,
+    int N,
+    int block_size
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    if (N <= 0) return;
+
+    int num_blocks = (N + block_size - 1) / block_size;
+
+    if (num_blocks == 1) {
+        // Single block case - do it inline
+        scan_phase1_kernel<<<1, block_size>>>(input, output, workspace, N);
+        cudaDeviceSynchronize();
+        return;
+    }
+
+    // Multi-block case
+    int* block_sums = workspace;
+    int* next_workspace = workspace + num_blocks;
+
+    // Phase 1: local scans, collect block totals
+    scan_phase1_kernel<<<num_blocks, block_size>>>(input, output, block_sums, N);
+    cudaDeviceSynchronize();
+
+    // Phase 2: recursively scan block sums (CDP recursion)
+    exclusive_scan_recursive_kernel<<<1, 1>>>(block_sums, block_sums, next_workspace, num_blocks, block_size);
+    cudaDeviceSynchronize();
+
+    // Phase 3: add block prefixes
+    scan_phase3_kernel<<<num_blocks, block_size>>>(output, block_sums, N);
+    cudaDeviceSynchronize();
 }
 
 __global__ void compact_entries_kernel(
@@ -114,6 +208,7 @@ __global__ void compact_memory_tubes_parallel_kernel(
     TemporalTube* tube,
     int* valid_flags_workspace,
     int* scan_workspace,
+    int* scan_recursive_workspace,
     MemoryEntry* temp_buffer,
     float decay_threshold
 ) {
@@ -129,12 +224,17 @@ __global__ void compact_memory_tubes_parallel_kernel(
         valid_flags_workspace,
         decay_threshold
     );
+    cudaDeviceSynchronize();
 
-    exclusive_scan_kernel<<<mark_grid, mark_block>>>(
+    // Use device-side recursive scan for correct multi-block behavior
+    exclusive_scan_recursive_kernel<<<1, 1>>>(
         valid_flags_workspace,
         scan_workspace,
-        tube->capacity
+        scan_recursive_workspace,
+        tube->capacity,
+        BLOCK_SIZE
     );
+    cudaDeviceSynchronize();
 
     compact_entries_kernel<<<mark_grid, mark_block>>>(
         tube,
@@ -143,6 +243,7 @@ __global__ void compact_memory_tubes_parallel_kernel(
         temp_buffer,
         old_count
     );
+    cudaDeviceSynchronize();
 
     int new_count = 0;
     if (old_count > 0) {
@@ -159,12 +260,14 @@ __global__ void compact_memory_tubes_parallel_kernel(
         temp_buffer,
         new_count
     );
+    cudaDeviceSynchronize();
 }
 
 __global__ void prune_and_compact_memories_kernel(
     TemporalTube* tube,
     int* valid_flags_workspace,
     int* scan_workspace,
+    int* scan_recursive_workspace,
     MemoryEntry* temp_buffer,
     float decay_threshold
 ) {
@@ -185,6 +288,7 @@ __global__ void prune_and_compact_memories_kernel(
             tube,
             valid_flags_workspace,
             scan_workspace,
+            scan_recursive_workspace,
             temp_buffer,
             decay_threshold
         );

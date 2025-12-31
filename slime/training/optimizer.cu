@@ -49,14 +49,20 @@ __global__ void adam_update_kernel(
 
     float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
 
-    float weight_delta = lr * m_hat / (sqrtf(v_hat) + epsilon);
+    float denom = sqrtf(v_hat) + epsilon;
+    if (isnan(denom) || isinf(denom)) {
+        printf("FATAL [adam_update]: idx=%d v_hat=%f denom=%f\n", idx, v_hat, denom);
+        return;
+    }
+
+    float weight_delta = lr * m_hat / denom;
     weights[idx] -= weight_delta;
 
     if (isnan(weights[idx]) || isinf(weights[idx])) {
         printf("FATAL [adam_update]: Weight corruption at index %d\n", idx);
         printf("  weight: %f, gradient: %f, m_hat: %f, v_hat: %f, delta: %f\n",
                weights[idx], g, m_hat, v_hat, weight_delta);
-        
+        return;
     }
 
     gradients[idx] = 0.0f;
@@ -106,12 +112,18 @@ __global__ void adam_update_fp16_kernel(
     float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
     float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
 
-    weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
+    float denom = sqrtf(v_hat) + epsilon;
+    if (isnan(denom) || isinf(denom)) {
+        printf("FATAL [adam_update_fp16]: idx=%d v_hat=%f denom=%f\n", idx, v_hat, denom);
+        return;
+    }
+
+    weight -= lr * m_hat / denom;
 
     if (isnan(weight) || isinf(weight)) {
         printf("FATAL [adam_update_fp16]: Weight corruption at index %d (new weight: %f)\n",
                idx, weight);
-        
+        return;
     }
 
     weights_fp16[idx] = __float2half(weight);

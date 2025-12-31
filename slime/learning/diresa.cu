@@ -2,7 +2,7 @@
 #define DIRESA_CU
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
@@ -77,42 +77,70 @@ struct DIRESABatch {
 };
 
 // Xavier initialization
-__global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int replica_id = tid / 1024;
-    int local_tid = tid % 1024;
+__global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed) {
+    int replica_id = blockIdx.x;
+    int local_tid = threadIdx.x;
 
     if (replica_id >= entry->num_tempering_replicas) return;
 
     DIRESAWeights* weights = &replicas[replica_id];
 
-    // Allocate weight arrays using genome-derived + path-specific dimensions
-    if (tid == 0 && replica_id == 0) {
-        for (int r = 0; r < entry->num_tempering_replicas; r++) {
-            cudaMalloc(&replicas[r].encoder_w1, sizeof(float) * input_dim * entry->diresa_hidden1);
-            cudaMalloc(&replicas[r].encoder_b1, sizeof(float) * entry->diresa_hidden1);
-            cudaMalloc(&replicas[r].encoder_w2, sizeof(float) * entry->diresa_hidden1 * entry->diresa_hidden2);
-            cudaMalloc(&replicas[r].encoder_b2, sizeof(float) * entry->diresa_hidden2);
-            cudaMalloc(&replicas[r].encoder_w3, sizeof(float) * entry->diresa_hidden2 * output_dim);
-            cudaMalloc(&replicas[r].encoder_b3, sizeof(float) * output_dim);
+    if (local_tid == 0) {
+        size_t offset = replica_id * replica_stride;
 
-            cudaMalloc(&replicas[r].decoder_w1, sizeof(float) * output_dim * entry->diresa_hidden2);
-            cudaMalloc(&replicas[r].decoder_b1, sizeof(float) * entry->diresa_hidden2);
-            cudaMalloc(&replicas[r].decoder_w2, sizeof(float) * entry->diresa_hidden2 * entry->diresa_hidden1);
-            cudaMalloc(&replicas[r].decoder_b2, sizeof(float) * entry->diresa_hidden1);
-            cudaMalloc(&replicas[r].decoder_w3, sizeof(float) * entry->diresa_hidden1 * input_dim);
-            cudaMalloc(&replicas[r].decoder_b3, sizeof(float) * input_dim);
+        weights->encoder_w1 = &preallocated_weight_pool[offset];
+        offset += input_dim * DIRESA_HIDDEN1_MAX;
 
-            replicas[r].input_dim = input_dim;
-            replicas[r].output_dim = output_dim;
-            replicas[r].hidden1 = entry->diresa_hidden1;
-            replicas[r].hidden2 = entry->diresa_hidden2;
-        }
+        weights->encoder_b1 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN1_MAX;
+
+        weights->encoder_w2 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX;
+
+        weights->encoder_b2 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN2_MAX;
+
+        weights->encoder_w3 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN2_MAX * output_dim;
+
+        weights->encoder_b3 = &preallocated_weight_pool[offset];
+        offset += output_dim;
+
+        weights->decoder_w1 = &preallocated_weight_pool[offset];
+        offset += output_dim * DIRESA_HIDDEN2_MAX;
+
+        weights->decoder_b1 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN2_MAX;
+
+        weights->decoder_w2 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX;
+
+        weights->decoder_b2 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN1_MAX;
+
+        weights->decoder_w3 = &preallocated_weight_pool[offset];
+        offset += DIRESA_HIDDEN1_MAX * input_dim;
+
+        weights->decoder_b3 = &preallocated_weight_pool[offset];
+
+        weights->input_dim = input_dim;
+        weights->output_dim = output_dim;
+        weights->hidden1 = entry->diresa_hidden1;
+        weights->hidden2 = entry->diresa_hidden2;
     }
     __syncthreads();
 
+    if (local_tid == 0) {
+        printf("[DIRESA-CHK] replica=%d BEFORE curand_init\n", replica_id);
+    }
+
     curandState state;
-    curand_init(seed + tid, 0, 0, &state);
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    curand_init(seed + global_tid, 0, 0, &state);
+
+    if (local_tid == 0) {
+        printf("[DIRESA-CHK] replica=%d AFTER curand_init\n", replica_id);
+    }
 
     int hidden1 = weights->hidden1;
     int hidden2 = weights->hidden2;
@@ -122,7 +150,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
     // Encoder layer 1
     if (local_tid < in_dim * hidden1) {
         float scale = sqrtf(2.0f / (in_dim + hidden1));
-        weights->encoder_w1[local_tid] = curand_normal(&state) * scale;
+        weights->encoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_enc1", local_tid) * scale;
     }
     if (local_tid < hidden1) {
         weights->encoder_b1[local_tid] = 0.0f;
@@ -131,7 +159,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
     // Encoder layer 2
     if (local_tid < hidden1 * hidden2) {
         float scale = sqrtf(2.0f / (hidden1 + hidden2));
-        weights->encoder_w2[local_tid] = curand_normal(&state) * scale;
+        weights->encoder_w2[local_tid] = validated_curand_normal(&state, "diresa_init_enc2", local_tid) * scale;
     }
     if (local_tid < hidden2) {
         weights->encoder_b2[local_tid] = 0.0f;
@@ -140,7 +168,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
     // Encoder layer 3
     if (local_tid < hidden2 * out_dim) {
         float scale = sqrtf(2.0f / (hidden2 + out_dim));
-        weights->encoder_w3[local_tid] = curand_normal(&state) * scale;
+        weights->encoder_w3[local_tid] = validated_curand_normal(&state, "diresa_init_enc3", local_tid) * scale;
     }
     if (local_tid < out_dim) {
         weights->encoder_b3[local_tid] = 0.0f;
@@ -149,7 +177,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
     // Decoder mirrors encoder
     if (local_tid < out_dim * hidden2) {
         float scale = sqrtf(2.0f / (out_dim + hidden2));
-        weights->decoder_w1[local_tid] = curand_normal(&state) * scale;
+        weights->decoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_dec1", local_tid) * scale;
     }
     if (local_tid < hidden2) {
         weights->decoder_b1[local_tid] = 0.0f;
@@ -157,7 +185,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
 
     if (local_tid < hidden2 * hidden1) {
         float scale = sqrtf(2.0f / (hidden2 + hidden1));
-        weights->decoder_w2[local_tid] = curand_normal(&state) * scale;
+        weights->decoder_w2[local_tid] = validated_curand_normal(&state, "diresa_init_dec2", local_tid) * scale;
     }
     if (local_tid < hidden1) {
         weights->decoder_b2[local_tid] = 0.0f;
@@ -165,7 +193,7 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
 
     if (local_tid < hidden1 * in_dim) {
         float scale = sqrtf(2.0f / (hidden1 + in_dim));
-        weights->decoder_w3[local_tid] = curand_normal(&state) * scale;
+        weights->decoder_w3[local_tid] = validated_curand_normal(&state, "diresa_init_dec3", local_tid) * scale;
     }
     if (local_tid < in_dim) {
         weights->decoder_b3[local_tid] = 0.0f;
@@ -180,6 +208,9 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, int input_dim, int o
         weights->temperature = 1.0f + replica_id * 0.5f;  // [1.0, 1.5, 2.0, 2.5]
         weights->distance_exponent = entry->distance_exponent;
         weights->quality_weight = entry->quality_weight;
+
+        printf("[INIT-DIRESA-WEIGHTS] replica=%d w1[0]=%f w1[1]=%f b1[0]=%f\n",
+            replica_id, weights->encoder_w1[0], weights->encoder_w1[1], weights->encoder_b1[0]);
     }
 }
 
@@ -212,8 +243,9 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
     }
 
     // Layer 3: HIDDEN2 -> output_dim (linear output, vectorized with float4)
-    // Vectorize latent writes: 128 elements -> 32 float4 stores
     int vec_output_dim = weights->output_dim / 4;
+    int remainder_dim = weights->output_dim % 4;
+
     for (int i = 0; i < vec_output_dim; i++) {
         float4 sum4 = make_float4(
             weights->encoder_b3[i * 4 + 0],
@@ -382,7 +414,11 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         if (tid == 0) {
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
-                sum += logf(batch->orig_distances[i] + EPSILON);
+                if (batch->orig_distances[i] <= 0.0f) {
+                    printf("FATAL [diresa]: orig_distances[%d]=%f\n", i, batch->orig_distances[i]);
+                    return;
+                }
+                sum += logf(batch->orig_distances[i]);
             }
             shared_orig_mean[0] = sum / batch->batch_size;
         }
@@ -393,7 +429,11 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             float sum_sq = 0.0f;
             float mean = shared_orig_mean[0];
             for (int i = 0; i < batch->batch_size; i++) {
-                float diff = logf(batch->orig_distances[i] + EPSILON) - mean;
+                if (batch->orig_distances[i] <= 0.0f) {
+                    printf("FATAL [diresa]: orig_distances[%d]=%f\n", i, batch->orig_distances[i]);
+                    return;
+                }
+                float diff = logf(batch->orig_distances[i]) - mean;
                 sum_sq += diff * diff;
             }
             shared_orig_var[0] = sum_sq / batch->batch_size;
@@ -403,7 +443,11 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         if (tid == 1) {
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
-                sum += logf(batch->latent_distances[i] + EPSILON);
+                if (batch->latent_distances[i] <= 0.0f) {
+                    printf("FATAL [diresa]: latent_distances[%d]=%f\n", i, batch->latent_distances[i]);
+                    return;
+                }
+                sum += logf(batch->latent_distances[i]);
             }
             shared_latent_mean[0] = sum / batch->batch_size;
         }
@@ -417,8 +461,12 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         float local_cov = 0.0f;
 
         for (int i = tid; i < batch->batch_size; i += blockDim.x) {
-            float latent_diff = logf(batch->latent_distances[i] + EPSILON) - latent_mean;
-            float orig_diff = logf(batch->orig_distances[i] + EPSILON) - orig_mean;
+            if (batch->latent_distances[i] <= 0.0f || batch->orig_distances[i] <= 0.0f) {
+                printf("FATAL [diresa]: latent[%d]=%f orig[%d]=%f\n", i, batch->latent_distances[i], i, batch->orig_distances[i]);
+                return;
+            }
+            float latent_diff = logf(batch->latent_distances[i]) - latent_mean;
+            float orig_diff = logf(batch->orig_distances[i]) - orig_mean;
             local_var += latent_diff * latent_diff;
             local_cov += latent_diff * orig_diff;
         }
@@ -451,15 +499,24 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         if (tid == 0) {
             shared_cov_sum[0] = shared_recon[0];
 
-            // Power-law exponent from log-log slope: α = cov(log d_latent, log d_orig) / var(log d_orig)
-            float alpha_measured = shared_cov_sum[0] / (shared_orig_var[0] * batch->batch_size + EPSILON);
+            float alpha_denom = shared_orig_var[0] * batch->batch_size;
+            if (alpha_denom <= 0.0f) {
+                printf("FATAL [diresa]: alpha_denom=%f orig_var=%f batch_size=%d\n",
+                       alpha_denom, shared_orig_var[0], batch->batch_size);
+                return;
+            }
+            float alpha_measured = shared_cov_sum[0] / alpha_denom;
 
-            // Log-log correlation quality (how well data fits power law)
-            float log_correlation = shared_cov_sum[0] / (sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size + EPSILON);
+            float corr_denom = sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size;
+            if (corr_denom <= 0.0f || isnan(corr_denom) || isinf(corr_denom)) {
+                printf("FATAL [diresa]: corr_denom=%f orig_var=%f latent_var=%f batch_size=%d\n",
+                       corr_denom, shared_orig_var[0], shared_latent_var[0], batch->batch_size);
+                return;
+            }
+            float log_correlation = shared_cov_sum[0] / corr_denom;
 
-            // Combined loss: penalize both deviation from target exponent AND poor power-law fit quality
             float exponent_loss = (alpha_measured - target_alpha) * (alpha_measured - target_alpha);
-            float quality_loss = 1.0f - fabsf(log_correlation);  // 0 when perfect power-law fit
+            float quality_loss = 1.0f - fabsf(log_correlation);
             batch->dist_loss = exponent_loss + weights->quality_weight * quality_loss;
         }
     }
@@ -530,7 +587,7 @@ __global__ void replica_exchange_kernel(DIRESAWeights* replicas, DIRESABatch* ba
     float delta = (beta_j - beta_i) * (E_i - E_j);
     float accept_prob = fminf(1.0f, expf(delta));
 
-    float rand = curand_uniform(&rand_states[tid]);
+    float rand = validated_curand_uniform(&rand_states[tid], "replica_exchange", tid);
     if (rand < accept_prob) {
         // Swap temperatures (not weights - we want to explore same landscape)
         float temp_swap = replicas[i].temperature;

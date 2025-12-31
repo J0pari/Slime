@@ -1,6 +1,6 @@
 
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <mma.h>
@@ -16,7 +16,13 @@ __device__ void jacobi_rotation(float* A, int n, int p, int q, float* s, float* 
     float aqq = A[q * n + q];
     float apq = A[p * n + q];
 
-    float tau = (aqq - app) / (2.0f * apq + EPSILON);
+    if (fabsf(apq) <= 0.0f) {
+        printf("FATAL [jacobi_rotation]: apq=%f\n", apq);
+        *s = 0.0f;
+        *c = 1.0f;
+        return;
+    }
+    float tau = (aqq - app) / (2.0f * apq);
     float t = (tau >= 0.0f) ?
         1.0f / (tau + sqrtf(1.0f + tau * tau)) :
         -1.0f / (-tau + sqrtf(1.0f + tau * tau));
@@ -120,7 +126,13 @@ __global__ void gpu_svd_kernel(
             if (tid < effective_size) {
                 int global_idx = base_row + tid;
                 if (global_idx < n && tile_row == tile_col) {
-                    S[global_idx] = sqrtf(fabsf(shared_A[tid][tid]));
+                    float diag_val = shared_A[tid][tid];
+                    if (diag_val < 0.0f) {
+                        printf("FATAL [svd_jacobi]: negative diagonal element A[%d][%d]=%f\n", tid, tid, diag_val);
+                        S[global_idx] = 0.0f;
+                        return;
+                    }
+                    S[global_idx] = sqrtf(diag_val);
                 }
             }
             __syncthreads();
@@ -147,7 +159,12 @@ __global__ void effective_rank_from_latent_kernel(
     variance /= latent_dim;
 
     if (threadIdx.x == 0) {
-        *rank_out = sqrtf(variance + EPSILON) * latent_dim;
+        if (variance < 0.0f) {
+            printf("FATAL [effective_rank]: variance=%f\n", variance);
+            *rank_out = 0.0f;
+            return;
+        }
+        *rank_out = sqrtf(variance) * latent_dim;
     }
 }
 
@@ -167,7 +184,11 @@ __global__ void coherence_kernel(
     if (tid < history_length - 1) {
         float curr_error = prediction_errors[tid];
         float next_error = prediction_errors[tid + 1];
-        local_progress = fmaxf(0.0f, (curr_error - next_error) / (curr_error + EPSILON));
+        if (curr_error <= 0.0f) {
+            printf("FATAL [coherence]: curr_error[%d]=%f\n", tid, curr_error);
+            return;
+        }
+        local_progress = fmaxf(0.0f, (curr_error - next_error) / curr_error);
     }
 
     __syncthreads();
@@ -275,7 +296,13 @@ __global__ void flow_lenia_kernel(
 
     float next_val = center + dt * growth;
 
-    float mass_ratio = total_mass / (CA_KERNEL_CELL_COUNT * next_val + EPSILON);
+    float denom = CA_KERNEL_CELL_COUNT * next_val;
+    if (denom <= 0.0f) {
+        printf("FATAL [flow_lenia]: denom=%f next_val=%f\n", denom, next_val);
+        next_state[idx] = 0.0f;
+        return;
+    }
+    float mass_ratio = total_mass / denom;
     next_state[idx] = next_val * mass_ratio;
 }
 
@@ -348,7 +375,7 @@ __global__ void warp_ca_kernel(
     float new_val = my_state + warp_ca_growth_rate * growth;
     float new_total = WarpReduce<WARP_SIZE>::sum(new_val);
 
-    if (new_total > EPSILON) {
+    if (is_meaningful(new_total, total_mass)) {
         new_val *= total_mass / new_total;
     }
 

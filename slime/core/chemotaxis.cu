@@ -3,6 +3,8 @@
 #define CHEMOTAXIS_CU
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
+#include "pseudopod.cu"
+#include "../memory/pool.cu"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
@@ -80,35 +82,53 @@ __global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_s
 }
 
 __global__ void initialize_ca_from_field_kernel(
-    float* __restrict__ ca_concentration,
+    ComponentPool* __restrict__ pool,
     float* __restrict__ chemical_concentration,
-    int grid_size
+    int max_grid_size,
+    int entry_idx
 ) {
+    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && entry_idx == 0) {
+        printf("[INIT-CA-CHILD] ENTER entry_idx=%d\n", entry_idx);
+    }
+
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
 
     int idx = y * grid_size + x;
+    float* ca_concentration = entry->ca_state->ca_concentration;
 
-    
     ca_concentration[idx] = chemical_concentration[idx];
 }
 
 __global__ void update_field_from_ca_kernel(
+    ComponentPool* __restrict__ pool,
     float* __restrict__ chemical_concentration,
-    float* __restrict__ ca_output,
-    int grid_size
+    int max_grid_size,
+    int entry_idx
 ) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
 
     int idx = y * grid_size + x;
+    float* ca_concentration = entry->ca_state->ca_concentration;
 
-    
-    chemical_concentration[idx] = ca_output[idx];
+    atomicAdd(&chemical_concentration[idx], ca_concentration[idx]);
 }
 
 __global__ void diffusion_reaction_kernel(
@@ -134,6 +154,8 @@ __global__ void diffusion_reaction_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
+
+    if (x == grid_size - 1 && y == grid_size - 1) printf("[RULED-OUT] diffusion_reaction completed grid=%d - NOT the hang\n", grid_size);
 
     int idx = y * grid_size + x;
 
@@ -174,7 +196,8 @@ __global__ void behavioral_gradient_kernel(float* __restrict__ behavioral_field,
     float grad_x, grad_y;
     Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size * behavioral_dim);
 
-    float magnitude = sqrtf(grad_x * grad_x + grad_y * grad_y) + EPSILON_SMALL;
+    float grad_sq = grad_x * grad_x + grad_y * grad_y;
+    float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
     grad_x /= magnitude;
     grad_y /= magnitude;
 
@@ -255,8 +278,8 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
         d_offset++;
     }
 
-    float behav_magnitude = sqrtf(behav_grad_x * behav_grad_x +
-                                  behav_grad_y * behav_grad_y) + EPSILON_SMALL;
+    float behav_sq = behav_grad_x * behav_grad_x + behav_grad_y * behav_grad_y;
+    float behav_magnitude = sqrtf(behav_sq) + safe_epsilon(behav_sq);
     behav_grad_x /= behav_magnitude;
     behav_grad_y /= behav_magnitude;
 
@@ -291,21 +314,53 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
     float W = (seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE;
 
-    float phi = TAU * (V - CENTERED_DIFFERENCE_SCALE);
-    float half_pi_alpha = (CUDART_PI_F * CENTERED_DIFFERENCE_SCALE) * levy_alpha;
-    float xi = (CUDART_PI_F * CENTERED_DIFFERENCE_SCALE) - half_pi_alpha + phi;
+    float phi = (TAU * 0.25f) * (2.0f * V - 1.0f);
     float alpha_phi = levy_alpha * phi;
+    float one_minus_alpha_phi = (1.0f - levy_alpha) * phi;
 
     float levy_num = sinf(alpha_phi);
-    float levy_denom = powf(cosf(phi) + EPSILON, (NORMALIZED_MAX / levy_alpha));
-    float levy_factor = powf(cosf(xi) / (-logf(W + EPSILON) + EPSILON), ((NORMALIZED_MAX - levy_alpha) / levy_alpha));
+
+    float cos_phi = cosf(phi);
+    if (cos_phi <= 0.0f) {
+        printf("FATAL [levy_chemotaxis]: cos_phi=%f\n", cos_phi);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
+        return;
+    }
+    float levy_denom = powf(cos_phi, (NORMALIZED_MAX / levy_alpha));
+
+    if (W <= 0.0f) {
+        printf("FATAL [levy_chemotaxis]: W=%f\n", W);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
+        return;
+    }
+    float log_w = -logf(W);
+    if (log_w <= 0.0f) {
+        printf("FATAL [levy_chemotaxis]: log_w=%f W=%f\n", log_w, W);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
+        return;
+    }
+    float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
+    if (cos_one_minus_alpha_phi <= 0.0f) {
+        printf("FATAL [levy_chemotaxis]: cos((1-α)*phi)=%f one_minus_alpha_phi=%f\n", cos_one_minus_alpha_phi, one_minus_alpha_phi);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
+        return;
+    }
+    float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - levy_alpha) / levy_alpha));
 
     float levy_sample = levy_num / levy_denom * levy_factor;
 
-    // Tempered L\u00e9vy flight: Mix with Gaussian for bounded jumps (prevents infinite excursions)
-    // Box-Muller transform using U for Gaussian component
-    float gaussian_component = sqrtf(-2.0f * logf(U + EPSILON)) * cosf(TAU * V);
-    float tempering_weight = expf(-levy_alpha * fabsf(levy_sample));  // Exponential tempering
+    if (U <= 0.0f) {
+        printf("FATAL [levy_chemotaxis]: U=%f\n", U);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
+        return;
+    }
+    float gaussian_component = sqrtf(-2.0f * logf(U)) * cosf(TAU * V);
+    float tempering_weight = expf(-levy_alpha * fabsf(levy_sample));
     float tempered_sample = tempering_weight * levy_sample + (NORMALIZED_MAX - tempering_weight) * gaussian_component;
 
     seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
@@ -319,7 +374,11 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
 
     for (int i = 0; i < GRADIENT_HISTORY; i++) {
         float age = (float)(GRADIENT_HISTORY - i);
-        float kernel_weight = powf(age + EPSILON, kernel_exponent);
+        if (age <= 0.0f) {
+            printf("FATAL [chemotaxis]: age=%f\n", age);
+            return;
+        }
+        float kernel_weight = powf(age, kernel_exponent);
         fractional_friction_x += kernel_weight * agent->velocity_history[i][0];
         fractional_friction_y += kernel_weight * agent->velocity_history[i][1];
     }
@@ -414,18 +473,13 @@ __global__ void create_attractors_kernel(
     sources[idx] = source_value;
 }
 
-__global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__ agents, float* __restrict__ embedding_weights, float* __restrict__ reconstruction_error, int num_agents, float learning_rate, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int behavioral_dim){
+__global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__ agents, float* __restrict__ embedding_weights, float* __restrict__ reconstruction_error, int num_agents, float learning_rate, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int behavioral_dim, int hw_dim, int task_dim, int gen_dim, float* features_buffer){
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (agent_id >= num_agents) return;
 
     BehavioralState* agent = &agents[agent_id];
 
-    float* features;
-    cudaError_t malloc_err = cudaMalloc(&features, sizeof(float) * behavioral_dim);
-    if (malloc_err != cudaSuccess || features == nullptr) {
-        printf("[ERROR] cudaMalloc failed for features in agent %d: %s\n", agent_id, cudaGetErrorString(malloc_err));
-        return;
-    }
+    float* features = &features_buffer[agent_id * behavioral_dim];
 
     float context_metabolic = agent->sensitivity;
     float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] +
@@ -468,11 +522,67 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
         }
 
         float magnitude = sqrtf(cos_sum * cos_sum + sin_sum * sin_sum) / GRADIENT_HISTORY;
-        float amplitude_weight = powf(freq + EPSILON, -fourier_spectrum_exponent);
+        if (freq <= 0.0f) {
+            printf("FATAL [behavioral_embedding]: freq=%f\n", freq);
+            return;
+        }
+        float amplitude_weight = powf(freq, -fourier_spectrum_exponent);
         features[BASE_FEATURES_COUNT + k] = magnitude * amplitude_weight;
     }
 
-    cudaFree(features);
+    // Project features to behavioral space through learned embedding and update coords
+    for (int d = 0; d < behavioral_dim; d++) {
+        float reconstruction = 0.0f;
+        for (int f = 0; f < behavioral_dim; f++) {
+            reconstruction += features[f] * embedding_weights[f * behavioral_dim + d];
+        }
+
+        // Determine which coord array this dimension belongs to
+        float* target_coord;
+        int local_idx;
+        if (d < hw_dim) {
+            target_coord = agent->hw_coords;
+            local_idx = d;
+        } else if (d < hw_dim + task_dim) {
+            target_coord = agent->task_coords;
+            local_idx = d - hw_dim;
+        } else {
+            target_coord = agent->gen_coords;
+            local_idx = d - hw_dim - task_dim;
+        }
+
+        // Update coord with gradient descent
+        float error = reconstruction - target_coord[local_idx];
+        target_coord[local_idx] += learning_rate * error;
+
+        // Accumulate reconstruction error
+        atomicAdd(reconstruction_error, error * error);
+    }
+}
+
+__global__ void init_embedding_weights_kernel(float* embedding_weights, int behavioral_dim, unsigned int seed){
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_weights = behavioral_dim * behavioral_dim;
+    if (idx >= total_weights) return;
+
+    curandState state;
+    curand_init(seed, idx, 0, &state);
+    if (idx == 0) printf("[RULED-OUT] init_embedding curand_init completed threads=%d - if you see this curand is NOT hanging\n", (int)(gridDim.x * blockDim.x));
+
+    int row = idx / behavioral_dim;
+    int col = idx % behavioral_dim;
+
+    float val;
+    if (row == col) {
+        val = 1.0f + 0.01f * curand_normal(&state);
+    } else {
+        val = 0.01f * curand_normal(&state);
+    }
+    if (isnan(val) || isinf(val)) {
+        printf("FATAL [init_embedding]: idx=%d row=%d col=%d val=%f\n", idx, row, col, val);
+        return;
+    }
+    embedding_weights[idx] = val;
 }
 
 __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_agents, unsigned int seed, const float* genome, const float* epigenetic, uint64_t genome_hash, int organism_id, BehavioralInitSlots slots, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int hw_dim, int task_dim, int gen_dim){
@@ -574,13 +684,20 @@ __global__ void init_chemical_field_kernel(
 
     if (x >= grid_size || y >= grid_size) return;
 
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] ENTRY x=0 y=0\n");
+
     int idx = y * grid_size + x;
 
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before ChemotaxisParams\n");
     ChemotaxisParams params;
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before derive_from_genome_hash\n");
     params.derive_from_genome_hash(genome_hash);
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] After derive_from_genome_hash\n");
 
     InitContext ctx;
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before ctx.derive_from_genome\n");
     ctx.derive_from_genome(genome_hash, genome);
+    if (x == 0 && y == 0) printf("[CHEM-FIELD] After ctx.derive_from_genome\n");
 
     float chemical_decay = params.get_chemical_decay(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
@@ -615,6 +732,8 @@ __global__ void set_chemical_sources_from_agents_kernel(
 ) {
     int agent_id = threadIdx.x;
     if (agent_id >= num_agents) return;
+
+    if (agent_id == num_agents - 1) printf("[RULED-OUT] set_chemical_sources completed agents=%d - NOT the hang\n", num_agents);
 
     BehavioralState* agent = &agents[agent_id];
 
@@ -697,7 +816,7 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = weight_sum > EPSILON_SMALL ? field_value / weight_sum : 0.0f;
+        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
         d_offset++;
     }
 
@@ -721,7 +840,7 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = weight_sum > EPSILON_SMALL ? field_value / weight_sum : 0.0f;
+        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
         d_offset++;
     }
 
@@ -745,7 +864,7 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = weight_sum > EPSILON_SMALL ? field_value / weight_sum : 0.0f;
+        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
         d_offset++;
     }
 }
@@ -790,7 +909,12 @@ __global__ void init_rd_fields_kernel(
     float v_scale_norm = (genome[v_scale_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
     float v_scale = v_scale_norm * (RD_V_PERTURBATION_MAX - RD_V_PERTURBATION_MIN);
 
-    v_field[idx] = (r < perturbation_radius) ? v_perturbation_base + curand_uniform(&state) * v_scale : NORMALIZED_MIN;
+    if (r < perturbation_radius) {
+        float rand_val = validated_curand_uniform(&state, "init_rd_fields", idx);
+        v_field[idx] = v_perturbation_base + rand_val * v_scale;
+    } else {
+        v_field[idx] = NORMALIZED_MIN;
+    }
 }
 
 __global__ void init_resource_fields_kernel(
@@ -817,9 +941,10 @@ __global__ void init_resource_fields_kernel(
     float resource_noise_norm = (genome[resource_noise_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
     float resource_noise = RESOURCE_NOISE_MIN + resource_noise_norm * (RESOURCE_NOISE_MAX - RESOURCE_NOISE_MIN);
 
-    resource_density[idx] = resource_init + resource_noise * (curand_uniform(&state) - CENTERED_DIFFERENCE_SCALE);
+    float rand_val = validated_curand_uniform(&state, "init_resource_fields", idx);
+    resource_density[idx] = resource_init + resource_noise * (rand_val - CENTERED_DIFFERENCE_SCALE);
 
-    fitness_landscape[idx] = DEFAULT_FITNESS;
+    fitness_landscape[idx] = 0.0f;
 }
 
 __global__ void initialize_chemical_field_kernel(
@@ -846,7 +971,8 @@ __global__ void initialize_chemical_field_kernel(
         genome_influence = genome[genome_idx] * 0.1f;
     }
 
-    float noise = (curand_uniform(&state) - 0.5f) * 0.2f;
+    float rand_val = validated_curand_uniform(&state, "initialize_chemical_field", idx);
+    float noise = (rand_val - 0.5f) * 0.2f;
 
     chemical_field[idx] = base_value + genome_influence + noise;
     chemical_field[idx] = clamp(chemical_field[idx], 0.0f, 1.0f);
@@ -889,8 +1015,13 @@ extern "C" __global__ void resource_flow_kernel(
 
     float drho_dt = -divergence + diffusivity * lap_rho;
 
-    resource_next[idx] = rho + dt * drho_dt;
-    resource_next[idx] = fmaxf(0.0f, resource_next[idx]);
+    float new_rho = rho + dt * drho_dt;
+    if (new_rho < -0.1f) {
+        printf("FATAL [resource_conservation]: large negative rho=%f at idx=%d (rho=%f drho_dt=%f dt=%f)\n",
+               new_rho, idx, rho, drho_dt, dt);
+        return;
+    }
+    resource_next[idx] = fmaxf(0.0f, new_rho);
 }
 
 extern "C" __global__ void update_fitness_landscape_kernel(
@@ -914,7 +1045,7 @@ extern "C" __global__ void update_fitness_landscape_kernel(
         }
     }
 
-    fitness_landscape[idx] = (count > 0) ? (total_fitness / count) : DEFAULT_FITNESS;
+    fitness_landscape[idx] = (count > 0) ? (total_fitness / count) : 0.0f;
 }
 
 #endif

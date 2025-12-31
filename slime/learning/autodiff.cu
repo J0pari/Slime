@@ -2,7 +2,7 @@
 #ifndef AUTODIFF_CU
 #define AUTODIFF_CU
 #include "../config/config.cu"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
 enum TapeOp {
@@ -122,12 +122,20 @@ __device__ int ad_exp(ADTape* tape, int x_idx) {
 
 __device__ int ad_log(ADTape* tape, int x_idx) {
     float x = tape->value_buffer[x_idx];
+    if (x <= 0.0f) {
+        printf("FATAL [ad_log]: x=%f at idx=%d\n", x, x_idx);
+        return -1;
+    }
     float result = logf(x);
     return tape_record_unary(tape, OP_LOG, x_idx, result, x);
 }
 
 __device__ int ad_sqrt(ADTape* tape, int x_idx) {
     float x = tape->value_buffer[x_idx];
+    if (x < 0.0f) {
+        printf("FATAL [ad_sqrt]: x=%f at idx=%d\n", x, x_idx);
+        return -1;
+    }
     float result = sqrtf(x);
     return tape_record_unary(tape, OP_SQRT, x_idx, result, result);
 }
@@ -147,9 +155,14 @@ __device__ int ad_cos(ADTape* tape, int x_idx) {
 __global__ void ad_backward_kernel(ADTape* tape, int output_idx, float output_grad) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
+    printf("[AD-BACKWARD-ENTRY] output_idx=%d output_grad=%f tape_size=%d\n", output_idx, output_grad, tape->current_size);
+
     tape->grad_buffer[output_idx] = output_grad;
 
     for (int i = tape->current_size - 1; i >= 0; i--) {
+        if (i % 500 == 0 || i < 10) {
+            printf("[AD-BACKWARD-ITER] i=%d op=%d out_idx=%d\n", i, tape->entries[i].op, tape->entries[i].output_idx);
+        }
         TapeEntry* entry = &tape->entries[i];
         float output_grad = tape->grad_buffer[entry->output_idx];
 
@@ -179,12 +192,12 @@ __global__ void ad_backward_kernel(ADTape* tape, int output_idx, float output_gr
             }
             case OP_LOG: {
                 float x = entry->aux_data;
-                tape->grad_buffer[entry->input1_idx] += output_grad / (x + EPSILON_SMALL);
+                tape->grad_buffer[entry->input1_idx] += safe_div(output_grad, x);
                 break;
             }
             case OP_SQRT: {
                 float sqrt_x = entry->aux_data;
-                tape->grad_buffer[entry->input1_idx] += output_grad / (2.0f * sqrt_x + EPSILON_SMALL);
+                tape->grad_buffer[entry->input1_idx] += safe_div(output_grad, 2.0f * sqrt_x);
                 break;
             }
             case OP_SIN: {
@@ -198,9 +211,12 @@ __global__ void ad_backward_kernel(ADTape* tape, int output_idx, float output_gr
                 break;
             }
             default:
-                break;
+                printf("FATAL [autodiff_backward]: unknown op type %d at tape entry %d\n", (int)entry->op, i);
+                return;
         }
     }
+
+    printf("[AD-BACKWARD-EXIT] Completed %d tape entries\n", tape->current_size);
 }
 
 __global__ void reset_tape_kernel(ADTape* tape) {

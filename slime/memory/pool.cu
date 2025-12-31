@@ -3,12 +3,15 @@
 #define POOL_CU
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
-#include "../utils/tile_ops.cuh"
+#include "../utils/cuda_primitives.cuh"
 #include "../compression/delta.cu"
 #include "../memory/archive.cu"
 #include "../memory/genome_ops.cuh"
+#include "../memory/parallel_compaction.cu"
 #include <cuda_runtime.h>
 #include <cuda/atomic>
+
+struct MultiHeadCAState;
 
 struct PoolEntry {
     int id;
@@ -52,6 +55,14 @@ struct PoolEntry {
     float baldwin_sensitivity;
     int coherence_window_size;
     float renyi_q;
+
+    // Per-organism Flow Lenia parameters (derived from genome)
+    float flow_beta_A;
+    float flow_n;
+    float flow_s;
+    float flow_resource_dt;
+
+    MultiHeadCAState* ca_state;
 };
 
 struct ComponentPool {
@@ -60,7 +71,42 @@ struct ComponentPool {
     cuda::atomic<int> total_spawned;
     cuda::atomic<int> total_culled;
     int capacity;
+
+    // Compact index array - maps [0, alive_count) to actual entry indices
+    // Built by compact_alive_indices_kernel before kernels that need dense iteration
+    int* alive_indices;
+    int alive_indices_count;  // Snapshot of active_count at compaction time
 };
+
+// Step 1: Mark alive entries into flags array
+__global__ void mark_alive_kernel(ComponentPool* pool, int* flags) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < pool->capacity) {
+        flags[idx] = pool->entries[idx].alive ? 1 : 0;
+    }
+}
+
+// Step 2: Use existing exclusive_scan_kernel from parallel_compaction.cu
+
+// Step 3: Scatter indices based on scan results
+__global__ void scatter_alive_indices_kernel(
+    ComponentPool* pool, int* flags, int* scan_results
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < pool->capacity && flags[idx]) {
+        pool->alive_indices[scan_results[idx]] = idx;
+    }
+}
+
+// Step 4: Finalize count
+__global__ void finalize_alive_count_kernel(
+    ComponentPool* pool, int* flags, int* scan_results, int capacity
+) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int last_idx = capacity - 1;
+        pool->alive_indices_count = scan_results[last_idx] + flags[last_idx];
+    }
+}
 
 __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
     int num_heads_slot = derive_param_slot(genome_hash, "arch_num_heads");
@@ -68,15 +114,19 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     int head_dim_slot = derive_param_slot(genome_hash, "arch_head_dim");
     int grid_size_slot = derive_param_slot(genome_hash, "arch_grid_size");
 
-    float num_heads_norm = (genome[num_heads_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float channels_norm = (genome[channels_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float head_dim_norm = (genome[head_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float grid_size_norm = (genome[grid_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    float num_heads_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[num_heads_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float channels_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[channels_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float head_dim_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[head_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float grid_size_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[grid_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
 
-    entry->num_heads = NUM_HEADS_MIN + (int)(num_heads_norm * (NUM_HEADS_MAX - NUM_HEADS_MIN));
-    entry->channels = CHANNELS_MIN + (int)(channels_norm * (CHANNELS_MAX - CHANNELS_MIN));
-    entry->head_dim = HEAD_DIM_MIN + (int)(head_dim_norm * (HEAD_DIM_MAX - HEAD_DIM_MIN));
-    entry->grid_size = GRID_SIZE_MIN + (int)(grid_size_norm * (GRID_SIZE_MAX - GRID_SIZE_MIN));
+    entry->num_heads = (int)fmaxf((float)NUM_HEADS_MIN, fminf((float)NUM_HEADS_MAX, NUM_HEADS_MIN + num_heads_norm * (NUM_HEADS_MAX - NUM_HEADS_MIN)));
+
+    int head_dim_tiles = min(HEAD_DIM_TILES_MAX, HEAD_DIM_TILES_MIN + (int)(head_dim_norm * (HEAD_DIM_TILES_MAX - HEAD_DIM_TILES_MIN + 1)));
+    int channels_octets = min(CHANNELS_OCTETS_MAX, CHANNELS_OCTETS_MIN + (int)(channels_norm * (CHANNELS_OCTETS_MAX - CHANNELS_OCTETS_MIN + 1)));
+
+    entry->head_dim = head_dim_tiles * WMMA_TILE_DIM;
+    entry->channels = channels_octets * WMMA_ALIGNMENT;
+    entry->grid_size = (int)fmaxf((float)GRID_SIZE_MIN, fminf((float)GRID_SIZE_MAX, GRID_SIZE_MIN + grid_size_norm * (GRID_SIZE_MAX - GRID_SIZE_MIN)));
     entry->hidden_dim = entry->num_heads * entry->head_dim;
 }
 
@@ -92,27 +142,27 @@ __device__ __forceinline__ void derive_diresa(uint64_t genome_hash, const float*
     int distance_exponent_slot = derive_param_slot(genome_hash, "diresa_distance_exponent");
     int quality_weight_slot = derive_param_slot(genome_hash, "diresa_quality_weight");
 
-    float replicas_norm = (genome[replicas_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float hidden1_norm = (genome[hidden1_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float hidden2_norm = (genome[hidden2_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float batch_size_norm = (genome[batch_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float anneal_step_norm = (genome[anneal_step_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float cov_target_norm = (genome[cov_target_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float dist_weight_norm = (genome[dist_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float recon_weight_norm = (genome[recon_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float distance_exponent_norm = (genome[distance_exponent_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float quality_weight_norm = (genome[quality_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    float replicas_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[replicas_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float hidden1_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[hidden1_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float hidden2_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[hidden2_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float batch_size_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[batch_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float anneal_step_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[anneal_step_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float cov_target_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[cov_target_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float dist_weight_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[dist_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float recon_weight_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[recon_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float distance_exponent_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[distance_exponent_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float quality_weight_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[quality_weight_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
 
-    entry->num_tempering_replicas = NUM_TEMPERING_REPLICAS_MIN + (int)(replicas_norm * (NUM_TEMPERING_REPLICAS_MAX - NUM_TEMPERING_REPLICAS_MIN));
-    entry->diresa_hidden1 = DIRESA_HIDDEN1_MIN + (int)(hidden1_norm * (DIRESA_HIDDEN1_MAX - DIRESA_HIDDEN1_MIN));
-    entry->diresa_hidden2 = DIRESA_HIDDEN2_MIN + (int)(hidden2_norm * (DIRESA_HIDDEN2_MAX - DIRESA_HIDDEN2_MIN));
-    entry->diresa_batch_size = DIRESA_BATCH_SIZE_MIN + (int)(batch_size_norm * (DIRESA_BATCH_SIZE_MAX - DIRESA_BATCH_SIZE_MIN));
-    entry->anneal_step = ANNEAL_STEP_MIN + anneal_step_norm * (ANNEAL_STEP_MAX - ANNEAL_STEP_MIN);
-    entry->cov_target = COV_TARGET_MIN + cov_target_norm * (COV_TARGET_MAX - COV_TARGET_MIN);
-    entry->dist_weight = DIST_WEIGHT_MIN + dist_weight_norm * (DIST_WEIGHT_MAX - DIST_WEIGHT_MIN);
-    entry->recon_weight = RECON_WEIGHT_MIN + recon_weight_norm * (RECON_WEIGHT_MAX - RECON_WEIGHT_MIN);
-    entry->distance_exponent = DIRESA_DISTANCE_EXPONENT_MIN + distance_exponent_norm * (DIRESA_DISTANCE_EXPONENT_MAX - DIRESA_DISTANCE_EXPONENT_MIN);
-    entry->quality_weight = DIRESA_QUALITY_WEIGHT_MIN + quality_weight_norm * (DIRESA_QUALITY_WEIGHT_MAX - DIRESA_QUALITY_WEIGHT_MIN);
+    entry->num_tempering_replicas = (int)fmaxf((float)NUM_TEMPERING_REPLICAS_MIN, fminf((float)NUM_TEMPERING_REPLICAS_MAX, NUM_TEMPERING_REPLICAS_MIN + replicas_norm * (NUM_TEMPERING_REPLICAS_MAX - NUM_TEMPERING_REPLICAS_MIN)));
+    entry->diresa_hidden1 = (int)fmaxf((float)DIRESA_HIDDEN1_MIN, fminf((float)DIRESA_HIDDEN1_MAX, DIRESA_HIDDEN1_MIN + hidden1_norm * (DIRESA_HIDDEN1_MAX - DIRESA_HIDDEN1_MIN)));
+    entry->diresa_hidden2 = (int)fmaxf((float)DIRESA_HIDDEN2_MIN, fminf((float)DIRESA_HIDDEN2_MAX, DIRESA_HIDDEN2_MIN + hidden2_norm * (DIRESA_HIDDEN2_MAX - DIRESA_HIDDEN2_MIN)));
+    entry->diresa_batch_size = (int)fmaxf((float)DIRESA_BATCH_SIZE_MIN, fminf((float)DIRESA_BATCH_SIZE_MAX, DIRESA_BATCH_SIZE_MIN + batch_size_norm * (DIRESA_BATCH_SIZE_MAX - DIRESA_BATCH_SIZE_MIN)));
+    entry->anneal_step = fmaxf(ANNEAL_STEP_MIN, fminf(ANNEAL_STEP_MAX, ANNEAL_STEP_MIN + anneal_step_norm * (ANNEAL_STEP_MAX - ANNEAL_STEP_MIN)));
+    entry->cov_target = fmaxf(COV_TARGET_MIN, fminf(COV_TARGET_MAX, COV_TARGET_MIN + cov_target_norm * (COV_TARGET_MAX - COV_TARGET_MIN)));
+    entry->dist_weight = fmaxf(DIST_WEIGHT_MIN, fminf(DIST_WEIGHT_MAX, DIST_WEIGHT_MIN + dist_weight_norm * (DIST_WEIGHT_MAX - DIST_WEIGHT_MIN)));
+    entry->recon_weight = fmaxf(RECON_WEIGHT_MIN, fminf(RECON_WEIGHT_MAX, RECON_WEIGHT_MIN + recon_weight_norm * (RECON_WEIGHT_MAX - RECON_WEIGHT_MIN)));
+    entry->distance_exponent = fmaxf(DIRESA_DISTANCE_EXPONENT_MIN, fminf(DIRESA_DISTANCE_EXPONENT_MAX, DIRESA_DISTANCE_EXPONENT_MIN + distance_exponent_norm * (DIRESA_DISTANCE_EXPONENT_MAX - DIRESA_DISTANCE_EXPONENT_MIN)));
+    entry->quality_weight = fmaxf(DIRESA_QUALITY_WEIGHT_MIN, fminf(DIRESA_QUALITY_WEIGHT_MAX, DIRESA_QUALITY_WEIGHT_MIN + quality_weight_norm * (DIRESA_QUALITY_WEIGHT_MAX - DIRESA_QUALITY_WEIGHT_MIN)));
 }
 
 __device__ __forceinline__ void derive_fitness_exponents(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
@@ -153,11 +203,12 @@ struct PRNGState {
 
     __device__ float next() {
         uint64_t x = s0;
-        uint64_t const y = s1;
-        s0 = y;
-        x ^= x << XORSHIFT_A;
-        s1 = x ^ y ^ (x >> XORSHIFT_B) ^ (y >> XORSHIFT_C);
-        return (s1 + y) / XORSHIFT_NORMALIZATION_SCALE;
+        uint64_t y = s1;
+        uint64_t result = x + y;
+        y ^= x;
+        s0 = ((x << XORSHIFT128_ROTL_A) | (x >> (XORSHIFT_STATE_BITS - XORSHIFT128_ROTL_A))) ^ y ^ (y << XORSHIFT128_SHIFT_C);
+        s1 = (y << XORSHIFT128_ROTL_B) | (y >> (XORSHIFT_STATE_BITS - XORSHIFT128_ROTL_B));
+        return (double)result / XORSHIFT_NORMALIZATION_SCALE;
     }
 
     __device__ float levy_stable(float alpha, float scale) {
@@ -165,17 +216,33 @@ struct PRNGState {
         float V = next();
         float W = next();
 
-        float phi = TAU * (V - CENTERED_DIFFERENCE_SCALE);
-        float quarter_tau_alpha = (TAU * QUARTER_SCALE) * alpha;
-        float xi = (TAU * QUARTER_SCALE) - quarter_tau_alpha + phi;
+        float phi = (TAU * 0.25f) * (2.0f * V - 1.0f);
         float alpha_phi = alpha * phi;
+        float one_minus_alpha_phi = (1.0f - alpha) * phi;
 
         float levy_num = sinf(alpha_phi);
-        float levy_denom = powf(fabsf(cosf(phi)) + EPSILON, (NORMALIZED_MAX / alpha));
+        float cos_phi = cosf(phi);
+        if (cos_phi <= 0.0f) {
+            printf("FATAL [levy_stable]: cos_phi=%f phi=%f\n", cos_phi, phi);
+            return NAN;
+        }
+        float levy_denom = powf(cos_phi, (1.0f / alpha));
 
-        float log_w = fabsf(-logf(W + EPSILON));
-        float levy_base = fabsf(cosf(xi)) / (log_w + EPSILON);
-        float levy_factor = powf(levy_base + EPSILON, ((NORMALIZED_MAX - alpha) / alpha));
+        if (W <= 0.0f || W >= 1.0f) {
+            printf("FATAL [levy_stable]: W=%f\n", W);
+            return NAN;
+        }
+        float log_w = -logf(W);
+        if (log_w <= 0.0f) {
+            printf("FATAL [levy_stable]: log_w=%f W=%f\n", log_w, W);
+            return NAN;
+        }
+        float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
+        if (cos_one_minus_alpha_phi <= 0.0f) {
+            printf("FATAL [levy_stable]: cos((1-α)*phi)=%f\n", cos_one_minus_alpha_phi);
+            return NAN;
+        }
+        float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - alpha) / alpha));
 
         return (levy_num / levy_denom * levy_factor) * scale;
     }
@@ -201,11 +268,6 @@ __global__ void spawn_component_kernel(
             for (int i = 0; i < pool->capacity; i++) {
                 if (!pool->entries[i].alive) {
                     pool->entries[i].id = new_id;
-                    pool->entries[i].fitness = DEFAULT_FITNESS;
-                    pool->entries[i].coherence = DEFAULT_FITNESS;
-                    pool->entries[i].task_accuracy = DEFAULT_FITNESS;
-                    pool->entries[i].generalization_gap = DEFAULT_FITNESS;
-                    pool->entries[i].hardware_efficiency = DEFAULT_FITNESS;
                     pool->entries[i].age = 0;
                     pool->entries[i].alive = true;
 
@@ -323,6 +385,14 @@ __global__ void spawn_component_kernel(
                     derive_diresa(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
                     derive_fitness_exponents(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
 
+                    int init_fitness_slot = derive_param_slot(pool->entries[i].genome_hash, "initial_fitness_prior");
+                    float init_fitness_prior = fmaxf(0.01f, (child_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
+                    pool->entries[i].fitness = init_fitness_prior;
+                    pool->entries[i].coherence = init_fitness_prior;
+                    pool->entries[i].task_accuracy = init_fitness_prior;
+                    pool->entries[i].generalization_gap = 0.0f;
+                    pool->entries[i].hardware_efficiency = 1.0f;
+
                     Atomics::increment_int(pool->active_count);
                     break;
                 }
@@ -378,7 +448,7 @@ __global__ void update_hunger_kernel(ComponentPool* pool) {
 
     if (idx < pool->capacity && pool->entries[idx].alive) {
 
-        pool->entries[idx].hunger = 1.0f - pool->entries[idx].coherence;
+        pool->entries[idx].hunger = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence);
     }
 }
 
@@ -528,14 +598,9 @@ __global__ void init_pool_kernel(
         pool->entries[idx].delta_values = &delta_values_buffer[idx * GENOME_SIZE];
         pool->entries[idx].gradients = &gradients_buffer[idx * GENOME_SIZE];
 
-        if (idx < MIN_POOL_SIZE) {
+        if (idx < POOL_CAPACITY_MIN) {
             pool->entries[idx].id = idx;
             pool->entries[idx].alive = true;
-            pool->entries[idx].fitness = DEFAULT_FITNESS;
-            pool->entries[idx].coherence = DEFAULT_FITNESS;
-            pool->entries[idx].task_accuracy = DEFAULT_FITNESS;
-            pool->entries[idx].generalization_gap = DEFAULT_FITNESS;
-            pool->entries[idx].hardware_efficiency = DEFAULT_FITNESS;
             pool->entries[idx].age = 0;
             pool->entries[idx].parent_hash = 0;
             pool->entries[idx].num_deltas = GENOME_SIZE;
@@ -555,19 +620,25 @@ __global__ void init_pool_kernel(
             pool->entries[idx].hunger = init_params.initial_hunger;
 
             derive_architecture(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-
             derive_diresa(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-
             derive_fitness_exponents(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
+
+            int init_fitness_slot = derive_param_slot(pool->entries[idx].genome_hash, "initial_fitness_prior");
+            float init_fitness_prior = fmaxf(0.01f, (temp_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
+            pool->entries[idx].fitness = init_fitness_prior;
+            pool->entries[idx].coherence = init_fitness_prior;
+            pool->entries[idx].task_accuracy = init_fitness_prior;
+            pool->entries[idx].generalization_gap = 0.0f;
+            pool->entries[idx].hardware_efficiency = 1.0f;
         } else {
             pool->entries[idx].id = -1;
             pool->entries[idx].alive = false;
-            pool->entries[idx].fitness = DEFAULT_FITNESS;
-            pool->entries[idx].coherence = DEFAULT_FITNESS;
-            pool->entries[idx].task_accuracy = DEFAULT_FITNESS;
-            pool->entries[idx].generalization_gap = DEFAULT_FITNESS;
-            pool->entries[idx].hardware_efficiency = DEFAULT_FITNESS;
-            pool->entries[idx].hunger = DEFAULT_FITNESS;
+            pool->entries[idx].fitness = 0.0f;
+            pool->entries[idx].coherence = 0.0f;
+            pool->entries[idx].task_accuracy = 0.0f;
+            pool->entries[idx].generalization_gap = 0.0f;
+            pool->entries[idx].hardware_efficiency = 0.0f;
+            pool->entries[idx].hunger = 0.0f;
             pool->entries[idx].age = 0;
             pool->entries[idx].parent_hash = 0;
             pool->entries[idx].num_deltas = 0;
@@ -580,8 +651,8 @@ __global__ void init_pool_kernel(
 
     if (idx == 0) {
         pool->capacity = capacity;
-        pool->active_count = MIN_POOL_SIZE;
-        pool->total_spawned = MIN_POOL_SIZE;
+        pool->active_count = POOL_CAPACITY_MIN;
+        pool->total_spawned = POOL_CAPACITY_MIN;
         pool->total_culled = 0;
     }
 }
@@ -673,7 +744,7 @@ __global__ void compute_pool_stats_kernel(
         float genome_levy = temp_genome[levy_alpha_slot];
         float genome_diversity = temp_genome[diversity_slot];
 
-        params.initial_hunger = (genome_hunger + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        params.initial_hunger = fmaxf(0.01f, (genome_hunger + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
         params.mutation_scale = (genome_mutation + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.1f;
         params.mutation_levy_alpha = CHEMOTAXIS_LEVY_ALPHA_MIN + (genome_levy + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (CHEMOTAXIS_LEVY_ALPHA_MAX - CHEMOTAXIS_LEVY_ALPHA_MIN);
         params.diversity_normalization = 1.0f + (genome_diversity + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 1000.0f;
@@ -682,54 +753,35 @@ __global__ void compute_pool_stats_kernel(
     }
 }
 
-struct PoolBuffers {
-    uint16_t* indices;
-    float* values;
-    float* gradients;
-};
+// Device kernel to compact pool alive indices (CDP)
+// Must be called before kernels that iterate only over alive entries
+// Since POOL_CAPACITY_MAX = BLOCK_SIZE, single-block scan is sufficient
+__global__ void compact_pool_alive_indices_kernel(
+    ComponentPool* pool,
+    int* flags,
+    int* scan_workspace,
+    int* scan_recursive_workspace,
+    int capacity
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-__global__ void init_pool_buffers_kernel(ComponentPool* pool, int capacity, PoolBuffers* buffers) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        size_t indices_size = sizeof(uint16_t) * GENOME_SIZE * capacity;
-        size_t values_size = sizeof(float) * GENOME_SIZE * capacity;
-        size_t gradients_size = sizeof(float) * GENOME_SIZE * capacity;
-        size_t total_mb = (indices_size + values_size + gradients_size) / BYTES_PER_MB;
+    int blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-        cudaError_t err = cudaMalloc(&buffers->indices, indices_size);
-        if (err != cudaSuccess) {
-            printf("[pool_buffers] indices alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)indices_size);
-            buffers->indices = nullptr;
-            buffers->values = nullptr;
-            buffers->gradients = nullptr;
-            return;
-        }
-        err = cudaMalloc(&buffers->values, values_size);
-        if (err != cudaSuccess) {
-            printf("[pool_buffers] values alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)values_size);
-            cudaFree(buffers->indices);
-            buffers->indices = nullptr;
-            buffers->values = nullptr;
-            buffers->gradients = nullptr;
-            return;
-        }
-        err = cudaMalloc(&buffers->gradients, gradients_size);
-        if (err != cudaSuccess) {
-            printf("[pool_buffers] gradients alloc_err=%s size=%llu\n", cudaGetErrorString(err), (unsigned long long)gradients_size);
-            cudaFree(buffers->indices);
-            cudaFree(buffers->values);
-            buffers->indices = nullptr;
-            buffers->values = nullptr;
-            buffers->gradients = nullptr;
-            return;
-        }
+    // Step 1: Mark alive entries
+    mark_alive_kernel<<<blocks, BLOCK_SIZE>>>(pool, flags);
+    cudaDeviceSynchronize();
 
-        int pool_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(pool, capacity, buffers->indices, buffers->values, buffers->gradients);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("[pool_buffers] init_pool launch_err=%s\n", cudaGetErrorString(err));
-        }
-    }
+    // Step 2: Exclusive scan (device-side recursive for correctness)
+    exclusive_scan_recursive_kernel<<<1, 1>>>(flags, scan_workspace, scan_recursive_workspace, capacity, BLOCK_SIZE);
+    cudaDeviceSynchronize();
+
+    // Step 3: Scatter indices
+    scatter_alive_indices_kernel<<<blocks, BLOCK_SIZE>>>(pool, flags, scan_workspace);
+    cudaDeviceSynchronize();
+
+    // Step 4: Finalize count
+    finalize_alive_count_kernel<<<1, 1>>>(pool, flags, scan_workspace, capacity);
+    cudaDeviceSynchronize();
 }
 
 #endif
