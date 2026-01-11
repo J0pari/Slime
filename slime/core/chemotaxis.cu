@@ -31,6 +31,7 @@ struct ChemicalField {
     float* sources;
     float* decay_factors;
     TemporalTube* history;
+    float cached_mean;  // Precomputed mean concentration - updated once per generation via parallel reduction
 };
 
 struct BehavioralState {
@@ -88,7 +89,6 @@ __global__ void initialize_ca_from_field_kernel(
     int entry_idx
 ) {
     if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && entry_idx == 0) {
-        printf("[INIT-CA-CHILD] ENTER entry_idx=%d\n", entry_idx);
     }
 
     if (entry_idx >= pool->capacity) return;
@@ -128,7 +128,10 @@ __global__ void update_field_from_ca_kernel(
     int idx = y * grid_size + x;
     float* ca_concentration = entry->ca_state->ca_concentration;
 
-    atomicAdd(&chemical_concentration[idx], ca_concentration[idx]);
+    float val = ca_concentration[idx];
+    if (isfinite(val)) {
+        atomicAdd(&chemical_concentration[idx], val);
+    }
 }
 
 __global__ void diffusion_reaction_kernel(
@@ -154,8 +157,6 @@ __global__ void diffusion_reaction_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
-
-    if (x == grid_size - 1 && y == grid_size - 1) printf("[RULED-OUT] diffusion_reaction completed grid=%d - NOT the hang\n", grid_size);
 
     int idx = y * grid_size + x;
 
@@ -322,7 +323,6 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
 
     float cos_phi = cosf(phi);
     if (cos_phi <= 0.0f) {
-        printf("FATAL [levy_chemotaxis]: cos_phi=%f\n", cos_phi);
         agent->velocity[0] = 0.0f;
         agent->velocity[1] = 0.0f;
         return;
@@ -330,21 +330,18 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     float levy_denom = powf(cos_phi, (NORMALIZED_MAX / levy_alpha));
 
     if (W <= 0.0f) {
-        printf("FATAL [levy_chemotaxis]: W=%f\n", W);
         agent->velocity[0] = 0.0f;
         agent->velocity[1] = 0.0f;
         return;
     }
     float log_w = -logf(W);
     if (log_w <= 0.0f) {
-        printf("FATAL [levy_chemotaxis]: log_w=%f W=%f\n", log_w, W);
         agent->velocity[0] = 0.0f;
         agent->velocity[1] = 0.0f;
         return;
     }
     float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
     if (cos_one_minus_alpha_phi <= 0.0f) {
-        printf("FATAL [levy_chemotaxis]: cos((1-α)*phi)=%f one_minus_alpha_phi=%f\n", cos_one_minus_alpha_phi, one_minus_alpha_phi);
         agent->velocity[0] = 0.0f;
         agent->velocity[1] = 0.0f;
         return;
@@ -354,7 +351,6 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     float levy_sample = levy_num / levy_denom * levy_factor;
 
     if (U <= 0.0f) {
-        printf("FATAL [levy_chemotaxis]: U=%f\n", U);
         agent->velocity[0] = 0.0f;
         agent->velocity[1] = 0.0f;
         return;
@@ -375,7 +371,6 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     for (int i = 0; i < GRADIENT_HISTORY; i++) {
         float age = (float)(GRADIENT_HISTORY - i);
         if (age <= 0.0f) {
-            printf("FATAL [chemotaxis]: age=%f\n", age);
             return;
         }
         float kernel_weight = powf(age, kernel_exponent);
@@ -523,7 +518,6 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
 
         float magnitude = sqrtf(cos_sum * cos_sum + sin_sum * sin_sum) / GRADIENT_HISTORY;
         if (freq <= 0.0f) {
-            printf("FATAL [behavioral_embedding]: freq=%f\n", freq);
             return;
         }
         float amplitude_weight = powf(freq, -fourier_spectrum_exponent);
@@ -567,8 +561,6 @@ __global__ void init_embedding_weights_kernel(float* embedding_weights, int beha
 
     curandState state;
     curand_init(seed, idx, 0, &state);
-    if (idx == 0) printf("[RULED-OUT] init_embedding curand_init completed threads=%d - if you see this curand is NOT hanging\n", (int)(gridDim.x * blockDim.x));
-
     int row = idx / behavioral_dim;
     int col = idx % behavioral_dim;
 
@@ -579,7 +571,6 @@ __global__ void init_embedding_weights_kernel(float* embedding_weights, int beha
         val = 0.01f * curand_normal(&state);
     }
     if (isnan(val) || isinf(val)) {
-        printf("FATAL [init_embedding]: idx=%d row=%d col=%d val=%f\n", idx, row, col, val);
         return;
     }
     embedding_weights[idx] = val;
@@ -590,10 +581,6 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (agent_id == 0) {
-        printf("[behavioral] agents=%p num=%d seed=%u genome=%p genome_hash=%llu organism_id=%d\n",
-               agents, num_agents, seed, genome, genome_hash, organism_id);
-        printf("[behavioral] dims: hw=%d task=%d gen=%d total=%d hw_coords=%p task_coords=%p gen_coords=%p\n",
-               hw_dim, task_dim, gen_dim, behavioral_dim, agents[0].hw_coords, agents[0].task_coords, agents[0].gen_coords);
     }
 
     if (agent_id >= num_agents) return;
@@ -627,7 +614,6 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     agent->velocity[1] = 0.0f;
 
     if (agent_id == 0) {
-        printf("[behavioral] agent0 levy params: alpha=%f scale=%f\n", levy_alpha, embedding_scale);
     }
 
     for (int i = 0; i < hw_dim; i++) {
@@ -641,8 +627,6 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     }
 
     if (agent_id == 0) {
-        printf("[behavioral] agent0 coords assigned: hw[0]=%f task[0]=%f gen[0]=%f\n",
-               agent->hw_coords[0], agent->task_coords[0], agent->gen_coords[0]);
     }
 
     for (int i = 0; i < GRADIENT_HISTORY; i++) {
@@ -660,11 +644,6 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     agent->organism_id = organism_id;
 
     if (agent_id == 0) {
-        printf("[behavioral] agent0: pos=[%f,%f] vel=[%f,%f] exploration=%f sensitivity=%f levy_alpha=%f\n",
-               agent->position[0], agent->position[1], agent->velocity[0], agent->velocity[1],
-               init_exploration, init_sensitivity, levy_alpha);
-        printf("[behavioral] agent0: hw_coords[0]=%f task_coords[0]=%f gen_coords[0]=%f\n",
-               agent->hw_coords[0], agent->task_coords[0], agent->gen_coords[0]);
     }
 }
 
@@ -684,21 +663,12 @@ __global__ void init_chemical_field_kernel(
 
     if (x >= grid_size || y >= grid_size) return;
 
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] ENTRY x=0 y=0\n");
-
     int idx = y * grid_size + x;
 
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before ChemotaxisParams\n");
     ChemotaxisParams params;
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before derive_from_genome_hash\n");
     params.derive_from_genome_hash(genome_hash);
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] After derive_from_genome_hash\n");
-
     InitContext ctx;
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] Before ctx.derive_from_genome\n");
     ctx.derive_from_genome(genome_hash, genome);
-    if (x == 0 && y == 0) printf("[CHEM-FIELD] After ctx.derive_from_genome\n");
-
     float chemical_decay = params.get_chemical_decay(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
     field->concentration[idx] = 0.0f;
@@ -710,11 +680,63 @@ __global__ void init_chemical_field_kernel(
 
     if (x == 0 && y == 0) {
         int null_check = (field->concentration == nullptr) + (field->gradient_x == nullptr) + (field->gradient_y == nullptr) + (field->laplacian == nullptr);
-        printf("[chemical_field] field=%p grid=%d field_size=%d decay=%f nulls=%d conc=%p grad_x=%p laplacian=%p\n",
-               field, grid_size, grid_size*grid_size, chemical_decay, null_check, field->concentration, field->gradient_x, field->laplacian);
-        printf("[chemical_field] verify idx0: conc=%f grad_x=%f grad_y=%f decay=%f\n",
-               field->concentration[0], field->gradient_x[0], field->gradient_y[0], field->decay_factors[0]);
     }
+}
+
+// Parallel reduction to compute mean concentration - updates chemical_field->cached_mean
+__global__ void reduce_concentration_mean_kernel(
+    ChemicalField* field,
+    int total_cells,
+    float* partial_sums  // Workspace for block-level partial sums
+) {
+    extern __shared__ float sdata[];
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Each thread loads and accumulates multiple elements (grid-stride loop)
+    float sum = 0.0f;
+    for (int i = idx; i < total_cells; i += blockDim.x * gridDim.x) {
+        sum += field->concentration[i];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+
+    // Warp-level reduction (no sync needed within warp)
+    if (tid < 32) {
+        volatile float* vdata = sdata;
+        vdata[tid] += vdata[tid + 32];
+        vdata[tid] += vdata[tid + 16];
+        vdata[tid] += vdata[tid + 8];
+        vdata[tid] += vdata[tid + 4];
+        vdata[tid] += vdata[tid + 2];
+        vdata[tid] += vdata[tid + 1];
+    }
+
+    // First thread writes block result
+    if (tid == 0) {
+        partial_sums[blockIdx.x] = sdata[0];
+    }
+}
+
+// Final reduction of partial sums and write to cached_mean
+__global__ void finalize_concentration_mean_kernel(
+    ChemicalField* field,
+    float* partial_sums,
+    int num_blocks,
+    int total_cells
+) {
+    float sum = 0.0f;
+    for (int i = 0; i < num_blocks; i++) {
+        sum += partial_sums[i];
+    }
+    field->cached_mean = sum / (float)total_cells;
 }
 
 __global__ void set_chemical_sources_from_agents_kernel(
@@ -732,8 +754,6 @@ __global__ void set_chemical_sources_from_agents_kernel(
 ) {
     int agent_id = threadIdx.x;
     if (agent_id >= num_agents) return;
-
-    if (agent_id == num_agents - 1) printf("[RULED-OUT] set_chemical_sources completed agents=%d - NOT the hang\n", num_agents);
 
     BehavioralState* agent = &agents[agent_id];
 
@@ -771,7 +791,9 @@ __global__ void set_chemical_sources_from_agents_kernel(
             float dist_sq = dx * dx + dy * dy;
             float contribution = source_strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * source_sigma * source_sigma));
 
-            atomicAdd(&sources[idx], contribution);
+            if (isfinite(contribution)) {
+                atomicAdd(&sources[idx], contribution);
+            }
         }
     }
 }
@@ -1017,8 +1039,6 @@ extern "C" __global__ void resource_flow_kernel(
 
     float new_rho = rho + dt * drho_dt;
     if (new_rho < -0.1f) {
-        printf("FATAL [resource_conservation]: large negative rho=%f at idx=%d (rho=%f drho_dt=%f dt=%f)\n",
-               new_rho, idx, rho, drho_dt, dt);
         return;
     }
     resource_next[idx] = fmaxf(0.0f, new_rho);
@@ -1026,26 +1046,23 @@ extern "C" __global__ void resource_flow_kernel(
 
 extern "C" __global__ void update_fitness_landscape_kernel(
     ComponentPool* pool,
+    BehavioralState* agents,
     float* __restrict__ fitness_landscape,
     int grid_size
 ) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= grid_size || y >= grid_size) return;
+    int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (entry_idx >= pool->capacity) return;
+    // Use SoA for coalesced alive read
+    if (!pool->alive_flags[entry_idx]) return;
 
-    int idx = y * grid_size + x;
+    float px = agents[entry_idx].position[0];
+    float py = agents[entry_idx].position[1];
+    int gx = min((int)(px * grid_size), grid_size - 1);
+    int gy = min((int)(py * grid_size), grid_size - 1);
+    int idx = gy * grid_size + gx;
 
-    float total_fitness = 0.0f;
-    int count = 0;
-
-    for (int i = 0; i < pool->capacity; i++) {
-        if (pool->entries[i].alive) {
-            total_fitness += pool->entries[i].fitness;
-            count++;
-        }
-    }
-
-    fitness_landscape[idx] = (count > 0) ? (total_fitness / count) : 0.0f;
+    // Use SoA for coalesced fitness read
+    atomicAdd(&fitness_landscape[idx], pool->fitness_values[entry_idx]);
 }
 
 #endif

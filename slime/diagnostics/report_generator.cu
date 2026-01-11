@@ -4,6 +4,8 @@
 
 #include "../config/config.cu"
 #include "../utils/cuda_primitives.cuh"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "../../external/stb_image_write.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -19,30 +21,26 @@ __host__ void compute_sha256(const void* data, size_t len, uint8_t hash[SHA256_H
     HCRYPTHASH hHash = 0;
 
     if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-        printf("ERROR: CryptAcquireContext failed\n");
-        memset(hash, 0, SHA256_HASH_SIZE);
+        memset(hash, 0xFF, SHA256_HASH_SIZE);  // Sentinel: all-FF = obvious failure
         return;
     }
 
     if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
-        printf("ERROR: CryptCreateHash failed\n");
         CryptReleaseContext(hProv, 0);
-        memset(hash, 0, SHA256_HASH_SIZE);
+        memset(hash, 0xFF, SHA256_HASH_SIZE);
         return;
     }
 
     if (!CryptHashData(hHash, (const BYTE*)data, (DWORD)len, 0)) {
-        printf("ERROR: CryptHashData failed\n");
         CryptDestroyHash(hHash);
         CryptReleaseContext(hProv, 0);
-        memset(hash, 0, SHA256_HASH_SIZE);
+        memset(hash, 0xFF, SHA256_HASH_SIZE);
         return;
     }
 
     DWORD hashLen = SHA256_HASH_SIZE;
     if (!CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
-        printf("ERROR: CryptGetHashParam failed\n");
-        memset(hash, 0, SHA256_HASH_SIZE);
+        memset(hash, 0xFF, SHA256_HASH_SIZE);
     }
 
     CryptDestroyHash(hHash);
@@ -59,7 +57,6 @@ __host__ void compute_sha256(const void* data, size_t len, uint8_t hash[SHA256_H
 __host__ void dump_raw_buffer(const char* filename, const void* data, size_t size_bytes, const char* manifest_path) {
     FILE* f = fopen(filename, "wb");
     if (!f) {
-        printf("ERROR: Cannot write %s\n", filename);
         return;
     }
 
@@ -67,7 +64,6 @@ __host__ void dump_raw_buffer(const char* filename, const void* data, size_t siz
     fclose(f);
 
     if (written != size_bytes) {
-        printf("ERROR: Wrote %zu bytes, expected %zu for %s\n", written, size_bytes, filename);
         return;
     }
 
@@ -87,41 +83,34 @@ __host__ void dump_raw_buffer(const char* filename, const void* data, size_t siz
 
 __host__ void dump_sample_raw(const char* base_path, int generation, unsigned char* h_image,
                              int sample_rows, int sample_cols, int channels, const char* manifest) {
-    char raw_file[PATH_BUFFER_SIZE], pgm_file[PATH_BUFFER_SIZE];
+    char raw_file[PATH_BUFFER_SIZE], png_file[PATH_BUFFER_SIZE];
     int sample_size = sample_rows * sample_cols * channels;
 
     snprintf(raw_file, sizeof(raw_file), "%s/sample_%04d.raw", base_path, generation);
-    snprintf(pgm_file, sizeof(pgm_file), "%s/sample_%04d.pgm", base_path, generation);
+    snprintf(png_file, sizeof(png_file), "%s/sample_%04d.png", base_path, generation);
 
     dump_raw_buffer(raw_file, h_image, sample_size, manifest);
-
-    FILE* f = fopen(pgm_file, "wb");
-    if (f) {
-        fprintf(f, "P5\n%d %d\n255\n", sample_cols, sample_rows);
-        fwrite(h_image, 1, sample_size, f);
-        fclose(f);
-    }
+    stbi_write_png(png_file, sample_cols, sample_rows, channels, h_image, sample_cols * channels);
 }
 
 __host__ void dump_ca_raw(const char* base_path, int generation, float* h_ca_state, int grid_size, int channels, const char* manifest) {
-    char raw_file[PATH_BUFFER_SIZE], pgm_file[PATH_BUFFER_SIZE];
+    char raw_file[PATH_BUFFER_SIZE], png_file[PATH_BUFFER_SIZE];
     size_t ca_size = grid_size * grid_size * channels * sizeof(float);
 
     snprintf(raw_file, sizeof(raw_file), "%s/ca_%04d.raw", base_path, generation);
-    snprintf(pgm_file, sizeof(pgm_file), "%s/ca_%04d.pgm", base_path, generation);
+    snprintf(png_file, sizeof(png_file), "%s/ca_%04d.png", base_path, generation);
 
     dump_raw_buffer(raw_file, h_ca_state, ca_size, manifest);
 
-    FILE* f = fopen(pgm_file, "wb");
-    if (f) {
-        fprintf(f, "P5\n%d %d\n255\n", grid_size, grid_size);
+    unsigned char* pixels = (unsigned char*)malloc(grid_size * grid_size);
+    if (pixels) {
         for (int i = 0; i < grid_size * grid_size; i++) {
             float val = h_ca_state[i * channels];
             float clamped = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
-            unsigned char pixel = (unsigned char)(clamped * UINT8_MAX);
-            fwrite(&pixel, 1, 1, f);
+            pixels[i] = (unsigned char)(clamped * 255.0f);
         }
-        fclose(f);
+        stbi_write_png(png_file, grid_size, grid_size, 1, pixels, grid_size);
+        free(pixels);
     }
 }
 

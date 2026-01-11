@@ -11,7 +11,7 @@
     do { \
         cudaError_t err = call; \
         if (err != cudaSuccess) { \
-            printf("CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+\
             exit(1); \
         } \
     } while(0)
@@ -118,10 +118,6 @@ bool test_rd_initialization() {
     bool u_valid = (h_u_nan == 0) && (fabsf(h_u_mean - 1.0f) < 0.1f);
     bool v_valid = (h_v_nan == 0) && (h_v_mean >= 0.0f) && (h_v_mean < 0.3f) && (h_v_max > 0.0f);
 
-    printf("[rd_init] u_mean=%.4f v_mean=%.4f u_nan=%d v_nan=%d %s\n",
-           h_u_mean, h_v_mean, h_u_nan, h_v_nan,
-           (u_valid && v_valid) ? "OK" : "FAIL");
-
     cudaFree(d_u_field);
     cudaFree(d_v_field);
     cudaFree(d_u_min);
@@ -174,9 +170,6 @@ bool test_chemical_field_initialization() {
     float mean = sum / (float)(GRID_SIZE * GRID_SIZE);
 
     bool valid = (nan_count == 0) && (valid_range == GRID_SIZE * GRID_SIZE) && (mean > 0.3f && mean < 0.7f);
-
-    printf("[chemical_init] mean=%.6f range_valid=%d/%d nan=%d %s\n",
-           mean, valid_range, GRID_SIZE * GRID_SIZE, nan_count, valid ? "OK" : "FAIL");
 
     delete[] h_field;
     cudaFree(d_chemical_field);
@@ -231,9 +224,6 @@ bool test_resource_flow() {
 
     bool valid = (h_nan == 0) && (h_min >= 0.0f) && (h_mean > 0.0f);
 
-    printf("[resource_flow] min=%.4f max=%.4f mean=%.4f nan=%d %s\n",
-           h_min, h_max, h_mean, h_nan, valid ? "OK" : "FAIL");
-
     cudaFree(d_resource);
     cudaFree(d_resource_next);
     cudaFree(d_fitness_landscape);
@@ -252,8 +242,6 @@ int main() {
     total++; if (test_rd_initialization()) passed++;
     total++; if (test_chemical_field_initialization()) passed++;
     total++; if (test_resource_flow()) passed++;
-
-    printf("%d/%d passed\n", passed, total);
 
     return (passed == total) ? 0 : 1;
 }

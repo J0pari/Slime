@@ -17,7 +17,6 @@ __device__ void jacobi_rotation(float* A, int n, int p, int q, float* s, float* 
     float apq = A[p * n + q];
 
     if (fabsf(apq) <= 0.0f) {
-        printf("FATAL [jacobi_rotation]: apq=%f\n", apq);
         *s = 0.0f;
         *c = 1.0f;
         return;
@@ -128,7 +127,6 @@ __global__ void gpu_svd_kernel(
                 if (global_idx < n && tile_row == tile_col) {
                     float diag_val = shared_A[tid][tid];
                     if (diag_val < 0.0f) {
-                        printf("FATAL [svd_jacobi]: negative diagonal element A[%d][%d]=%f\n", tid, tid, diag_val);
                         S[global_idx] = 0.0f;
                         return;
                     }
@@ -145,25 +143,23 @@ __global__ void effective_rank_from_latent_kernel(
     float* __restrict__ rank_out,
     int latent_dim
 ) {
-    float mean = 0.0f;
-    for (int i = 0; i < latent_dim; i++) {
-        mean += latent_genome[i];
-    }
-    mean /= latent_dim;
+    int tid = threadIdx.x;
 
-    float variance = 0.0f;
-    for (int i = 0; i < latent_dim; i++) {
+    float local_sum = 0.0f;
+    for (int i = tid; i < latent_dim; i += blockDim.x) {
+        local_sum += latent_genome[i];
+    }
+    float mean = BlockReduce<BLOCK_SIZE>::sum(local_sum) / latent_dim;
+    mean = __shfl_sync(0xffffffff, mean, 0);
+
+    float local_var = 0.0f;
+    for (int i = tid; i < latent_dim; i += blockDim.x) {
         float diff = latent_genome[i] - mean;
-        variance += diff * diff;
+        local_var += diff * diff;
     }
-    variance /= latent_dim;
+    float variance = BlockReduce<BLOCK_SIZE>::sum(local_var) / latent_dim;
 
-    if (threadIdx.x == 0) {
-        if (variance < 0.0f) {
-            printf("FATAL [effective_rank]: variance=%f\n", variance);
-            *rank_out = 0.0f;
-            return;
-        }
+    if (tid == 0 && variance >= 0.0f) {
         *rank_out = sqrtf(variance) * latent_dim;
     }
 }
@@ -185,7 +181,6 @@ __global__ void coherence_kernel(
         float curr_error = prediction_errors[tid];
         float next_error = prediction_errors[tid + 1];
         if (curr_error <= 0.0f) {
-            printf("FATAL [coherence]: curr_error[%d]=%f\n", tid, curr_error);
             return;
         }
         local_progress = fmaxf(0.0f, (curr_error - next_error) / curr_error);
@@ -298,7 +293,6 @@ __global__ void flow_lenia_kernel(
 
     float denom = CA_KERNEL_CELL_COUNT * next_val;
     if (denom <= 0.0f) {
-        printf("FATAL [flow_lenia]: denom=%f next_val=%f\n", denom, next_val);
         next_state[idx] = 0.0f;
         return;
     }

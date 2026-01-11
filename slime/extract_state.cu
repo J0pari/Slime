@@ -11,7 +11,7 @@
     do { \
         cudaError_t err = call; \
         if (err != cudaSuccess) { \
-            printf("FATAL CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+\
             return; \
         } \
     } while(0)

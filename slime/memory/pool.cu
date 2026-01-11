@@ -4,14 +4,13 @@
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
 #include "../utils/cuda_primitives.cuh"
-#include "../compression/delta.cu"
 #include "../memory/archive.cu"
+#include "../compression/delta.cu"
 #include "../memory/genome_ops.cuh"
 #include "../memory/parallel_compaction.cu"
+#include "../core/ca_state.cuh"
 #include <cuda_runtime.h>
 #include <cuda/atomic>
-
-struct MultiHeadCAState;
 
 struct PoolEntry {
     int id;
@@ -25,6 +24,7 @@ struct PoolEntry {
     bool alive;
     uint64_t genome_hash;
     uint64_t parent_hash;
+    int parent_idx;  // Pool index of parent, or INT_MAX if spawned from archive/random
     int generation;
     uint16_t num_deltas;
     uint16_t max_deltas;
@@ -60,6 +60,9 @@ struct PoolEntry {
     float flow_beta_A;
     float flow_n;
     float flow_s;
+    float flow_alpha_min;
+    float flow_alpha_max;
+    float flow_sharpness;
     float flow_resource_dt;
 
     MultiHeadCAState* ca_state;
@@ -76,13 +79,28 @@ struct ComponentPool {
     // Built by compact_alive_indices_kernel before kernels that need dense iteration
     int* alive_indices;
     int alive_indices_count;  // Snapshot of active_count at compaction time
+
+    // SoA hot fields for coalesced access in iteration kernels
+    bool* alive_flags;      // [capacity] - mirrors entries[i].alive
+    float* fitness_values;  // [capacity] - mirrors entries[i].fitness
 };
+
+// DIRESA autoencoder - needs PoolEntry definition above
+#include "../learning/diresa.cu"
+
+__global__ void init_rng_states_kernel(curandState* states, int count, unsigned long seed) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < count) {
+        curand_init(seed, idx, 0, &states[idx]);
+    }
+}
 
 // Step 1: Mark alive entries into flags array
 __global__ void mark_alive_kernel(ComponentPool* pool, int* flags) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < pool->capacity) {
-        flags[idx] = pool->entries[idx].alive ? 1 : 0;
+        // Use SoA for coalesced alive read
+        flags[idx] = pool->alive_flags[idx] ? 1 : 0;
     }
 }
 
@@ -223,23 +241,19 @@ struct PRNGState {
         float levy_num = sinf(alpha_phi);
         float cos_phi = cosf(phi);
         if (cos_phi <= 0.0f) {
-            printf("FATAL [levy_stable]: cos_phi=%f phi=%f\n", cos_phi, phi);
             return NAN;
         }
         float levy_denom = powf(cos_phi, (1.0f / alpha));
 
         if (W <= 0.0f || W >= 1.0f) {
-            printf("FATAL [levy_stable]: W=%f\n", W);
             return NAN;
         }
         float log_w = -logf(W);
         if (log_w <= 0.0f) {
-            printf("FATAL [levy_stable]: log_w=%f W=%f\n", log_w, W);
             return NAN;
         }
         float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
         if (cos_one_minus_alpha_phi <= 0.0f) {
-            printf("FATAL [levy_stable]: cos((1-α)*phi)=%f\n", cos_one_minus_alpha_phi);
             return NAN;
         }
         float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - alpha) / alpha));
@@ -248,7 +262,7 @@ struct PRNGState {
     }
 };
 
-__global__ void spawn_component_kernel(
+__device__ void spawn_component_device(
     ComponentPool* pool,
     GPUElite* archive,
     int archive_size,
@@ -259,146 +273,155 @@ __global__ void spawn_component_kernel(
     float* workspace_parent_temp,
     DIRESAWeights* diresa_genome_weights
 ) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int count = Atomics::load_int(pool->active_count);
+    int slot_idx = -1;
+    int new_id;
+    int parent_archive_idx;
+    uint64_t parent_genome_hash;
+    float inheritance_factor;
+    PRNGState rng;
+    PoolInitParams params;
+    float delta_threshold;
+    int has_parent;
+    int use_latent;
 
-        if (count < pool->capacity) {
-            int new_id = atomicAdd((int*)&pool->total_spawned, 1);
+    int count = Atomics::load_int(pool->active_count);
+    if (count < pool->capacity) {
+        new_id = atomicAdd((int*)&pool->total_spawned, 1);
+    } else {
+        return;
+    }
 
-            for (int i = 0; i < pool->capacity; i++) {
-                if (!pool->entries[i].alive) {
-                    pool->entries[i].id = new_id;
-                    pool->entries[i].age = 0;
-                    pool->entries[i].alive = true;
+    for (int i = 0; i < pool->capacity; i++) {
+        // Use SoA for coalesced alive read
+        if (!pool->alive_flags[i]) {
+            int claimed = atomicCAS((int*)&slot_idx, -1, i);
+            if (claimed == -1) break;
+        }
+    }
 
-                    float* parent_genome = workspace_parent_genome;
-                    float* child_genome = workspace_child_genome;
+    if (slot_idx < 0) return;
+    int i = slot_idx;
 
-                    if (parent_id >= 0 && parent_id < pool->capacity) {
-                        PoolEntry* parent = &pool->entries[parent_id];
+    pool->entries[i].id = new_id;
+    pool->entries[i].age = 0;
+    pool->entries[i].alive = true;
+    pool->alive_flags[i] = true;  // SoA sync
+    has_parent = (parent_id >= 0 && parent_id < pool->capacity) ? 1 : 0;
+    pool->entries[i].parent_idx = has_parent ? parent_id : INT_MAX;
+    if (has_parent) {
+        parent_genome_hash = pool->entries[parent_id].genome_hash;
+    }
 
-                        int parent_archive_idx = -1;
-                        for (int k = 0; k < archive_size; k++) {
-                            if (archive->genome_hash[k] == parent->parent_hash) {
-                                parent_archive_idx = k;
-                                break;
-                            }
-                        }
+    float* parent_genome = workspace_parent_genome;
+    float* child_genome = workspace_child_genome;
 
-                        if (parent_archive_idx >= 0 && archive->latent_genome) {
-                            float* parent_latent = &archive->latent_genome[parent_archive_idx * GENOME_LATENT_DIM_MAX];
+    if (has_parent) {
+        PoolEntry* parent = &pool->entries[parent_id];
 
-                            PRNGState rng;
-                            rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
-                            rng.s1 = parent_id * 0xbf58476d1ce4e5b9ULL;
+        // O(1) lookup via hash table
+        parent_archive_idx = hash_table_lookup(
+            archive->hash_table_keys,
+            archive->hash_table_values,
+            parent->parent_hash
+        );
 
-                            reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size, parent->delta_indices, parent->delta_values, parent->num_deltas, parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
+        use_latent = (parent_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
+        rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
+        rng.s1 = parent_id * 0xbf58476d1ce4e5b9ULL;
 
-                            PoolInitParams parent_params;
-                            parent_params.derive_from_genome(parent->genome_hash, parent_genome);
+        reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size,
+            parent->delta_indices, parent->delta_values, parent->num_deltas,
+            parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
 
-                            for (int j = 0; j < GENOME_LATENT_DIM_MAX; j++) {
-                                float mutated_latent = parent_latent[j];
+        params.derive_from_genome(parent->genome_hash, parent_genome);
 
-                                if (rng.next() < mutation_rate) {
-                                    mutated_latent += rng.levy_stable(parent_params.mutation_levy_alpha, parent_params.mutation_scale);
-                                    mutated_latent = tanhf(mutated_latent);
-                                }
-
-                                workspace_parent_temp[j] = mutated_latent;
-                            }
-
-                            diresa_decode(workspace_parent_temp, child_genome, diresa_genome_weights);
-                        } else {
-                            reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size, parent->delta_indices, parent->delta_values, parent->num_deltas, parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
-
-                            PRNGState rng;
-                            rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
-                            rng.s1 = parent_id * 0xbf58476d1ce4e5b9ULL;
-
-                            PoolInitParams parent_params;
-                            parent_params.derive_from_genome(parent->genome_hash, parent_genome);
-
-                            for (int j = 0; j < GENOME_SIZE; j++) {
-                                child_genome[j] = parent_genome[j];
-
-                                if (rng.next() < mutation_rate) {
-                                    child_genome[j] += rng.levy_stable(parent_params.mutation_levy_alpha, parent_params.mutation_scale);
-                                    child_genome[j] = tanhf(child_genome[j]);
-                                }
-                            }
-                        }
-
-                        pool->entries[i].parent_hash = parent->genome_hash;
-
-                        // Fitness-weighted Lamarckian inheritance using genome-derived sigmoid
-                        int inherit_center_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_center");
-                        int inherit_steep_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_steepness");
-
-                        float inherit_center = LIFECYCLE_FITNESS_INHERIT_CENTER_MIN +
-                            ((parent_genome[inherit_center_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE) *
-                            (LIFECYCLE_FITNESS_INHERIT_CENTER_MAX - LIFECYCLE_FITNESS_INHERIT_CENTER_MIN);
-
-                        float inherit_steepness = LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN +
-                            ((parent_genome[inherit_steep_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE) *
-                            (LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX - LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN);
-
-                        // Smooth sigmoid: inheritance_factor = 1 / (1 + exp(-steepness*(fitness - center)))
-                        float inheritance_factor = 1.0f / (1.0f + expf(-inherit_steepness * (parent->fitness - inherit_center)));
-
-                        for (int j = 0; j < GENOME_SIZE; j++) {
-                            pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
-                        }
-                    } else {
-                        PRNGState rng;
-                        rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
-                        rng.s1 = new_id * 0xbf58476d1ce4e5b9ULL;
-
-                        for (int j = 0; j < GENOME_SIZE; j++) {
-                            child_genome[j] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
-                            pool->entries[i].gradients[j] = 0.0f;
-                        }
-
-                        pool->entries[i].parent_hash = 0;
-                    }
-
-                    pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
-
-                    pool->entries[i].num_deltas = 0;
-                    int delta_threshold_slot = derive_param_slot(pool->entries[i].genome_hash, "delta_threshold");
-                    float delta_threshold = (child_genome[delta_threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
-
-                    for (int j = 0; j < GENOME_SIZE; j++) {
-                        float diff = child_genome[j] - parent_genome[j];
-                        if (fabsf(diff) > delta_threshold && pool->entries[i].num_deltas < pool->entries[i].max_deltas) {
-                            int delta_idx = pool->entries[i].num_deltas++;
-                            pool->entries[i].delta_indices[delta_idx] = j;
-                            pool->entries[i].delta_values[delta_idx] = diff;
-                        }
-                    }
-
-                    PoolInitParams init_params;
-                    init_params.derive_from_genome(pool->entries[i].genome_hash, child_genome);
-                    pool->entries[i].hunger = init_params.initial_hunger;
-
-                    derive_architecture(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-                    derive_diresa(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-                    derive_fitness_exponents(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-
-                    int init_fitness_slot = derive_param_slot(pool->entries[i].genome_hash, "initial_fitness_prior");
-                    float init_fitness_prior = fmaxf(0.01f, (child_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
-                    pool->entries[i].fitness = init_fitness_prior;
-                    pool->entries[i].coherence = init_fitness_prior;
-                    pool->entries[i].task_accuracy = init_fitness_prior;
-                    pool->entries[i].generalization_gap = 0.0f;
-                    pool->entries[i].hardware_efficiency = 1.0f;
-
-                    Atomics::increment_int(pool->active_count);
-                    break;
+        if (use_latent) {
+            float* parent_latent = &archive->latent_genome[parent_archive_idx * GENOME_LATENT_DIM_MAX];
+            for (int j = 0; j < GENOME_LATENT_DIM_MAX; j++) {
+                float mutated_latent = parent_latent[j];
+                PRNGState local_rng = rng;
+                local_rng.s0 ^= j;
+                if (local_rng.next() < mutation_rate) {
+                    mutated_latent += local_rng.levy_stable(params.mutation_levy_alpha, params.mutation_scale);
+                    mutated_latent = tanhf(mutated_latent);
                 }
+                workspace_parent_temp[j] = mutated_latent;
+            }
+            diresa_decode(workspace_parent_temp, child_genome, diresa_genome_weights);
+        } else {
+            for (int j = 0; j < GENOME_SIZE; j++) {
+                float val = parent_genome[j];
+                PRNGState local_rng = rng;
+                local_rng.s0 ^= j;
+                if (local_rng.next() < mutation_rate) {
+                    val += local_rng.levy_stable(params.mutation_levy_alpha, params.mutation_scale);
+                    val = tanhf(val);
+                }
+                child_genome[j] = val;
+            }
+        }
+
+        pool->entries[i].parent_hash = parent->genome_hash;
+        int inherit_center_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_center");
+        int inherit_steep_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_steepness");
+        float inherit_center = LIFECYCLE_FITNESS_INHERIT_CENTER_MIN +
+            ((parent_genome[inherit_center_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE) *
+            (LIFECYCLE_FITNESS_INHERIT_CENTER_MAX - LIFECYCLE_FITNESS_INHERIT_CENTER_MIN);
+        float inherit_steepness = LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN +
+            ((parent_genome[inherit_steep_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE) *
+            (LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX - LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN);
+        inheritance_factor = 1.0f / (1.0f + expf(-inherit_steepness * (parent->fitness - inherit_center)));
+
+        for (int j = 0; j < GENOME_SIZE; j++) {
+            pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
+        }
+
+        // Weight copy deferred to inherit_ca_weights_kernel
+        pool->entries[i].parent_hash = parent->genome_hash;
+    } else {
+        rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
+        rng.s1 = new_id * 0xbf58476d1ce4e5b9ULL;
+        pool->entries[i].parent_hash = UINT64_MAX;  // No parent
+
+        for (int j = 0; j < GENOME_SIZE; j++) {
+            PRNGState local_rng = rng;
+            local_rng.s0 ^= j;
+            child_genome[j] = local_rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
+            pool->entries[i].gradients[j] = 0.0f;
+        }
+    }
+
+    pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
+    pool->entries[i].num_deltas = 0;
+    int delta_threshold_slot = derive_param_slot(pool->entries[i].genome_hash, "delta_threshold");
+    delta_threshold = (child_genome[delta_threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+
+    for (int j = 0; j < GENOME_SIZE; j++) {
+        float diff = child_genome[j] - parent_genome[j];
+        if (fabsf(diff) > delta_threshold) {
+            int delta_idx = atomicAdd((int*)&pool->entries[i].num_deltas, 1);
+            if (delta_idx < pool->entries[i].max_deltas) {
+                pool->entries[i].delta_indices[delta_idx] = j;
+                pool->entries[i].delta_values[delta_idx] = diff;
             }
         }
     }
+
+    PoolInitParams init_params;
+    init_params.derive_from_genome(pool->entries[i].genome_hash, child_genome);
+    pool->entries[i].hunger = init_params.initial_hunger;
+    derive_architecture(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
+    derive_diresa(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
+    derive_fitness_exponents(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
+    int init_fitness_slot = derive_param_slot(pool->entries[i].genome_hash, "initial_fitness_prior");
+    float init_fitness_prior = fmaxf(0.01f, (child_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
+    pool->entries[i].fitness = init_fitness_prior;
+    pool->fitness_values[i] = init_fitness_prior;  // SoA sync
+    pool->entries[i].coherence = init_fitness_prior;
+    pool->entries[i].task_accuracy = NAN;  // Set by classification evaluation
+    pool->entries[i].generalization_gap = NAN;  // Set by held-out evaluation
+    pool->entries[i].hardware_efficiency = NAN;  // Set by hardware profiling
+    Atomics::increment_int(pool->active_count);
 }
 
 __global__ void cull_weak_kernel(
@@ -408,10 +431,10 @@ __global__ void cull_weak_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        PoolEntry* entry = &pool->entries[idx];
-
-        if (entry->alive && entry->fitness < threshold) {
-            entry->alive = false;
+        // Use SoA for coalesced alive/fitness reads
+        if (pool->alive_flags[idx] && pool->fitness_values[idx] < threshold) {
+            pool->entries[idx].alive = false;
+            pool->alive_flags[idx] = false;  // SoA sync
             Atomics::decrement_int(pool->active_count);
             Atomics::increment_int(pool->total_culled);
         }
@@ -425,10 +448,10 @@ __global__ void cull_hungry_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        PoolEntry* entry = &pool->entries[idx];
-
-        if (entry->alive && entry->hunger > hunger_threshold) {
-            entry->alive = false;
+        // Use SoA for coalesced alive read
+        if (pool->alive_flags[idx] && pool->entries[idx].hunger > hunger_threshold) {
+            pool->entries[idx].alive = false;
+            pool->alive_flags[idx] = false;  // SoA sync
             Atomics::decrement_int(pool->active_count);
             Atomics::increment_int(pool->total_culled);
         }
@@ -438,7 +461,8 @@ __global__ void cull_hungry_kernel(
 __global__ void age_components_kernel(ComponentPool* pool) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx < pool->capacity && pool->entries[idx].alive) {
+    // Use SoA for coalesced alive read
+    if (idx < pool->capacity && pool->alive_flags[idx]) {
         pool->entries[idx].age++;
     }
 }
@@ -446,8 +470,8 @@ __global__ void age_components_kernel(ComponentPool* pool) {
 __global__ void update_hunger_kernel(ComponentPool* pool) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx < pool->capacity && pool->entries[idx].alive) {
-
+    // Use SoA for coalesced alive read
+    if (idx < pool->capacity && pool->alive_flags[idx]) {
         pool->entries[idx].hunger = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence);
     }
 }
@@ -488,8 +512,8 @@ __global__ void select_top_k_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < k && tid < pool->capacity) {
-
-        if (pool->entries[tid].alive) {
+        // Use SoA for coalesced alive read
+        if (pool->alive_flags[tid]) {
             selected_indices[tid] = tid;
         } else {
             selected_indices[tid] = -1;
@@ -503,16 +527,20 @@ __device__ __noinline__ float compute_genome_distance(
     GPUElite* archive,
     int archive_size
 ) {
-    // Compute distance in DIRESA latent space (much faster than full genome)
-    int idx1 = -1, idx2 = -1;
-    for (int i = 0; i < archive_size; i++) {
-        if (archive->genome_hash[i] == entry1->parent_hash) idx1 = i;
-        if (archive->genome_hash[i] == entry2->parent_hash) idx2 = i;
-    }
+    // O(1) lookups via hash table
+    int idx1 = hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        entry1->parent_hash
+    );
+    int idx2 = hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        entry2->parent_hash
+    );
 
-    if (idx1 < 0 || idx2 < 0) return 1e10f;  // Not in archive
+    if (idx1 < 0 || idx2 < 0) return 1e10f;
 
-    // Use vectorized DIRESAOps warp-reduce distance (128D -> 32 float4 loads)
     const float* latent1 = &archive->latent_genome[idx1 * GENOME_LATENT_DIM_MAX];
     const float* latent2 = &archive->latent_genome[idx2 * GENOME_LATENT_DIM_MAX];
     float distance_squared = DIRESAOps::compute_latent_distance_sq(latent1, latent2, GENOME_LATENT_DIM_MAX);
@@ -528,53 +556,88 @@ __global__ void diversity_selection_kernel(
     int num_select
 ) {
     __shared__ float distances[BLOCK_SIZE];
+    __shared__ int indices[BLOCK_SIZE];
+    __shared__ float warp_max[BLOCK_SIZE / 32];
+    __shared__ int warp_max_idx[BLOCK_SIZE / 32];
 
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + tid;
+    int lane = tid % 32;
+    int warp_id = tid / 32;
+    int capacity = pool->capacity;
 
-    if (idx < pool->capacity && pool->entries[idx].alive) {
-
-        float avg_distance = 0.0f;
+    float my_distance = -1.0f;
+    // Use SoA for coalesced alive reads
+    if (idx < capacity && pool->alive_flags[idx]) {
+        float sum_dist = 0.0f;
         int count = 0;
-
-        for (int i = 0; i < pool->capacity; i++) {
-            if (i != idx && pool->entries[i].alive) {
-
-                float dist = compute_genome_distance(
-                    &pool->entries[idx],
-                    &pool->entries[i],
-                    archive,
-                    archive_size
-                );
-                avg_distance += dist;
+        for (int i = tid; i < capacity; i += blockDim.x) {
+            if (i != idx && pool->alive_flags[i]) {
+                float dist = compute_genome_distance(&pool->entries[idx], &pool->entries[i], archive, archive_size);
+                sum_dist += dist;
                 count++;
             }
         }
-
-        distances[tid] = count > 0 ? avg_distance / count : 0.0f;
-    } else {
-        distances[tid] = -1.0f;
+        sum_dist = warp_reduce_sum(sum_dist);
+        count = (int)warp_reduce_sum((float)count);
+        if (lane == 0 && count > 0) {
+            my_distance = sum_dist / count;
+        }
+        my_distance = __shfl_sync(0xffffffff, my_distance, 0);
     }
-
+    distances[tid] = my_distance;
+    indices[tid] = idx;
     __syncthreads();
 
-    if (tid == 0) {
-        for (int i = 0; i < num_select && i < blockDim.x; i++) {
-            float max_dist = -1.0f;
-            int max_idx = -1;
+    for (int sel = 0; sel < num_select; sel++) {
+        float val = distances[tid];
+        int my_idx = indices[tid];
+        float max_val = val;
+        int max_idx = my_idx;
 
-            for (int j = 0; j < blockDim.x; j++) {
-                if (distances[j] > max_dist) {
-                    max_dist = distances[j];
-                    max_idx = j;
-                }
-            }
-
-            if (max_idx >= 0) {
-                selected_indices[i] = blockIdx.x * blockDim.x + max_idx;
-                distances[max_idx] = -1.0f;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            float other_val = __shfl_down_sync(0xffffffff, max_val, offset);
+            int other_idx = __shfl_down_sync(0xffffffff, max_idx, offset);
+            if (other_val > max_val) {
+                max_val = other_val;
+                max_idx = other_idx;
             }
         }
+
+        if (lane == 0) {
+            warp_max[warp_id] = max_val;
+            warp_max_idx[warp_id] = max_idx;
+        }
+        __syncthreads();
+
+        if (tid < (BLOCK_SIZE / 32)) {
+            max_val = warp_max[tid];
+            max_idx = warp_max_idx[tid];
+            unsigned active = __activemask();
+            for (int offset = (BLOCK_SIZE / 64); offset > 0; offset >>= 1) {
+                float other_val = __shfl_down_sync(active, max_val, offset);
+                int other_idx = __shfl_down_sync(active, max_idx, offset);
+                if (other_val > max_val) {
+                    max_val = other_val;
+                    max_idx = other_idx;
+                }
+            }
+        }
+
+        if (tid == 0 && max_idx >= 0 && max_val >= 0.0f) {
+            selected_indices[sel] = max_idx;
+        }
+        __syncthreads();
+
+        if (tid == 0) {
+            for (int j = 0; j < BLOCK_SIZE; j++) {
+                if (indices[j] == max_idx) {
+                    distances[j] = -1.0f;
+                    break;
+                }
+            }
+        }
+        __syncthreads();
     }
 }
 
@@ -601,8 +664,10 @@ __global__ void init_pool_kernel(
         if (idx < POOL_CAPACITY_MIN) {
             pool->entries[idx].id = idx;
             pool->entries[idx].alive = true;
+            pool->alive_flags[idx] = true;  // SoA sync
             pool->entries[idx].age = 0;
             pool->entries[idx].parent_hash = 0;
+            pool->entries[idx].parent_idx = INT_MAX;  // No parent - randomly generated
             pool->entries[idx].num_deltas = GENOME_SIZE;
 
             float temp_genome[GENOME_SIZE];
@@ -626,25 +691,29 @@ __global__ void init_pool_kernel(
             int init_fitness_slot = derive_param_slot(pool->entries[idx].genome_hash, "initial_fitness_prior");
             float init_fitness_prior = fmaxf(0.01f, (temp_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
             pool->entries[idx].fitness = init_fitness_prior;
+            pool->fitness_values[idx] = init_fitness_prior;  // SoA sync
             pool->entries[idx].coherence = init_fitness_prior;
-            pool->entries[idx].task_accuracy = init_fitness_prior;
-            pool->entries[idx].generalization_gap = 0.0f;
-            pool->entries[idx].hardware_efficiency = 1.0f;
+            pool->entries[idx].task_accuracy = NAN;  // Set by classification evaluation
+            pool->entries[idx].generalization_gap = NAN;  // Set by held-out evaluation
+            pool->entries[idx].hardware_efficiency = NAN;  // Set by hardware profiling
         } else {
-            pool->entries[idx].id = -1;
+            pool->entries[idx].id = INT_MAX;  // Poison value
             pool->entries[idx].alive = false;
-            pool->entries[idx].fitness = 0.0f;
-            pool->entries[idx].coherence = 0.0f;
-            pool->entries[idx].task_accuracy = 0.0f;
-            pool->entries[idx].generalization_gap = 0.0f;
-            pool->entries[idx].hardware_efficiency = 0.0f;
-            pool->entries[idx].hunger = 0.0f;
-            pool->entries[idx].age = 0;
-            pool->entries[idx].parent_hash = 0;
-            pool->entries[idx].num_deltas = 0;
+            pool->alive_flags[idx] = false;  // SoA sync
+            pool->entries[idx].fitness = NAN;
+            pool->fitness_values[idx] = NAN;  // SoA sync
+            pool->entries[idx].coherence = NAN;
+            pool->entries[idx].task_accuracy = NAN;
+            pool->entries[idx].generalization_gap = NAN;
+            pool->entries[idx].hardware_efficiency = NAN;
+            pool->entries[idx].hunger = NAN;
+            pool->entries[idx].age = INT_MAX;  // Poison value
+            pool->entries[idx].parent_hash = UINT64_MAX;  // Poison value
+            pool->entries[idx].parent_idx = INT_MAX;  // Poison value
+            pool->entries[idx].num_deltas = UINT16_MAX;  // Poison value
 
             for (int i = 0; i < GENOME_SIZE; i++) {
-                pool->entries[idx].gradients[i] = 0.0f;
+                pool->entries[idx].gradients[i] = NAN;
             }
         }
     }
@@ -675,8 +744,9 @@ __global__ void compute_pool_stats_kernel(
     float local_coherence = 0.0f;
     float local_age = 0.0f;
 
-    if (idx < pool->capacity && pool->entries[idx].alive) {
-        local_fitness = pool->entries[idx].fitness;
+    // Use SoA for coalesced alive/fitness reads
+    if (idx < pool->capacity && pool->alive_flags[idx]) {
+        local_fitness = pool->fitness_values[idx];
         local_coherence = pool->entries[idx].coherence;
         local_age = (float)pool->entries[idx].age;
     }
@@ -691,7 +761,8 @@ __global__ void compute_pool_stats_kernel(
         atomicAdd(avg_age, total_age);
     }
 
-    if (idx < pool->capacity && pool->entries[idx].alive) {
+    // Use SoA for coalesced alive read
+    if (idx < pool->capacity && pool->alive_flags[idx]) {
         float diversity = 0.0f;
 
         PRNGState rng;
@@ -729,7 +800,8 @@ __global__ void compute_pool_stats_kernel(
 
         for (int i = 0; i < diversity_sample_count; i++) {
             int other_idx = (int)(rng.next() * pool->capacity) % pool->capacity;
-            if (other_idx != idx && pool->entries[other_idx].alive) {
+            // Use SoA for coalesced alive read
+            if (other_idx != idx && pool->alive_flags[other_idx]) {
                 diversity += compute_genome_distance(
                     &pool->entries[idx],
                     &pool->entries[other_idx],
@@ -782,6 +854,86 @@ __global__ void compact_pool_alive_indices_kernel(
     // Step 4: Finalize count
     finalize_alive_count_kernel<<<1, 1>>>(pool, flags, scan_workspace, capacity);
     cudaDeviceSynchronize();
+}
+
+__global__ void collect_pool_task_accuracies_kernel(
+    ComponentPool* pool,
+    float* pool_task_accuracies
+) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid < pool->capacity) {
+        // Use SoA for coalesced alive read
+        if (pool->alive_flags[tid]) {
+            pool_task_accuracies[tid] = pool->entries[tid].task_accuracy;
+        } else {
+            pool_task_accuracies[tid] = 0.0f;
+        }
+    }
+}
+
+__global__ void inherit_ca_weights_kernel(
+    ComponentPool* pool,
+    int num_pending_inherits,
+    int* child_indices,
+    int* parent_indices
+) {
+    int inherit_idx = blockIdx.y;
+    if (inherit_idx >= num_pending_inherits) return;
+
+    int child_idx = child_indices[inherit_idx];
+    int parent_idx = parent_indices[inherit_idx];
+
+    PoolEntry* child = &pool->entries[child_idx];
+    PoolEntry* parent = &pool->entries[parent_idx];
+
+    // Use SoA for coalesced alive reads
+    if (!pool->alive_flags[child_idx] || !pool->alive_flags[parent_idx]) return;
+    if (!child->ca_state || !parent->ca_state) return;
+
+    MultiHeadCAState* child_ca = child->ca_state;
+    MultiHeadCAState* parent_ca = parent->ca_state;
+
+    int perception_size = parent->num_heads * parent->channels * parent->head_dim;
+    int interaction_size = parent->num_heads * parent->head_dim * parent->head_dim;
+    int value_size = parent->num_heads * parent->head_dim * parent->channels;
+    int total_size = perception_size + interaction_size + value_size;
+
+    int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (weight_idx < perception_size) {
+        child_ca->perception_weights[weight_idx] = parent_ca->perception_weights[weight_idx];
+    }
+    if (weight_idx < interaction_size) {
+        child_ca->interaction_weights[weight_idx] = parent_ca->interaction_weights[weight_idx];
+    }
+    if (weight_idx < value_size) {
+        child_ca->value_weights[weight_idx] = parent_ca->value_weights[weight_idx];
+    }
+}
+
+__global__ void find_pending_weight_inherits_kernel(
+    ComponentPool* pool,
+    int* child_indices,
+    int* parent_indices,
+    int* num_pending
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pool->capacity) return;
+
+    // Use SoA for coalesced alive read
+    if (!pool->alive_flags[idx]) return;
+
+    PoolEntry* entry = &pool->entries[idx];
+    if (entry->age != 0) return;
+
+    int p = entry->parent_idx;
+    // Use SoA for coalesced alive read
+    if (p != INT_MAX && p >= 0 && p < pool->capacity && pool->alive_flags[p]) {
+        int slot = atomicAdd(num_pending, 1);
+        child_indices[slot] = idx;
+        parent_indices[slot] = p;
+    }
 }
 
 #endif

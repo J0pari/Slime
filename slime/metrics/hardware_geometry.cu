@@ -218,7 +218,6 @@ __global__ void aggregate_hardware_geometry_kernel(
     int tid = threadIdx.x;
 
     if (tid == 0) {
-        printf("[AGGREGATE-HW-GEOM] ENTER tid=0 buffer=%p current_idx=%d\n", buffer, buffer ? buffer->current_idx : -1);
         aggregate_trace.active_warps = 0;
         aggregate_trace.divergent_branches = 0;
         aggregate_trace.total_branches = 0;
@@ -260,9 +259,7 @@ __global__ void aggregate_hardware_geometry_kernel(
     __syncthreads();
 
     if (tid == 0) {
-        printf("[AGGREGATE-HW-GEOM] About to compute_hardware_geometry tid=0\n");
         compute_hardware_geometry(&aggregate_trace, output_geom);
-        printf("[AGGREGATE-HW-GEOM] EXIT tid=0\n");
     }
 }
 

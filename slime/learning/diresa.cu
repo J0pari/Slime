@@ -131,7 +131,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     __syncthreads();
 
     if (local_tid == 0) {
-        printf("[DIRESA-CHK] replica=%d BEFORE curand_init\n", replica_id);
     }
 
     curandState state;
@@ -139,7 +138,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     curand_init(seed + global_tid, 0, 0, &state);
 
     if (local_tid == 0) {
-        printf("[DIRESA-CHK] replica=%d AFTER curand_init\n", replica_id);
     }
 
     int hidden1 = weights->hidden1;
@@ -208,9 +206,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
         weights->temperature = 1.0f + replica_id * 0.5f;  // [1.0, 1.5, 2.0, 2.5]
         weights->distance_exponent = entry->distance_exponent;
         weights->quality_weight = entry->quality_weight;
-
-        printf("[INIT-DIRESA-WEIGHTS] replica=%d w1[0]=%f w1[1]=%f b1[0]=%f\n",
-            replica_id, weights->encoder_w1[0], weights->encoder_w1[1], weights->encoder_b1[0]);
     }
 }
 
@@ -415,7 +410,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    printf("FATAL [diresa]: orig_distances[%d]=%f\n", i, batch->orig_distances[i]);
                     return;
                 }
                 sum += logf(batch->orig_distances[i]);
@@ -430,7 +424,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             float mean = shared_orig_mean[0];
             for (int i = 0; i < batch->batch_size; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    printf("FATAL [diresa]: orig_distances[%d]=%f\n", i, batch->orig_distances[i]);
                     return;
                 }
                 float diff = logf(batch->orig_distances[i]) - mean;
@@ -444,7 +437,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
                 if (batch->latent_distances[i] <= 0.0f) {
-                    printf("FATAL [diresa]: latent_distances[%d]=%f\n", i, batch->latent_distances[i]);
                     return;
                 }
                 sum += logf(batch->latent_distances[i]);
@@ -462,7 +454,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
 
         for (int i = tid; i < batch->batch_size; i += blockDim.x) {
             if (batch->latent_distances[i] <= 0.0f || batch->orig_distances[i] <= 0.0f) {
-                printf("FATAL [diresa]: latent[%d]=%f orig[%d]=%f\n", i, batch->latent_distances[i], i, batch->orig_distances[i]);
                 return;
             }
             float latent_diff = logf(batch->latent_distances[i]) - latent_mean;
@@ -501,16 +492,12 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
 
             float alpha_denom = shared_orig_var[0] * batch->batch_size;
             if (alpha_denom <= 0.0f) {
-                printf("FATAL [diresa]: alpha_denom=%f orig_var=%f batch_size=%d\n",
-                       alpha_denom, shared_orig_var[0], batch->batch_size);
                 return;
             }
             float alpha_measured = shared_cov_sum[0] / alpha_denom;
 
             float corr_denom = sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size;
             if (corr_denom <= 0.0f || isnan(corr_denom) || isinf(corr_denom)) {
-                printf("FATAL [diresa]: corr_denom=%f orig_var=%f latent_var=%f batch_size=%d\n",
-                       corr_denom, shared_orig_var[0], shared_latent_var[0], batch->batch_size);
                 return;
             }
             float log_correlation = shared_cov_sum[0] / corr_denom;

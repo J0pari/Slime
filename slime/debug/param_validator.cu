@@ -7,15 +7,12 @@
 
 inline bool validate_pointer(const char* name, void* ptr, bool must_be_device, const char* file, int line) {
     if (ptr == nullptr) {
-        printf("[PARAM_NULL] %s is NULL at %s:%d\n", name, file, line);
         return false;
     }
 
     cudaPointerAttributes attr;
     cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
     if (err != cudaSuccess) {
-        printf("[PARAM_ERROR] %s (%p) query failed: %s at %s:%d\n",
-               name, ptr, cudaGetErrorString(err), file, line);
         cudaGetLastError();
         return false;
     }
@@ -32,29 +29,21 @@ inline bool validate_pointer(const char* name, void* ptr, bool must_be_device, c
     }
 
     if (!is_valid) {
-        printf("[PARAM_WRONG_TYPE] %s (%p) is %s (expected device) at %s:%d\n",
-               name, ptr, type_str, file, line);
         return false;
     }
-
-    printf("[PARAM_OK] %s=%p (%s) at %s:%d\n", name, ptr, type_str, file, line);
     return true;
 }
 
 
 template<typename T>
 inline void print_struct_layout(const char* name) {
-    printf("[STRUCT] %s: size=%zu bytes, align=%zu\n", name, sizeof(T), alignof(T));
 }
 
 
 inline bool validate_int_range(const char* name, int value, int min, int max, const char* file, int line) {
     if (value < min || value > max) {
-        printf("[PARAM_RANGE] %s=%d out of range [%d,%d] at %s:%d\n",
-               name, value, min, max, file, line);
         return false;
     }
-    printf("[PARAM_OK] %s=%d at %s:%d\n", name, value, file, line);
     return true;
 }
 
@@ -68,30 +57,20 @@ inline bool validate_launch_config(dim3 grid, dim3 block, size_t shared_mem, con
     bool valid = true;
 
     if (block.x * block.y * block.z > (unsigned)prop.maxThreadsPerBlock) {
-        printf("[LAUNCH_ERROR] %s: block size %ux%ux%u = %u exceeds max %d at %s:%d\n",
-               kernel_name, block.x, block.y, block.z, block.x*block.y*block.z,
-               prop.maxThreadsPerBlock, file, line);
         valid = false;
     }
 
     if (grid.x > (unsigned)prop.maxGridSize[0] ||
         grid.y > (unsigned)prop.maxGridSize[1] ||
         grid.z > (unsigned)prop.maxGridSize[2]) {
-        printf("[LAUNCH_ERROR] %s: grid size %ux%ux%u exceeds max [%d,%d,%d] at %s:%d\n",
-               kernel_name, grid.x, grid.y, grid.z,
-               prop.maxGridSize[0], prop.maxGridSize[1], prop.maxGridSize[2], file, line);
         valid = false;
     }
 
     if (shared_mem > prop.sharedMemPerBlock) {
-        printf("[LAUNCH_ERROR] %s: shared memory %zu exceeds max %zu at %s:%d\n",
-               kernel_name, shared_mem, prop.sharedMemPerBlock, file, line);
         valid = false;
     }
 
     if (valid) {
-        printf("[LAUNCH_OK] %s: grid=(%u,%u,%u) block=(%u,%u,%u) shared=%zu at %s:%d\n",
-               kernel_name, grid.x, grid.y, grid.z, block.x, block.y, block.z, shared_mem, file, line);
     }
 
     return valid;
@@ -114,17 +93,17 @@ inline bool validate_launch_config(dim3 grid, dim3 block, size_t shared_mem, con
 
 #define BEGIN_KERNEL_VALIDATION(kernel_name) \
     do { \
-        printf("\n=== VALIDATING: %s ===\n", kernel_name); \
-        printf("Location: %s:%d\n", __FILE__, __LINE__); \
+\
+\
         cudaError_t _pending_err = cudaGetLastError(); \
         if (_pending_err != cudaSuccess) { \
-            printf("[WARN] Pending CUDA error: %s\n", cudaGetErrorString(_pending_err)); \
+\
         } \
     } while(0)
 
 #define END_KERNEL_VALIDATION() \
     do { \
-        printf("======================\n\n"); \
+\
     } while(0)
 
 #endif

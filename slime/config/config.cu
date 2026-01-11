@@ -2,7 +2,44 @@
 #define CONFIG_CU
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <math_constants.h>
+
+// ============================================================================
+// DEBUG CONFIGURATION
+// Set to 0 for release builds to eliminate error-check branching overhead
+// ============================================================================
+#ifndef SLIME_DEBUG_CHECKS
+#define SLIME_DEBUG_CHECKS 1
+#endif
+
+// Error checking macros - compile out in release builds
+#if SLIME_DEBUG_CHECKS
+#define CUDA_LAUNCH_CHECK() \
+    do { \
+        cudaError_t _err = cudaGetLastError(); \
+        if (_err != cudaSuccess) { \
+            printf("!CUDA_ERR: %s at %s:%d\n", cudaGetErrorString(_err), __FILE__, __LINE__); \
+            return; \
+        } \
+    } while(0)
+
+#define CUDA_LAUNCH_CHECK_VAL(retval) \
+    do { \
+        cudaError_t _err = cudaGetLastError(); \
+        if (_err != cudaSuccess) { \
+            printf("!CUDA_ERR: %s at %s:%d\n", cudaGetErrorString(_err), __FILE__, __LINE__); \
+            return retval; \
+        } \
+    } while(0)
+
+#define SLIME_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#else
+// Release mode: no-op macros
+#define CUDA_LAUNCH_CHECK() ((void)0)
+#define CUDA_LAUNCH_CHECK_VAL(retval) ((void)0)
+#define SLIME_DEBUG_PRINT(...) ((void)0)
+#endif
 
 
 
@@ -18,7 +55,11 @@ constexpr int BANK_PAD = 1;
 constexpr int CDP_SYNC_DEPTH = 4;
 constexpr int CDP_PENDING_LAUNCH_COUNT = 2048;
 constexpr int CDP_STACK_SIZE = 16384;
-constexpr size_t DEVICE_MALLOC_HEAP_MB = 512;        
+constexpr size_t DEVICE_MALLOC_HEAP_MB = 512;
+
+constexpr int MAX_KERNEL_CYCLES = 100000;
+constexpr int KERNEL_CYCLES_MIN = 1000;
+constexpr int KERNEL_CYCLES_MAX = 50000;        
 
 
 constexpr int TILE_M = WMMA_TILE_DIM;
@@ -46,6 +87,7 @@ constexpr int VALUE_CAPACITY = 50 * GENOME_SIZE;
 constexpr int TRACE_CAPACITY = GENOME_SIZE;
 constexpr int MAX_HISTORY_LENGTH = GENOME_SIZE;
 constexpr int MAX_DELTAS_PER_ENTRY = 128;
+constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;  // Weight deltas for Lamarckian inheritance
 constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY;
 constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY;
 constexpr int MAX_JACOBI_SWEEPS = 100;   
@@ -614,12 +656,26 @@ constexpr int CA_FLOW_SIZE = CA_FIELD_SIZE * FLOW_FIELD_DIMS;
 constexpr int CA_REINTEGRATION_SIZE = CA_FIELD_SIZE * CHANNELS_MAX;
 constexpr int CA_STATE_STRIDE = CA_CONCENTRATION_SIZE + CA_OUTPUT_SIZE + CA_AFFINITY_SIZE + CA_FLOW_SIZE + CA_REINTEGRATION_SIZE;
 
+// Backward pass workspace chunking - sized for memory-bounded gradient computation
+// col_width = 9 * channels for 3x3 kernel im2col
+constexpr int COL_WIDTH_MAX = 9 * CHANNELS_MAX;
+// Chunk size determines memory/parallelism tradeoff: larger = more parallel, more memory
+constexpr int BACKWARD_CHUNK_SAMPLES = 8192;
+// Per-sample workspace costs at max architecture
+constexpr size_t BACKWARD_WS_FP16_A_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_FP16_B_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_DW_SIZE = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_DI_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_W_T_SIZE = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_IM2COL_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * COL_WIDTH_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_DPREGELU_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
+
 constexpr float LEARNING_RATE_MIN = 0.0001f;
 constexpr float LEARNING_RATE_MAX = 0.01f;
 constexpr float BATCH_SIZE_NORM_MIN = 0.0f;  
 constexpr float BATCH_SIZE_NORM_MAX = 1.0f;
 constexpr int BATCH_SIZE_MIN = 8;
-constexpr int BATCH_SIZE_MAX = 128;
+constexpr int BATCH_SIZE_MAX = 32;
 constexpr float DECAY_RATE_MIN = 0.9f;
 constexpr float DECAY_RATE_MAX = 0.999f;
 constexpr float ADAM_BETA1_MIN = 0.85f;
@@ -678,6 +734,12 @@ constexpr float FLOW_LENIA_BETA_A_MIN = 1.0f;
 constexpr float FLOW_LENIA_BETA_A_MAX = 20.0f;
 constexpr float FLOW_LENIA_N_MIN = 1.0f;
 constexpr float FLOW_LENIA_N_MAX = 4.0f;
+constexpr float FLOW_LENIA_ALPHA_MIN_MIN = 0.0f;
+constexpr float FLOW_LENIA_ALPHA_MIN_MAX = 0.3f;
+constexpr float FLOW_LENIA_ALPHA_MAX_MIN = 0.7f;
+constexpr float FLOW_LENIA_ALPHA_MAX_MAX = 1.0f;
+constexpr float FLOW_LENIA_SHARPNESS_MIN = 1.0f;
+constexpr float FLOW_LENIA_SHARPNESS_MAX = 50.0f;
 constexpr float RD_V_PERTURBATION_MIN = 0.1f;
 constexpr float RD_V_PERTURBATION_MAX = 0.5f;
 constexpr float RESOURCE_INIT_MIN = 0.5f;
@@ -714,6 +776,69 @@ struct AuditBuffer {
     float train_accuracy;
     float test_accuracy;
     float generalization_gap;
+
+    // Pool metrics
+    int pool_alive_count;
+    int pool_capacity;
+
+    // === MAP-ELITES EVOLUTIONARY ARC ===
+
+    // Coverage dynamics
+    int archive_occupied_cells;
+    int frontier_cells_gained;
+    int frontier_cells_lost;
+    int sparse_cell_count;
+    float niche_entropy;
+    float novelty_gradient;
+
+    // Quality dynamics
+    float elite_fitness_best;
+    float elite_fitness_mean;
+    float elite_fitness_delta;
+    float quality_floor;
+    float quality_mean;
+    float quality_range;
+
+    // Density distribution
+    float density_mean;
+    float density_max;
+    float density_variance;
+
+    // 3-axis behavioral spread (hw, task, gen)
+    float hw_axis_min, hw_axis_max, hw_axis_mean;
+    float task_axis_min, task_axis_max, task_axis_mean;
+    float gen_axis_min, gen_axis_max, gen_axis_mean;
+
+    // Population flow
+    int total_population;
+    int births_this_gen;
+    int deaths_this_gen;
+
+    // === DIRESA (pre vs post encoding) ===
+    float diresa_recon_loss_hw;
+    float diresa_recon_loss_task;
+    float diresa_recon_loss_gen;
+    float diresa_recon_loss_total;
+    float diresa_behavioral_drift;
+    float diresa_latent_utilization;
+
+    // === GENOME COMPLEXITY ===
+    int genome_unique_hashes;
+    float genome_hash_entropy;
+    float genome_avg_deltas;
+
+    // Per-class accuracy tracking
+    float per_class_correct[NUM_CLASSES_MAX];
+    float per_class_total[NUM_CLASSES_MAX];
+
+    // === POOL ENTRY SNAPSHOTS ===
+    // Per-entry data for forensic pool state export
+    int pool_entry_alive[POOL_CAPACITY_MAX];
+    float pool_entry_fitness[POOL_CAPACITY_MAX];
+    float pool_entry_hunger[POOL_CAPACITY_MAX];
+    int pool_entry_age[POOL_CAPACITY_MAX];
+    int pool_entry_num_deltas[POOL_CAPACITY_MAX];
+    uint64_t pool_entry_genome_hash[POOL_CAPACITY_MAX];
 };
 
 #endif

@@ -72,17 +72,15 @@ __device__ void reconstruct_genome_from_archive(
             }
         }
     } else {
-        int parent_idx = -1;
-        for (int i = 0; i < archive_size; i++) {
-            if (archive->genome_hash[i] == parent_hash) {
-                parent_idx = i;
-                break;
-            }
-        }
+        // O(1) lookup via hash table
+        int parent_idx = hash_table_lookup(
+            archive->hash_table_keys,
+            archive->hash_table_values,
+            parent_hash
+        );
 
         if (parent_idx >= 0 && archive->latent_genome) {
             diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
-            CooperativeSync::sync_warp();
             reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
         } else {
             for (int i = 0; i < genome_length; i++) {

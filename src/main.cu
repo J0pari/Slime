@@ -1,5 +1,6 @@
 #include "../slime/runtime.cu"
 #include "../slime/diagnostics/report_generator.cu"
+#include "../slime/diagnostics/audit_writer.cu"
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -25,6 +26,9 @@
 } while(0)
 
 int main() {
+    // Force line-buffered stdout so host prints appear immediately
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     printf("[H1] Entry\n"); fflush(stdout);
     cudaSetDevice(0);
     printf("[H2] Device set\n"); fflush(stdout);
@@ -62,18 +66,25 @@ int main() {
     Dataset* d_datasets[NUM_ACTIVE_DATASETS];
     printf("[H8] Loading %d active datasets for curriculum...\n", NUM_ACTIVE_DATASETS); fflush(stdout);
 
+    Dataset* d_test_datasets[NUM_ACTIVE_DATASETS];
     for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
         int dataset_id = HOST_ACTIVE_DATASET_IDS[i];
-        printf("[H8.%d] Loading dataset %d...\n", i, dataset_id); fflush(stdout);
+        printf("[H8.%d] Loading train dataset %d...\n", i, dataset_id); fflush(stdout);
         err = load_dataset_from_registry(dataset_id, true, &d_datasets[i]);
         if (err != cudaSuccess) {
-            printf("[H-ERR] Dataset %d load failed: %s\n", dataset_id, cudaGetErrorString(err));
+            printf("[H-ERR] Train dataset %d load failed: %s\n", dataset_id, cudaGetErrorString(err));
+            return 1;
+        }
+        printf("[H8.%d] Loading test dataset %d...\n", i, dataset_id); fflush(stdout);
+        err = load_dataset_from_registry(dataset_id, false, &d_test_datasets[i]);
+        if (err != cudaSuccess) {
+            printf("[H-ERR] Test dataset %d load failed: %s\n", dataset_id, cudaGetErrorString(err));
             return 1;
         }
     }
-    printf("[H9] All %d datasets loaded\n", NUM_ACTIVE_DATASETS); fflush(stdout);
+    printf("[H9] All %d train+test dataset pairs loaded\n", NUM_ACTIVE_DATASETS); fflush(stdout);
 
-    // Allocate device array of dataset pointers
+    // Allocate device array of dataset pointers (train)
     Dataset** d_dataset_array;
     cudaError_t malloc_err = cudaMalloc(&d_dataset_array, sizeof(Dataset*) * NUM_ACTIVE_DATASETS);
     if (malloc_err != cudaSuccess) {
@@ -81,6 +92,15 @@ int main() {
         return 1;
     }
     cudaMemcpy(d_dataset_array, d_datasets, sizeof(Dataset*) * NUM_ACTIVE_DATASETS, cudaMemcpyHostToDevice);
+
+    // Allocate device array of dataset pointers (test)
+    Dataset** d_test_dataset_array;
+    malloc_err = cudaMalloc(&d_test_dataset_array, sizeof(Dataset*) * NUM_ACTIVE_DATASETS);
+    if (malloc_err != cudaSuccess) {
+        fprintf(stderr, "FATAL [main]: d_test_dataset_array cudaMalloc failed: %s\n", cudaGetErrorString(malloc_err));
+        return 1;
+    }
+    cudaMemcpy(d_test_dataset_array, d_test_datasets, sizeof(Dataset*) * NUM_ACTIVE_DATASETS, cudaMemcpyHostToDevice);
 
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H22] Mem after loading datasets: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
@@ -317,14 +337,40 @@ int main() {
     printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
            (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
 
+    // Create session-timestamped output directory
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char session_dir[256];
+    snprintf(session_dir, sizeof(session_dir), "diagnostics/run_%04d%02d%02d_%02d%02d%02d",
+             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+             t->tm_hour, t->tm_min, t->tm_sec);
+
     MKDIR("diagnostics");
-    MKDIR("diagnostics/samples");
-    MKDIR("diagnostics/ca_states");
+    MKDIR(session_dir);
+
+    char samples_dir[256], ca_dir[256], pool_dir[256], chem_dir[256];
+    snprintf(samples_dir, sizeof(samples_dir), "%s/samples", session_dir);
+    snprintf(ca_dir, sizeof(ca_dir), "%s/ca_states", session_dir);
+    snprintf(pool_dir, sizeof(pool_dir), "%s/pool_states", session_dir);
+    snprintf(chem_dir, sizeof(chem_dir), "%s/chemical_fields", session_dir);
+    MKDIR(samples_dir);
+    MKDIR(ca_dir);
+    MKDIR(pool_dir);
+    MKDIR(chem_dir);
+
+    char manifest_path[256];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.csv", session_dir);
+    FILE* manifest = fopen(manifest_path, "w");
+    if (manifest) {
+        fprintf(manifest, "file,size,sha256,elapsed_sec\n");
+        fclose(manifest);
+    }
 
     printf("[H29] Launching persistent_evolution_kernel<<<1,1>>>\n"); fflush(stdout);
     persistent_evolution_kernel<<<1, 1>>>(
         (unsigned int)time(nullptr),
         d_dataset_array,
+        d_test_dataset_array,
         buffers,
         d_audit
     );
@@ -336,71 +382,62 @@ int main() {
     }
 
     printf("[H31] Kernel launched, starting audit polling loop\n"); fflush(stdout);
+    printf("H:poll_loop_start\n"); fflush(stdout);
 
-    const char* manifest_path = "diagnostics/manifest.csv";
-    FILE* manifest = fopen(manifest_path, "w");
-    if (manifest) {
-        fprintf(manifest, "file,size,sha256\n");
-        fclose(manifest);
-    }
-
+    auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
+
     while (true) {
+        // Memory fence to ensure we see GPU writes to mapped memory
+        std::atomic_thread_fence(std::memory_order_acquire);
+
         if (h_audit->ready && !h_audit->consumed) {
             int gen = h_audit->generation;
             if (gen != last_gen) {
                 last_gen = gen;
 
+                auto now_time = std::chrono::steady_clock::now();
+                double elapsed_sec = std::chrono::duration<double>(now_time - start_time).count();
+
                 printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d\n",
                        gen, h_audit->batch_size, h_audit->accuracy, h_audit->loss,
                        h_audit->correct_count, h_audit->batch_size);
 
-                for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < h_audit->batch_size; s++) {
-                    char pgm_path[256];
-                    snprintf(pgm_path, sizeof(pgm_path), "diagnostics/samples/gen%04d_s%d.pgm", gen, s);
-                    FILE* f = fopen(pgm_path, "wb");
-                    if (f) {
-                        fprintf(f, "P5\n28 28\n255\n");
-                        fwrite(&h_audit->sample_images[s * AUDIT_IMAGE_SIZE], 1, AUDIT_IMAGE_SIZE, f);
-                        fclose(f);
-                    }
-
-                    printf("  [%d] label=%d pred=%d conf=%.3f %s\n",
-                           s, h_audit->sample_labels[s], h_audit->sample_predictions[s],
-                           h_audit->sample_confidences[s],
-                           (h_audit->sample_labels[s] == h_audit->sample_predictions[s]) ? "CORRECT" : "WRONG");
+                // Write sample images using audit_writer
+                if (write_sample_images(session_dir, gen, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_sample_images failed\n");
                 }
 
+                // Write CA snapshot
                 char ca_path[256];
-                snprintf(ca_path, sizeof(ca_path), "diagnostics/ca_states/gen%04d.pgm", gen);
-                FILE* f = fopen(ca_path, "wb");
-                if (f) {
-                    fprintf(f, "P5\n64 64\n255\n");
-                    for (int i = 0; i < AUDIT_CA_SNAPSHOT_SIZE; i++) {
-                        float val = h_audit->ca_snapshot[i];
-                        val = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
-                        unsigned char pixel = (unsigned char)(val * 255.0f);
-                        fwrite(&pixel, 1, 1, f);
-                    }
-                    fclose(f);
+                snprintf(ca_path, sizeof(ca_path), "%s/ca_states/gen%04d.pgm", session_dir, gen);
+                if (write_ca_snapshot(ca_path, gen, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_ca_snapshot failed\n");
                 }
 
+                // Write predictions CSV
                 char predictions_path[256];
-                snprintf(predictions_path, sizeof(predictions_path), "diagnostics/predictions_gen%04d.csv", gen);
-                f = fopen(predictions_path, "w");
-                if (f) {
-                    fprintf(f, "sample,label,prediction,confidence,correct\n");
-                    for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < h_audit->batch_size; s++) {
-                        fprintf(f, "%d,%d,%d,%.6f,%d\n",
-                                s, h_audit->sample_labels[s], h_audit->sample_predictions[s],
-                                h_audit->sample_confidences[s],
-                                (h_audit->sample_labels[s] == h_audit->sample_predictions[s]) ? 1 : 0);
-                    }
-                    fclose(f);
+                snprintf(predictions_path, sizeof(predictions_path), "%s/predictions_gen%04d.csv", session_dir, gen);
+                if (write_predictions_csv(predictions_path, gen, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_predictions_csv failed\n");
                 }
 
+                // Write generation summary to metrics.csv
+                if (write_generation_summary(session_dir, gen, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_generation_summary failed\n");
+                }
+
+                // Write pool state
+                if (write_pool_state(session_dir, gen, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_pool_state failed\n");
+                }
+
+                // Append to manifest
+                append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);
+
+                // Mark consumed
                 h_audit->consumed = 1;
-                std::atomic_thread_fence(std::memory_order_seq_cst);
+                std::atomic_thread_fence(std::memory_order_release);
             }
         }
 

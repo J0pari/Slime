@@ -53,8 +53,7 @@ __global__ void apply_decay_kernel(
     float timestep
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) printf("[APPLY-DECAY] ENTER count=%d\n", tube->count);
-
+    if (idx == 0) 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -112,8 +111,7 @@ __global__ void prune_memories_kernel(
     float decay_threshold
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) printf("[PRUNE-MEM] ENTER count=%d\n", tube->count);
-
+    if (idx == 0) 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -145,8 +143,7 @@ __global__ void consolidate_memories_kernel(
     __shared__ bool merged[MAX_MEMORY_SIZE + BANK_PAD];
 
     int idx = threadIdx.x;
-    if (idx == 0) printf("[CONSOLIDATE-MEM] ENTER count=%d\n", tube->count);
-    if (idx < tube->count) {
+    if (idx == 0)     if (idx < tube->count) {
         merged[idx] = false;
     }
     __syncthreads();
@@ -165,7 +162,6 @@ __global__ void consolidate_memories_kernel(
             if (entry->data && other->data) {
                 int min_size = min(entry->size, other->size);
                 if (min_size <= 0) {
-                    printf("FATAL [consolidate_memories]: min_size=%d entry->size=%d other->size=%d\n", min_size, entry->size, other->size);
                     return;
                 }
                 for (int k = 0; k < min_size; k++) {
@@ -210,7 +206,6 @@ __global__ void init_tube_kernel(
         tube->count = 0;
         tube->global_time = 0.0f;
         tube->decay_rate = decay_rate;
-        printf("[tube] tube=%p capacity=%d decay_rate=%f entries=%p\n", tube, capacity, decay_rate, tube->entries);
     }
 }
 
@@ -226,8 +221,6 @@ __global__ void wire_tube_data_kernel(
     tube->entries[idx].size = entry_size;
 
     if (idx == 0) {
-        printf("[wire_tube] tube=%p capacity=%d entry_size=%d data_buffer=%p\n",
-               tube, tube->capacity, entry_size, data_buffer);
     }
 }
 

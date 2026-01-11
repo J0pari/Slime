@@ -31,8 +31,9 @@ struct LocalOrganismState {
     __device__ void observe(int idx, const ComponentPool* pool, int generation) {
         if (idx >= SECTION_SIZE) return;
 
-        organism_indices[idx] = idx;  
-        local_fitness[idx] = pool->entries[idx].fitness;
+        organism_indices[idx] = idx;
+        // Use SoA for coalesced fitness read
+        local_fitness[idx] = pool->fitness_values[idx];
         local_coherence[idx] = pool->entries[idx].coherence;
 
         for (int i = 7; i > 0; i--) {
@@ -335,7 +336,6 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     int compact_idx = block_id * blockDim.x + tid;
 
     if (tid == 0 && block_id == 0) {
-        printf("[HIERARCHICAL-LIFECYCLE] ENTER gen=%d alive_count=%d\n", generation, pool->alive_indices_count);
     }
 
     bool valid = compact_idx < pool->alive_indices_count;
@@ -481,8 +481,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             for (int i = 0; i < threads_in_block; i++) {
                 int ci = block_id * blockDim.x + i;
                 int ai = pool->alive_indices[ci];
-                if (pool->entries[ai].fitness < worst_fitness) {
-                    worst_fitness = pool->entries[ai].fitness;
+                // Use SoA for coalesced fitness read
+                if (pool->fitness_values[ai] < worst_fitness) {
+                    worst_fitness = pool->fitness_values[ai];
                     worst_tid = i;
                 }
             }
@@ -490,7 +491,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             if (worst_tid == 0) {
                 int worst_actual = pool->alive_indices[block_id * blockDim.x + worst_tid];
                 local_state.phases[worst_tid] = LifecyclePhase::REACTIVATING;
-                pool->entries[worst_actual].fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
+                float new_fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
+                pool->entries[worst_actual].fitness = new_fitness;
+                pool->fitness_values[worst_actual] = new_fitness;  // SoA sync
                 pool->entries[worst_actual].coherence = elite_coherence_reset;
             }
         }
@@ -504,7 +507,6 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     if (tid == 0) {
         int total_active = Atomics::load_int(pool->active_count);
         if (total_active <= 0) {
-            printf("FATAL [hierarchical_lifecycle]: total population extinction - active_count=%d gen=%d block=%d\n", total_active, generation, blockIdx.x);
         }
     }
 }

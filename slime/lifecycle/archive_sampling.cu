@@ -39,8 +39,7 @@ __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, Vo
     return result;
 }
 
-__global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
     if (archive_size == 0) return;
 
     curandState rand_state;
@@ -52,7 +51,10 @@ __global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archi
 
     PoolEntry* entry = &pool->entries[pool_idx];
 
+    entry->id = atomicAdd((int*)&pool->total_spawned, 1);
+    entry->age = 0;
     entry->parent_hash = archive->genome_hash[elite_idx];
+    entry->parent_idx = INT_MAX;  // No pool parent - weights from archive
     entry->genome_hash = archive->genome_hash[elite_idx];
     entry->num_deltas = 0;
     entry->alive = true;
@@ -81,8 +83,21 @@ __global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archi
 
     entry->fitness = archive->fitness[elite_idx] * fitness_modulation;
     entry->coherence = archive->coherence[elite_idx];
+    entry->task_accuracy = NAN;  // Requires fresh evaluation
+    entry->generalization_gap = NAN;  // Requires fresh evaluation
+    entry->hardware_efficiency = NAN;  // Requires fresh evaluation
     entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
     entry->generation = archive->generation[elite_idx];
+
+    // Reset gradients - fresh autodiff accumulation
+    for (int g = 0; g < GENOME_SIZE; g++) {
+        entry->gradients[g] = 0.0f;
+    }
+
+    // Derive architecture from reconstructed genome
+    derive_architecture(entry->genome_hash, elite_genome, entry);
+    derive_diresa(entry->genome_hash, elite_genome, entry);
+    derive_fitness_exponents(entry->genome_hash, elite_genome, entry);
 
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;
@@ -100,6 +115,10 @@ __global__ void replace_from_archive_kernel(ComponentPool* pool, GPUElite* archi
             agent->gen_coords[i] = archive->gen_coords[elite_idx * gen_dim + i];
         }
     }
+
+    // Mark for batch weight restoration via restore_elite_weights_kernel + apply_weight_deltas_kernel
+    entry->ca_state->tape.needs_weight_restore = 1;
+    entry->ca_state->tape.restore_elite_idx = elite_idx;
 
     Atomics::increment_int(pool->total_spawned);
 }

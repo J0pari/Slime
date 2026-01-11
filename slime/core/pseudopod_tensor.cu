@@ -5,7 +5,7 @@
 #include "../config/config.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../utils/genome_params.cuh"
-#include "../learning/autodiff.cu"
+#include "pseudopod.cu"
 #include "../metrics/hardware_geometry.cu"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -15,191 +15,6 @@
 
 namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
-
-struct MultiHeadCATensorState {
-
-    half* perception_weights;
-    half* interaction_weights;
-    half* value_weights;
-
-    float* ca_concentration;
-    float* ca_output;
-};
-
-__global__ void multi_head_ca_tensor_kernel(
-    float* __restrict__ ca_state,
-    half* __restrict__ perception_weights,
-    half* __restrict__ interaction_weights,
-    half* __restrict__ value_weights,
-    float* __restrict__ ca_output,
-    int batch_size,
-    int grid_size,
-    int num_heads,
-    ArchitectureParams arch,
-    ADTape* tape = nullptr,
-    TraceBuffer* trace_buffer = nullptr
-) {
-
-    int head_id = blockIdx.y;
-    int batch_id = blockIdx.z;
-    int cell_x = blockIdx.x * blockDim.x + threadIdx.x;
-    int cell_y = blockIdx.x * blockDim.y + threadIdx.y;
-
-    if (cell_x >= grid_size || cell_y >= grid_size) return;
-
-    // Record hardware trace metrics
-    if (trace_buffer != nullptr && trace_buffer->current_idx < trace_buffer->capacity) {
-        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-        if (trace_idx < trace_buffer->capacity) {
-            ExecutionTrace* trace = &trace_buffer->traces[trace_idx];
-            int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
-            record_warp_metrics(trace, warp_id);
-        }
-    }
-
-    __shared__ float neighborhood[3][3][MAX_HEAD_DIM + BANK_PAD];
-
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int nx = clamp(cell_x + dx, 0, grid_size - 1);
-            int ny = clamp(cell_y + dy, 0, grid_size - 1);
-
-            int idx = batch_id * grid_size * grid_size * arch.head_dim +
-                     ny * grid_size * arch.head_dim +
-                     nx * arch.head_dim;
-
-            if (threadIdx.z < arch.head_dim) {
-                neighborhood[dy + 1][dx + 1][threadIdx.z] = ca_state[idx + threadIdx.z];
-            }
-        }
-    }
-    __syncthreads();
-
-    float perception[MAX_HEAD_DIM];
-
-    for (int i = 0; i < arch.head_dim; i++) {
-        float accum = 0.0f;
-
-        for (int dy = 0; dy < 3; dy++) {
-            for (int dx = 0; dx < 3; dx++) {
-                for (int c = 0; c < arch.channels; c++) {
-                    int weight_idx = head_id * arch.channels * arch.head_dim +
-                                    c * arch.head_dim + i;
-
-                    float neighbor_val = neighborhood[dy][dx][c];
-                    float weight_val = __half2float(perception_weights[weight_idx]);
-                    accum += neighbor_val * weight_val;
-                }
-            }
-        }
-
-        perception[i] = fmaxf(0.0f, accum);
-    }
-
-    int perception_tape_idx = -1;
-    if (tape != nullptr && threadIdx.z == 0) {
-        if (tape->current_value_idx < tape->value_capacity) {
-            perception_tape_idx = atomicAdd(&tape->current_value_idx, 1);
-            if (perception_tape_idx < tape->value_capacity) {
-                float perception_norm = 0.0f;
-                for (int i = 0; i < arch.head_dim; i++) {
-                    perception_norm += perception[i] * perception[i];
-                }
-                tape->value_buffer[perception_tape_idx] = sqrtf(perception_norm);
-                tape->grad_buffer[perception_tape_idx] = 0.0f;
-            }
-        }
-    }
-
-    float interaction[MAX_HEAD_DIM];
-
-    for (int i = 0; i < arch.head_dim; i++) {
-        float accum = 0.0f;
-
-        for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = head_id * arch.head_dim * arch.head_dim +
-                           j * arch.head_dim + i;
-
-            float weight_val = __half2float(interaction_weights[weight_idx]);
-            accum += perception[j] * weight_val;
-        }
-
-        float x = accum;
-        interaction[i] = GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
-    }
-
-    int interaction_tape_idx = -1;
-    if (tape != nullptr && threadIdx.z == 0 && perception_tape_idx >= 0) {
-        if (tape->current_size < tape->capacity && tape->current_value_idx < tape->value_capacity) {
-            int entry_idx = atomicAdd(&tape->current_size, 1);
-            interaction_tape_idx = atomicAdd(&tape->current_value_idx, 1);
-
-            if (entry_idx < tape->capacity && interaction_tape_idx < tape->value_capacity) {
-                float interaction_norm = 0.0f;
-                for (int i = 0; i < arch.head_dim; i++) {
-                    interaction_norm += interaction[i] * interaction[i];
-                }
-
-                tape->entries[entry_idx].op = OP_TANH;
-                tape->entries[entry_idx].output_idx = interaction_tape_idx;
-                tape->entries[entry_idx].input1_idx = perception_tape_idx;
-                tape->entries[entry_idx].input2_idx = -1;
-                tape->entries[entry_idx].aux_data = tanhf(interaction_norm);
-
-                tape->value_buffer[interaction_tape_idx] = sqrtf(interaction_norm);
-                tape->grad_buffer[interaction_tape_idx] = 0.0f;
-            }
-        }
-    }
-
-    float output[MAX_CHANNELS];
-
-    for (int i = 0; i < arch.channels; i++) {
-        float accum = 0.0f;
-
-        for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = head_id * arch.head_dim * arch.channels +
-                           j * arch.channels + i;
-
-            float weight_val = __half2float(value_weights[weight_idx]);
-            accum += interaction[j] * weight_val;
-        }
-
-        output[i] = accum;
-    }
-
-    if (tape != nullptr && threadIdx.z == 0 && interaction_tape_idx >= 0) {
-        if (tape->current_size < tape->capacity && tape->current_value_idx < tape->value_capacity) {
-            int entry_idx = atomicAdd(&tape->current_size, 1);
-            int output_tape_idx = atomicAdd(&tape->current_value_idx, 1);
-
-            if (entry_idx < tape->capacity && output_tape_idx < tape->value_capacity) {
-                float output_norm = 0.0f;
-                for (int i = 0; i < arch.channels; i++) {
-                    output_norm += output[i] * output[i];
-                }
-
-                tape->entries[entry_idx].op = OP_ADD;
-                tape->entries[entry_idx].output_idx = output_tape_idx;
-                tape->entries[entry_idx].input1_idx = interaction_tape_idx;
-                tape->entries[entry_idx].input2_idx = -1;
-                tape->entries[entry_idx].aux_data = 0.0f;
-
-                tape->value_buffer[output_tape_idx] = sqrtf(output_norm);
-                tape->grad_buffer[output_tape_idx] = 0.0f;
-            }
-        }
-    }
-
-    int out_idx = batch_id * num_heads * grid_size * grid_size * arch.channels +
-                  head_id * grid_size * grid_size * arch.channels +
-                  cell_y * grid_size * arch.channels +
-                  cell_x * arch.channels;
-
-    for (int i = 0; i < arch.channels; i++) {
-        ca_output[out_idx + i] = output[i];
-    }
-}
 
 __global__ void tensor_core_conv3x3_kernel(
     half* __restrict__ input,
@@ -377,7 +192,7 @@ __global__ void compute_coherence_tensor_kernel(
 }
 
 __global__ void init_multihead_ca_tensor_kernel(
-    MultiHeadCATensorState* state,
+    MultiHeadCAState* state,
     unsigned int seed,
     int num_heads,
     int channels,

@@ -649,6 +649,8 @@ __host__ cudaError_t load_dataset_from_registry(
         char img_path[512], lbl_path[512];
         snprintf(img_path, sizeof(img_path), "%s/%s-images-idx3-ubyte", h_descriptor->base_path, is_train ? "train" : "t10k");
         snprintf(lbl_path, sizeof(lbl_path), "%s/%s-labels-idx1-ubyte", h_descriptor->base_path, is_train ? "train" : "t10k");
+        printf("H:load_dataset img_path=%s lbl_path=%s\n", img_path, lbl_path);
+        fflush(stdout);
 
         if (!read_binary_blob(img_path, h_samples, data_size, 16) ||
             !read_binary_blob(lbl_path, h_labels, h_dataset->num_samples, 8)) {

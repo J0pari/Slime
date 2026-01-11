@@ -123,7 +123,7 @@ __global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_siz
         mode->use_selection = true;
         mode->gradient_fitness_weight = 0.7f;
         mode->coherence_fitness_weight = 0.3f;
-        mode->batch_size = 64;
+        mode->batch_size = 32;
         mode->learning_rate = 0.001f;
         mode->gradient_clip_norm = 1.0f;
         mode->adam_timestep = 1;
@@ -150,7 +150,6 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
     if (tid < input_dim) {
         float val = curand_normal(&state) * 0.1f;
         if (isnan(val) || isinf(val)) {
-            printf("FATAL [init_classifier]: pooling_weights[%d]=%f\n", tid, val);
             return;
         }
         classifier->pooling_weights[tid] = val;
@@ -160,7 +159,6 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
         float scale = sqrtf(2.0f / (input_dim + num_classes));
         float val = curand_normal(&state) * scale;
         if (isnan(val) || isinf(val)) {
-            printf("FATAL [init_classifier]: fc_weights[%d]=%f\n", tid, val);
             return;
         }
         classifier->fc_weights[tid] = val;
@@ -175,18 +173,14 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
     if (tid == 0) {
         for (int i = 0; i < input_dim && i < 10; i++) {
             if (isnan(classifier->pooling_weights[i])) {
-                printf("FATAL [init_classifier]: pooling_weights[%d]=NaN\n", i);
                 return;
             }
         }
         for (int i = 0; i < input_dim * num_classes && i < 10; i++) {
             if (isnan(classifier->fc_weights[i])) {
-                printf("FATAL [init_classifier]: fc_weights[%d]=NaN\n", i);
                 return;
             }
         }
-        printf("[CLASSIFIER-INIT-OK] input_dim=%d classes=%d pool[0]=%.6f fc[0]=%.6f bias[0]=%.6f\n",
-               input_dim, num_classes, classifier->pooling_weights[0], classifier->fc_weights[0], classifier->fc_bias[0]);
     }
 }
 
@@ -246,7 +240,6 @@ __global__ void init_curriculum_kernel(
             ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
             CURRICULUM_MIN_GENERATIONS_MIN, CURRICULUM_MIN_GENERATIONS_MAX
         );
-        printf("[RULED-OUT] init_curriculum completed - NOT the hang\n");
     }
 }
 
@@ -293,7 +286,6 @@ __global__ void update_curriculum_kernel(
             }
         }
         if (num_voronoi_cells <= 1) {
-            printf("FATAL [niche_diversity]: num_voronoi_cells=%d must be > 1\n", num_voronoi_cells);
             return;
         }
         float log_cells = logf((float)num_voronoi_cells);
@@ -312,39 +304,6 @@ __global__ void update_curriculum_kernel(
             int next_dataset_id = ACTIVE_DATASET_IDS[curriculum->current_dataset_idx];
             curriculum->stats[curriculum->current_dataset_idx].activation_threshold_met = true;
             curriculum->curriculum_progress = (float)(curriculum->current_dataset_idx + 1) / (float)NUM_ACTIVE_DATASETS;
-
-            printf("[CURRICULUM] Completed dataset %d, progressing to dataset %d (%d/%d)\n",
-                   ACTIVE_DATASET_IDS[curriculum->current_dataset_idx - 1],
-                   next_dataset_id,
-                   curriculum->current_dataset_idx + 1,
-                   NUM_ACTIVE_DATASETS);
-        }
-    }
-}
-
-__global__ void compute_voronoi_occupancy_kernel(
-    VoronoiCell* voronoi_cells,
-    int num_voronoi_cells,
-    float* voronoi_occupancy_histogram
-) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (tid < num_voronoi_cells) {
-        voronoi_occupancy_histogram[tid] = (float)voronoi_cells[tid].density;
-    }
-}
-
-__global__ void collect_pool_task_accuracies_kernel(
-    ComponentPool* pool,
-    float* pool_task_accuracies
-) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (tid < pool->capacity) {
-        if (pool->entries[tid].alive) {
-            pool_task_accuracies[tid] = pool->entries[tid].task_accuracy;
-        } else {
-            pool_task_accuracies[tid] = 0.0f;
         }
     }
 }

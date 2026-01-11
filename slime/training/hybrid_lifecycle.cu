@@ -6,6 +6,7 @@
 #include "../training/training_types.cu"
 #include "../data/dataset_loader.cu"
 #include "../core/chemotaxis.cu"
+#include "../core/ca_state.cuh"
 #include "../training/autodiff_integration.cu"
 #include "../training/gradient_fitness.cu"
 #include "../training/classification.cu"
@@ -20,7 +21,6 @@ struct VoronoiCell;
 struct ChemicalField;
 struct BehavioralState;
 struct TemporalTube;
-struct MultiHeadCAState;
 
 extern "C" __global__ void component_evolution_kernel(Organism*, ComponentPool*, GPUElite*, VoronoiCell*, int, int*, ChemicalField*, BehavioralState*, float*, float*, int, ArchitectureParams, float*);
 __global__ void neural_ca_update_kernel(Organism*, ChemicalField*, float*, float*, int, ComponentPool*, float*, float*, float*, TraceBuffer*, int);
@@ -48,9 +48,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     HybridTrainingMode* training_mode,
     CAParameterMap* param_map,
     int generation,
-    float* workspace_genomes
+    float* workspace_genomes,
+    bool eval_only
 ) {
+    extern __shared__ float sdata[];
     int entry_idx = blockIdx.x;
+    int tid = threadIdx.x;
     ComponentPool* pool = organism->pool;
 
     if (entry_idx >= pool->capacity) return;
@@ -60,69 +63,132 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
     MultiHeadCAState* ca_state = entry->ca_state;
 
-    float* primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
-    float* primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+    int local_cells = entry->channels * entry->grid_size * entry->grid_size;
+    float thread_sum = 0.0f;
+    for (int i = tid; i < local_cells; i += blockDim.x) {
+        thread_sum += ca_state->ca_concentration[i];
+    }
+    sdata[tid] = thread_sum;
+    __syncthreads();
 
-    reconstruct_genome_from_archive(
-        entry->parent_hash,
-        (GPUElite*)organism->archive,
-        organism->archive_size,
-        entry->delta_indices,
-        entry->delta_values,
-        entry->num_deltas,
-        entry->max_deltas,
-        primary_genome,
-        GENOME_SIZE,
-        primary_parent_temp,
-        organism->diresa_genome_weights
-    );
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
 
-    int num_classes = organism->current_dataset->descriptor->num_classes;
+    float local_ca_mean = sdata[0] / (float)local_cells;
+    // Broadcast to all threads via shared memory (threads stay alive for parallel Flow Lenia)
+    if (tid == 0) sdata[0] = local_ca_mean;
+    __syncthreads();
+    local_ca_mean = sdata[0];
 
-    BehavioralDimensions dims;
-    dims.derive_from_genome(entry->genome_hash, primary_genome);
-    int behavioral_dim = dims.total();
+    // Sequential setup - only thread 0 (other threads wait for parallel Flow Lenia)
+    __shared__ float* s_primary_genome;
+    __shared__ int s_num_classes;
+    __shared__ int s_behavioral_dim;
+    __shared__ ArchitectureParams s_arch;
+    __shared__ dim3 s_component_grid;
+    __shared__ dim3 s_component_block;
+    __shared__ dim3 s_ca_grid;
+    __shared__ dim3 s_ca_block;
+    __shared__ dim3 s_field_grid;
+    __shared__ dim3 s_field_block;
 
+    float* primary_genome;
+    float* primary_parent_temp;
+    int num_classes;
+    int behavioral_dim;
     ArchitectureParams arch;
-    arch.num_heads = entry->num_heads;
-    arch.channels = entry->channels;
-    arch.hidden_dim = entry->hidden_dim;
-    arch.head_dim = entry->head_dim;
-    arch.grid_size = entry->grid_size;
-
-    dim3 component_grid((POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
-    dim3 component_block(BLOCK_SIZE);
-
-    dim3 ca_grid(arch.grid_size / WMMA_TILE_DIM, arch.num_heads, 1);
-    dim3 ca_block(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
-
-    dim3 field_grid((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
-    dim3 field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
-
+    dim3 component_grid;
+    dim3 component_block;
+    dim3 ca_grid;
+    dim3 ca_block;
+    dim3 field_grid;
+    dim3 field_block;
     cudaError_t err;
 
-    printf("[HYBRID] gen=%d batch=%d grid=%d h=%d ch=%d classes=%d\n",
-           generation, training_mode->batch_size, arch.grid_size,
-           arch.num_heads, arch.channels, num_classes);
+    if (tid == 0) {
+        primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
+        primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+
+        reconstruct_genome_from_archive(
+            entry->parent_hash,
+            (GPUElite*)organism->archive,
+            organism->archive_size,
+            entry->delta_indices,
+            entry->delta_values,
+            entry->num_deltas,
+            entry->max_deltas,
+            primary_genome,
+            GENOME_SIZE,
+            primary_parent_temp,
+            organism->diresa_genome_weights
+        );
+
+        num_classes = organism->current_dataset->descriptor->num_classes;
+
+        BehavioralDimensions dims;
+        dims.derive_from_genome(entry->genome_hash, primary_genome);
+        behavioral_dim = dims.total();
+
+        arch.num_heads = entry->num_heads;
+        arch.channels = entry->channels;
+        arch.hidden_dim = entry->hidden_dim;
+        arch.head_dim = entry->head_dim;
+        arch.grid_size = entry->grid_size;
+        float accuracy = organism->telemetry->task_performance.accuracy;
+        arch.ca_gate_center = 2.0f - 1.5f * fminf(fmaxf(accuracy, 0.0f), 1.0f);
+
+        component_grid = dim3((POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
+        component_block = dim3(BLOCK_SIZE);
+        ca_grid = dim3(arch.grid_size / WMMA_TILE_DIM, arch.num_heads, 1);
+        ca_block = dim3(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
+        field_grid = dim3((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
+        field_block = dim3(WMMA_TILE_DIM, WMMA_TILE_DIM);
+
+        // Broadcast to shared for all threads
+        s_primary_genome = primary_genome;
+        s_num_classes = num_classes;
+        s_behavioral_dim = behavioral_dim;
+        s_arch = arch;
+        s_component_grid = component_grid;
+        s_component_block = component_block;
+        s_ca_grid = ca_grid;
+        s_ca_block = ca_block;
+        s_field_grid = field_grid;
+        s_field_block = field_block;
+    }
+    __syncthreads();
+
+    // All threads read shared values
+    primary_genome = s_primary_genome;
+    primary_parent_temp = primary_genome + GENOME_SIZE;
+    num_classes = s_num_classes;
+    behavioral_dim = s_behavioral_dim;
+    arch = s_arch;
+    component_grid = s_component_grid;
+    component_block = s_component_block;
+    ca_grid = s_ca_grid;
+    ca_block = s_ca_block;
+    field_grid = s_field_grid;
+    field_block = s_field_block;
 
     // Initialize current_activation_grid_size on first run (preallocated buffers already assigned)
     if (organism->current_activation_grid_size == 0) {
         organism->current_activation_grid_size = arch.grid_size;
-        printf("[HYBRID] Initialized activation grid_size=%d (using preallocated buffers)\n", arch.grid_size);
     }
 
     // Warn if grid size changed (buffers are preallocated to MAX size, so no reallocation needed)
     if (arch.grid_size != organism->current_activation_grid_size) {
-        printf("[HYBRID] WARNING: Grid size changed from %d to %d (preallocated buffers sized for MAX)\n",
-               organism->current_activation_grid_size, arch.grid_size);
         organism->current_activation_grid_size = arch.grid_size;
     }
 
     if (!training_mode->use_gradients) {
-        printf("ERROR [hybrid_lifecycle]: use_gradients=FALSE, training pipeline WILL NOT RUN\n");
     }
 
-    if (training_mode->use_gradients) {
+    if (training_mode->use_gradients && entry_idx == 0) {
         sample_batch_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
             organism->current_dataset,
             training_mode,
@@ -130,57 +196,26 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             generation * training_mode->batch_size,
             arch.grid_size
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: sample_batch launch failed: %s\n", cudaGetErrorString(err));
-                return;
-        }
-        printf("[HYBRID-CHK] sample_batch_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: sample_batch sync failed: %s\n", cudaGetErrorString(err));
+        CUDA_LAUNCH_CHECK();
+
+        if (organism == nullptr || organism->ad_tape == nullptr || ca_state == nullptr ||
+            training_mode == nullptr || param_map == nullptr) {
+            printf("!E:hybrid null_check org=%p ad_tape=%p ca_state=%p tm=%p pm=%p\n",
+                   (void*)organism,
+                   organism ? (void*)organism->ad_tape : nullptr,
+                   (void*)ca_state,
+                   (void*)training_mode,
+                   (void*)param_map);
             return;
         }
-        printf("[HYBRID-CHK] sample_batch_kernel completed\n");
 
-        if (organism == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: organism is NULL\n");
-                return;
-        }
-        if (organism->ad_tape == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: ad_tape is NULL\n");
-                return;
-        }
-        if (ca_state == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: ca_state is NULL for entry %d\n", entry_idx);
-                return;
-        }
-        if (training_mode == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: training_mode is NULL\n");
-                return;
-        }
-        if (param_map == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: param_map is NULL\n");
-                return;
-        }
-
+        SLIME_DEBUG_PRINT("V:hybrid:155 pre_reset_tape\n");
         reset_tape_kernel<<<(VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->ad_tape);
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: reset_tape launch failed: %s\n", cudaGetErrorString(err));
-                return;
-        }
-        printf("[HYBRID-CHK] reset_tape_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: reset_tape sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] reset_tape_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
+        SLIME_DEBUG_PRINT("V:hybrid:165 post_reset_tape\n");
 
         if (training_mode->batch_images == nullptr) {
-            printf("FATAL [hybrid_lifecycle]: batch_images=NULL at sample injection\n");
+            printf("!E:hybrid batch_images=nullptr\n");
             return;
         }
 
@@ -194,20 +229,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             arch.channels,
             arch.grid_size
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: Sample injection failed: %s\n", cudaGetErrorString(err));
-            return;
-
-        }
-        printf("[HYBRID-CHK] inject_sample_to_ca_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: inject_sample sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] inject_sample_to_ca_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         int ca_output_size = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.head_dim;
         zero_buffer_kernel<<<(ca_output_size + 255) / 256, 256>>>(ca_state->ca_output, ca_output_size);
@@ -242,22 +264,121 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch
             );
 
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: multi_head_ca_with_tape pass %d launch failed: %s\n", pass, cudaGetErrorString(err));
-                return;
+            CUDA_LAUNCH_CHECK();
+        }
+
+        cudaDeviceSynchronize();  // CDP barrier - required
+
+        // Flow Lenia: transport mass based on CA affinity gradients
+        {
+            int total_cells = arch.grid_size * arch.grid_size;
+            int buffer_size = training_mode->batch_size * total_cells * arch.channels;
+            int batch_size = training_mode->batch_size;
+            int grid_size = arch.grid_size;
+            int channels = arch.channels;
+            int num_heads = arch.num_heads;
+            int head_dim = arch.head_dim;
+            float flow_beta_A = entry->flow_beta_A;
+            float flow_n = entry->flow_n;
+            float flow_alpha_min = entry->flow_alpha_min;
+            float flow_alpha_max = entry->flow_alpha_max;
+            float flow_sharpness = entry->flow_sharpness;
+            float flow_dt = entry->flow_resource_dt;
+
+            int total_affinity_work = batch_size * total_cells;
+            for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
+                int batch_idx = work_idx / total_cells;
+                int cell_idx = work_idx % total_cells;
+
+                float affinity = 0.0f;
+                int total_elements = num_heads * head_dim;
+                for (int i = 0; i < total_elements; i++) {
+                    int head = i / head_dim;
+                    int dim = i % head_dim;
+                    int idx = batch_idx * num_heads * total_cells * head_dim +
+                              head * total_cells * head_dim +
+                              cell_idx * head_dim + dim;
+                    affinity += ca_state->ca_output[idx];
+                }
+                ca_state->affinity_reduced[batch_idx * total_cells + cell_idx] = affinity;
+            }
+            __syncthreads();
+
+            for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
+                int batch_idx = work_idx / total_cells;
+                int cell_idx = work_idx % total_cells;
+                int x = cell_idx % grid_size;
+                int y = cell_idx / grid_size;
+
+                int batch_offset = batch_idx * total_cells;
+                float U_center = ca_state->affinity_reduced[batch_offset + cell_idx];
+                int x_E = min(x + 1, grid_size - 1);
+                int y_N = min(y + 1, grid_size - 1);
+                float U_E = ca_state->affinity_reduced[batch_offset + y * grid_size + x_E];
+                float U_N = ca_state->affinity_reduced[batch_offset + y_N * grid_size + x];
+
+                int conc_batch_offset = batch_idx * total_cells * channels;
+                float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
+                for (int c = 0; c < channels; c++) {
+                    A_sum_center += ca_state->ca_concentration[conc_batch_offset + cell_idx * channels + c];
+                    A_sum_E += ca_state->ca_concentration[conc_batch_offset + (y * grid_size + x_E) * channels + c];
+                    A_sum_N += ca_state->ca_concentration[conc_batch_offset + (y_N * grid_size + x) * channels + c];
+                }
+
+                float2 F = FlowLeniaOps::compute_flow_differentiable(
+                    U_center, U_E, U_N, A_sum_center, A_sum_E, A_sum_N,
+                    flow_beta_A, flow_n, flow_alpha_min, flow_alpha_max, flow_sharpness
+                );
+
+                int flow_idx = batch_idx * total_cells * 2 + cell_idx * 2;
+                ca_state->flow_field[flow_idx + 0] = F.x;
+                ca_state->flow_field[flow_idx + 1] = F.y;
+            }
+
+            // Clear reintegration buffer
+            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
+                ca_state->reintegration_buffer[idx] = 0.0f;
+            }
+            __syncthreads();
+
+            // Phase 4: Bilinear splatting transport (all threads parallel)
+            int total_splat_work = batch_size * total_cells;
+            for (int work_idx = tid; work_idx < total_splat_work; work_idx += blockDim.x) {
+                int batch_idx = work_idx / total_cells;
+                int cell_idx = work_idx % total_cells;
+                int source_x = cell_idx % grid_size;
+                int source_y = cell_idx / grid_size;
+
+                int batch_offset = batch_idx * total_cells;
+                int flow_idx = batch_offset * 2 + cell_idx * 2;
+                float Fx = ca_state->flow_field[flow_idx + 0];
+                float Fy = ca_state->flow_field[flow_idx + 1];
+
+                int conc_batch_offset = batch_idx * total_cells * channels;
+                float* batch_buffer = ca_state->reintegration_buffer + conc_batch_offset;
+                const float* batch_conc = ca_state->ca_concentration + conc_batch_offset;
+
+                for (int c = 0; c < channels; c++) {
+                    float source_mass = batch_conc[cell_idx * channels + c];
+                    FlowLeniaOps::bilinear_transport_forward(
+                        source_mass,
+                        (float)source_x, (float)source_y,
+                        Fx, Fy, flow_dt, grid_size,
+                        batch_buffer, c, channels
+                    );
+                }
+            }
+            __syncthreads();
+
+            // Phase 5: Copy transported mass back to concentration (all threads parallel)
+            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
+                ca_state->ca_concentration[idx] = ca_state->reintegration_buffer[idx];
             }
         }
 
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: multi_head_ca_with_tape sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
         float* ca_output_grad = nullptr;
         
         if (training_mode->batch_images == nullptr) {
-            printf("ERROR [hybrid_lifecycle]: batch_images=NULL at classification pipeline, SKIPPING task_performance_probe_kernel and ALL classification\n");
         }
 
         if (training_mode->batch_images != nullptr) {
@@ -265,9 +386,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* features = organism->gradient_features_pool;
 
             if (training_mode->classifier == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: classifier is NULL\n");
                 return;
             }
+
             spatial_pooling_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
                 ca_state->ca_output,
                 training_mode->classifier->pooling_weights,
@@ -277,19 +398,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.channels
             );
 
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: spatial_pooling launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] spatial_pooling_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: spatial_pooling sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] spatial_pooling_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
 
             float* logits = organism->gradient_logits_pool;
 
@@ -302,39 +411,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.channels,
                 num_classes
             );
-
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: classification_head launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] classification_head_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: classification_head sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] classification_head_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
 
             float* loss_out = organism->gradient_loss_pool;
             float* logit_grads = organism->gradient_logit_grads_pool;
 
             zero_scalar_kernel<<<1, 1>>>(loss_out);
-
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_scalar launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] zero_scalar_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_scalar sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] zero_scalar_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
 
             cross_entropy_loss_kernel<<<training_mode->batch_size, WARP_SIZE>>>(
                 logits,
@@ -344,20 +427,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 training_mode->batch_size,
                 num_classes
             );
-
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: cross_entropy_loss launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] cross_entropy_loss_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: cross_entropy_loss sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] cross_entropy_loss_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
 
             task_performance_probe_kernel<<<1, 1>>>(
                 logits,
@@ -367,20 +437,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 &organism->telemetry->task_performance,
                 training_mode->is_train_batch
             );
+            CUDA_LAUNCH_CHECK();
+            cudaDeviceSynchronize();  // CDP barrier - required
 
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: task_performance_probe launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] task_performance_probe_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: task_performance_probe sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] task_performance_probe_kernel completed\n");
+            // Skip backward pass for eval-only mode (test evaluation)
+            if (!eval_only) {
 
             // Zero gradient buffers before backward pass (uses atomicAdd)
             int fc_weights_size = num_classes * arch.channels;
@@ -400,19 +461,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.channels,
                 num_classes
             );
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: classification_head_backward launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] classification_head_backward_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: classification_head_backward sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] classification_head_backward_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
 
             // Backprop through spatial pooling
             dim3 pooling_grid(1, (arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -433,145 +482,39 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.grid_size,
                 arch.channels
             );
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: spatial_pooling_backward launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-            }
-            printf("[HYBRID-CHK] spatial_pooling_backward_kernel launched\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: spatial_pooling_backward sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] spatial_pooling_backward_kernel completed\n");
+            CUDA_LAUNCH_CHECK();
         }
 
         // CA Backward Pass - Replace broken tape-based autodiff
-        printf("[HYBRID-CHK] === CA BACKWARD PASS STARTING ===\n");
         {
             float* dL_dperception = organism->buffers->dL_dperception_buffer;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer;
 
-            printf("[HYBRID-CHK] dL_dperception buffer: %p\n", (void*)dL_dperception);
-            printf("[HYBRID-CHK] dL_dinteraction buffer: %p\n", (void*)dL_dinteraction);
-            printf("[HYBRID-CHK] ca_output_grad buffer: %p\n", (void*)ca_output_grad);
-
-            if (dL_dperception == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: dL_dperception is nullptr!\n");
-                return;
-            }
-            if (dL_dinteraction == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: dL_dinteraction is nullptr!\n");
-                return;
-            }
-            if (ca_output_grad == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: ca_output_grad is nullptr!\n");
+            if (dL_dperception == nullptr || dL_dinteraction == nullptr || ca_output_grad == nullptr) {
                 return;
             }
 
             // Zero gradient buffers using kernel (can't use cudaMemset from device)
-            int num_elements = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.hidden_dim;
-            printf("[HYBRID-CHK] num_elements for zero buffers: %d\n", num_elements);
-            printf("[HYBRID-CHK] total_params: %d\n", param_map->total_params);
-
-            printf("[HYBRID-CHK] Launching zero_buffer_kernel for dL_dperception...\n");
+            int num_elements = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.head_dim;
             zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(dL_dperception, num_elements);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_buffer dL_dperception failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-
-            printf("[HYBRID-CHK] Launching zero_buffer_kernel for dL_dinteraction...\n");
+            CUDA_LAUNCH_CHECK();
             zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(dL_dinteraction, num_elements);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_buffer dL_dinteraction failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-
-            printf("[HYBRID-CHK] Launching zero_buffer_kernel for grad_buffer...\n");
+            CUDA_LAUNCH_CHECK();
             zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(organism->ad_tape->grad_buffer, param_map->total_params);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_buffer grad_buffer failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
+            CUDA_LAUNCH_CHECK();
 
-            printf("[HYBRID-CHK] Syncing after zero_buffer_kernels...\n");
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: zero_buffer sync failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-            printf("[HYBRID-CHK] Zero buffer kernels completed\n");
-            
-            // Allocate workspace buffers for GEMM-based backward pass
+            // Use preallocated workspace buffers for GEMM-based backward pass
             int num_cells = arch.grid_size * arch.grid_size;
             int total_samples = training_mode->batch_size * num_cells;
             int col_width = 9 * arch.channels;
 
-            // Per-head workspace sizes (enables parallel head processing - no loops)
-            size_t ws_fp16_a_size = arch.num_heads * total_samples * max(arch.hidden_dim, col_width) * sizeof(half);
-            size_t ws_fp16_b_size = arch.num_heads * total_samples * arch.hidden_dim * sizeof(half);
-            size_t ws_dW_size = arch.num_heads * max(arch.hidden_dim * arch.hidden_dim, col_width * arch.hidden_dim) * sizeof(float);
-            size_t ws_dI_size = arch.num_heads * total_samples * arch.hidden_dim * sizeof(float);
-            size_t ws_W_T_size = arch.num_heads * max(arch.hidden_dim * arch.hidden_dim, arch.channels * arch.hidden_dim) * sizeof(half);
-            size_t ws_im2col_size = arch.num_heads * total_samples * col_width * sizeof(float);
-            size_t ws_dpregelu_size = arch.num_heads * total_samples * arch.hidden_dim * sizeof(float);
-
-            half *ws_fp16_a, *ws_fp16_b, *ws_W_T;
-            float *ws_dW, *ws_dI, *ws_im2col, *ws_dpregelu;
-
-            printf("[HYBRID-CHK] Allocating workspace buffers...\n");
-            printf("[HYBRID-CHK] Sizes: fp16_a=%d fp16_b=%d dW=%d dI=%d W_T=%d im2col=%d dpregelu=%d\n",
-                   (int)ws_fp16_a_size, (int)ws_fp16_b_size, (int)ws_dW_size,
-                   (int)ws_dI_size, (int)ws_W_T_size, (int)ws_im2col_size, (int)ws_dpregelu_size);
-
-            err = cudaMalloc(&ws_fp16_a, ws_fp16_a_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_fp16_a: err=%d ptr=%p\n", (int)err, ws_fp16_a);
-            if (err != cudaSuccess || ws_fp16_a == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_fp16_a failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_fp16_b, ws_fp16_b_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_fp16_b: err=%d ptr=%p\n", (int)err, ws_fp16_b);
-            if (err != cudaSuccess || ws_fp16_b == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_fp16_b failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_dW, ws_dW_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_dW: err=%d ptr=%p\n", (int)err, ws_dW);
-            if (err != cudaSuccess || ws_dW == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_dW failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_dI, ws_dI_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_dI: err=%d ptr=%p\n", (int)err, ws_dI);
-            if (err != cudaSuccess || ws_dI == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_dI failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_W_T, ws_W_T_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_W_T: err=%d ptr=%p\n", (int)err, ws_W_T);
-            if (err != cudaSuccess || ws_W_T == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_W_T failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_im2col, ws_im2col_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_im2col: err=%d ptr=%p\n", (int)err, ws_im2col);
-            if (err != cudaSuccess || ws_im2col == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_im2col failed\n");
-                return;
-            }
-            err = cudaMalloc(&ws_dpregelu, ws_dpregelu_size);
-            printf("[HYBRID-CHK] cudaMalloc ws_dpregelu: err=%d ptr=%p\n", (int)err, ws_dpregelu);
-            if (err != cudaSuccess || ws_dpregelu == nullptr) {
-                printf("FATAL [hybrid_lifecycle]: cudaMalloc ws_dpregelu failed\n");
-                return;
-            }
+            half* ws_fp16_a = organism->buffers->backward_ws_fp16_a;
+            half* ws_fp16_b = organism->buffers->backward_ws_fp16_b;
+            float* ws_dW = organism->buffers->backward_ws_dW;
+            float* ws_dI = organism->buffers->backward_ws_dI;
+            half* ws_W_T = organism->buffers->backward_ws_W_T;
+            float* ws_im2col = organism->buffers->backward_ws_im2col;
+            float* ws_dpregelu = organism->buffers->backward_ws_dpregelu;
 
             // Stride calculations
             int I_head_stride = num_cells * arch.hidden_dim;
@@ -589,14 +532,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             batched_convert_fp32_to_fp16_strided<<<(total_I + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
                 organism->interaction_activations_saved, ws_fp16_a,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
-                I_head_stride, I_batch_stride, ws_fp16_a_stride
+                I_head_stride, I_batch_stride, ws_fp16_a_stride, 0
             );
 
             int total_V = arch.num_heads * total_samples * arch.head_dim;
             batched_convert_fp32_to_fp16_strided<<<(total_V + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
                 ca_output_grad, ws_fp16_b,
                 arch.num_heads, training_mode->batch_size, V_head_stride,
-                V_head_stride, V_batch_stride, ws_fp16_b_stride
+                V_head_stride, V_batch_stride, ws_fp16_b_stride, 0
             );
 
             int tiles_M = (arch.hidden_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -631,7 +574,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             batched_memcpy_to_strided<<<(arch.num_heads * total_samples * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
                 ws_dI, dL_dinteraction,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
-                ws_dI_stride, I_head_stride, I_batch_stride
+                ws_dI_stride, I_head_stride, I_batch_stride, 0
             );
 
             // === INTERACTION BACKWARD ===
@@ -645,7 +588,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             batched_convert_fp32_to_fp16_strided<<<(total_I + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
                 organism->perception_activations_saved, ws_fp16_a,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
-                I_head_stride, I_batch_stride, ws_fp16_a_stride
+                I_head_stride, I_batch_stride, ws_fp16_a_stride, 0
             );
 
             fp32_to_fp16_kernel<<<(arch.num_heads * total_samples * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
@@ -681,7 +624,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             batched_memcpy_to_strided<<<(arch.num_heads * total_samples * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
                 ws_dI, dL_dperception,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
-                ws_dI_stride, I_head_stride, I_batch_stride
+                ws_dI_stride, I_head_stride, I_batch_stride, 0
             );
 
             // === PERCEPTION BACKWARD ===
@@ -721,35 +664,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.channels * arch.hidden_dim, arch.num_heads, ws_dW_perception_stride
             );
 
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("FATAL [hybrid_lifecycle]: batched backward pass failed: %s\n", cudaGetErrorString(err));
-                return;
-            }
-
-            // Clean up workspace and gradient buffers
-            cudaFree(ws_fp16_a);
-            cudaFree(ws_fp16_b);
-            cudaFree(ws_dW);
-            cudaFree(ws_dI);
-            cudaFree(ws_W_T);
-            cudaFree(ws_im2col);
-            cudaFree(ws_dpregelu);
-            cudaFree(dL_dperception);
-            cudaFree(dL_dinteraction);
-            cudaFree(ca_output_grad);
         }
 
         int total_ca_params = arch.num_heads * arch.channels * arch.hidden_dim * 3;
 
         float ctx_metabolic = entry->fitness;
         float ctx_stress = entry->hunger;
-        float sum_morphogen = 0.0f;
-        int total_cells = arch.grid_size * arch.grid_size * arch.channels;
-        for (int i = 0; i < total_cells; i++) {
-            sum_morphogen += organism->chemical_field->concentration[i];
-        }
-        float ctx_morphogen = sum_morphogen / (float)total_cells;
+        float ctx_morphogen = local_ca_mean;
 
         TrainingParams train_params;
         train_params.derive_from_genome_hash(entry->genome_hash);
@@ -774,20 +695,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->adam_timestep,
             gradient_clip_norm
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: Adam update (CA FP16) failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] adam_update_fp16_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: adam_update_fp16 sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] adam_update_fp16_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         dim3 pooling_adam_grid((arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE);
         adam_update_kernel<<<pooling_adam_grid, adam_block>>>(
@@ -803,20 +711,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->adam_timestep,
             gradient_clip_norm
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: Adam update (pooling weights FP32) failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] adam_update_pooling_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: adam_update_pooling sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] adam_update_pooling_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         int fc_weights_size = num_classes * behavioral_dim;
         dim3 fc_weights_adam_grid((fc_weights_size + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -833,20 +728,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->adam_timestep,
             gradient_clip_norm
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: Adam update (fc_weights FP32) failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] adam_update_fc_weights_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: adam_update_fc_weights sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] adam_update_fc_weights_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         dim3 fc_bias_adam_grid((num_classes + BLOCK_SIZE - 1) / BLOCK_SIZE);
         adam_update_kernel<<<fc_bias_adam_grid, adam_block>>>(
@@ -862,20 +744,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->adam_timestep,
             gradient_clip_norm
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: Adam update (fc_bias FP32) failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] adam_update_fc_bias_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: adam_update_fc_bias sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] adam_update_fc_bias_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         training_mode->adam_timestep++;
 
@@ -888,20 +757,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             gradient_magnitudes,
             arch.num_heads
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: extract_head_gradient_magnitudes launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] extract_head_gradient_magnitudes_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: extract_head_gradient_magnitudes sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] extract_head_gradient_magnitudes_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
 
         compute_gradient_fitness_kernel<<<(POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
             gradient_magnitudes,
@@ -911,20 +767,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->gradient_fitness_weight,
             training_mode->coherence_fitness_weight
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: compute_gradient_fitness launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] compute_gradient_fitness_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: compute_gradient_fitness sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] compute_gradient_fitness_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
+            } // end if (!eval_only)
     }
 
     float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
@@ -945,19 +789,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         component_workspace_genomes
     );
 
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("FATAL [hybrid_lifecycle]: component_evolution launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-    }
-    printf("[HYBRID-CHK] component_evolution_kernel launched\n");
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("FATAL [hybrid_lifecycle]: component_evolution sync failed: %s\n", cudaGetErrorString(err));
-        return;
-    }
-    printf("[HYBRID-CHK] component_evolution_kernel completed\n");
+    CUDA_LAUNCH_CHECK();
+    cudaDeviceSynchronize();  // CDP barrier - required
 
     if (!training_mode->use_gradients) {
         float* workspace_genomes = organism->buffers->organism_workspace_genomes;
@@ -975,20 +808,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             organism->trace_buffer,
             arch.grid_size
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: neural_ca_update launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
-        printf("[HYBRID-CHK] neural_ca_update_kernel launched\n");
-        err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: neural_ca_update sync failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
-        printf("[HYBRID-CHK] neural_ca_update_kernel completed\n");
+        CUDA_LAUNCH_CHECK();
+        cudaDeviceSynchronize();  // CDP barrier - required
     } else {
 
         dim3 update_grid(field_grid.x, field_grid.y, 1);
@@ -998,13 +819,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             arch.grid_size,
             entry_idx
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: update_field_from_ca launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
+        CUDA_LAUNCH_CHECK();
 
         int weight_count = arch.num_heads * arch.channels * arch.hidden_dim;
 
@@ -1015,13 +830,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             organism->fp32_ca_workspace,
             weight_count
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: convert_weights_to_fp32 launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
+        CUDA_LAUNCH_CHECK();
 
         float* temp_latent = primary_parent_temp;
         diresa_encode(primary_genome, temp_latent, &organism->diresa_genome_weights[0]);
@@ -1033,13 +842,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             GENOME_LATENT_DIM_MAX,
             entry_idx
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: compute_effective_rank launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-        }
+        CUDA_LAUNCH_CHECK();
     }
 
     float* behavioral_workspace_genomes = organism->buffers->behavioral_workspace_genomes_buffer;
@@ -1054,12 +857,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         behavioral_workspace_genomes
     );
 
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("FATAL [hybrid_lifecycle]: behavioral_update launch failed: %s\n", cudaGetErrorString(err));
-                return;
-
-    }
+    CUDA_LAUNCH_CHECK();
 
     if (generation % EMBEDDING_UPDATE_FREQ == 0) {
         zero_scalar_kernel<<<1, 1>>>(organism->buffers->behavioral_reconstruction_error);
@@ -1087,25 +885,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             gen_dim,
             organism->buffers->behavioral_features_buffer
         );
-
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("FATAL [hybrid_lifecycle]: update_behavioral_embedding launch failed: %s\n", cudaGetErrorString(err));
-            return;
-        }
+        CUDA_LAUNCH_CHECK();
     }
 
     uint64_t mem_genome_hash = entry->genome_hash;
     float ctx_metabolic = entry->fitness;
     float ctx_stress = entry->hunger;
 
-    float ctx_morphogen = 0.0f;
-    int chem_grid_size = arch.grid_size;
-    int chem_field_size = chem_grid_size * chem_grid_size;
-    for (int i = 0; i < chem_field_size; i++) {
-        ctx_morphogen += organism->chemical_field->concentration[i];
-    }
-    ctx_morphogen /= (float)chem_field_size;
+    float ctx_morphogen = local_ca_mean;
 
     memory_update_kernel<<<1, BLOCK_SIZE>>>(
         organism->chemical_field->history,
@@ -1126,26 +913,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         organism->telemetry->diresa_evolution.behavioral_drift_rate,
         organism->telemetry->task_performance.accuracy
     );
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("FATAL [hybrid_lifecycle]: memory_update launch failed: %s\n", cudaGetErrorString(err));
-                return;
-        
-    }
-
-    cudaFree(component_workspace_genomes);
-    cudaFree(behavioral_workspace_genomes);
+    CUDA_LAUNCH_CHECK();
 
     // Synchronize to ensure ALL child kernels complete before exiting
     // This prevents persistent loop's cudaDeviceSynchronize from blocking forever
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("[HYBRID-ERROR] Final cudaDeviceSynchronize failed: %s\n", cudaGetErrorString(err));
-        return;
-    }
-
-    printf("[HYBRID-EXIT] gen=%d completed\n", generation);
+    cudaDeviceSynchronize();  // CDP barrier - required
 }
 
 

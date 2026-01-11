@@ -6,6 +6,7 @@
 #include "../utils/cuda_primitives.cuh"
 #include "../learning/autodiff.cu"
 #include "tubes.cu"
+#include "genome_ops.cuh"
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
 
@@ -129,6 +130,40 @@ __global__ void scan_phase3_kernel(
     }
 }
 
+// Single-kernel exclusive scan using Hillis-Steele algorithm
+// Handles arrays up to MAX_MEMORY_SIZE using shared memory
+__global__ void exclusive_scan_single_kernel(
+    int* input,
+    int* output,
+    int N
+) {
+    __shared__ int temp[MAX_MEMORY_SIZE + BANK_PAD];
+
+    // Load input to shared memory (all threads participate)
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        temp[i] = input[i];
+    }
+    __syncthreads();
+
+    // Hillis-Steele inclusive scan
+    for (int stride = 1; stride < N; stride *= 2) {
+        for (int i = threadIdx.x; i < N; i += blockDim.x) {
+            int val = temp[i];
+            if (i >= stride) {
+                val += temp[i - stride];
+            }
+            __syncthreads();
+            temp[i] = val;
+            __syncthreads();
+        }
+    }
+
+    // Convert to exclusive scan (shift right, first element = 0)
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        output[i] = (i == 0) ? 0 : temp[i - 1];
+    }
+}
+
 // Device-side recursive multi-block exclusive scan (CDP)
 // workspace must have size >= N (partitioned across recursion levels)
 __global__ void exclusive_scan_recursive_kernel(
@@ -198,6 +233,40 @@ __global__ void copy_compacted_kernel(
         tube->entries[idx] = temp_buffer[idx];
     }
 
+    if (idx == 0) {
+        tube->count = new_count;
+        tube->head = new_count % tube->capacity;
+    }
+}
+
+// Computes new_count from scan results and copies compacted entries back to tube
+__global__ void finalize_and_copy_compacted_kernel(
+    TemporalTube* tube,
+    int* valid_flags,
+    int* scan_output,
+    MemoryEntry* temp_buffer,
+    int old_count
+) {
+    // Thread 0 computes new_count
+    __shared__ int new_count;
+    if (threadIdx.x == 0) {
+        if (old_count > 0) {
+            int last_write_idx = scan_output[old_count - 1];
+            int last_valid_flag = valid_flags[old_count - 1];
+            new_count = last_write_idx + last_valid_flag;
+        } else {
+            new_count = 0;
+        }
+    }
+    __syncthreads();
+
+    // All threads copy compacted entries
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < new_count) {
+        tube->entries[idx] = temp_buffer[idx];
+    }
+
+    // Thread 0 updates tube metadata
     if (idx == 0) {
         tube->count = new_count;
         tube->head = new_count % tube->capacity;
@@ -329,6 +398,102 @@ __global__ void refine_elite_kernel(
         learning_rate,
         gradient_clip_norm
     );
+}
+
+__global__ void memory_update_kernel(
+    TemporalTube* tubes,
+    float* fitness_history,
+    int* valid_flags_workspace,
+    int* scan_workspace,
+    int* scan_recursive_workspace,
+    MemoryEntry* temp_buffer,
+    int generation,
+    float* genome,
+    float* gradients,
+    uint64_t genome_hash,
+    float ctx_metabolic,
+    float ctx_stress,
+    float ctx_morphogen,
+    float ctx_complexity,
+    float ctx_niche,
+    float ctx_learning,
+    float ctx_performance
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    if (!tubes || tubes->count <= 0) return;
+
+    int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
+    int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
+    int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
+    int compaction_interval_slot = derive_param_slot(genome_hash, "memory_compaction_interval");
+
+    float decay_threshold = genome_to_param(
+        genome, gradients, decay_threshold_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
+    );
+
+    float consolidation_threshold = genome_to_param(
+        genome, gradients, consolidation_threshold_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
+    );
+
+    float flow_lenia_dt = genome_to_param(
+        genome, gradients, flow_dt_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
+    );
+
+    float compaction_interval_norm = genome_to_param(
+        genome, gradients, compaction_interval_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        0.0f, 1.0f
+    );
+    int compaction_interval = 1 + (int)(compaction_interval_norm * 15.0f);
+    bool should_compact = (generation % compaction_interval == 0);
+
+    int tube_count = tubes->count;
+    int mem_blocks = (tube_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    apply_decay_kernel<<<mem_blocks, BLOCK_SIZE>>>(tubes, flow_lenia_dt);
+    cudaDeviceSynchronize();
+
+    prune_memories_kernel<<<mem_blocks, BLOCK_SIZE>>>(tubes, decay_threshold);
+    cudaDeviceSynchronize();
+
+    int consol_threads = (tube_count < BLOCK_SIZE) ? tube_count : BLOCK_SIZE;
+    consolidate_memories_kernel<<<1, consol_threads>>>(tubes, consolidation_threshold);
+    cudaDeviceSynchronize();
+
+    if (should_compact && valid_flags_workspace && scan_workspace && temp_buffer) {
+        int old_count = tubes->count;
+
+        mark_valid_entries_kernel<<<mem_blocks, BLOCK_SIZE>>>(
+            tubes, valid_flags_workspace, decay_threshold
+        );
+        cudaDeviceSynchronize();
+
+        exclusive_scan_single_kernel<<<1, BLOCK_SIZE>>>(
+            valid_flags_workspace, scan_workspace, tubes->capacity
+        );
+        cudaDeviceSynchronize();
+
+        compact_entries_kernel<<<mem_blocks, BLOCK_SIZE>>>(
+            tubes, valid_flags_workspace, scan_workspace, temp_buffer, old_count
+        );
+        cudaDeviceSynchronize();
+
+        finalize_and_copy_compacted_kernel<<<mem_blocks, BLOCK_SIZE>>>(
+            tubes, valid_flags_workspace, scan_workspace, temp_buffer, old_count
+        );
+        cudaDeviceSynchronize();
+    }
 }
 
 #endif

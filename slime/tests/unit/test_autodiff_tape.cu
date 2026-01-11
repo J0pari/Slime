@@ -9,7 +9,7 @@
     do { \
         cudaError_t err = call; \
         if (err != cudaSuccess) { \
-            printf("FATAL CUDA ERROR at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+\
             exit(1); \
         } \
     } while(0)
@@ -44,21 +44,26 @@ bool test_tape_initialization() {
     TapeEntry* entries;
     float* values;
     float* grads;
+    int* levels;
     CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
     CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&levels, VALUE_CAPACITY * sizeof(int)));
+    CUDA_CHECK(cudaMemset(levels, 0, VALUE_CAPACITY * sizeof(int)));
 
     ADTape h_tape;
     h_tape.entries = entries;
     h_tape.value_buffer = values;
     h_tape.grad_buffer = grads;
+    h_tape.value_levels = levels;
     h_tape.capacity = TAPE_CAPACITY;
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
+    h_tape.max_level = 0;
     CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, levels, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_size;
@@ -74,8 +79,6 @@ bool test_tape_initialization() {
     CUDA_CHECK(cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bool passed = (h_size == 0) && (h_value_idx == 0);
-
-    printf("[init] size=%d val_idx=%d %s\n", h_size, h_value_idx, passed ? "OK" : "FAIL");
 
     cudaFree(d_size);
     cudaFree(d_value_idx);
@@ -103,21 +106,26 @@ bool test_tape_record_single_op() {
     TapeEntry* entries;
     float* values;
     float* grads;
+    int* levels;
     CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
     CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&levels, VALUE_CAPACITY * sizeof(int)));
+    CUDA_CHECK(cudaMemset(levels, 0, VALUE_CAPACITY * sizeof(int)));
 
     ADTape h_tape;
     h_tape.entries = entries;
     h_tape.value_buffer = values;
     h_tape.grad_buffer = grads;
+    h_tape.value_levels = levels;
     h_tape.capacity = TAPE_CAPACITY;
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
+    h_tape.max_level = 0;
     CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, levels, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     record_single_op_kernel<<<1, 1>>>(d_tape);
@@ -136,8 +144,6 @@ bool test_tape_record_single_op() {
     CUDA_CHECK(cudaMemcpy(&h_value_idx, d_value_idx, sizeof(int), cudaMemcpyDeviceToHost));
 
     bool passed = (h_size == 1) && (h_value_idx == 1);
-
-    printf("[record] size=%d val_idx=%d %s\n", h_size, h_value_idx, passed ? "OK" : "FAIL");
 
     cudaFree(d_size);
     cudaFree(d_value_idx);
@@ -171,21 +177,26 @@ bool test_backward_gradient_computation() {
     TapeEntry* entries;
     float* values;
     float* grads;
+    int* levels;
     CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
     CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&levels, VALUE_CAPACITY * sizeof(int)));
+    CUDA_CHECK(cudaMemset(levels, 0, VALUE_CAPACITY * sizeof(int)));
 
     ADTape h_tape;
     h_tape.entries = entries;
     h_tape.value_buffer = values;
     h_tape.grad_buffer = grads;
+    h_tape.value_levels = levels;
     h_tape.capacity = TAPE_CAPACITY;
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
+    h_tape.max_level = 0;
     CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, levels, TAPE_CAPACITY, VALUE_CAPACITY);
     cudaDeviceSynchronize();
 
     int* d_y_idx;
@@ -206,10 +217,7 @@ bool test_backward_gradient_computation() {
     CUDA_CHECK(cudaMemcpy(&h_grad, &d_grad_buffer[0], sizeof(float), cudaMemcpyDeviceToHost));
 
     float expected = 6.0f;
-    float tolerance = EPSILON_GRADIENT;
-    bool passed = fabsf(h_grad - expected) < tolerance;
-
-    printf("[backward] grad=%.6f expect=%.6f diff=%.2e %s\n", h_grad, expected, fabsf(h_grad - expected), passed ? "OK" : "FAIL");
+    bool passed = fabsf(h_grad - expected) < safe_epsilon(expected);
 
     cudaFree(d_y_idx);
     cudaFree(entries);
@@ -227,21 +235,26 @@ bool test_tape_reset() {
     TapeEntry* entries;
     float* values;
     float* grads;
+    int* levels;
     CUDA_CHECK(cudaMalloc(&entries, TAPE_CAPACITY * sizeof(TapeEntry)));
     CUDA_CHECK(cudaMalloc(&values, VALUE_CAPACITY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&grads, VALUE_CAPACITY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&levels, VALUE_CAPACITY * sizeof(int)));
+    CUDA_CHECK(cudaMemset(levels, 0, VALUE_CAPACITY * sizeof(int)));
 
     ADTape h_tape;
     h_tape.entries = entries;
     h_tape.value_buffer = values;
     h_tape.grad_buffer = grads;
+    h_tape.value_levels = levels;
     h_tape.capacity = TAPE_CAPACITY;
     h_tape.value_capacity = VALUE_CAPACITY;
     h_tape.current_size = 0;
     h_tape.current_value_idx = 0;
+    h_tape.max_level = 0;
     CUDA_CHECK(cudaMemcpy(d_tape, &h_tape, sizeof(ADTape), cudaMemcpyHostToDevice));
 
-    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, TAPE_CAPACITY, VALUE_CAPACITY);
+    init_ad_tape_kernel<<<1, 1>>>(d_tape, entries, values, grads, levels, TAPE_CAPACITY, VALUE_CAPACITY);
     record_single_op_kernel<<<1, 1>>>(d_tape);
     cudaDeviceSynchronize();
 
@@ -262,8 +275,6 @@ bool test_tape_reset() {
 
     bool passed = (h_size == 0) && (h_value_idx == 0);
 
-    printf("[reset] size=%d val_idx=%d %s\n", h_size, h_value_idx, passed ? "OK" : "FAIL");
-
     cudaFree(d_size);
     cudaFree(d_value_idx);
     cudaFree(entries);
@@ -282,8 +293,6 @@ int main() {
     total++; if (test_tape_record_single_op()) passed++;
     total++; if (test_backward_gradient_computation()) passed++;
     total++; if (test_tape_reset()) passed++;
-
-    printf("%d/%d passed\n", passed, total);
 
     return (passed == total) ? 0 : 1;
 }

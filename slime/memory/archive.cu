@@ -6,8 +6,12 @@
 #include "behavioral_ops.cuh"
 #include "genome_ops.cuh"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <curand_kernel.h>
 #include <stdint.h>
+
+constexpr int GENOME_HASH_TABLE_SIZE = 16384;  // Power of 2, ~1.6x MAX_ARCHIVE_SIZE
+constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;  // 0 = empty slot (genome hashes are non-zero)
 
 struct GPUElite {
     float* fitness;
@@ -26,6 +30,22 @@ struct GPUElite {
     int hw_dim;
     int task_dim;
     int gen_dim;
+
+    // LAMARCKIAN: Weight delta storage (mirrors genome delta pattern)
+    // Weights = Xavier(genome_hash) + deltas
+    // Deltas stored as flat index into concatenated [perception|interaction|value] space
+    half* weight_deltas;             // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
+    uint32_t* weight_delta_indices;  // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
+    uint16_t* num_weight_deltas;     // [MAX_ARCHIVE_SIZE]
+
+    // Architecture snapshot for weight reconstruction (derived from genome at archive time)
+    int* archived_num_heads;         // [MAX_ARCHIVE_SIZE]
+    int* archived_channels;          // [MAX_ARCHIVE_SIZE]
+    int* archived_head_dim;          // [MAX_ARCHIVE_SIZE]
+
+    // Hash table for O(1) genome_hash -> archive_idx lookup (open addressing)
+    uint64_t* hash_table_keys;       // [GENOME_HASH_TABLE_SIZE] - 0 = empty
+    int* hash_table_values;          // [GENOME_HASH_TABLE_SIZE] - archive index
 };
 
 struct VoronoiCell {
@@ -39,6 +59,121 @@ struct VoronoiCell {
     int best_elite_idx;
     float quality_threshold;
 };
+
+// Hash table operations for O(1) genome_hash -> archive_idx lookup
+// Uses open addressing with linear probing
+
+__device__ __forceinline__ int hash_table_slot(uint64_t genome_hash) {
+    // Fibonacci hashing for better distribution
+    return (int)((genome_hash * 11400714819323198485ULL) >> 50) & (GENOME_HASH_TABLE_SIZE - 1);
+}
+
+__device__ int hash_table_lookup(
+    const uint64_t* __restrict__ keys,
+    const int* __restrict__ values,
+    uint64_t genome_hash
+) {
+    if (genome_hash == HASH_TABLE_EMPTY_KEY) return -1;  // Invalid key
+
+    int slot = hash_table_slot(genome_hash);
+    int probes = 0;
+
+    while (probes < GENOME_HASH_TABLE_SIZE) {
+        uint64_t key = keys[slot];
+        if (key == genome_hash) {
+            return values[slot];  // Found
+        }
+        if (key == HASH_TABLE_EMPTY_KEY) {
+            return -1;  // Not found (hit empty slot)
+        }
+        // Linear probing
+        slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
+        probes++;
+    }
+    return -1;  // Table full, not found
+}
+
+__device__ bool hash_table_insert(
+    uint64_t* __restrict__ keys,
+    int* __restrict__ values,
+    uint64_t genome_hash,
+    int archive_idx
+) {
+    if (genome_hash == HASH_TABLE_EMPTY_KEY) return false;  // Invalid key
+
+    int slot = hash_table_slot(genome_hash);
+    int probes = 0;
+
+    while (probes < GENOME_HASH_TABLE_SIZE) {
+        uint64_t expected = HASH_TABLE_EMPTY_KEY;
+        uint64_t old = atomicCAS((unsigned long long*)&keys[slot], expected, genome_hash);
+
+        if (old == HASH_TABLE_EMPTY_KEY) {
+            // Successfully claimed empty slot
+            values[slot] = archive_idx;
+            return true;
+        }
+        if (old == genome_hash) {
+            // Key already exists (duplicate)
+            return false;
+        }
+        // Slot occupied by different key, linear probe
+        slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
+        probes++;
+    }
+    return false;  // Table full
+}
+
+__device__ void hash_table_remove(
+    uint64_t* __restrict__ keys,
+    int* __restrict__ values,
+    uint64_t genome_hash
+) {
+    if (genome_hash == HASH_TABLE_EMPTY_KEY) return;
+
+    int slot = hash_table_slot(genome_hash);
+    int probes = 0;
+
+    while (probes < GENOME_HASH_TABLE_SIZE) {
+        if (keys[slot] == genome_hash) {
+            // Found - mark as deleted (tombstone would need separate handling,
+            // but for our use case we rebuild on archive compaction)
+            keys[slot] = HASH_TABLE_EMPTY_KEY;
+            values[slot] = -1;
+            return;
+        }
+        if (keys[slot] == HASH_TABLE_EMPTY_KEY) {
+            return;  // Not found
+        }
+        slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
+        probes++;
+    }
+}
+
+__global__ void init_hash_table_kernel(
+    uint64_t* keys,
+    int* values,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        keys[idx] = HASH_TABLE_EMPTY_KEY;
+        values[idx] = -1;
+    }
+}
+
+__global__ void rebuild_hash_table_kernel(
+    GPUElite* archive,
+    int archive_size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < archive_size) {
+        uint64_t genome_hash = archive->genome_hash[idx];
+        if (genome_hash != HASH_TABLE_EMPTY_KEY) {
+            hash_table_insert(archive->hash_table_keys, archive->hash_table_values, genome_hash, idx);
+        }
+    }
+}
 
 __constant__ uint16_t d_generation_counter;
 
@@ -116,7 +251,6 @@ __global__ void update_voronoi_density_kernel(
 ) {
     if (num_cells <= 0) {
         if (threadIdx.x == 0 && blockIdx.x == 0) {
-            printf("FATAL [update_voronoi_density]: num_cells=%d\n", num_cells);
         }
         return;
     }
@@ -186,7 +320,6 @@ __global__ void update_voronoi_density_kernel(
             int idx = blockIdx.x * blockDim.x + i;
 
             if (density_mean <= 0.0f) {
-                printf("FATAL [archive]: density_mean=%f\n", density_mean);
                 return;
             }
             cells[idx].density_fluctuation = fabsf((float)cells[idx].density - (float)cells[idx].density_prev) / density_mean;
@@ -195,6 +328,95 @@ __global__ void update_voronoi_density_kernel(
             cells[idx].radius = powf(fmaxf(cells[idx].density_fluctuation, safe_epsilon(1.0f)), -correlation_exponent);
         }
     }
+}
+
+__device__ void insert_elite_device(
+    GPUElite* __restrict__ archive,
+    int* __restrict__ archive_size,
+    float fitness_val,
+    float coherence_val,
+    float effective_rank_val,
+    uint64_t genome_hash_val,
+    uint32_t parent_id_0,
+    uint32_t parent_id_1,
+    uint16_t generation_val,
+    float* hw_coords_new,
+    float* task_coords_new,
+    float* gen_coords_new,
+    float task_performance_val,
+    float* per_class_accuracy_new,
+    int num_classes,
+    VoronoiCell* __restrict__ cells,
+    int num_cells
+) {
+    // O(1) duplicate check via hash table
+    int existing_idx = hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        genome_hash_val
+    );
+    if (existing_idx >= 0) {
+        return;  // Duplicate found
+    }
+
+    int idx = atomicAdd(archive_size, 1);
+    if (idx >= MAX_ARCHIVE_SIZE) {
+        atomicSub(archive_size, 1);
+        return;
+    }
+
+    // Insert into hash table for future O(1) lookups
+    bool inserted = hash_table_insert(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        genome_hash_val,
+        idx
+    );
+    if (!inserted) {
+        // Hash table full or race condition duplicate - revert
+        atomicSub(archive_size, 1);
+        return;
+    }
+
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    archive->fitness[idx] = fitness_val;
+    archive->coherence[idx] = coherence_val;
+    archive->effective_rank[idx] = effective_rank_val;
+    archive->genome_hash[idx] = genome_hash_val;
+    archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
+    archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
+    archive->generation[idx] = generation_val;
+
+    for (int d = 0; d < hw_dim; d++) {
+        archive->hw_coords[idx * hw_dim + d] = hw_coords_new[d];
+    }
+    for (int d = 0; d < task_dim; d++) {
+        archive->task_coords[idx * task_dim + d] = task_coords_new[d];
+    }
+    for (int d = 0; d < gen_dim; d++) {
+        archive->gen_coords[idx * gen_dim + d] = gen_coords_new[d];
+    }
+
+    archive->task_performance[idx] = task_performance_val;
+    for (int c = 0; c < num_classes; c++) {
+        archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
+    }
+
+    float min_dist = 1e9f;
+    int closest_cell = 0;
+    for (int c = 0; c < num_cells; c++) {
+        float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
+        if (dist_sq < min_dist) {
+            min_dist = dist_sq;
+            closest_cell = c;
+        }
+    }
+
+    atomicAdd(&cells[closest_cell].density, 1);
+    cells[closest_cell].best_elite_idx = idx;
 }
 
 __global__ void insert_elite_kernel(
@@ -216,75 +438,80 @@ __global__ void insert_elite_kernel(
     VoronoiCell* __restrict__ cells,
     int num_cells
 ) {
+    // Only thread 0 performs the insertion
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    bool is_duplicate = false;
+    // O(1) duplicate check via hash table
+    int existing_idx = hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        genome_hash_val
+    );
+    if (existing_idx >= 0) {
+        return;  // Duplicate found
+    }
 
-    if (tid < *archive_size) {
-        if (archive->genome_hash[tid] == genome_hash_val) {
-            is_duplicate = true;
+    int idx = atomicAdd(archive_size, 1);
+    if (idx >= MAX_ARCHIVE_SIZE) {
+        atomicSub(archive_size, 1);
+        return;
+    }
+
+    // Insert into hash table for future O(1) lookups
+    bool inserted = hash_table_insert(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        genome_hash_val,
+        idx
+    );
+    if (!inserted) {
+        atomicSub(archive_size, 1);
+        return;
+    }
+
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    archive->fitness[idx] = fitness_val;
+    archive->coherence[idx] = coherence_val;
+    archive->effective_rank[idx] = effective_rank_val;
+    archive->genome_hash[idx] = genome_hash_val;
+    archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
+    archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
+    archive->generation[idx] = generation_val;
+
+    int hw_base = idx * hw_dim;
+    int task_base = idx * task_dim;
+    int gen_base = idx * gen_dim;
+
+    for (int d = 0; d < hw_dim; d++) {
+        archive->hw_coords[hw_base + d] = hw_coords_new[d];
+    }
+    for (int d = 0; d < task_dim; d++) {
+        archive->task_coords[task_base + d] = task_coords_new[d];
+    }
+    for (int d = 0; d < gen_dim; d++) {
+        archive->gen_coords[gen_base + d] = gen_coords_new[d];
+    }
+
+    archive->task_performance[idx] = task_performance_val;
+    for (int c = 0; c < num_classes; c++) {
+        archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
+    }
+
+    float min_dist = 1e9f;
+    int closest_cell = 0;
+    for (int c = 0; c < num_cells; c++) {
+        float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
+        if (dist_sq < min_dist) {
+            min_dist = dist_sq;
+            closest_cell = c;
         }
     }
 
-    __shared__ bool block_has_duplicate;
-    if (threadIdx.x == 0) block_has_duplicate = false;
-    __syncthreads();
-
-    if (is_duplicate) {
-        block_has_duplicate = true;
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        if (!block_has_duplicate) {
-            int idx = atomicAdd(archive_size, 1);
-            if (idx < MAX_ARCHIVE_SIZE) {
-            int hw_dim = archive->hw_dim;
-            int task_dim = archive->task_dim;
-            int gen_dim = archive->gen_dim;
-
-            archive->fitness[idx] = fitness_val;
-            archive->coherence[idx] = coherence_val;
-            archive->effective_rank[idx] = effective_rank_val;
-            archive->genome_hash[idx] = genome_hash_val;
-            archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
-            archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
-            archive->generation[idx] = generation_val;
-
-            int hw_base = idx * hw_dim;
-            int task_base = idx * task_dim;
-            int gen_base = idx * gen_dim;
-
-            for (int d = 0; d < hw_dim; d++) {
-                archive->hw_coords[hw_base + d] = hw_coords_new[d];
-            }
-            for (int d = 0; d < task_dim; d++) {
-                archive->task_coords[task_base + d] = task_coords_new[d];
-            }
-            for (int d = 0; d < gen_dim; d++) {
-                archive->gen_coords[gen_base + d] = gen_coords_new[d];
-            }
-
-            archive->task_performance[idx] = task_performance_val;
-            for (int c = 0; c < num_classes; c++) {
-                archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
-            }
-
-            float min_dist = 1e9f;
-            int closest_cell = 0;
-            for (int c = 0; c < num_cells; c++) {
-                float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
-                if (dist_sq < min_dist) {
-                    min_dist = dist_sq;
-                    closest_cell = c;
-                }
-            }
-
-            atomicAdd(&cells[closest_cell].density, 1);
-            cells[closest_cell].best_elite_idx = idx;
-            }
-        }
-    }
+    atomicAdd(&cells[closest_cell].density, 1);
+    cells[closest_cell].best_elite_idx = idx;
 }
 
 __global__ void adapt_embedding_dim_kernel(
@@ -345,10 +572,174 @@ __global__ void init_voronoi_cells_kernel(
     cell->quality_threshold = 0.0f;
 
     if (cell_id == 0) {
-        printf("[voronoi] cells=%p num=%d dims=%d radius=%f\n", cells, num_cells, total_dims, typical_spacing * 2.0f);
     }
 }
 
 // Streaming genome element reconstruction - implementation here requires GPUElite definition
+
+__global__ void compute_voronoi_occupancy_kernel(
+    VoronoiCell* voronoi_cells,
+    int num_voronoi_cells,
+    float* voronoi_occupancy_histogram
+) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (tid < num_voronoi_cells) {
+        voronoi_occupancy_histogram[tid] = (float)voronoi_cells[tid].density;
+    }
+}
+
+// From pseudopod.cu
+__device__ float get_ca_xavier_scale(
+    int flat_idx, int num_heads, int channels, int head_dim,
+    int* out_matrix, int* out_local_idx
+);
+
+__global__ void store_elite_weight_deltas_kernel(
+    GPUElite* archive,
+    int elite_idx,
+    const half* perception_weights,
+    const half* interaction_weights,
+    const half* value_weights,
+    int num_heads,
+    int channels,
+    int head_dim,
+    uint64_t genome_hash,
+    const float* genome,
+    int* num_deltas_out
+) {
+    if (archive->weight_deltas == nullptr) return;
+
+    int perception_size = num_heads * channels * head_dim;
+    int interaction_size = num_heads * head_dim * head_dim;
+    int value_size = num_heads * head_dim * channels;
+    int total_size = perception_size + interaction_size + value_size;
+
+    int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (flat_idx >= total_size) return;
+
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        archive->archived_num_heads[elite_idx] = num_heads;
+        archive->archived_channels[elite_idx] = channels;
+        archive->archived_head_dim[elite_idx] = head_dim;
+    }
+
+    int delta_threshold_slot = derive_param_slot(genome_hash, "weight_delta_threshold");
+    float delta_threshold = (genome[delta_threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+
+    curandState_t rand_state;
+    curand_init(genome_hash, flat_idx, 0, &rand_state);
+
+    int matrix, local_idx;
+    float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+    float baseline = curand_normal(&rand_state) * scale;
+
+    float current;
+    if (matrix == 0) {
+        current = __half2float(perception_weights[local_idx]);
+    } else if (matrix == 1) {
+        current = __half2float(interaction_weights[local_idx]);
+    } else if (matrix == 2) {
+        current = __half2float(value_weights[local_idx]);
+    } else {
+        return;
+    }
+
+    float delta = current - baseline;
+
+    if (fabsf(delta) > delta_threshold) {
+        int slot = atomicAdd(num_deltas_out, 1);
+        if (slot < MAX_WEIGHT_DELTAS_PER_ELITE) {
+            int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
+            archive->weight_delta_indices[base_offset + slot] = flat_idx;
+            archive->weight_deltas[base_offset + slot] = __float2half(delta);
+        }
+    }
+}
+
+__global__ void finalize_weight_deltas_kernel(
+    GPUElite* archive,
+    int elite_idx,
+    int* num_deltas_out
+) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        int count = min(*num_deltas_out, MAX_WEIGHT_DELTAS_PER_ELITE);
+        archive->num_weight_deltas[elite_idx] = count;
+    }
+}
+
+__global__ void restore_elite_weights_kernel(
+    const GPUElite* archive,
+    int elite_idx,
+    half* perception_weights,
+    half* interaction_weights,
+    half* value_weights
+) {
+    if (archive->weight_deltas == nullptr) return;
+
+    int num_heads = archive->archived_num_heads[elite_idx];
+    int channels = archive->archived_channels[elite_idx];
+    int head_dim = archive->archived_head_dim[elite_idx];
+    uint64_t genome_hash = archive->genome_hash[elite_idx];
+
+    int perception_size = num_heads * channels * head_dim;
+    int interaction_size = num_heads * head_dim * head_dim;
+    int value_size = num_heads * head_dim * channels;
+    int total_size = perception_size + interaction_size + value_size;
+
+    int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (flat_idx >= total_size) return;
+
+    curandState_t rand_state;
+    curand_init(genome_hash, flat_idx, 0, &rand_state);
+
+    int matrix, local_idx;
+    float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+    float val = curand_normal(&rand_state) * scale;
+
+    if (matrix == 0) {
+        perception_weights[local_idx] = __float2half(val);
+    } else if (matrix == 1) {
+        interaction_weights[local_idx] = __float2half(val);
+    } else if (matrix == 2) {
+        value_weights[local_idx] = __float2half(val);
+    }
+}
+
+__global__ void apply_weight_deltas_kernel(
+    const GPUElite* archive,
+    int elite_idx,
+    half* perception_weights,
+    half* interaction_weights,
+    half* value_weights
+) {
+    if (archive->weight_deltas == nullptr) return;
+
+    int num_heads = archive->archived_num_heads[elite_idx];
+    int channels = archive->archived_channels[elite_idx];
+    int head_dim = archive->archived_head_dim[elite_idx];
+
+    int num_deltas = archive->num_weight_deltas[elite_idx];
+    int delta_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (delta_idx >= num_deltas) return;
+
+    int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
+    uint32_t flat_idx = archive->weight_delta_indices[base_offset + delta_idx];
+    half delta = archive->weight_deltas[base_offset + delta_idx];
+
+    int matrix, local_idx;
+    get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+
+    if (matrix == 0) {
+        float current = __half2float(perception_weights[local_idx]);
+        perception_weights[local_idx] = __float2half(current + __half2float(delta));
+    } else if (matrix == 1) {
+        float current = __half2float(interaction_weights[local_idx]);
+        interaction_weights[local_idx] = __float2half(current + __half2float(delta));
+    } else if (matrix == 2) {
+        float current = __half2float(value_weights[local_idx]);
+        value_weights[local_idx] = __float2half(current + __half2float(delta));
+    }
+}
 
 #endif

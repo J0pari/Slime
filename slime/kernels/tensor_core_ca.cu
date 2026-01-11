@@ -74,6 +74,27 @@ __global__ void tensor_core_matmul_kernel(
     wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
 }
 
+__global__ void relu_kernel(
+    float* __restrict__ data,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] = fmaxf(0.0f, data[idx]);
+    }
+}
+
+__global__ void gelu_kernel(
+    float* __restrict__ data,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float x = data[idx];
+        data[idx] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
+    }
+}
+
 __global__ void tensor_core_perception_kernel(
     half* __restrict__ neighborhood_fp16,
     half* __restrict__ perception_weights,
@@ -123,27 +144,6 @@ __global__ void tensor_core_perception_kernel(
     );
 }
 
-__global__ void relu_kernel(
-    float* __restrict__ data,
-    int size
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        data[idx] = fmaxf(0.0f, data[idx]);
-    }
-}
-
-__global__ void gelu_kernel(
-    float* __restrict__ data,
-    int size
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float x = data[idx];
-        data[idx] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
-    }
-}
-
 __global__ void prepare_ca_fp16_kernel(
     ComponentPool* __restrict__ pool,
     int max_grid_size,
@@ -170,7 +170,6 @@ __global__ void multi_head_ca_tensor_kernel(
     ComponentPool* __restrict__ pool,
     int max_grid_size,
     ArchitectureParams arch,
-    TraceBuffer* trace_buffer,
     int entry_idx
 ) {
     int head = blockIdx.y;
@@ -187,6 +186,17 @@ __global__ void multi_head_ca_tensor_kernel(
     int num_cells = grid_size * grid_size;
 
     MultiHeadCAState* ca_state = entry->ca_state;
+
+    // Record hardware trace metrics
+    TraceBuffer* trace_buffer = &ca_state->trace;
+    if (trace_buffer->current_idx < trace_buffer->capacity) {
+        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+        if (trace_idx < trace_buffer->capacity) {
+            int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
+            record_warp_metrics(&trace_buffer->traces[trace_idx], warp_id);
+        }
+    }
+
     half* fp16_workspace = ca_state->fp16_workspace;
     float* fp32_workspace = ca_state->fp32_workspace;
     half* perception_weights = ca_state->perception_weights;

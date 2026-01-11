@@ -9,9 +9,11 @@ struct PoolEntry;
 
 __device__ constexpr uint64_t fnv1a_hash(const char* str) {
     uint64_t hash = 14695981039346656037ULL;
-    while (*str) {
+    int cycles = 0;
+    while (*str && cycles < MAX_KERNEL_CYCLES) {
         hash ^= (uint64_t)(*str++);
         hash *= 1099511628211ULL;
+        cycles++;
     }
     return hash;
 }

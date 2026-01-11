@@ -14,6 +14,7 @@ struct ArchitectureParams {
     int hidden_dim;
     int head_dim;
     int grid_size;
+    float ca_gate_center;  // Derived from learning state: low accuracy → conservative (high center), high accuracy → aggressive (low center)
 };
 
 

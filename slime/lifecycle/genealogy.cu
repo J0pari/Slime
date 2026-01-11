@@ -11,12 +11,12 @@ __device__ void set_parent_ids(GPUElite* archive, int elite_idx, uint32_t parent
 }
 
 __device__ int find_parent_by_hash(GPUElite* archive, int archive_size, uint64_t parent_hash) {
-    for (int i = 0; i < archive_size; i++) {
-        if (archive->genome_hash[i] == parent_hash) {
-            return i;
-        }
-    }
-    return -1;
+    // O(1) lookup via hash table
+    return hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        parent_hash
+    );
 }
 
 __device__ void update_genealogy_on_spawn(GPUElite* archive, int new_elite_idx, int parent1_idx, int parent2_idx) {

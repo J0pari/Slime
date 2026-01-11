@@ -41,20 +41,10 @@ inline void traced_kernel_launch(
 
     cudaMemcpyToSymbol(g_last_launch, &info, sizeof(KernelLaunchInfo));
 
-    printf("[LAUNCH] %s<<<(%u,%u,%u),(%u,%u,%u),%zu>>> at %s:%d\n",
-           kernel_name, gridDim.x, gridDim.y, gridDim.z,
-           blockDim.x, blockDim.y, blockDim.z, sharedMem, file, line);
-
     kernel<<<gridDim, blockDim, sharedMem, stream>>>(std::forward<Args>(args)...);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("[FATAL] Kernel launch failed: %s\n", kernel_name);
-        printf("        Location: %s:%d\n", file, line);
-        printf("        Error: %s (code %d)\n", cudaGetErrorString(err), err);
-        printf("        Grid: (%u,%u,%u) Block: (%u,%u,%u) Shared: %zu\n",
-               gridDim.x, gridDim.y, gridDim.z,
-               blockDim.x, blockDim.y, blockDim.z, sharedMem);
         exit(1);
     }
 }
@@ -68,34 +58,27 @@ inline void traced_kernel_launch(
         if (err != cudaSuccess) { \
             KernelLaunchInfo info; \
             cudaMemcpyFromSymbol(&info, g_last_launch, sizeof(KernelLaunchInfo)); \
-            printf("[FATAL] Synchronization failed after: %s\n", msg); \
-            printf("        Last kernel: %s at %s:%d\n", \
-                   info.kernel_name, info.file, info.line); \
-            printf("        Grid: (%u,%u,%u) Block: (%u,%u,%u)\n", \
-                   info.grid_x, info.grid_y, info.grid_z, \
-                   info.block_x, info.block_y, info.block_z); \
-            printf("        Error: %s (code %d)\n", cudaGetErrorString(err), err); \
+\
+\
+\
+\
             exit(1); \
         } \
     } while(0)
 
 __global__ void kernel_trace_init() {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("[TRACE] Kernel tracing system initialized\n");
     }
 }
 
 inline void init_kernel_trace() {
-    printf("[TRACE] Initializing kernel tracing...\n");
     kernel_trace_init<<<1, 1>>>();
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("[FATAL] kernel_trace_init launch failed: %s\n", cudaGetErrorString(err));
         exit(1);
     }
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
-        printf("[FATAL] kernel_trace_init sync failed: %s\n", cudaGetErrorString(err));
         exit(1);
     }
 
@@ -108,10 +91,6 @@ inline void init_kernel_trace() {
     cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, 4);
 
     cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, 32768);
-
-    printf("[TRACE] Stack size: %zu bytes, Heap size: %zu MB\n",
-           stack_size, malloc_heap / (1024*1024));
-    printf("[TRACE] Dynamic parallelism: sync depth=4, pending launches=32768\n");
 }
 
 #endif

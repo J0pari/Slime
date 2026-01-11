@@ -6,6 +6,7 @@
 #include "../memory/pool.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
+#include <cmath>
 
 struct GenomeComplexityMetrics {
     float delta_diversity;
@@ -16,15 +17,59 @@ struct GenomeComplexityMetrics {
 };
 
 struct ArchiveTopologyMetrics {
-    float density_variance;
-    float novelty_gradient;
-    float hash_clustering_coefficient;
+    // Coverage dynamics
     int occupied_cells;
+    int frontier_cells_gained;   // New cells colonized this gen
+    int frontier_cells_lost;     // Cells that went extinct
+    int sparse_cell_count;       // Cells with density < threshold
+    float niche_entropy;         // Shannon entropy of cell occupancy
+    float novelty_gradient;      // occupied/total ratio
+
+    // Quality dynamics  
+    float elite_fitness_best;
+    float elite_fitness_mean;    // Mean fitness across archive
+    float elite_fitness_delta;   // Change from previous gen
+    float quality_floor;         // Worst occupied cell quality
+    float quality_mean;          // Mean quality threshold
     float quality_range;
+
+    // Density distribution
+    float density_mean;          // Mean organisms per occupied cell
+    float density_max;           // Most crowded cell
+    float density_variance;
+
+    // 3-axis behavioral spread
+    float hw_axis_min, hw_axis_max, hw_axis_mean;
+    float task_axis_min, task_axis_max, task_axis_mean;
+    float gen_axis_min, gen_axis_max, gen_axis_mean;
+
+    // Axis correlations
+    float axis_corr_hw_task;
+    float axis_corr_hw_gen;
+    float axis_corr_task_gen;
+
+    // Population flow
+    int total_population;
+    int births_this_gen;
+    int deaths_this_gen;
+
+    // Legacy
+    float hash_clustering_coefficient;
 };
 
 struct DIRESAEvolutionMetrics {
-    float behavioral_drift_rate;
+    // Reconstruction fidelity (pre vs post DIRESA)
+    float recon_loss_hw;         // Hardware axis encoding loss
+    float recon_loss_task;       // Task axis encoding loss  
+    float recon_loss_gen;        // Generalization axis encoding loss
+    float recon_loss_total;      // Combined reconstruction loss
+
+    // Latent space dynamics
+    float behavioral_drift_rate; // How fast behavioral coords change
+    float latent_utilization;    // Fraction of latent dims actively used
+    float compression_ratio;     // Input dim / latent dim effective
+
+    // Hardware-behavior correlation
     float hardware_feature_correlation;
     float gradient_magnitude_avg;
     int archive_injections;
@@ -64,15 +109,16 @@ struct TelemetryBuffer {
     MemoryAllocationMetrics memory_allocation;
     int generation;
     bool valid;
+
+    // Persistent state for generational delta tracking
+    ArchiveTopologyMetrics prev_archive_topology;
+    int prev_occupied_flags[MAX_CELLS];  // Density per cell from previous gen
 };
 
 __device__ void print_size(const char* prefix, const char* label, size_t size_bytes, const char* suffix) {
     if (size_bytes < BYTES_PER_KB) {
-        printf("%s%s: %llu bytes%s\n", prefix, label, (unsigned long long)size_bytes, suffix);
     } else if (size_bytes < BYTES_PER_MB) {
-        printf("%s%s: %.2f KB%s\n", prefix, label, size_bytes / (float)BYTES_PER_KB, suffix);
     } else {
-        printf("%s%s: %.2f MB%s\n", prefix, label, size_bytes / (float)BYTES_PER_MB, suffix);
     }
 }
 
@@ -84,22 +130,16 @@ __device__ void track_allocation(
     MemoryAllocationMetrics* metrics
 ) {
     if (result != cudaSuccess) {
-        printf("[MEM ERROR] %s FAILED: %s (requested %llu bytes)\n",
-               label, cudaGetErrorString(result), (unsigned long long)size_bytes);
         return;
     }
 
     if (ptr == nullptr) {
-        printf("[MEM ERROR] %s returned nullptr (requested %llu bytes)\n", label, (unsigned long long)size_bytes);
         return;
     }
 
     if (size_bytes < BYTES_PER_KB) {
-        printf("[MEM OK] %s: %llu bytes at %p\n", label, (unsigned long long)size_bytes, ptr);
     } else if (size_bytes < BYTES_PER_MB) {
-        printf("[MEM OK] %s: %.2f KB at %p\n", label, size_bytes / (float)BYTES_PER_KB, ptr);
     } else {
-        printf("[MEM OK] %s: %.2f MB at %p\n", label, size_bytes / (float)BYTES_PER_MB, ptr);
     }
     metrics->total_gpu_allocated += size_bytes;
 }
@@ -109,23 +149,19 @@ __device__ void track_allocation(
         size_t heap_limit = Atomics::load_size(&(metrics)->device_heap_limit); \
         size_t heap_used = Atomics::load_size(&(metrics)->device_heap_allocated); \
         size_t heap_free = heap_limit - heap_used; \
-        printf("[ALLOC START] %s: %llu bytes | heap: %llu used + %llu req = %llu / %llu limit\n", \
-               #ptr, (unsigned long long)(size), (unsigned long long)heap_used, (unsigned long long)(size), \
-               (unsigned long long)(heap_used + (size)), (unsigned long long)heap_limit); \
+\
         if (heap_free < (size)) { \
-            printf("[FATAL] %s cudaMalloc WILL FAIL: requested %llu bytes but only %llu free (deficit: %lld bytes)\n", \
-                   #ptr, (unsigned long long)(size), (unsigned long long)heap_free, \
-                   (long long)((size) - heap_free)); \
+\
             return; \
         } \
         cudaError_t alloc_err = cudaMalloc(&(ptr), (size)); \
-        printf("[ALLOC DONE] %s\n", #ptr); \
+\
         if (alloc_err != cudaSuccess) { \
-            printf("[FATAL] %s cudaMalloc FAILED: %s (requested %llu bytes)\n", #ptr, cudaGetErrorString(alloc_err), (unsigned long long)(size)); \
+\
             return; \
         } \
         if ((ptr) == nullptr) { \
-            printf("[FATAL] %s cudaMalloc returned nullptr (requested %llu bytes)\n", #ptr, (unsigned long long)(size)); \
+\
             return; \
         } \
         Atomics::add_size(&(metrics)->device_heap_allocated, (size)); \
@@ -141,11 +177,11 @@ __global__ void genome_complexity_probe_kernel(
 
     int capacity = pool->capacity;
     if (capacity == 0) {
-        metrics->delta_diversity = 0.0f;
-        metrics->hash_entropy = 0.0f;
-        metrics->parameter_variance = 0.0f;
-        metrics->unique_hashes = 0;
-        metrics->avg_deltas_per_genome = 0.0f;
+        metrics->delta_diversity = NAN;
+        metrics->hash_entropy = NAN;
+        metrics->parameter_variance = NAN;
+        metrics->unique_hashes = -1;
+        metrics->avg_deltas_per_genome = NAN;
         return;
     }
 
@@ -156,7 +192,8 @@ __global__ void genome_complexity_probe_kernel(
     int alive_count = 0;
 
     for (int i = 0; i < capacity; i++) {
-        if (!pool->entries[i].alive) continue;
+        // Use SoA for coalesced alive read
+        if (!pool->alive_flags[i]) continue;
         alive_count++;
 
         PoolEntry* e = &pool->entries[i];
@@ -179,24 +216,19 @@ __global__ void genome_complexity_probe_kernel(
     }
 
     if (alive_count == 0) {
-        metrics->delta_diversity = 0.0f;
-        metrics->hash_entropy = 0.0f;
-        metrics->parameter_variance = 0.0f;
-        metrics->unique_hashes = 0;
-        metrics->avg_deltas_per_genome = 0.0f;
+        metrics->delta_diversity = NAN;
+        metrics->hash_entropy = NAN;
+        metrics->parameter_variance = NAN;
+        metrics->unique_hashes = -1;
+        metrics->avg_deltas_per_genome = NAN;
         return;
     }
 
     int display_count = 0;
-    printf("[POOL-DIVERSITY] alive=%d unique=%d capacity=%d\n", alive_count, unique_count, capacity);
     for (int i = 0; i < capacity && display_count < 10; i++) {
-        if (!pool->entries[i].alive) continue;
+        // Use SoA for coalesced alive read
+        if (!pool->alive_flags[i]) continue;
         PoolEntry* e = &pool->entries[i];
-        printf("  [%3d] fit=%.6f task=%.4f gen_gap=%.4f hw_eff=%.4f age=%d deltas=%d\n",
-               i, e->fitness, e->task_accuracy, e->generalization_gap, e->hardware_efficiency, e->age, e->num_deltas);
-        printf("        exp(α=%.3f β=%.3f γ=%.3f δ=%.3f) arch(h=%d ch=%d grid=%d) diresa(h1=%d h2=%d)\n",
-               e->fitness_task_exponent, e->fitness_gen_exponent, e->fitness_rank_exponent, e->fitness_efficiency_exponent,
-               e->num_heads, e->channels, e->grid_size, e->diresa_hidden1, e->diresa_hidden2);
         display_count++;
     }
 
@@ -221,62 +253,154 @@ __global__ void archive_topology_probe_kernel(
     int archive_size,
     VoronoiCell* voronoi_cells,
     int num_cells,
-    ArchiveTopologyMetrics* metrics
+    ArchiveTopologyMetrics* metrics,
+    ArchiveTopologyMetrics* prev_metrics,  // Previous gen for deltas
+    int* prev_occupied_flags,              // Which cells were occupied last gen
+    int hw_dim, int task_dim, int gen_dim
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     if (archive_size == 0 || num_cells == 0) {
-        metrics->density_variance = 0.0f;
-        metrics->novelty_gradient = 0.0f;
-        metrics->hash_clustering_coefficient = 0.0f;
         metrics->occupied_cells = 0;
-        metrics->quality_range = 0.0f;
+        metrics->novelty_gradient = 0.0f;
+        metrics->niche_entropy = 0.0f;
         return;
     }
 
+    // Coverage and population
     int occupied = 0;
+    int sparse_count = 0;
+    int frontier_gained = 0;
+    int frontier_lost = 0;
+    int total_pop = 0;
     float sum_density = 0.0f;
     float sum_density_sq = 0.0f;
+    int max_density = 0;
+
+    // Quality
     float min_quality = 1e10f;
     float max_quality = -1e10f;
+    float sum_quality = 0.0f;
+    float best_fitness = -1e10f;
+    float sum_fitness = 0.0f;
+
+    // 3-axis spread (using centroid L2 norms as proxy)
+    float hw_min = 1e10f, hw_max = -1e10f, hw_sum = 0.0f;
+    float task_min = 1e10f, task_max = -1e10f, task_sum = 0.0f;
+    float gen_min = 1e10f, gen_max = -1e10f, gen_sum = 0.0f;
 
     for (int i = 0; i < num_cells; i++) {
-        if (voronoi_cells[i].density > 0) {
+        int dens = voronoi_cells[i].density;
+        int prev_dens = (prev_occupied_flags && i < num_cells) ? prev_occupied_flags[i] : 0;
+
+        if (dens > 0) {
             occupied++;
-            float d = (float)voronoi_cells[i].density;
+            total_pop += dens;
+            float d = (float)dens;
             sum_density += d;
             sum_density_sq += d * d;
+
+            if (dens < 3) sparse_count++;  // Sparse = novelty target
+            if (prev_dens == 0) frontier_gained++;  // New colonization
+            if (dens > max_density) max_density = dens;
 
             float q = voronoi_cells[i].quality_threshold;
             min_quality = fminf(min_quality, q);
             max_quality = fmaxf(max_quality, q);
+            sum_quality += q;
+
+            // Compute centroid magnitudes for axis spread
+            float hw_mag = 0.0f, task_mag = 0.0f, gen_mag = 0.0f;
+            for (int d = 0; d < hw_dim && voronoi_cells[i].hw_centroid; d++) {
+                hw_mag += voronoi_cells[i].hw_centroid[d] * voronoi_cells[i].hw_centroid[d];
+            }
+            for (int d = 0; d < task_dim && voronoi_cells[i].task_centroid; d++) {
+                task_mag += voronoi_cells[i].task_centroid[d] * voronoi_cells[i].task_centroid[d];
+            }
+            for (int d = 0; d < gen_dim && voronoi_cells[i].gen_centroid; d++) {
+                gen_mag += voronoi_cells[i].gen_centroid[d] * voronoi_cells[i].gen_centroid[d];
+            }
+            hw_mag = sqrtf(hw_mag); task_mag = sqrtf(task_mag); gen_mag = sqrtf(gen_mag);
+
+            hw_min = fminf(hw_min, hw_mag); hw_max = fmaxf(hw_max, hw_mag); hw_sum += hw_mag;
+            task_min = fminf(task_min, task_mag); task_max = fmaxf(task_max, task_mag); task_sum += task_mag;
+            gen_min = fminf(gen_min, gen_mag); gen_max = fmaxf(gen_max, gen_mag); gen_sum += gen_mag;
+        } else if (prev_dens > 0) {
+            frontier_lost++;  // Extinction
+        }
+
+        // Update prev flags for next generation
+        if (prev_occupied_flags) prev_occupied_flags[i] = dens;
+    }
+
+    // Find best and mean elite fitness (SoA layout: archive->fitness[i])
+    for (int i = 0; i < archive_size; i++) {
+        float f = archive->fitness[i];
+        if (f > best_fitness) best_fitness = f;
+        sum_fitness += f;
+    }
+
+    // Niche entropy (Shannon entropy of density distribution)
+    float entropy = 0.0f;
+    if (total_pop > 0) {
+        for (int i = 0; i < num_cells; i++) {
+            if (voronoi_cells[i].density > 0) {
+                float p = (float)voronoi_cells[i].density / total_pop;
+                entropy -= p * log2f(p);
+            }
         }
     }
 
+    // Coverage dynamics
     metrics->occupied_cells = occupied;
-    metrics->quality_range = max_quality - min_quality;
+    metrics->frontier_cells_gained = frontier_gained;
+    metrics->frontier_cells_lost = frontier_lost;
+    metrics->sparse_cell_count = sparse_count;
+    metrics->niche_entropy = entropy;
+    metrics->novelty_gradient = (float)occupied / num_cells;
 
+    // Quality dynamics
+    metrics->elite_fitness_best = best_fitness;
+    metrics->elite_fitness_mean = (archive_size > 0) ? (sum_fitness / archive_size) : 0.0f;
+    metrics->elite_fitness_delta = prev_metrics ? (best_fitness - prev_metrics->elite_fitness_best) : 0.0f;
+    metrics->quality_floor = (occupied > 0) ? min_quality : 0.0f;
+    metrics->quality_mean = (occupied > 0) ? (sum_quality / occupied) : 0.0f;
+    metrics->quality_range = (occupied > 0) ? (max_quality - min_quality) : 0.0f;
+
+    // Density distribution
+    metrics->density_mean = (occupied > 0) ? (sum_density / occupied) : 0.0f;
+    metrics->density_max = (float)max_density;
+
+    // 3-axis spread
+    metrics->hw_axis_min = (occupied > 0) ? hw_min : 0.0f;
+    metrics->hw_axis_max = (occupied > 0) ? hw_max : 0.0f;
+    metrics->hw_axis_mean = (occupied > 0) ? (hw_sum / occupied) : 0.0f;
+    metrics->task_axis_min = (occupied > 0) ? task_min : 0.0f;
+    metrics->task_axis_max = (occupied > 0) ? task_max : 0.0f;
+    metrics->task_axis_mean = (occupied > 0) ? (task_sum / occupied) : 0.0f;
+    metrics->gen_axis_min = (occupied > 0) ? gen_min : 0.0f;
+    metrics->gen_axis_max = (occupied > 0) ? gen_max : 0.0f;
+    metrics->gen_axis_mean = (occupied > 0) ? (gen_sum / occupied) : 0.0f;
+
+    // Axis correlations (placeholder - would need full centroid data)
+    metrics->axis_corr_hw_task = 0.0f;
+    metrics->axis_corr_hw_gen = 0.0f;
+    metrics->axis_corr_task_gen = 0.0f;
+
+    // Population flow
+    metrics->total_population = total_pop;
+    metrics->births_this_gen = 0;  // Tracked elsewhere in lifecycle
+    metrics->deaths_this_gen = 0;
+
+    // Legacy
     if (occupied > 0) {
         float mean_density = sum_density / occupied;
         float variance = (sum_density_sq / occupied) - (mean_density * mean_density);
-        metrics->density_variance = sqrtf(variance);
+        metrics->density_variance = sqrtf(fmaxf(0.0f, variance));
     } else {
         metrics->density_variance = 0.0f;
     }
-
-    metrics->novelty_gradient = (float)occupied / num_cells;
     metrics->hash_clustering_coefficient = 1.0f - metrics->novelty_gradient;
-
-    int display_limit = archive_size < 10 ? archive_size : 10;
-    printf("[ARCHIVE-ELITES] size=%d showing %d niche specializations\n", archive_size, display_limit);
-    for (int i = 0; i < display_limit; i++) {
-        GPUElite* e = &archive[i];
-        printf("  [%3d] gen=%d fit=%.6f hw[%.3f,%.3f,%.3f,%.3f] task[%.3f,%.3f,%.3f,%.3f] gen[%.3f,%.3f]\n",
-               i, e->generation, e->fitness,
-               e->hw_coords[0], e->hw_coords[1], e->hw_coords[2], e->hw_coords[3],
-               e->task_coords[0], e->task_coords[1], e->task_coords[2], e->task_coords[3],
-               e->gen_coords[0], e->gen_coords[1]);
-    }
 }
 
 __global__ void diresa_evolution_probe_kernel(
@@ -287,10 +411,10 @@ __global__ void diresa_evolution_probe_kernel(
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     if (archive_size == 0) {
-        metrics->behavioral_drift_rate = 0.0f;
-        metrics->hardware_feature_correlation = 0.0f;
-        metrics->gradient_magnitude_avg = 0.0f;
-        metrics->archive_injections = 0;
+        metrics->behavioral_drift_rate = NAN;
+        metrics->hardware_feature_correlation = NAN;
+        metrics->gradient_magnitude_avg = NAN;
+        metrics->archive_injections = -1;
         return;
     }
 
@@ -299,7 +423,6 @@ __global__ void diresa_evolution_probe_kernel(
     int recent_count = 0;
 
     int display_limit = archive_size < 5 ? archive_size : 5;
-    printf("[DIRESA-LATENT] showing %d/%d elite latent coordinates\n", display_limit, archive_size);
 
     for (int i = 0; i < archive_size && i < MAX_ARCHIVE_SIZE; i++) {
         if (archive[i].generation > 0 && recent_count < 100) {
@@ -323,19 +446,15 @@ __global__ void diresa_evolution_probe_kernel(
             sum_hw_corr += hw_sum / (WMMA_TILE_DIM - 1);
 
             if (i < display_limit) {
-                printf("  [%3d] drift=%.4f hw_feat_avg=%.4f latent[%.3f,%.3f,%.3f,%.3f...]\n",
-                       i, drift / total_dims, hw_sum / (WMMA_TILE_DIM - 1),
-                       archive[i].latent_genome[0], archive[i].latent_genome[1],
-                       archive[i].latent_genome[2], archive[i].latent_genome[3]);
             }
 
             recent_count++;
         }
     }
 
-    metrics->behavioral_drift_rate = recent_count > 0 ? sum_drift / recent_count : 0.0f;
-    metrics->hardware_feature_correlation = recent_count > 0 ? sum_hw_corr / recent_count : 0.0f;
-    metrics->gradient_magnitude_avg = 0.0f;
+    metrics->behavioral_drift_rate = recent_count > 0 ? sum_drift / recent_count : NAN;
+    metrics->hardware_feature_correlation = recent_count > 0 ? sum_hw_corr / recent_count : NAN;
+    metrics->gradient_magnitude_avg = NAN;
     metrics->archive_injections = recent_count;
 }
 
@@ -347,10 +466,7 @@ __global__ void task_performance_probe_kernel(
     TaskPerformanceMetrics* metrics,
     bool is_train_batch
 ) {
-    printf("[TASK-PERF-PRE-FILTER] tid=%d bid=%d batch=%d classes=%d\n", threadIdx.x, blockIdx.x, batch_size, num_classes);
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
-
-    printf("[TASK-PERF-ENTRY] batch=%d classes=%d\n", batch_size, num_classes);
 
     int correct = 0;
     float total_loss = 0.0f;
@@ -380,8 +496,6 @@ __global__ void task_performance_probe_kernel(
 
     float computed_accuracy = (float)correct / batch_size;
 
-    printf("[TASK-PERF-RESULT] correct=%d/%d acc=%f loss=%f\n", correct, batch_size, computed_accuracy, total_loss / batch_size);
-
     metrics->correct_predictions = correct;
     metrics->total_predictions = batch_size;
     metrics->accuracy = computed_accuracy;
@@ -406,9 +520,39 @@ __device__ void populate_audit_buffer(
     float* ca_concentration,
     int grid_size,
     float train_accuracy,
-    float test_accuracy
+    float test_accuracy,
+    TelemetryBuffer* telemetry,
+    ComponentPool* pool
 ) {
-    if (!audit->consumed && audit->ready) return;
+    // V: entry probe - all inputs
+    printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
+           generation, (void*)logits, (void*)labels, (void*)batch_images,
+           batch_size, num_classes, (void*)ca_concentration, grid_size);
+
+    // State machine:
+    // ready=0: GPU writing (or initial)
+    // ready=1, consumed=0: data available for host
+    // ready=1, consumed=1: host finished, GPU can overwrite
+
+    // Wait for host to finish (consumed=1) or initial state (ready=0)
+    int timeout_ms = 0;
+    while (audit->ready && !audit->consumed) {
+        if (++timeout_ms > 5000) {
+            printf("V:audit_timeout gen=%d ready=%d consumed=%d\n",
+                   generation, audit->ready, audit->consumed);
+            return;  // 5s timeout, skip update
+        }
+        __nanosleep(1000000);  // 1ms
+    }
+    printf("V:audit_wait_done gen=%d wait_ms=%d ready=%d consumed=%d\n",
+           generation, timeout_ms, audit->ready, audit->consumed);
+
+    // Mark not ready BEFORE writing (prevents host from reading partial data)
+    audit->ready = 0;
+    __threadfence_system();
+
+    // Clear consumed flag
+    audit->consumed = 0;
 
     audit->generation = generation;
     audit->batch_size = batch_size;
@@ -489,10 +633,143 @@ __device__ void populate_audit_buffer(
         }
     }
 
+    // Copy pool metrics and per-entry snapshots
+    if (pool) {
+        audit->pool_alive_count = pool->active_count.load(cuda::memory_order_relaxed);
+        audit->pool_capacity = pool->capacity;
+
+        // Copy per-entry pool snapshots
+        for (int i = 0; i < pool->capacity && i < POOL_CAPACITY_MAX; i++) {
+            PoolEntry* e = &pool->entries[i];
+            audit->pool_entry_alive[i] = e->alive ? 1 : 0;
+            audit->pool_entry_fitness[i] = e->fitness;
+            audit->pool_entry_hunger[i] = e->hunger;
+            audit->pool_entry_age[i] = e->age;
+            audit->pool_entry_num_deltas[i] = e->num_deltas;
+            audit->pool_entry_genome_hash[i] = e->genome_hash;
+        }
+        // Zero remaining entries if pool capacity < POOL_CAPACITY_MAX
+        for (int i = pool->capacity; i < POOL_CAPACITY_MAX; i++) {
+            audit->pool_entry_alive[i] = 0;
+            audit->pool_entry_fitness[i] = 0.0f;
+            audit->pool_entry_hunger[i] = 0.0f;
+            audit->pool_entry_age[i] = 0;
+            audit->pool_entry_num_deltas[i] = 0;
+            audit->pool_entry_genome_hash[i] = 0;
+        }
+    } else {
+        audit->pool_alive_count = 0;
+        audit->pool_capacity = 0;
+        for (int i = 0; i < POOL_CAPACITY_MAX; i++) {
+            audit->pool_entry_alive[i] = 0;
+            audit->pool_entry_fitness[i] = 0.0f;
+            audit->pool_entry_hunger[i] = 0.0f;
+            audit->pool_entry_age[i] = 0;
+            audit->pool_entry_num_deltas[i] = 0;
+            audit->pool_entry_genome_hash[i] = 0;
+        }
+    }
+
+    // Copy telemetry metrics (existing computed values)
+    if (telemetry && telemetry->valid) {
+        // Coverage dynamics
+        audit->archive_occupied_cells = telemetry->archive_topology.occupied_cells;
+        audit->frontier_cells_gained = telemetry->archive_topology.frontier_cells_gained;
+        audit->frontier_cells_lost = telemetry->archive_topology.frontier_cells_lost;
+        audit->sparse_cell_count = telemetry->archive_topology.sparse_cell_count;
+        audit->niche_entropy = telemetry->archive_topology.niche_entropy;
+        audit->novelty_gradient = telemetry->archive_topology.novelty_gradient;
+
+        // Quality dynamics
+        audit->elite_fitness_best = telemetry->archive_topology.elite_fitness_best;
+        audit->elite_fitness_mean = telemetry->archive_topology.elite_fitness_mean;
+        audit->elite_fitness_delta = telemetry->archive_topology.elite_fitness_delta;
+        audit->quality_floor = telemetry->archive_topology.quality_floor;
+        audit->quality_mean = telemetry->archive_topology.quality_mean;
+        audit->quality_range = telemetry->archive_topology.quality_range;
+
+        // Density distribution
+        audit->density_mean = telemetry->archive_topology.density_mean;
+        audit->density_max = telemetry->archive_topology.density_max;
+        audit->density_variance = telemetry->archive_topology.density_variance;
+
+        // 3-axis behavioral spread
+        audit->hw_axis_min = telemetry->archive_topology.hw_axis_min;
+        audit->hw_axis_max = telemetry->archive_topology.hw_axis_max;
+        audit->hw_axis_mean = telemetry->archive_topology.hw_axis_mean;
+        audit->task_axis_min = telemetry->archive_topology.task_axis_min;
+        audit->task_axis_max = telemetry->archive_topology.task_axis_max;
+        audit->task_axis_mean = telemetry->archive_topology.task_axis_mean;
+        audit->gen_axis_min = telemetry->archive_topology.gen_axis_min;
+        audit->gen_axis_max = telemetry->archive_topology.gen_axis_max;
+        audit->gen_axis_mean = telemetry->archive_topology.gen_axis_mean;
+
+        // Population flow
+        audit->total_population = telemetry->archive_topology.total_population;
+        audit->births_this_gen = telemetry->archive_topology.births_this_gen;
+        audit->deaths_this_gen = telemetry->archive_topology.deaths_this_gen;
+
+        // DIRESA metrics
+        audit->diresa_recon_loss_hw = telemetry->diresa_evolution.recon_loss_hw;
+        audit->diresa_recon_loss_task = telemetry->diresa_evolution.recon_loss_task;
+        audit->diresa_recon_loss_gen = telemetry->diresa_evolution.recon_loss_gen;
+        audit->diresa_recon_loss_total = telemetry->diresa_evolution.recon_loss_total;
+        audit->diresa_behavioral_drift = telemetry->diresa_evolution.behavioral_drift_rate;
+        audit->diresa_latent_utilization = telemetry->diresa_evolution.latent_utilization;
+
+        // Genome complexity
+        audit->genome_unique_hashes = telemetry->genome_complexity.unique_hashes;
+        audit->genome_hash_entropy = telemetry->genome_complexity.hash_entropy;
+        audit->genome_avg_deltas = telemetry->genome_complexity.avg_deltas_per_genome;
+    } else {
+        // Zero all metrics if telemetry invalid
+        audit->archive_occupied_cells = 0;
+        audit->frontier_cells_gained = 0;
+        audit->frontier_cells_lost = 0;
+        audit->sparse_cell_count = 0;
+        audit->niche_entropy = 0.0f;
+        audit->novelty_gradient = 0.0f;
+        audit->elite_fitness_best = 0.0f;
+        audit->elite_fitness_mean = 0.0f;
+        audit->elite_fitness_delta = 0.0f;
+        audit->quality_floor = 0.0f;
+        audit->quality_mean = 0.0f;
+        audit->quality_range = 0.0f;
+        audit->density_mean = 0.0f;
+        audit->density_max = 0.0f;
+        audit->density_variance = 0.0f;
+        audit->hw_axis_min = 0.0f; audit->hw_axis_max = 0.0f; audit->hw_axis_mean = 0.0f;
+        audit->task_axis_min = 0.0f; audit->task_axis_max = 0.0f; audit->task_axis_mean = 0.0f;
+        audit->gen_axis_min = 0.0f; audit->gen_axis_max = 0.0f; audit->gen_axis_mean = 0.0f;
+        audit->total_population = 0;
+        audit->births_this_gen = 0;
+        audit->deaths_this_gen = 0;
+        audit->diresa_recon_loss_hw = 0.0f;
+        audit->diresa_recon_loss_task = 0.0f;
+        audit->diresa_recon_loss_gen = 0.0f;
+        audit->diresa_recon_loss_total = 0.0f;
+        audit->diresa_behavioral_drift = 0.0f;
+        audit->diresa_latent_utilization = 0.0f;
+        audit->genome_unique_hashes = 0;
+        audit->genome_hash_entropy = 0.0f;
+        audit->genome_avg_deltas = 0.0f;
+    }
+
+    // Initialize per-class tracking (to be populated by caller if available)
+    for (int c = 0; c < NUM_CLASSES_MAX; c++) {
+        audit->per_class_correct[c] = 0.0f;
+        audit->per_class_total[c] = 0.0f;
+    }
+
+    // Signal data ready (must be last, after all writes complete)
     __threadfence_system();
-    audit->consumed = 0;
     audit->ready = 1;
     __threadfence_system();
+
+    // V: exit probe - buffer state after fill
+    printf("V:audit_done gen=%d correct=%d/%d acc=%.4f loss=%.4f train=%.4f test=%.4f pool=%d/%d\n",
+           generation, audit->correct_count, batch_size, audit->accuracy, audit->loss,
+           train_accuracy, test_accuracy, audit->pool_alive_count, audit->pool_capacity);
 }
 
 #endif

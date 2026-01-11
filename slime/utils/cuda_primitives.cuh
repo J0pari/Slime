@@ -21,7 +21,7 @@ constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  // FLT_MIN
 
 // Context-driven epsilon: scales with the magnitude of the reference value
 // Use this for ALL numerical stability (divisions, logs, sqrt, powers, etc.)
-__device__ __forceinline__ float safe_epsilon(float reference_scale) {
+__host__ __device__ __forceinline__ float safe_epsilon(float reference_scale) {
     // Epsilon proportional to magnitude, but never smaller than minimum normal
     return fmaxf(MACHINE_EPS * fabsf(reference_scale), FLOAT_MIN_NORMAL);
 }
@@ -59,11 +59,9 @@ __device__ __forceinline__ float sample_neighborhood(
     const float* field, int idx, int grid_size, int radius = 1
 ) {
     if (!field) {
-        printf("[NaN-TRACE] sample_neighborhood: null field at idx=%d\n", idx);
         return nanf("");
     }
     if (grid_size <= 0) {
-        printf("[NaN-TRACE] sample_neighborhood: invalid grid_size=%d at idx=%d\n", grid_size, idx);
         return nanf("");
     }
     int cx = idx % grid_size, cy = idx / grid_size;
@@ -79,7 +77,6 @@ __device__ __forceinline__ float sample_neighborhood(
         }
     }
     if (n == 0) {
-        printf("[NaN-TRACE] sample_neighborhood: zero samples at idx=%d grid_size=%d\n", idx, grid_size);
         return nanf("");
     }
     return sum / n;
@@ -89,7 +86,6 @@ __device__ __forceinline__ float sample_neighborhood(
 __device__ __forceinline__ float validated_curand_normal(curandState* state, const char* caller, int idx) {
     float val = curand_normal(state);
     if (isnan(val) || isinf(val)) {
-        printf("FATAL [%s]: curand_normal returned %f at idx=%d\n", caller, val, idx);
         __trap();
     }
     return val;
@@ -98,7 +94,6 @@ __device__ __forceinline__ float validated_curand_normal(curandState* state, con
 __device__ __forceinline__ float validated_curand_uniform(curandState* state, const char* caller, int idx) {
     float val = curand_uniform(state);
     if (isnan(val) || isinf(val) || val < 0.0f || val > 1.0f) {
-        printf("FATAL [%s]: curand_uniform returned %f at idx=%d\n", caller, val, idx);
         __trap();
     }
     return val;
@@ -106,7 +101,6 @@ __device__ __forceinline__ float validated_curand_uniform(curandState* state, co
 
 __device__ __forceinline__ float ldg_float(const float* ptr) {
     if (ptr == nullptr) {
-        printf("FATAL [ldg_float]: null pointer\n");
         __trap();
     }
     #if __CUDA_ARCH__ >= 350
@@ -118,7 +112,6 @@ __device__ __forceinline__ float ldg_float(const float* ptr) {
 
 __device__ __forceinline__ float4 ldg_float4(const float4* ptr) {
     if (ptr == nullptr) {
-        printf("FATAL [ldg_float4]: null pointer\n");
         __trap();
     }
     #if __CUDA_ARCH__ >= 350
@@ -322,7 +315,7 @@ struct VectorizedLoad {
     }
 };
 
-template<int TILE_DIM, int HALO, int BANK_OFFSET = 0>
+template<int TILE_DIM, int HALO, int BANK_OFFSET>
 struct TiledSection2D {
     static constexpr int PADDED = TILE_DIM + 2 * HALO + BANK_OFFSET;
 
@@ -385,12 +378,12 @@ struct TiledSection2D {
     }
 
     template<typename T>
-    __device__ static T& at(T (&tile)[PADDED][PADDED], int tx, int ty, int dx = 0, int dy = 0) {
+    __device__ static T& at(T (&tile)[PADDED][PADDED], int tx, int ty, int dx, int dy) {
         return tile[ty + HALO + dy][tx + HALO + dx];
     }
 };
 
-template<int TILE_DIM, int HALO, int BANK_OFFSET = 0>
+template<int TILE_DIM, int HALO, int BANK_OFFSET>
 struct TiledSection3D {
     static constexpr int PADDED = TILE_DIM + 2 * HALO + BANK_OFFSET;
 
@@ -884,7 +877,7 @@ struct Occupancy {
 // WMMA tensor core operations for sm_70+ (Volta/Turing/Ampere/Hopper)
 #if __CUDA_ARCH__ >= 700
 
-template<int M = 16, int N = 16, int K = 16>
+template<int M, int N, int K>
 struct TensorCoreMatmul {
     // FP16 matrix multiply: C[M×N] = A[M×K] × B[K×N]
     __device__ static void multiply_accumulate(
@@ -1169,7 +1162,8 @@ __global__ void batched_convert_fp32_to_fp16_strided(
     int slice_size,
     int src_head_stride,
     int src_batch_stride,
-    int dst_head_stride
+    int dst_head_stride,
+    int batch_offset
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
@@ -1180,7 +1174,7 @@ __global__ void batched_convert_fp32_to_fp16_strided(
     int batch_id = remainder / slice_size;
     int local_idx = remainder % slice_size;
 
-    int src_idx = head_id * src_head_stride + batch_id * src_batch_stride + local_idx;
+    int src_idx = head_id * src_head_stride + (batch_offset + batch_id) * src_batch_stride + local_idx;
     int dst_idx = head_id * dst_head_stride + batch_id * slice_size + local_idx;
 
     dst[dst_idx] = __float2half(src[src_idx]);
@@ -1194,7 +1188,8 @@ __global__ void batched_memcpy_to_strided(
     int slice_size,
     int src_head_stride,
     int dst_head_stride,
-    int dst_batch_stride
+    int dst_batch_stride,
+    int batch_offset
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
@@ -1206,7 +1201,7 @@ __global__ void batched_memcpy_to_strided(
     int local_idx = remainder % slice_size;
 
     int src_idx = head_id * src_head_stride + batch_id * slice_size + local_idx;
-    int dst_idx = head_id * dst_head_stride + batch_id * dst_batch_stride + local_idx;
+    int dst_idx = head_id * dst_head_stride + (batch_offset + batch_id) * dst_batch_stride + local_idx;
 
     dst[dst_idx] = src[src_idx];
 }

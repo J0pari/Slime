@@ -6,6 +6,7 @@
 #include "training_types.cu"
 #include "../learning/autodiff.cu"
 #include "../core/pseudopod.cu"
+#include "../metrics/hardware_geometry.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../utils/genome_params.cuh"
 #include <cuda_runtime.h>
@@ -126,59 +127,40 @@ __global__ void multi_head_ca_with_tape_kernel(
     int grid_size,
     ArchitectureParams arch
 ) {
-    int tile_x = blockIdx.x;
-    int tile_y = blockIdx.y;
-    int head_batch_id = blockIdx.z;
-    int head_id = head_batch_id % arch.num_heads;
-    int micro_batch_id = head_batch_id / arch.num_heads;
-    int batch_id = micro_batch_offset + micro_batch_id;
-
-    int cell_x = tile_x * blockDim.x + threadIdx.x;
-    int cell_y = tile_y * blockDim.y + threadIdx.y;
+    const int head_id = blockIdx.z % arch.num_heads;
+    const int micro_batch_id = blockIdx.z / arch.num_heads;
+    const int batch_id = micro_batch_offset + micro_batch_id;
+    const int cell_x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int cell_y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (cell_x >= grid_size || cell_y >= grid_size) return;
 
-    if (head_id == 0 && batch_id == 0 && cell_x == 0 && cell_y == 0 && threadIdx.z == 0) {
-        if (isnan(ca_state[0])) {
-            printf("FATAL [multi_head_ca]: ca_state[0]=NaN at entry\n");
-            return;
-        }
-        half* perception_weights = &ca_heads->perception_weights[0];
-        float w0 = __half2float(perception_weights[0]);
-        if (isnan(w0)) {
-            printf("FATAL [multi_head_ca]: perception_weights[0]=NaN\n");
-            return;
-        }
-        half* interaction_weights = &ca_heads->interaction_weights[0];
-        float iw0 = __half2float(interaction_weights[0]);
-        if (isnan(iw0)) {
-            printf("FATAL [multi_head_ca]: interaction_weights[0]=NaN\n");
-            return;
-        }
-        half* value_weights = &ca_heads->value_weights[0];
-        float vw0 = __half2float(value_weights[0]);
-        if (isnan(vw0)) {
-            printf("FATAL [multi_head_ca]: value_weights[0]=NaN\n");
-            return;
+    TraceBuffer* trace_buffer = &ca_heads->trace;
+    if (trace_buffer->current_idx < trace_buffer->capacity && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+        if (trace_idx < trace_buffer->capacity) {
+            record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
         }
     }
+
+    const int cells_per_grid = grid_size * grid_size;
+    const int saved_base = micro_batch_id * arch.num_heads * cells_per_grid * arch.head_dim +
+                           head_id * cells_per_grid * arch.head_dim +
+                           cell_y * grid_size * arch.head_dim +
+                           cell_x * arch.head_dim;
 
     __shared__ float neighborhood[3][3][MAX_HEAD_DIM + BANK_PAD];
 
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
-            int nx = cell_x + dx;
-            int ny = cell_y + dy;
-
-            nx = (nx < 0) ? 0 : ((nx >= grid_size) ? grid_size - 1 : nx);
-            ny = (ny < 0) ? 0 : ((ny >= grid_size) ? grid_size - 1 : ny);
-
-            int idx = batch_id * grid_size * grid_size * arch.head_dim +
-                     ny * grid_size * arch.head_dim +
-                     nx * arch.head_dim;
+            int nx = min(max(cell_x + dx, 0), grid_size - 1);
+            int ny = min(max(cell_y + dy, 0), grid_size - 1);
+            int state_idx = batch_id * cells_per_grid * arch.head_dim +
+                           ny * grid_size * arch.head_dim +
+                           nx * arch.head_dim;
 
             if (threadIdx.z < arch.head_dim) {
-                neighborhood[dy + 1][dx + 1][threadIdx.z] = ldg_float(&ca_state[idx + threadIdx.z]);
+                neighborhood[dy + 1][dx + 1][threadIdx.z] = ldg_float(&ca_state[state_idx + threadIdx.z]);
             }
         }
     }
@@ -186,87 +168,56 @@ __global__ void multi_head_ca_with_tape_kernel(
 
     float perception[MAX_HEAD_DIM];
     float interaction[MAX_HEAD_DIM];
-    float output[MAX_HEAD_DIM];
+    float output[MAX_CHANNELS];
 
-    half* perception_weights_fp16 = &ca_heads->perception_weights[head_id * arch.channels * arch.head_dim];
+    half* perc_w = &ca_heads->perception_weights[head_id * arch.channels * arch.head_dim];
+    half* inter_w = &ca_heads->interaction_weights[head_id * arch.head_dim * arch.head_dim];
+    half* val_w = &ca_heads->value_weights[head_id * arch.head_dim * arch.channels];
 
     for (int h = 0; h < arch.head_dim; h++) {
         float acc = 0.0f;
         for (int dy = 0; dy < 3; dy++) {
             for (int dx = 0; dx < 3; dx++) {
                 for (int c = 0; c < arch.channels; c++) {
-                    int weight_idx = c * arch.head_dim + h;
-                    float weight_val = __half2float(perception_weights_fp16[weight_idx]);
-                    float neigh_val = neighborhood[dy][dx][c];
-                    acc += weight_val * neigh_val;
+                    acc += neighborhood[dy][dx][c] * __half2float(perc_w[c * arch.head_dim + h]);
                 }
             }
         }
         perception[h] = fmaxf(0.0f, acc);
-        // Use micro_batch_id for saved buffer indexing (fits within buffer capacity)
-        int idx = micro_batch_id * (arch.num_heads * grid_size * grid_size * arch.head_dim) +
-                  head_id * (grid_size * grid_size * arch.head_dim) +
-                  cell_y * (grid_size * arch.head_dim) +
-                  cell_x * arch.head_dim + h;
-        perception_saved[idx] = perception[h];
+        perception_saved[saved_base + h] = perception[h];
     }
 
-    half* interaction_weights_fp16 = &ca_heads->interaction_weights[head_id * arch.head_dim * arch.head_dim];
-
+    float interaction_sum = 0.0f;
     for (int h = 0; h < arch.head_dim; h++) {
         float acc = 0.0f;
         for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = j * arch.head_dim + h;
-            float weight_val = __half2float(interaction_weights_fp16[weight_idx]);
-            acc += weight_val * perception[j];
-
-            if (isnan(weight_val)) {
-                printf("FATAL [multi_head_ca]: interaction_weight[%d,%d]=nan\n", j, h);
-                return;
-            }
+            acc += perception[j] * __half2float(inter_w[j * arch.head_dim + h]);
         }
         float x = acc;
-        float x_cubed = x * x * x;
-        float inner = GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x_cubed);
-        float tanh_val = tanhf(inner);
-        interaction[h] = GELU_SCALE * x * (GELU_OFFSET + tanh_val);
-
-        if (isnan(interaction[h]) || isinf(interaction[h])) {
-            printf("FATAL [multi_head_ca]: interaction[%d]=nan/inf acc=%.6f x=%.6f inner=%.6f tanh=%.6f\n", h, acc, x, inner, tanh_val);
-            return;
-        }
-
-        // Use micro_batch_id for saved buffer indexing (fits within buffer capacity)
-        int idx = micro_batch_id * (arch.num_heads * grid_size * grid_size * arch.head_dim) +
-                  head_id * (grid_size * grid_size * arch.head_dim) +
-                  cell_y * (grid_size * arch.head_dim) +
-                  cell_x * arch.head_dim + h;
-        pre_gelu_saved[idx] = x;
-        interaction_saved[idx] = interaction[h];
+        interaction[h] = GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
+        interaction_sum += fabsf(interaction[h]);
+        pre_gelu_saved[saved_base + h] = x;
+        interaction_saved[saved_base + h] = interaction[h];
     }
 
-    half* value_weights_fp16 = &ca_heads->value_weights[head_id * arch.head_dim * arch.channels];
-
-    for (int i = 0; i < arch.channels; i++) {
-        output[i] = 0.0f;
-        for (int j = 0; j < arch.head_dim; j++) {
-            int weight_idx = j * arch.channels + i;
-            float weight_val = __half2float(value_weights_fp16[weight_idx]);
-            output[i] += interaction[j] * weight_val;
+    for (int c = 0; c < arch.channels; c++) {
+        float acc = 0.0f;
+        for (int h = 0; h < arch.head_dim; h++) {
+            acc += interaction[h] * __half2float(val_w[h * arch.channels + c]);
         }
+        output[c] = acc;
     }
 
-    int out_idx = batch_id * arch.num_heads * grid_size * grid_size * arch.channels +
-                  head_id * grid_size * grid_size * arch.channels +
+    float gate = 1.0f / (1.0f + expf(-(interaction_sum / (float)arch.head_dim - arch.ca_gate_center)));
+
+    int out_idx = batch_id * arch.num_heads * cells_per_grid * arch.channels +
+                  head_id * cells_per_grid * arch.channels +
                   cell_y * grid_size * arch.channels +
                   cell_x * arch.channels;
 
-    for (int i = 0; i < arch.channels; i++) {
-        if (isnan(output[i]) || isinf(output[i])) {
-            printf("FATAL [multi_head_ca]: output[%d]=nan/inf perception[0]=%.6f interaction[0]=%.6f\n", i, perception[0], interaction[0]);
-            return;
-        }
-        ca_output[out_idx + i] = output[i];
+    for (int c = 0; c < arch.channels; c++) {
+        float input_val = neighborhood[1][1][c];
+        ca_output[out_idx + c] = input_val * (1.0f - gate) + output[c] * gate;
     }
 }
 
@@ -309,7 +260,6 @@ __global__ void apply_ca_gradients_kernel(
         float grad = tape->grad_buffer[tape_idx];
 
         if (isnan(grad) || isinf(grad)) {
-            printf("FATAL [apply_ca_gradients]: grad[%d]=%.6f for head=%d param=%d\n", tape_idx, grad, head_id, param_idx);
             return;
         }
 
@@ -320,12 +270,10 @@ __global__ void apply_ca_gradients_kernel(
         if (is_fp16 && param_ptr_fp16 != nullptr) {
             float val = __half2float(*param_ptr_fp16);
             if (isnan(val)) {
-                printf("FATAL [apply_ca_gradients]: weight already NaN at head=%d param=%d\n", head_id, param_idx);
                 return;
             }
             val -= learning_rate * grad;
             if (isnan(val) || isinf(val)) {
-                printf("FATAL [apply_ca_gradients]: updated weight=%.6f lr=%.6f grad=%.6f\n", val, learning_rate, grad);
                 return;
             }
             *param_ptr_fp16 = __float2half(val);
@@ -362,8 +310,6 @@ __global__ void init_ca_parameter_map_kernel(CAParameterMap* map, ArchitecturePa
 
     map->total_params = offset;
     map->total_ca_params = offset;
-
-    printf("[DEVICE] CA param map: %d params, %d heads\n", map->total_params, arch.num_heads);
 }
 
 __global__ void im2col_kernel(

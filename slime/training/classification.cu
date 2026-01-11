@@ -28,30 +28,23 @@ __global__ void spatial_pooling_kernel(
     int spatial_size = grid_size * grid_size;
     int base_idx = batch_idx * spatial_size * channels;
 
-    for (int spatial = threadIdx.x; spatial < spatial_size; spatial += blockDim.x) {
+    // Each thread handles one (batch, channel) - iterate ALL spatial positions
+    // Use texture cache for read-only ca_state access
+    for (int spatial = 0; spatial < spatial_size; spatial++) {
         int y = spatial / grid_size;
         int x = spatial % grid_size;
         int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        sum += ca_state[idx];
+        sum += ldg_float(&ca_state[idx]);
     }
 
-    sum = WarpReduce<WARP_SIZE>::sum(sum);
+    float avg = sum / spatial_size;
+    float weight = ldg_float(&pooling_weights[channel]);
+    float weighted = avg * weight;
 
-    if ((threadIdx.x % WARP_SIZE) == 0) {
-        float avg = sum / spatial_size;
-        float weight = pooling_weights[channel];
-
-        if (channel == 0 && batch_idx == 0) {
-            printf("[spatial_pooling] avg=%.6f weight[0]=%.6f ca_state[0]=%.6f\n", avg, weight, ca_state[base_idx]);
-        }
-
-        float weighted = avg * weight;
-        if (isnan(weighted) || isinf(weighted)) {
-            printf("FATAL [spatial_pooling]: NaN/Inf result! avg=%.6f weight=%.6f weighted=%.6f\n", avg, weight, weighted);
-            return;
-        }
-        features[batch_idx * channels + channel] = weighted;
+    if (isnan(weighted) || isinf(weighted)) {
+        return;
     }
+    features[batch_idx * channels + channel] = weighted;
 }
 
 __global__ void classification_head_kernel(
@@ -71,38 +64,33 @@ __global__ void classification_head_kernel(
     // Validate pointers and first values
     if (batch_idx == 0 && class_idx == 0) {
         if (features == nullptr) {
-            printf("FATAL [classification_head]: features is nullptr\n");
             return;
         }
         if (fc_weights == nullptr) {
-            printf("FATAL [classification_head]: fc_weights is nullptr\n");
             return;
         }
         if (fc_bias == nullptr) {
-            printf("FATAL [classification_head]: fc_bias is nullptr\n");
             return;
         }
         if (isnan(features[0])) {
-            printf("FATAL [classification_head]: features[0]=NaN\n");
             return;
         }
         if (isnan(fc_weights[0])) {
-            printf("FATAL [classification_head]: fc_weights[0]=NaN\n");
             return;
         }
         if (isnan(fc_bias[0])) {
-            printf("FATAL [classification_head]: fc_bias[0]=NaN\n");
             return;
         }
     }
 
     __shared__ float dot_products[NUM_CLASSES_MAX];
 
-    float acc = fc_bias[class_idx];
+    // Use texture cache for read-only weight/feature access
+    float acc = ldg_float(&fc_bias[class_idx]);
 
     for (int feat = 0; feat < num_features; feat++) {
-        float feature_val = features[batch_idx * num_features + feat];
-        float weight = fc_weights[class_idx * num_features + feat];
+        float feature_val = ldg_float(&features[batch_idx * num_features + feat]);
+        float weight = ldg_float(&fc_weights[class_idx * num_features + feat]);
         acc += feature_val * weight;
     }
 
@@ -113,7 +101,6 @@ __global__ void classification_head_kernel(
 
     if (class_idx < num_classes) {
         if (isnan(dot_products[class_idx]) || isinf(dot_products[class_idx])) {
-            printf("FATAL [classification_head]: logit[%d]=NaN/Inf acc=%.6f\n", class_idx, acc);
             return;
         }
         logits[batch_idx * num_classes + class_idx] = dot_products[class_idx];
@@ -127,33 +114,23 @@ __global__ void softmax_kernel(
     int num_classes
 ) {
     int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
 
     if (batch_idx >= batch_size) return;
-
-    __shared__ float max_val;
-    __shared__ float sum_exp;
 
     float* batch_logits = &logits[batch_idx * num_classes];
     float* batch_probs = &probabilities[batch_idx * num_classes];
 
-    if (threadIdx.x == 0) {
-        max_val = batch_logits[0];
-        for (int i = 1; i < num_classes; i++) {
-            max_val = fmaxf(max_val, batch_logits[i]);
-        }
-    }
-    __syncthreads();
+    float local_val = (tid < num_classes) ? batch_logits[tid] : -INFINITY;
+    float max_val = warp_reduce_max(local_val);
+    max_val = __shfl_sync(0xffffffff, max_val, 0);
 
-    if (threadIdx.x == 0) {
-        sum_exp = 0.0f;
-        for (int i = 0; i < num_classes; i++) {
-            sum_exp += expf(batch_logits[i] - max_val);
-        }
-    }
-    __syncthreads();
+    float local_exp = (tid < num_classes) ? expf(local_val - max_val) : 0.0f;
+    float sum_exp = warp_reduce_sum(local_exp);
+    sum_exp = __shfl_sync(0xffffffff, sum_exp, 0);
 
-    if (threadIdx.x < num_classes) {
-        batch_probs[threadIdx.x] = expf(batch_logits[threadIdx.x] - max_val) / sum_exp;
+    if (tid < num_classes) {
+        batch_probs[tid] = local_exp / sum_exp;
     }
 }
 
@@ -194,61 +171,41 @@ __global__ void cross_entropy_loss_kernel(
     int num_classes
 ) {
     int batch_idx = blockIdx.x;
+    int tid = threadIdx.x;
+
     if (batch_idx >= batch_size) return;
 
     int label = labels[batch_idx];
+    if (label < 0 || label >= num_classes) return;
 
-    if (logits == nullptr || labels == nullptr || loss_out == nullptr || logit_grads == nullptr) {
-        if (threadIdx.x == 0 && batch_idx == 0) {
-            printf("FATAL [cross_entropy_loss]: NULL pointer detected\n");
-        }
-        
+    float* batch_logits = &logits[batch_idx * num_classes];
+
+    float local_val = (tid < num_classes) ? batch_logits[tid] : -INFINITY;
+
+    if (tid < num_classes && (isnan(local_val) || isinf(local_val))) {
         return;
     }
 
-    if (label < 0 || label >= num_classes) {
-        printf("FATAL [cross_entropy_loss]: Invalid label %d at batch %d (must be 0-%d)\n",
-               label, batch_idx, num_classes - 1);
-        return;
+    float max_logit = warp_reduce_max(local_val);
+    max_logit = __shfl_sync(0xffffffff, max_logit, 0);
+
+    float local_exp = (tid < num_classes) ? expf(local_val - max_logit) : 0.0f;
+    float sum_exp = warp_reduce_sum(local_exp);
+    sum_exp = __shfl_sync(0xffffffff, sum_exp, 0);
+
+    float log_sum_exp = logf(sum_exp) + max_logit;
+
+    if (tid == 0) {
+        float nll = log_sum_exp - batch_logits[label];
+        if (!isnan(nll) && !isinf(nll) && nll >= 0.0f) {
+            atomicAdd(loss_out, nll / batch_size);
+        }
     }
 
-    __shared__ float max_logit;
-    __shared__ float log_sum_exp;
-
-    if (threadIdx.x == 0) {
-        max_logit = logits[batch_idx * num_classes];
-        for (int i = 1; i < num_classes; i++) {
-            float val = logits[batch_idx * num_classes + i];
-            if (isnan(val) || isinf(val)) {
-                printf("FATAL [cross_entropy_loss]: Invalid logit %f at batch %d class %d\n",
-                       val, batch_idx, i);
-                return;
-            }
-            max_logit = fmaxf(max_logit, val);
-        }
-
-        float sum_exp = 0.0f;
-        for (int i = 0; i < num_classes; i++) {
-            sum_exp += expf(logits[batch_idx * num_classes + i] - max_logit);
-        }
-
-        log_sum_exp = logf(sum_exp) + max_logit;
-        float nll = log_sum_exp - logits[batch_idx * num_classes + label];
-
-        if (isnan(nll) || isinf(nll) || nll < 0.0f) {
-            printf("FATAL [cross_entropy_loss]: Invalid NLL %f at batch %d\n", nll, batch_idx);
-            return;
-        }
-
-        atomicAdd(loss_out, nll / batch_size);
-    }
-    __syncthreads();
-
-    int tid = threadIdx.x;
-    for (int i = tid; i < num_classes; i += blockDim.x) {
-        float prob = expf(logits[batch_idx * num_classes + i] - log_sum_exp);
-        float grad = (i == label) ? (prob - 1.0f) : prob;
-        logit_grads[batch_idx * num_classes + i] = grad / batch_size;
+    if (tid < num_classes) {
+        float prob = local_exp / sum_exp;
+        float grad = (tid == label) ? (prob - 1.0f) : prob;
+        logit_grads[batch_idx * num_classes + tid] = grad / batch_size;
     }
 }
 
@@ -268,16 +225,18 @@ __global__ void classification_head_backward_kernel(
 
     if (batch_idx >= batch_size || class_idx >= num_classes) return;
 
-    float logit_grad = logit_grads[batch_idx * num_classes + class_idx];
+    // Use texture cache for read-only gradient input
+    float logit_grad = ldg_float(&logit_grads[batch_idx * num_classes + class_idx]);
 
     if (class_idx < num_classes) {
-        atomicAdd(&fc_bias_grad[class_idx], logit_grad);
+        Atomics::add_float(&fc_bias_grad[class_idx], logit_grad);
     }
 
     for (int feat = 0; feat < num_features; feat++) {
-        float feature_val = features[batch_idx * num_features + feat];
-        atomicAdd(&fc_weights_grad[class_idx * num_features + feat], logit_grad * feature_val);
-        atomicAdd(&features_grad[batch_idx * num_features + feat], logit_grad * fc_weights[class_idx * num_features + feat]);
+        float feature_val = ldg_float(&features[batch_idx * num_features + feat]);
+        float weight_val = ldg_float(&fc_weights[class_idx * num_features + feat]);
+        Atomics::add_float(&fc_weights_grad[class_idx * num_features + feat], logit_grad * feature_val);
+        Atomics::add_float(&features_grad[batch_idx * num_features + feat], logit_grad * weight_val);
     }
 }
 
@@ -296,40 +255,35 @@ __global__ void spatial_pooling_backward_kernel(
 
     if (batch_idx >= batch_size || channel >= channels) return;
 
-    float feat_grad = features_grad[batch_idx * channels + channel];
+    // Use texture cache for read-only inputs
+    float feat_grad = ldg_float(&features_grad[batch_idx * channels + channel]);
 
-    // Guard against NaN causing infinite atomic loops
     if (isnan(feat_grad) || isinf(feat_grad)) {
-        if (threadIdx.x == 0 && channel == 0) {
-            printf("FATAL [spatial_pooling_backward]: NaN/Inf in features_grad[%d,%d]=%f\n", batch_idx, channel, feat_grad);
-        }
         return;
     }
 
     int spatial_size = grid_size * grid_size;
     int base_idx = batch_idx * spatial_size * channels;
 
+    // Each thread handles one (batch, channel) - iterate ALL spatial positions
+    // Use texture cache for read-only ca_state access
     float ca_avg = 0.0f;
-    for (int spatial = threadIdx.x; spatial < spatial_size; spatial += blockDim.x) {
+    for (int spatial = 0; spatial < spatial_size; spatial++) {
         int y = spatial / grid_size;
         int x = spatial % grid_size;
         int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        ca_avg += ca_state[idx];
+        ca_avg += ldg_float(&ca_state[idx]);
     }
-
-    ca_avg = WarpReduce<WARP_SIZE>::sum(ca_avg);
     ca_avg /= spatial_size;
 
-    if ((threadIdx.x % WARP_SIZE) == 0) {
-        atomicAdd(&pooling_weights_grad[channel], feat_grad * ca_avg);
-    }
+    Atomics::add_float(&pooling_weights_grad[channel], feat_grad * ca_avg);
 
-    float ca_grad_val = feat_grad * pooling_weights[channel] / spatial_size;
-    for (int spatial = threadIdx.x; spatial < spatial_size; spatial += blockDim.x) {
+    float ca_grad_val = feat_grad * ldg_float(&pooling_weights[channel]) / spatial_size;
+    for (int spatial = 0; spatial < spatial_size; spatial++) {
         int y = spatial / grid_size;
         int x = spatial % grid_size;
         int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        atomicAdd(&ca_state_grad[idx], ca_grad_val);
+        ca_state_grad[idx] += ca_grad_val;
     }
 }
 
@@ -368,8 +322,6 @@ __global__ void init_classification_head_kernel(
     for (int i = 0; i < num_classes; i++) {
         fc_bias[i] = 0.0f;
     }
-
-    printf("[DEVICE] Classification head initialized: %d features, %d classes\n", num_features, num_classes);
 }
 
 #endif

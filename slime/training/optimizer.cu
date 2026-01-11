@@ -23,7 +23,6 @@ __global__ void adam_update_kernel(
 
     if (weights == nullptr || gradients == nullptr || m == nullptr || v == nullptr) {
         if (idx == 0) {
-            printf("FATAL [adam_update]: NULL pointer detected\n");
         }
         
         return;
@@ -32,7 +31,6 @@ __global__ void adam_update_kernel(
     float g = gradients[idx];
 
     if (isnan(g) || isinf(g)) {
-        printf("FATAL [adam_update]: Invalid gradient %f at index %d\n", g, idx);
         
         return;
     }
@@ -51,7 +49,6 @@ __global__ void adam_update_kernel(
 
     float denom = sqrtf(v_hat) + epsilon;
     if (isnan(denom) || isinf(denom)) {
-        printf("FATAL [adam_update]: idx=%d v_hat=%f denom=%f\n", idx, v_hat, denom);
         return;
     }
 
@@ -59,9 +56,6 @@ __global__ void adam_update_kernel(
     weights[idx] -= weight_delta;
 
     if (isnan(weights[idx]) || isinf(weights[idx])) {
-        printf("FATAL [adam_update]: Weight corruption at index %d\n", idx);
-        printf("  weight: %f, gradient: %f, m_hat: %f, v_hat: %f, delta: %f\n",
-               weights[idx], g, m_hat, v_hat, weight_delta);
         return;
     }
 
@@ -86,7 +80,6 @@ __global__ void adam_update_fp16_kernel(
 
     if (weights_fp16 == nullptr || gradients == nullptr || m == nullptr || v == nullptr) {
         if (idx == 0) {
-            printf("FATAL [adam_update_fp16]: NULL pointer detected\n");
         }
         
         return;
@@ -96,8 +89,6 @@ __global__ void adam_update_fp16_kernel(
     float g = gradients[idx];
 
     if (isnan(g) || isinf(g) || isnan(weight) || isinf(weight)) {
-        printf("FATAL [adam_update_fp16]: Invalid values at index %d (w=%f, g=%f)\n",
-               idx, weight, g);
         
         return;
     }
@@ -114,15 +105,12 @@ __global__ void adam_update_fp16_kernel(
 
     float denom = sqrtf(v_hat) + epsilon;
     if (isnan(denom) || isinf(denom)) {
-        printf("FATAL [adam_update_fp16]: idx=%d v_hat=%f denom=%f\n", idx, v_hat, denom);
         return;
     }
 
     weight -= lr * m_hat / denom;
 
     if (isnan(weight) || isinf(weight)) {
-        printf("FATAL [adam_update_fp16]: Weight corruption at index %d (new weight: %f)\n",
-               idx, weight);
         return;
     }
 
