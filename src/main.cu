@@ -21,14 +21,26 @@
     if (_err != cudaSuccess) { \
         fprintf(stderr, "FATAL: %s cudaMalloc(%zu bytes) failed: %s\n", \
                 (name), (size_t)(size), cudaGetErrorString(_err)); \
+        char _fail_path[512]; \
+        snprintf(_fail_path, sizeof(_fail_path), "%s/alloc_failure.csv", session_dir); \
+        FILE* _ff = fopen(_fail_path, "w"); \
+        if (_ff) { \
+            size_t _free, _total; \
+            cudaMemGetInfo(&_free, &_total); \
+            fprintf(_ff, "failed_allocation,%s\n", (name)); \
+            fprintf(_ff, "requested_bytes,%zu\n", (size_t)(size)); \
+            fprintf(_ff, "requested_mb,%.2f\n", (size_t)(size) / (1024.0 * 1024.0)); \
+            fprintf(_ff, "gpu_free_mb,%zu\n", _free / (1024 * 1024)); \
+            fprintf(_ff, "gpu_total_mb,%zu\n", _total / (1024 * 1024)); \
+            fprintf(_ff, "error_code,%d\n", (int)_err); \
+            fprintf(_ff, "error_string,%s\n", cudaGetErrorString(_err)); \
+            fclose(_ff); \
+        } \
         return 1; \
     } \
 } while(0)
 
 int main() {
-    // Force line-buffered stdout so host prints appear immediately
-    setvbuf(stdout, nullptr, _IOLBF, 0);
-
     printf("[H1] Entry\n"); fflush(stdout);
     cudaSetDevice(0);
     printf("[H2] Device set\n"); fflush(stdout);
@@ -163,6 +175,46 @@ int main() {
     printf("[H28c] NOT setting global stack limit - let CUDA allocate per-kernel dynamically\n"); fflush(stdout);
     printf("[H28d] Each kernel will use only the stack it needs (default 1024, up to %d for init_organism)\n", CDP_STACK_SIZE); fflush(stdout);
 
+    AuditBuffer* h_audit = nullptr;
+    AuditBuffer* d_audit = nullptr;
+    err = cudaHostAlloc(&h_audit, sizeof(AuditBuffer), cudaHostAllocMapped);
+    if (err != cudaSuccess) {
+        printf("[H-ERR] cudaHostAlloc audit buffer failed: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    err = cudaHostGetDevicePointer(&d_audit, h_audit, 0);
+    if (err != cudaSuccess) {
+        printf("[H-ERR] cudaHostGetDevicePointer audit buffer failed: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    memset(h_audit, 0, sizeof(AuditBuffer));
+    printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
+           (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
+
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char session_dir[256];
+    snprintf(session_dir, sizeof(session_dir), "diagnostics/run_%04d%02d%02d_%02d%02d%02d",
+             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+             t->tm_hour, t->tm_min, t->tm_sec);
+
+    MKDIR("diagnostics");
+    MKDIR(session_dir);
+
+    char samples_dir[256], ca_dir[256], pool_dir[256], chem_dir[256];
+    snprintf(samples_dir, sizeof(samples_dir), "%s/samples", session_dir);
+    snprintf(ca_dir, sizeof(ca_dir), "%s/ca_states", session_dir);
+    snprintf(pool_dir, sizeof(pool_dir), "%s/pool_states", session_dir);
+    snprintf(chem_dir, sizeof(chem_dir), "%s/chemical_fields", session_dir);
+    MKDIR(samples_dir);
+    MKDIR(ca_dir);
+    MKDIR(pool_dir);
+    MKDIR(chem_dir);
+
+    char manifest_path[256];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.csv", session_dir);
+    printf("[H-SESSION] Output directory: %s\n", session_dir); fflush(stdout);
+
     OrganismPreallocatedBuffers* buffers;
     err = cudaMalloc(&buffers, sizeof(OrganismPreallocatedBuffers));
     if (err != cudaSuccess) {
@@ -175,10 +227,14 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.pool, sizeof(ComponentPool), "pool");
     CUDA_ALLOC_CHECK(buffers_host.pool_entries, sizeof(PoolEntry) * POOL_CAPACITY_MAX, "pool_entries");
     CUDA_ALLOC_CHECK(buffers_host.pool_alive_indices, sizeof(int) * POOL_CAPACITY_MAX, "pool_alive_indices");
+    CUDA_ALLOC_CHECK(buffers_host.pool_alive_flags, sizeof(bool) * POOL_CAPACITY_MAX, "pool_alive_flags");
+    CUDA_ALLOC_CHECK(buffers_host.pool_fitness_values, sizeof(float) * POOL_CAPACITY_MAX, "pool_fitness_values");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_flags, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_flags");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_scan, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_scan");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_recursive_workspace, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_recursive_workspace");
     CUDA_ALLOC_CHECK(buffers_host.archive, sizeof(GPUElite), "archive");
+    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_keys, sizeof(uint64_t) * 16384, "archive_hash_table_keys");
+    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_values, sizeof(int) * 16384, "archive_hash_table_values");
     CUDA_ALLOC_CHECK(buffers_host.voronoi_cells, sizeof(VoronoiCell) * POOL_CAPACITY_MAX, "voronoi_cells");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_agents, sizeof(BehavioralState) * POOL_CAPACITY_MAX, "behavioral_agents");
     CUDA_ALLOC_CHECK(buffers_host.delta_indices_buffer, sizeof(uint16_t) * GENOME_SIZE * POOL_CAPACITY_MAX, "delta_indices_buffer");
@@ -212,10 +268,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.chemical_field_history, sizeof(TemporalTube), "chemical_field_history");
     CUDA_ALLOC_CHECK(buffers_host.chemical_field_history_entries, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "chemical_field_history_entries");
     CUDA_ALLOC_CHECK(buffers_host.history_data_buffer, sizeof(float) * CA_FIELD_SIZE * MAX_HISTORY_LENGTH, "history_data_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.all_ca_weights, sizeof(half) * NUM_HEADS_MAX * HEAD_DIM_MAX * (2 * CHANNELS_MAX + HEAD_DIM_MAX), "all_ca_weights");
+    CUDA_ALLOC_CHECK(buffers_host.all_ca_weights, sizeof(half) * POOL_CAPACITY_MAX * CA_WEIGHTS_PER_ENTRY_STRIDE, "all_ca_weights");
     CUDA_ALLOC_CHECK(buffers_host.all_ca_state, sizeof(float) * POOL_CAPACITY_MAX * CA_STATE_STRIDE, "all_ca_state");
-    CUDA_ALLOC_CHECK(buffers_host.all_chem_fields, sizeof(float) * 6 * CA_FIELD_SIZE, "all_chem_fields");
-    CUDA_ALLOC_CHECK(buffers_host.all_rd_fields, sizeof(float) * 7 * CA_FIELD_SIZE, "all_rd_fields");
+    CUDA_ALLOC_CHECK(buffers_host.all_chem_fields, sizeof(float) * CHEM_FIELD_COUNT * CA_FIELD_SIZE, "all_chem_fields");
+    CUDA_ALLOC_CHECK(buffers_host.all_rd_fields, sizeof(float) * RD_FIELD_COUNT * CA_FIELD_SIZE, "all_rd_fields");
     CUDA_ALLOC_CHECK(buffers_host.shared_workspace, sizeof(float) * POOL_CAPACITY_MAX * POOL_CAPACITY_MAX, "shared_workspace");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_states, sizeof(LocalOrganismState<BLOCK_SIZE>) * ((POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "lifecycle_states");
     CUDA_ALLOC_CHECK(buffers_host.diresa_hw_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_hw_weights");
@@ -229,8 +285,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (NUM_HEADS_MAX + 1) * HEAD_DIM_MAX, "fp32_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.fp16_ca_workspace, sizeof(half) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (CHANNELS_MAX + HEAD_DIM_MAX), "fp16_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.latent_genome_pool, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX, "latent_genome_pool");
-    CUDA_ALLOC_CHECK(buffers_host.behavioral_field_pool, sizeof(float) * CA_FIELD_SIZE * BEHAVIORAL_DIM_MAX, "behavioral_field_pool");
-    CUDA_ALLOC_CHECK(buffers_host.behavioral_gradient_pool, sizeof(float) * CA_FIELD_SIZE * BEHAVIORAL_DIM_MAX, "behavioral_gradient_pool");
+    CUDA_ALLOC_CHECK(buffers_host.behavioral_field_pool, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * BEHAVIORAL_DIM_MAX, "behavioral_field_pool");
+    CUDA_ALLOC_CHECK(buffers_host.behavioral_gradient_pool, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * BEHAVIORAL_DIM_MAX, "behavioral_gradient_pool");
     CUDA_ALLOC_CHECK(buffers_host.memory_data_pool, sizeof(float) * POOL_CAPACITY_MAX * (BEHAVIORAL_DIM_MAX + AGENT_SPATIAL_DIMS), "memory_data_pool");
     CUDA_ALLOC_CHECK(buffers_host.prediction_error_history, sizeof(float) * TELEMETRY_DETAILED, "prediction_error_history");
     CUDA_ALLOC_CHECK(buffers_host.trace_buffer, sizeof(TraceBuffer), "trace_buffer");
@@ -248,10 +304,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.fitness_history, sizeof(float) * 2 * POOL_CAPACITY_MAX, "fitness_history");
     CUDA_ALLOC_CHECK(buffers_host.coherence_history, sizeof(float) * 2 * POOL_CAPACITY_MAX, "coherence_history");
     CUDA_ALLOC_CHECK(buffers_host.effective_rank_history, sizeof(float) * POOL_CAPACITY_MAX, "effective_rank_history");
-    CUDA_ALLOC_CHECK(buffers_host.ad_tape, sizeof(ADTape), "ad_tape");
     CUDA_ALLOC_CHECK(buffers_host.ad_tape_entries_pool, sizeof(TapeEntry) * MAX_TAPE_SIZE, "ad_tape_entries_pool");
     CUDA_ALLOC_CHECK(buffers_host.ad_tape_values_pool, sizeof(float) * MAX_TAPE_VALUES, "ad_tape_values_pool");
     CUDA_ALLOC_CHECK(buffers_host.ad_tape_grads_pool, sizeof(float) * MAX_TAPE_VALUES, "ad_tape_grads_pool");
+    CUDA_ALLOC_CHECK(buffers_host.ad_tape_levels_pool, sizeof(int) * MAX_TAPE_VALUES, "ad_tape_levels_pool");
     CUDA_ALLOC_CHECK(buffers_host.param_map, sizeof(CAParameterMap), "param_map");
     CUDA_ALLOC_CHECK(buffers_host.perception_activations_saved, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "perception_activations_saved");
     CUDA_ALLOC_CHECK(buffers_host.interaction_activations_saved, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "interaction_activations_saved");
@@ -267,34 +323,25 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.fc_bias_grad, sizeof(float) * NUM_CLASSES_MAX, "fc_bias_grad");
     CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * BATCH_SIZE_MAX * BEHAVIORAL_DIM_HW_MAX, "features_grad");
     CUDA_ALLOC_CHECK(buffers_host.adam_m_perception_pool, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX, "adam_m_perception_pool");
-    cudaMemset(buffers_host.adam_m_perception_pool, 0, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_perception_pool, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX, "adam_v_perception_pool");
-    cudaMemset(buffers_host.adam_v_perception_pool, 0, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_interaction_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX, "adam_m_interaction_pool");
-    cudaMemset(buffers_host.adam_m_interaction_pool, 0, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_interaction_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX, "adam_v_interaction_pool");
-    cudaMemset(buffers_host.adam_v_interaction_pool, 0, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_value_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX, "adam_m_value_pool");
-    cudaMemset(buffers_host.adam_m_value_pool, 0, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_value_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX, "adam_v_value_pool");
-    cudaMemset(buffers_host.adam_v_value_pool, 0, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_classifier_pool, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_m_classifier_pool");
-    cudaMemset(buffers_host.adam_m_classifier_pool, 0, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_classifier_pool, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_v_classifier_pool");
-    cudaMemset(buffers_host.adam_v_classifier_pool, 0, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * CHANNELS_MAX, "adam_m_pooling");
-    cudaMemset(buffers_host.adam_m_pooling, 0, sizeof(float) * CHANNELS_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * CHANNELS_MAX, "adam_v_pooling");
-    cudaMemset(buffers_host.adam_v_pooling, 0, sizeof(float) * CHANNELS_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_m_fc_weights");
-    cudaMemset(buffers_host.adam_m_fc_weights, 0, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_v_fc_weights");
-    cudaMemset(buffers_host.adam_v_fc_weights, 0, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_m_fc_bias");
-    cudaMemset(buffers_host.adam_m_fc_bias, 0, sizeof(float) * NUM_CLASSES_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_v_fc_bias");
-    cudaMemset(buffers_host.adam_v_fc_bias, 0, sizeof(float) * NUM_CLASSES_MAX);
     CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_ca_states_pool");
+    CUDA_ALLOC_CHECK(buffers_host.batched_ca_output, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "batched_ca_output");
+    CUDA_ALLOC_CHECK(buffers_host.batch_affinity_reduced, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE, "batch_affinity_reduced");
+    CUDA_ALLOC_CHECK(buffers_host.batch_flow_field, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * 2, "batch_flow_field");
+    CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_reintegration_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_prev_concentration");
     CUDA_ALLOC_CHECK(buffers_host.batch_labels_pool, sizeof(int) * BATCH_SIZE_MAX, "batch_labels_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_loss_pool, sizeof(float), "task_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.reg_loss_pool, sizeof(float), "reg_loss_pool");
@@ -304,12 +351,17 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.total_loss_pool, sizeof(float), "total_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.training_mode, sizeof(HybridTrainingMode), "training_mode");
     CUDA_ALLOC_CHECK(buffers_host.classifier, sizeof(ClassificationHead), "classifier");
-    CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (BEHAVIORAL_DIM_HW_MAX + (BEHAVIORAL_DIM_HW_MAX * NUM_CLASSES_MAX) + NUM_CLASSES_MAX), "classifier_workspace");
+    // Classifier input_dim = num_heads * channels (from spatial pooling of CA output)
+    constexpr int CLASSIFIER_INPUT_DIM_MAX = NUM_HEADS_MAX * CHANNELS_MAX;
+    CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (CLASSIFIER_INPUT_DIM_MAX + (CLASSIFIER_INPUT_DIM_MAX * NUM_CLASSES_MAX) + NUM_CLASSES_MAX), "classifier_workspace");
     CUDA_ALLOC_CHECK(buffers_host.curriculum, sizeof(AdaptiveCurriculum), "curriculum");
     CUDA_ALLOC_CHECK(buffers_host.voronoi_occupancy_histogram, sizeof(float) * MAX_CELLS, "voronoi_occupancy_histogram");
     CUDA_ALLOC_CHECK(buffers_host.pool_task_accuracies, sizeof(float) * POOL_CAPACITY_MAX, "pool_task_accuracies");
     CUDA_ALLOC_CHECK(buffers_host.organism, sizeof(Organism), "organism");
-    CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * (2 * POOL_CAPACITY_MAX * GENOME_SIZE + 10 * GENOME_SIZE), "organism_workspace_genomes");
+    CUDA_ALLOC_CHECK(buffers_host.reduction_workspace, sizeof(float) * ((CA_FIELD_SIZE * CHANNELS_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_workspace");
+    CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
+    CUDA_ALLOC_CHECK(buffers_host.memory_params, sizeof(MemoryUpdateParams), "memory_params");
+    CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * BLOCK_SIZE * SPAWN_WS_COUNT * GENOME_SIZE, "organism_workspace_genomes");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_features_buffer, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_MAX, "behavioral_features_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_embedding_weights, sizeof(float) * BEHAVIORAL_DIM_MAX * BEHAVIORAL_DIM_MAX, "behavioral_embedding_weights");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_reconstruction_error, sizeof(float), "behavioral_reconstruction_error");
@@ -318,53 +370,11 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.dL_dinteraction_buffer, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dinteraction_buffer");
     CUDA_ALLOC_CHECK(buffers_host.component_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "component_workspace_genomes_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "behavioral_workspace_genomes_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
+    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
+    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
 
     cudaMemcpy(buffers, &buffers_host, sizeof(OrganismPreallocatedBuffers), cudaMemcpyHostToDevice);
-
-    AuditBuffer* h_audit = nullptr;
-    AuditBuffer* d_audit = nullptr;
-    err = cudaHostAlloc(&h_audit, sizeof(AuditBuffer), cudaHostAllocMapped);
-    if (err != cudaSuccess) {
-        printf("[H-ERR] cudaHostAlloc audit buffer failed: %s\n", cudaGetErrorString(err));
-        return 1;
-    }
-    err = cudaHostGetDevicePointer(&d_audit, h_audit, 0);
-    if (err != cudaSuccess) {
-        printf("[H-ERR] cudaHostGetDevicePointer audit buffer failed: %s\n", cudaGetErrorString(err));
-        return 1;
-    }
-    memset(h_audit, 0, sizeof(AuditBuffer));
-    printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
-           (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
-
-    // Create session-timestamped output directory
-    time_t now = time(nullptr);
-    struct tm* t = localtime(&now);
-    char session_dir[256];
-    snprintf(session_dir, sizeof(session_dir), "diagnostics/run_%04d%02d%02d_%02d%02d%02d",
-             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-             t->tm_hour, t->tm_min, t->tm_sec);
-
-    MKDIR("diagnostics");
-    MKDIR(session_dir);
-
-    char samples_dir[256], ca_dir[256], pool_dir[256], chem_dir[256];
-    snprintf(samples_dir, sizeof(samples_dir), "%s/samples", session_dir);
-    snprintf(ca_dir, sizeof(ca_dir), "%s/ca_states", session_dir);
-    snprintf(pool_dir, sizeof(pool_dir), "%s/pool_states", session_dir);
-    snprintf(chem_dir, sizeof(chem_dir), "%s/chemical_fields", session_dir);
-    MKDIR(samples_dir);
-    MKDIR(ca_dir);
-    MKDIR(pool_dir);
-    MKDIR(chem_dir);
-
-    char manifest_path[256];
-    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.csv", session_dir);
-    FILE* manifest = fopen(manifest_path, "w");
-    if (manifest) {
-        fprintf(manifest, "file,size,sha256,elapsed_sec\n");
-        fclose(manifest);
-    }
 
     printf("[H29] Launching persistent_evolution_kernel<<<1,1>>>\n"); fflush(stdout);
     persistent_evolution_kernel<<<1, 1>>>(

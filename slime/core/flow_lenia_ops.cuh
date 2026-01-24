@@ -37,13 +37,14 @@ struct FlowLeniaOps {
         float beta_A,
         float n
     ) {
-        float alpha = powf(A_sum_center / beta_A, n);
+        float ratio = A_sum_center / fmaxf(beta_A, safe_epsilon(beta_A));
+        float alpha = powf(fmaxf(ratio, 0.0f), n);
         alpha = clamp(alpha, 0.0f, 1.0f);
 
-        float grad_U_x = (U_E - U_center) * 0.5f;
-        float grad_U_y = (U_N - U_center) * 0.5f;
-        float grad_A_x = (A_sum_E - A_sum_center) * 0.5f;
-        float grad_A_y = (A_sum_N - A_sum_center) * 0.5f;
+        float grad_U_x = (U_E - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_U_y = (U_N - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_x = (A_sum_E - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_y = (A_sum_N - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
 
         return make_float2(
             (1.0f - alpha) * grad_U_x - alpha * grad_A_x,
@@ -179,9 +180,11 @@ struct FlowLeniaOps {
 
     // Soft clamp for differentiable alpha computation (replaces hard clamp)
     __device__ static float soft_clamp(float x, float min_val, float max_val, float sharpness) {
-        float scaled = (x - min_val) / (max_val - min_val);
-        float sigmoid_val = 1.0f / (1.0f + expf(-sharpness * (scaled - 0.5f)));
-        return min_val + (max_val - min_val) * sigmoid_val;
+        float range = max_val - min_val;
+        float safe_range = fmaxf(range, safe_epsilon(range));
+        float scaled = (x - min_val) / safe_range;
+        float sigmoid_val = 1.0f / (1.0f + expf(-sharpness * (scaled - CENTERED_DIFFERENCE_SCALE)));
+        return min_val + range * sigmoid_val;
     }
 
     __device__ static float2 compute_flow_differentiable(
@@ -198,10 +201,10 @@ struct FlowLeniaOps {
         float ratio = A_sum_center / fmaxf(beta_A, safe_epsilon(beta_A));
         float alpha = soft_clamp(powf(ratio, n), alpha_min, alpha_max, sharpness);
 
-        float grad_U_x = (U_E - U_center) * 0.5f;
-        float grad_U_y = (U_N - U_center) * 0.5f;
-        float grad_A_x = (A_sum_E - A_sum_center) * 0.5f;
-        float grad_A_y = (A_sum_N - A_sum_center) * 0.5f;
+        float grad_U_x = (U_E - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_U_y = (U_N - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_x = (A_sum_E - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_y = (A_sum_N - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
 
         return make_float2(
             (1.0f - alpha) * grad_U_x - alpha * grad_A_x,

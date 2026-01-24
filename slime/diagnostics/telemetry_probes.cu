@@ -48,10 +48,10 @@ struct ArchiveTopologyMetrics {
     float axis_corr_hw_gen;
     float axis_corr_task_gen;
 
-    // Population flow
+    // Population flow (measured at checkpoint boundaries, not global time)
     int total_population;
-    int births_this_gen;
-    int deaths_this_gen;
+    int births_since_checkpoint;   // Spawns between barriers, not "this generation"
+    int deaths_since_checkpoint;   // Culls between barriers
 
     // Legacy
     float hash_clustering_coefficient;
@@ -110,9 +110,10 @@ struct TelemetryBuffer {
     int generation;
     bool valid;
 
-    // Persistent state for generational delta tracking
-    ArchiveTopologyMetrics prev_archive_topology;
-    int prev_occupied_flags[MAX_CELLS];  // Density per cell from previous gen
+    ArchiveTopologyMetrics last_checkpoint;
+    int last_occupancy[MAX_CELLS];
+    int last_total_spawned;
+    int last_total_culled;
 };
 
 __device__ void print_size(const char* prefix, const char* label, size_t size_bytes, const char* suffix) {
@@ -387,10 +388,7 @@ __global__ void archive_topology_probe_kernel(
     metrics->axis_corr_hw_gen = 0.0f;
     metrics->axis_corr_task_gen = 0.0f;
 
-    // Population flow
     metrics->total_population = total_pop;
-    metrics->births_this_gen = 0;  // Tracked elsewhere in lifecycle
-    metrics->deaths_this_gen = 0;
 
     // Legacy
     if (occupied > 0) {
@@ -613,22 +611,25 @@ __device__ void populate_audit_buffer(
     audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
 
     if (batch_images) {
+        int img_size = grid_size * grid_size;
         for (int s = 0; s < samples_to_copy; s++) {
-            for (int p = 0; p < AUDIT_IMAGE_SIZE; p++) {
-                float val = batch_images[s * AUDIT_IMAGE_SIZE + p];
+            for (int p = 0; p < img_size; p++) {
+                float val = batch_images[s * img_size + p];
                 val = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
-                audit->sample_images[s * AUDIT_IMAGE_SIZE + p] = (unsigned char)(val * 255.0f);
+                audit->sample_images[s * img_size + p] = (unsigned char)(val * 255.0f);
             }
         }
     }
 
     if (ca_concentration) {
         int snap_grid = 64;
+        // CA concentration layout: [grid² × channels], snapshot channel 0
+        int channels = (pool && pool->entries[0].channels > 0) ? pool->entries[0].channels : 16;
         for (int y = 0; y < snap_grid && y < grid_size; y++) {
             for (int x = 0; x < snap_grid && x < grid_size; x++) {
-                int src_idx = y * grid_size + x;
+                int cell_idx = y * grid_size + x;
                 int dst_idx = y * snap_grid + x;
-                audit->ca_snapshot[dst_idx] = ca_concentration[src_idx];
+                audit->ca_snapshot[dst_idx] = ca_concentration[cell_idx * channels + 0];
             }
         }
     }
@@ -704,10 +705,9 @@ __device__ void populate_audit_buffer(
         audit->gen_axis_max = telemetry->archive_topology.gen_axis_max;
         audit->gen_axis_mean = telemetry->archive_topology.gen_axis_mean;
 
-        // Population flow
         audit->total_population = telemetry->archive_topology.total_population;
-        audit->births_this_gen = telemetry->archive_topology.births_this_gen;
-        audit->deaths_this_gen = telemetry->archive_topology.deaths_this_gen;
+        audit->births_this_gen = telemetry->archive_topology.births_since_checkpoint;
+        audit->deaths_this_gen = telemetry->archive_topology.deaths_since_checkpoint;
 
         // DIRESA metrics
         audit->diresa_recon_loss_hw = telemetry->diresa_evolution.recon_loss_hw;

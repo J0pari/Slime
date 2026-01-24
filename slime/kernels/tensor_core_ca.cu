@@ -266,33 +266,4 @@ __global__ void multi_head_ca_tensor_kernel(
     );
 }
 
-__global__ void init_tensor_weights_kernel(
-    half* __restrict__ weights,
-    int size,
-    unsigned int seed,
-    int channels
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) return;
-
-    curandState rand_state;
-    curand_init(seed + idx, 0, 0, &rand_state);
-
-    float val = curand_normal(&rand_state) * sqrtf(2.0f / channels);
-
-    if (isnan(val) || isinf(val) || fabsf(val) > 65000.0f) {
-        printf("FATAL [init_tensor_weights]: idx=%d val=%f seed=%u channels=%d\n",
-               idx, val, seed + idx, channels);
-        return;
-    }
-
-    weights[idx] = __float2half(val);
-
-    if (idx == 0) {
-        printf("[tensor_weights] weights=%p size=%d channels=%d seed=%u scale=%f\n",
-               weights, size, channels, seed, sqrtf(2.0f / channels));
-        printf("[tensor_weights] verify idx0: weight=%f (fp16 as fp32)\n", __half2float(weights[0]));
-    }
-}
-
 #endif

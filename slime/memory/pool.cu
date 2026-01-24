@@ -70,9 +70,9 @@ struct PoolEntry {
 
 struct ComponentPool {
     PoolEntry* entries;
-    cuda::atomic<int> active_count;
-    cuda::atomic<int> total_spawned;
-    cuda::atomic<int> total_culled;
+    cuda::atomic<int, cuda::thread_scope_system> active_count;
+    cuda::atomic<int, cuda::thread_scope_system> total_spawned;
+    cuda::atomic<int, cuda::thread_scope_system> total_culled;
     int capacity;
 
     // Compact index array - maps [0, alive_count) to actual entry indices
@@ -292,10 +292,13 @@ __device__ void spawn_component_device(
     }
 
     for (int i = 0; i < pool->capacity; i++) {
-        // Use SoA for coalesced alive read
-        if (!pool->alive_flags[i]) {
-            int claimed = atomicCAS((int*)&slot_idx, -1, i);
-            if (claimed == -1) break;
+        // Atomically claim slot using id field (INT_MAX means unclaimed)
+        if (pool->entries[i].id == INT_MAX) {
+            int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);  // -2 = claiming
+            if (old_id == INT_MAX) {
+                slot_idx = i;
+                break;
+            }
         }
     }
 
@@ -326,8 +329,8 @@ __device__ void spawn_component_device(
         );
 
         use_latent = (parent_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
-        rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
-        rng.s1 = parent_id * 0xbf58476d1ce4e5b9ULL;
+        rng.s0 = new_id * XORSHIFT_GOLDEN_RATIO_A;
+        rng.s1 = parent_id * XORSHIFT_GOLDEN_RATIO_B;
 
         reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size,
             parent->delta_indices, parent->delta_values, parent->num_deltas,
@@ -379,8 +382,8 @@ __device__ void spawn_component_device(
         // Weight copy deferred to inherit_ca_weights_kernel
         pool->entries[i].parent_hash = parent->genome_hash;
     } else {
-        rng.s0 = new_id * 0x9e3779b97f4a7c15ULL;
-        rng.s1 = new_id * 0xbf58476d1ce4e5b9ULL;
+        rng.s0 = new_id * XORSHIFT_GOLDEN_RATIO_A;
+        rng.s1 = new_id * XORSHIFT_GOLDEN_RATIO_B;
         pool->entries[i].parent_hash = UINT64_MAX;  // No parent
 
         for (int j = 0; j < GENOME_SIZE; j++) {
@@ -649,36 +652,47 @@ __global__ void init_pool_kernel(
     float* gradients_buffer
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx == 0) printf("V:init_pool_enter cap=%d pool=%p\n", capacity, (void*)pool);
 
     if (idx < capacity) {
+        if (idx == 0) printf("V:init_pool_idx0_A\n");
 
         PRNGState rng;
-        rng.s0 = idx * 0x9e3779b97f4a7c15ULL;
-        rng.s1 = idx * 0xbf58476d1ce4e5b9ULL;
+        rng.s0 = idx * XORSHIFT_GOLDEN_RATIO_A;
+        rng.s1 = idx * XORSHIFT_GOLDEN_RATIO_B;
 
+        if (idx == 0) printf("V:init_pool_idx0_B entries=%p\n", (void*)pool->entries);
         pool->entries[idx].max_deltas = GENOME_SIZE;
+        if (idx == 0) printf("V:init_pool_idx0_C\n");
         pool->entries[idx].delta_indices = &delta_indices_buffer[idx * GENOME_SIZE];
         pool->entries[idx].delta_values = &delta_values_buffer[idx * GENOME_SIZE];
         pool->entries[idx].gradients = &gradients_buffer[idx * GENOME_SIZE];
+        if (idx == 0) printf("V:init_pool_idx0_D alive_flags=%p fitness_vals=%p\n", (void*)pool->alive_flags, (void*)pool->fitness_values);
 
         if (idx < POOL_CAPACITY_MIN) {
+            if (idx == 0) printf("V:init_pool_idx0_E\n");
             pool->entries[idx].id = idx;
             pool->entries[idx].alive = true;
-            pool->alive_flags[idx] = true;  // SoA sync
+            if (idx == 0) printf("V:init_pool_idx0_F\n");
+            pool->alive_flags[idx] = true;
+            if (idx == 0) printf("V:init_pool_idx0_G\n");
             pool->entries[idx].age = 0;
             pool->entries[idx].parent_hash = 0;
-            pool->entries[idx].parent_idx = INT_MAX;  // No parent - randomly generated
+            pool->entries[idx].parent_idx = INT_MAX;
             pool->entries[idx].num_deltas = GENOME_SIZE;
+            if (idx == 0) printf("V:init_pool_idx0_H\n");
 
-            float temp_genome[GENOME_SIZE];
+            float* temp_genome = pool->entries[idx].delta_values;
+            if (idx == 0) printf("V:init_pool_pre_genome_loop temp=%p\n", (void*)temp_genome);
             for (int i = 0; i < GENOME_SIZE; i++) {
                 temp_genome[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
                 pool->entries[idx].delta_indices[i] = i;
-                pool->entries[idx].delta_values[i] = temp_genome[i];
                 pool->entries[idx].gradients[i] = 0.0f;
             }
+            if (idx == 0) printf("V:init_pool_post_genome_loop\n");
 
             pool->entries[idx].genome_hash = gpu_sha256(temp_genome, GENOME_SIZE);
+            if (idx == 0) printf("V:init_pool_post_sha256\n");
 
             PoolInitParams init_params;
             init_params.derive_from_genome(pool->entries[idx].genome_hash, temp_genome);
@@ -723,6 +737,7 @@ __global__ void init_pool_kernel(
         pool->active_count = POOL_CAPACITY_MIN;
         pool->total_spawned = POOL_CAPACITY_MIN;
         pool->total_culled = 0;
+        printf("V:init_pool_done cap=%d\n", capacity);
     }
 }
 
@@ -766,8 +781,8 @@ __global__ void compute_pool_stats_kernel(
         float diversity = 0.0f;
 
         PRNGState rng;
-        rng.s0 = idx * 0x9e3779b97f4a7c15ULL;
-        rng.s1 = pool->total_spawned * 0xbf58476d1ce4e5b9ULL;
+        rng.s0 = idx * XORSHIFT_GOLDEN_RATIO_A;
+        rng.s1 = pool->total_spawned * XORSHIFT_GOLDEN_RATIO_B;
 
         PoolInitParams params;
         uint64_t genome_hash = pool->entries[idx].genome_hash;

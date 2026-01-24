@@ -82,32 +82,6 @@ __global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_s
     store_chemical_snapshot(field, field_size, global_time, genome_hash, genome);
 }
 
-__global__ void initialize_ca_from_field_kernel(
-    ComponentPool* __restrict__ pool,
-    float* __restrict__ chemical_concentration,
-    int max_grid_size,
-    int entry_idx
-) {
-    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0 && entry_idx == 0) {
-    }
-
-    if (entry_idx >= pool->capacity) return;
-
-    PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
-
-    int grid_size = entry->grid_size;
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x >= grid_size || y >= grid_size) return;
-
-    int idx = y * grid_size + x;
-    float* ca_concentration = entry->ca_state->ca_concentration;
-
-    ca_concentration[idx] = chemical_concentration[idx];
-}
-
 __global__ void update_field_from_ca_kernel(
     ComponentPool* __restrict__ pool,
     float* __restrict__ chemical_concentration,
@@ -120,17 +94,19 @@ __global__ void update_field_from_ca_kernel(
     if (!entry->alive) return;
 
     int grid_size = entry->grid_size;
+    int channels = entry->channels;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= grid_size || y >= grid_size) return;
 
-    int idx = y * grid_size + x;
+    int cell_idx = y * grid_size + x;
     float* ca_concentration = entry->ca_state->ca_concentration;
 
-    float val = ca_concentration[idx];
+    // CA concentration layout: [grid² × channels], read channel 0 for chemical field
+    float val = ca_concentration[cell_idx * channels + 0];
     if (isfinite(val)) {
-        atomicAdd(&chemical_concentration[idx], val);
+        atomicAdd(&chemical_concentration[cell_idx], val);
     }
 }
 
@@ -162,7 +138,7 @@ __global__ void diffusion_reaction_kernel(
 
     float c_center;
     Stencils::all_operators(gradient_x[idx], gradient_y[idx], laplacian[idx], c_center,
-                            concentration, x, y, grid_size);
+                            concentration, x, y, grid_size, 1);
 
     float source_contribution = sources[idx];
 
@@ -195,7 +171,7 @@ __global__ void behavioral_gradient_kernel(float* __restrict__ behavioral_field,
     if (x >= grid_size || y >= grid_size || dim >= behavioral_dim) return;
 
     float grad_x, grad_y;
-    Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size * behavioral_dim);
+    Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size, behavioral_dim);
 
     float grad_sq = grad_x * grad_x + grad_y * grad_y;
     float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
@@ -468,7 +444,7 @@ __global__ void create_attractors_kernel(
     sources[idx] = source_value;
 }
 
-__global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__ agents, float* __restrict__ embedding_weights, float* __restrict__ reconstruction_error, int num_agents, float learning_rate, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int behavioral_dim, int hw_dim, int task_dim, int gen_dim, float* features_buffer){
+__global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__ agents, float* __restrict__ embedding_weights, float* __restrict__ reconstruction_error, int num_agents, float learning_rate, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int behavioral_dim, int hw_dim, int task_dim, int gen_dim, float* features_buffer, const float* __restrict__ chemical_concentration, int grid_size){
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (agent_id >= num_agents) return;
 
@@ -479,7 +455,10 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
     float context_metabolic = agent->sensitivity;
     float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] +
                                  agent->velocity[1] * agent->velocity[1]);
-    float context_morphogen = 0.0f;
+    // Sample morphogen from chemical field at agent position
+    int cx = (int)(agent->position[0] * grid_size) % grid_size;
+    int cy = (int)(agent->position[1] * grid_size) % grid_size;
+    float context_morphogen = chemical_concentration[cy * grid_size + cx];
 
     int base_freq_slot = derive_param_slot(agent->genome_hash, "fourier_base_freq");
     float fourier_base_freq = genome_to_param(genome, gradients, base_freq_slot, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, FOURIER_BASE_FREQ_MIN, FOURIER_BASE_FREQ_MAX);
@@ -571,6 +550,8 @@ __global__ void init_embedding_weights_kernel(float* embedding_weights, int beha
         val = 0.01f * curand_normal(&state);
     }
     if (isnan(val) || isinf(val)) {
+        printf("WARN [init_embedding_weights]: idx=%d row=%d col=%d val=%f is NaN/Inf, skipping\n",
+               idx, row, col, val);
         return;
     }
     embedding_weights[idx] = val;
@@ -587,14 +568,14 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
 
     uint64_t stream_seed = ((uint64_t)seed << 32) | (uint64_t)agent_id;
     stream_seed ^= stream_seed >> 33;
-    stream_seed *= 0xff51afd7ed558ccdULL;
+    stream_seed *= HASH_MIX_CONSTANT_A;
     stream_seed ^= stream_seed >> 33;
-    stream_seed *= 0xc4ceb9fe1a85ec53ULL;
+    stream_seed *= HASH_MIX_CONSTANT_B;
     stream_seed ^= stream_seed >> 33;
 
     PRNGState rng;
     rng.s0 = stream_seed;
-    rng.s1 = stream_seed ^ 0x9e3779b97f4a7c15ULL;
+    rng.s1 = stream_seed ^ XORSHIFT_GOLDEN_RATIO_A;
 
     BehavioralState* agent = &agents[agent_id];
 
@@ -838,7 +819,10 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+        if (is_meaningful(weight_sum, 1.0f)) {
+            behavioral_field[field_idx] = field_value / weight_sum;
+        }
+        // else: preserve existing value (temporal coherence)
         d_offset++;
     }
 
@@ -862,7 +846,10 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+        if (is_meaningful(weight_sum, 1.0f)) {
+            behavioral_field[field_idx] = field_value / weight_sum;
+        }
+        // else: preserve existing value (temporal coherence)
         d_offset++;
     }
 
@@ -886,56 +873,11 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         }
 
         int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+        if (is_meaningful(weight_sum, 1.0f)) {
+            behavioral_field[field_idx] = field_value / weight_sum;
+        }
+        // else: preserve existing value (temporal coherence)
         d_offset++;
-    }
-}
-
-__global__ void init_rd_fields_kernel(
-    float* __restrict__ u_field,
-    float* __restrict__ v_field,
-    int grid_size,
-    unsigned int seed,
-    float* genome,
-    uint64_t genome_hash
-) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= grid_size || y >= grid_size) return;
-
-    int idx = y * grid_size + x;
-    curandState_t state;
-    curand_init(seed, idx, 0, &state);
-
-    int u_init_slot = derive_param_slot(genome_hash, "rd_u_field_initial");
-    float rd_u_init = (genome[u_init_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float rd_u_value = RD_U_INIT_MIN + rd_u_init * (RD_U_INIT_MAX - RD_U_INIT_MIN);
-
-    u_field[idx] = rd_u_value;
-
-    int cx = grid_size / 2;
-    int cy = grid_size / 2;
-    float dx = x - cx;
-    float dy = y - cy;
-    float r = sqrtf(dx*dx + dy*dy);
-
-    int perturbation_radius_slot = derive_param_slot(genome_hash, "rd_perturbation_radius");
-    float perturbation_radius_norm = (genome[perturbation_radius_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float perturbation_radius = RD_PERTURBATION_RADIUS_MIN + perturbation_radius_norm * (RD_PERTURBATION_RADIUS_MAX - RD_PERTURBATION_RADIUS_MIN);
-
-    int v_perturbation_slot = derive_param_slot(genome_hash, "rd_v_perturbation");
-    float v_perturbation_norm = (genome[v_perturbation_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float v_perturbation_base = RD_V_PERTURBATION_MIN + v_perturbation_norm * (RD_V_PERTURBATION_MAX - RD_V_PERTURBATION_MIN);
-
-    int v_scale_slot = derive_param_slot(genome_hash, "rd_v_perturbation_scale");
-    float v_scale_norm = (genome[v_scale_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float v_scale = v_scale_norm * (RD_V_PERTURBATION_MAX - RD_V_PERTURBATION_MIN);
-
-    if (r < perturbation_radius) {
-        float rand_val = validated_curand_uniform(&state, "init_rd_fields", idx);
-        v_field[idx] = v_perturbation_base + rand_val * v_scale;
-    } else {
-        v_field[idx] = NORMALIZED_MIN;
     }
 }
 
@@ -1004,6 +946,8 @@ extern "C" __global__ void resource_flow_kernel(
     float* __restrict__ resource_density,
     float* __restrict__ resource_next,
     const float* __restrict__ fitness_landscape,
+    float* __restrict__ resource_gradient_x,
+    float* __restrict__ resource_gradient_y,
     int grid_size,
     float dt,
     float diffusivity,
@@ -1017,7 +961,7 @@ extern "C" __global__ void resource_flow_kernel(
     int idx = y * grid_size + x;
 
     float grad_fitness_x, grad_fitness_y;
-    Stencils::gradients_at(grad_fitness_x, grad_fitness_y, fitness_landscape, x, y, grid_size);
+    Stencils::gradients_at(grad_fitness_x, grad_fitness_y, fitness_landscape, x, y, grid_size, 1);
 
     float2 velocity = make_float2(-grad_fitness_x * flow_strength, -grad_fitness_y * flow_strength);
 
@@ -1033,7 +977,11 @@ extern "C" __global__ void resource_flow_kernel(
     float divergence = flux_x + flux_y;
 
     float grad_rho_x, grad_rho_y, lap_rho, rho_center;
-    Stencils::all_operators(grad_rho_x, grad_rho_y, lap_rho, rho_center, resource_density, x, y, grid_size);
+    Stencils::all_operators(grad_rho_x, grad_rho_y, lap_rho, rho_center, resource_density, x, y, grid_size, 1);
+
+    // Store gradients for CA channel injection
+    resource_gradient_x[idx] = grad_rho_x;
+    resource_gradient_y[idx] = grad_rho_y;
 
     float drho_dt = -divergence + diffusivity * lap_rho;
 

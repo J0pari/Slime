@@ -101,14 +101,18 @@ __device__ float get_ca_xavier_scale(
     if (flat_idx < interaction_size) {
         *out_matrix = 1;
         *out_local_idx = flat_idx;
-        return sqrtf(2.0f / (float)head_dim);
+        float fan_in = (float)head_dim;
+        float fan_out = (float)head_dim;
+        return sqrtf(2.0f / (fan_in + fan_out));
     }
     flat_idx -= interaction_size;
 
     if (flat_idx < value_size) {
         *out_matrix = 2;
         *out_local_idx = flat_idx;
-        return sqrtf(2.0f / (float)head_dim);
+        float fan_in = (float)head_dim;
+        float fan_out = (float)channels;
+        return sqrtf(2.0f / (fan_in + fan_out));
     }
 
     *out_matrix = -1;

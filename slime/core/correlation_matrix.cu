@@ -53,6 +53,8 @@ __global__ void compute_correlation_matrix_kernel(
 
     float denom = sqrtf(var_row * var_col);
     if (denom <= 0.0f || isnan(denom) || isinf(denom)) {
+        printf("WARN [correlation_matrix]: row=%d col=%d invalid denom=%f (var_row=%f var_col=%f)\n",
+               row, col, denom, var_row, var_col);
         correlation_matrix[row * genome_size + col] = 0.0f;
         return;
     }

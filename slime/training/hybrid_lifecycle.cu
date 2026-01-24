@@ -28,7 +28,7 @@ __global__ void update_field_from_ca_kernel(ComponentPool*, float*, int, int);
 __global__ void compute_effective_rank_from_latent_kernel(ComponentPool*, float*, float*, int, int);
 extern "C" __global__ void behavioral_update_kernel(Organism*, BehavioralState*, ChemicalField*, TemporalTube*, int, ArchitectureParams, float*);
 __global__ void memory_update_kernel(TemporalTube*, float*, int*, int*, int*, MemoryEntry*, int, float*, float*, uint64_t, float, float, float, float, float, float, float);
-__global__ void update_behavioral_embedding_kernel(BehavioralState*, float*, float*, int, float, const float*, const float*, float, float, float, float, int, int, int, int, float*);
+__global__ void update_behavioral_embedding_kernel(BehavioralState*, float*, float*, int, float, const float*, const float*, float, float, float, float, int, int, int, int, float*, const float*, int);
 
 __global__ void zero_scalar_kernel(float* ptr) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -141,8 +141,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         float accuracy = organism->telemetry->task_performance.accuracy;
         arch.ca_gate_center = 2.0f - 1.5f * fminf(fmaxf(accuracy, 0.0f), 1.0f);
 
-        component_grid = dim3((POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
-        component_block = dim3(BLOCK_SIZE);
+        component_grid = dim3(POOL_CAPACITY_MAX);  // One block per pool entry
+        component_block = dim3(WARP_SIZE);  // Match behavioral_update_kernel expectations
         ca_grid = dim3(arch.grid_size / WMMA_TILE_DIM, arch.num_heads, 1);
         ca_block = dim3(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
         field_grid = dim3((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
@@ -188,7 +188,25 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     if (!training_mode->use_gradients) {
     }
 
-    if (training_mode->use_gradients && entry_idx == 0) {
+    if (training_mode->use_gradients) {
+        if (tid == 0) {
+        if (organism == nullptr || ca_state == nullptr ||
+            training_mode == nullptr || param_map == nullptr) {
+            printf("!E:hybrid null_check org=%p ca_state=%p tm=%p pm=%p\n",
+                   (void*)organism,
+                   (void*)ca_state,
+                   (void*)training_mode,
+                   (void*)param_map);
+            return;
+        }
+
+        if (training_mode->batch_images == nullptr || training_mode->batch_labels == nullptr) {
+            printf("!E:hybrid batch_buffers_null images=%p labels=%p\n",
+                   (void*)training_mode->batch_images,
+                   (void*)training_mode->batch_labels);
+            return;
+        }
+
         sample_batch_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
             organism->current_dataset,
             training_mode,
@@ -198,44 +216,48 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         );
         CUDA_LAUNCH_CHECK();
 
-        if (organism == nullptr || organism->ad_tape == nullptr || ca_state == nullptr ||
-            training_mode == nullptr || param_map == nullptr) {
-            printf("!E:hybrid null_check org=%p ad_tape=%p ca_state=%p tm=%p pm=%p\n",
-                   (void*)organism,
-                   organism ? (void*)organism->ad_tape : nullptr,
-                   (void*)ca_state,
-                   (void*)training_mode,
-                   (void*)param_map);
-            return;
-        }
-
         SLIME_DEBUG_PRINT("V:hybrid:155 pre_reset_tape\n");
-        reset_tape_kernel<<<(VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->ad_tape);
+        reset_tape_kernel<<<(VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(&ca_state->tape);
         CUDA_LAUNCH_CHECK();
         SLIME_DEBUG_PRINT("V:hybrid:165 post_reset_tape\n");
-
-        if (training_mode->batch_images == nullptr) {
-            printf("!E:hybrid batch_images=nullptr\n");
-            return;
-        }
 
         dim3 sample_grid((arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, (arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, training_mode->batch_size);
         dim3 sample_block(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
 
+        SLIME_DEBUG_PRINT("V:hybrid:225 pre_inject grid=(%d,%d,%d) block=(%d,%d,%d)\n", sample_grid.x, sample_grid.y, sample_grid.z, sample_block.x, sample_block.y, sample_block.z);
         inject_sample_to_ca_kernel<<<sample_grid, sample_block>>>(
+            organism->batch_ca_states_pool,                // output: batched CA state [batch × grid² × channels]
+            training_mode->batch_size,                     // batch_size
+            arch.channels,                                 // channels
+            arch.grid_size,                                // grid_size
+            // ChemicalField sources (channels 0-5)
+            organism->chemical_field->concentration,
+            organism->chemical_field->gradient_x,
+            organism->chemical_field->gradient_y,
+            organism->chemical_field->laplacian,
+            organism->chemical_field->sources,
+            organism->chemical_field->decay_factors,
+            // RD field sources (channels 6-9)
+            organism->resource_density,
+            organism->fitness_landscape,
+            organism->resource_gradient_x,
+            organism->resource_gradient_y,
+            // Behavioral field (channel 10)
+            organism->behavioral_field_pool,
+            // Dataset sample (channels 11-13)
             training_mode->batch_images,
-            ca_state->ca_concentration,
-            training_mode->batch_size,
-            arch.channels,
-            arch.grid_size
+            (int)organism->current_dataset->descriptor->channels,
+            // Recurrence (channel 14) - previous step's final concentration
+            organism->batch_prev_concentration,
+            // Temporal retrieval (channel 15) - use chemical field for temporal coherence
+            organism->chemical_field->concentration
         );
         CUDA_LAUNCH_CHECK();
+        SLIME_DEBUG_PRINT("V:hybrid:235 post_inject\n");
 
-        int ca_output_size = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.head_dim;
-        zero_buffer_kernel<<<(ca_output_size + 255) / 256, 256>>>(ca_state->ca_output, ca_output_size);
-
-        size_t buffer_capacity = NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
-        size_t per_sample_size = arch.num_heads * arch.grid_size * arch.grid_size * arch.head_dim;
+        // CA output layout: [batch × num_heads × grid² × channels]
+        size_t buffer_capacity = NUM_HEADS_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
+        size_t per_sample_size = arch.num_heads * arch.grid_size * arch.grid_size * arch.channels;
         int samples_per_pass = (int)(buffer_capacity / per_sample_size);
         if (samples_per_pass < 1) samples_per_pass = 1;
         if (samples_per_pass > training_mode->batch_size) samples_per_pass = training_mode->batch_size;
@@ -245,18 +267,20 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         int x_tiles = (arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
         int y_tiles = (arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
 
+        SLIME_DEBUG_PRINT("V:hybrid:255 pre_ca_loop num_passes=%d samples_per_pass=%d\n", num_passes, samples_per_pass);
         for (int pass = 0; pass < num_passes; pass++) {
             int micro_batch_offset = pass * samples_per_pass;
             int micro_batch_size = min(samples_per_pass, training_mode->batch_size - micro_batch_offset);
 
             dim3 ca_grid_batched(x_tiles, y_tiles, arch.num_heads * micro_batch_size);
+            SLIME_DEBUG_PRINT("V:hybrid:260 pre_ca_kernel pass=%d grid=(%d,%d,%d)\n", pass, ca_grid_batched.x, ca_grid_batched.y, ca_grid_batched.z);
             multi_head_ca_with_tape_kernel<<<ca_grid_batched, ca_block>>>(
-                ca_state->ca_concentration,
+                organism->batch_ca_states_pool,       // batched input: [batch × grid² × channels]
                 ca_state,
-                ca_state->ca_output,
-                organism->perception_activations_saved,
-                organism->interaction_activations_saved,
-                organism->pre_gelu_values_saved,
+                organism->buffers->batched_ca_output, // batched output: [batch × num_heads × grid² × channels]
+                ca_state->perception_saved,
+                ca_state->interaction_saved,
+                ca_state->pre_gelu_saved,
                 param_map,
                 micro_batch_size,
                 micro_batch_offset,
@@ -265,12 +289,17 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             );
 
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:274 post_ca_kernel pass=%d\n", pass);
         }
 
+        SLIME_DEBUG_PRINT("V:hybrid:276 pre_sync\n");
         cudaDeviceSynchronize();  // CDP barrier - required
+        SLIME_DEBUG_PRINT("V:hybrid:278 post_sync\n");
+        }  // end if (tid == 0)
+        __syncthreads();
 
-        // Flow Lenia: transport mass based on CA affinity gradients
-        {
+    // Flow Lenia: transport mass based on CA affinity gradients (ALL threads of ALL blocks)
+    {
             int total_cells = arch.grid_size * arch.grid_size;
             int buffer_size = training_mode->batch_size * total_cells * arch.channels;
             int batch_size = training_mode->batch_size;
@@ -285,22 +314,23 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float flow_sharpness = entry->flow_sharpness;
             float flow_dt = entry->flow_resource_dt;
 
+            // CA output layout: [batch × num_heads × grid² × channels]
             int total_affinity_work = batch_size * total_cells;
             for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
                 int batch_idx = work_idx / total_cells;
                 int cell_idx = work_idx % total_cells;
 
                 float affinity = 0.0f;
-                int total_elements = num_heads * head_dim;
+                int total_elements = num_heads * channels;
                 for (int i = 0; i < total_elements; i++) {
-                    int head = i / head_dim;
-                    int dim = i % head_dim;
-                    int idx = batch_idx * num_heads * total_cells * head_dim +
-                              head * total_cells * head_dim +
-                              cell_idx * head_dim + dim;
-                    affinity += ca_state->ca_output[idx];
+                    int head = i / channels;
+                    int c = i % channels;
+                    int idx = batch_idx * num_heads * total_cells * channels +
+                              head * total_cells * channels +
+                              cell_idx * channels + c;
+                    affinity += organism->buffers->batched_ca_output[idx];
                 }
-                ca_state->affinity_reduced[batch_idx * total_cells + cell_idx] = affinity;
+                organism->batch_affinity_reduced[batch_idx * total_cells + cell_idx] = affinity;
             }
             __syncthreads();
 
@@ -311,18 +341,18 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int y = cell_idx / grid_size;
 
                 int batch_offset = batch_idx * total_cells;
-                float U_center = ca_state->affinity_reduced[batch_offset + cell_idx];
+                float U_center = organism->batch_affinity_reduced[batch_offset + cell_idx];
                 int x_E = min(x + 1, grid_size - 1);
                 int y_N = min(y + 1, grid_size - 1);
-                float U_E = ca_state->affinity_reduced[batch_offset + y * grid_size + x_E];
-                float U_N = ca_state->affinity_reduced[batch_offset + y_N * grid_size + x];
+                float U_E = organism->batch_affinity_reduced[batch_offset + y * grid_size + x_E];
+                float U_N = organism->batch_affinity_reduced[batch_offset + y_N * grid_size + x];
 
                 int conc_batch_offset = batch_idx * total_cells * channels;
                 float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
                 for (int c = 0; c < channels; c++) {
-                    A_sum_center += ca_state->ca_concentration[conc_batch_offset + cell_idx * channels + c];
-                    A_sum_E += ca_state->ca_concentration[conc_batch_offset + (y * grid_size + x_E) * channels + c];
-                    A_sum_N += ca_state->ca_concentration[conc_batch_offset + (y_N * grid_size + x) * channels + c];
+                    A_sum_center += organism->batch_ca_states_pool[conc_batch_offset + cell_idx * channels + c];
+                    A_sum_E += organism->batch_ca_states_pool[conc_batch_offset + (y * grid_size + x_E) * channels + c];
+                    A_sum_N += organism->batch_ca_states_pool[conc_batch_offset + (y_N * grid_size + x) * channels + c];
                 }
 
                 float2 F = FlowLeniaOps::compute_flow_differentiable(
@@ -331,13 +361,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 );
 
                 int flow_idx = batch_idx * total_cells * 2 + cell_idx * 2;
-                ca_state->flow_field[flow_idx + 0] = F.x;
-                ca_state->flow_field[flow_idx + 1] = F.y;
+                organism->batch_flow_field[flow_idx + 0] = F.x;
+                organism->batch_flow_field[flow_idx + 1] = F.y;
             }
 
             // Clear reintegration buffer
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                ca_state->reintegration_buffer[idx] = 0.0f;
+                organism->batch_reintegration_buffer[idx] = 0.0f;
             }
             __syncthreads();
 
@@ -351,12 +381,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                 int batch_offset = batch_idx * total_cells;
                 int flow_idx = batch_offset * 2 + cell_idx * 2;
-                float Fx = ca_state->flow_field[flow_idx + 0];
-                float Fy = ca_state->flow_field[flow_idx + 1];
+                float Fx = organism->batch_flow_field[flow_idx + 0];
+                float Fy = organism->batch_flow_field[flow_idx + 1];
 
                 int conc_batch_offset = batch_idx * total_cells * channels;
-                float* batch_buffer = ca_state->reintegration_buffer + conc_batch_offset;
-                const float* batch_conc = ca_state->ca_concentration + conc_batch_offset;
+                float* batch_buffer = organism->batch_reintegration_buffer + conc_batch_offset;
+                const float* batch_conc = organism->batch_ca_states_pool + conc_batch_offset;
 
                 for (int c = 0; c < channels; c++) {
                     float source_mass = batch_conc[cell_idx * channels + c];
@@ -372,33 +402,47 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // Phase 5: Copy transported mass back to concentration (all threads parallel)
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                ca_state->ca_concentration[idx] = ca_state->reintegration_buffer[idx];
+                organism->batch_ca_states_pool[idx] = organism->batch_reintegration_buffer[idx];
             }
-        }
+            __syncthreads();
 
+            // Phase 6: Save concentration for next iteration's recurrence channel
+            // batch_prev_concentration will be read by inject_sample_to_ca_kernel on next step
+            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
+                organism->batch_prev_concentration[idx] = organism->batch_ca_states_pool[idx];
+            }
+        }  // end Flow Lenia
+        __syncthreads();
+
+        SLIME_DEBUG_PRINT("V:hybrid:412 post_flow_lenia tid=%d\n", tid);
+
+        // Continue training code - thread 0 in each block launches per-entry kernels
+        if (tid == 0) {
+        SLIME_DEBUG_PRINT("V:hybrid:415 tid0_entry\n");
         float* ca_output_grad = nullptr;
         
         if (training_mode->batch_images == nullptr) {
         }
 
-        if (training_mode->batch_images != nullptr) {
+        if (training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
 
             float* features = organism->gradient_features_pool;
 
-            if (training_mode->classifier == nullptr) {
-                return;
-            }
-
-            spatial_pooling_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
-                ca_state->ca_output,
+            SLIME_DEBUG_PRINT("V:hybrid:428 pre_spatial_pooling\n");
+            int num_features = arch.num_heads * arch.channels;
+            dim3 pooling_grid(training_mode->batch_size, (num_features + BLOCK_SIZE - 1) / BLOCK_SIZE);
+            spatial_pooling_kernel<<<pooling_grid, BLOCK_SIZE>>>(
+                organism->buffers->batched_ca_output,
                 training_mode->classifier->pooling_weights,
                 features,
                 training_mode->batch_size,
+                arch.num_heads,
                 arch.grid_size,
                 arch.channels
             );
 
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:438 post_spatial_pooling\n");
 
             float* logits = organism->gradient_logits_pool;
 
@@ -408,16 +452,18 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 training_mode->classifier->fc_bias,
                 logits,
                 training_mode->batch_size,
-                arch.channels,
+                num_features,
                 num_classes
             );
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:456 post_classification_head\n");
 
             float* loss_out = organism->gradient_loss_pool;
             float* logit_grads = organism->gradient_logit_grads_pool;
 
             zero_scalar_kernel<<<1, 1>>>(loss_out);
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:462 post_zero_scalar\n");
 
             cross_entropy_loss_kernel<<<training_mode->batch_size, WARP_SIZE>>>(
                 logits,
@@ -428,6 +474,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 num_classes
             );
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:472 post_cross_entropy\n");
 
             task_performance_probe_kernel<<<1, 1>>>(
                 logits,
@@ -438,10 +485,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 training_mode->is_train_batch
             );
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:482 post_task_performance\n");
             cudaDeviceSynchronize();  // CDP barrier - required
+            SLIME_DEBUG_PRINT("V:hybrid:484 post_sync\n");
 
             // Skip backward pass for eval-only mode (test evaluation)
             if (!eval_only) {
+            SLIME_DEBUG_PRINT("V:hybrid:486 enter_backward eval_only=%d\n", eval_only);
 
             // Zero gradient buffers before backward pass (uses atomicAdd)
             int fc_weights_size = num_classes * arch.channels;
@@ -450,6 +500,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             zero_buffer_kernel<<<(arch.channels + 255) / 256, 256>>>(organism->features_grad, arch.channels);
             zero_buffer_kernel<<<(arch.channels + 255) / 256, 256>>>(organism->pooling_weights_grad, arch.channels);
 
+            SLIME_DEBUG_PRINT("V:hybrid:495 pre_class_backward\n");
             classification_head_backward_kernel<<<training_mode->batch_size, num_classes>>>(
                 logit_grads,
                 features,
@@ -462,46 +513,42 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 num_classes
             );
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:507 post_class_backward\n");
 
             // Backprop through spatial pooling
-            dim3 pooling_grid(1, (arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE);
-            dim3 pooling_block(BLOCK_SIZE);
+            int num_features_bwd = arch.num_heads * arch.channels;
+            dim3 pooling_grid_bwd(training_mode->batch_size, (num_features_bwd + BLOCK_SIZE - 1) / BLOCK_SIZE);
+            dim3 pooling_block_bwd(BLOCK_SIZE);
             ca_output_grad = organism->buffers->ca_output_grad_buffer;
 
             // Zero ca_output_grad before spatial_pooling_backward (uses atomicAdd)
-            int ca_grad_size = training_mode->batch_size * arch.grid_size * arch.grid_size * arch.channels;
+            // Layout: [batch × num_heads × grid² × channels]
+            int ca_grad_size = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.channels;
             zero_buffer_kernel<<<(ca_grad_size + 255) / 256, 256>>>(ca_output_grad, ca_grad_size);
 
-            spatial_pooling_backward_kernel<<<pooling_grid, pooling_block>>>(
+            SLIME_DEBUG_PRINT("V:hybrid:520 pre_pooling_backward\n");
+            spatial_pooling_backward_kernel<<<pooling_grid_bwd, pooling_block_bwd>>>(
                 organism->features_grad,
-                ca_state->ca_output,  // Use ca_output as input
+                organism->buffers->batched_ca_output,
                 training_mode->classifier->pooling_weights,
                 organism->pooling_weights_grad,
-                ca_output_grad,  // Write gradients to separate buffer
+                ca_output_grad,
                 training_mode->batch_size,
+                arch.num_heads,
                 arch.grid_size,
                 arch.channels
             );
             CUDA_LAUNCH_CHECK();
+            SLIME_DEBUG_PRINT("V:hybrid:530 post_pooling_backward\n");
         }
 
         // CA Backward Pass - Replace broken tape-based autodiff
-        {
+        if (!eval_only) {
+            SLIME_DEBUG_PRINT("V:hybrid:535 enter_ca_backward\n");
             float* dL_dperception = organism->buffers->dL_dperception_buffer;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer;
 
-            if (dL_dperception == nullptr || dL_dinteraction == nullptr || ca_output_grad == nullptr) {
-                return;
-            }
-
-            // Zero gradient buffers using kernel (can't use cudaMemset from device)
-            int num_elements = training_mode->batch_size * arch.num_heads * arch.grid_size * arch.grid_size * arch.head_dim;
-            zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(dL_dperception, num_elements);
-            CUDA_LAUNCH_CHECK();
-            zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(dL_dinteraction, num_elements);
-            CUDA_LAUNCH_CHECK();
-            zero_buffer_kernel<<<(num_elements + 255) / 256, 256>>>(organism->ad_tape->grad_buffer, param_map->total_params);
-            CUDA_LAUNCH_CHECK();
+            if (dL_dperception != nullptr && dL_dinteraction != nullptr && ca_output_grad != nullptr) {
 
             // Use preallocated workspace buffers for GEMM-based backward pass
             int num_cells = arch.grid_size * arch.grid_size;
@@ -530,7 +577,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             // === VALUE BACKWARD ===
             int total_I = arch.num_heads * total_samples * arch.hidden_dim;
             batched_convert_fp32_to_fp16_strided<<<(total_I + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                organism->interaction_activations_saved, ws_fp16_a,
+                ca_state->interaction_saved, ws_fp16_a,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
                 I_head_stride, I_batch_stride, ws_fp16_a_stride, 0
             );
@@ -551,7 +598,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             );
 
             batched_accumulate_weight_grads_kernel<<<(arch.num_heads * arch.hidden_dim * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                ws_dW, organism->ad_tape->grad_buffer, param_map->value_start,
+                ws_dW, ca_state->tape.grad_buffer, param_map->value_start,
                 arch.hidden_dim * arch.head_dim, arch.num_heads, ws_dW_stride
             );
 
@@ -580,13 +627,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             // === INTERACTION BACKWARD ===
             int ws_dpregelu_stride = total_samples * arch.hidden_dim;
             batched_gelu_backward_kernel<<<(arch.num_heads * total_samples * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                dL_dinteraction, organism->pre_gelu_values_saved, ws_dpregelu,
+                dL_dinteraction, ca_state->pre_gelu_saved, ws_dpregelu,
                 arch.num_heads, total_samples * arch.hidden_dim,
                 I_head_stride, ws_dpregelu_stride
             );
 
             batched_convert_fp32_to_fp16_strided<<<(total_I + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                organism->perception_activations_saved, ws_fp16_a,
+                ca_state->perception_saved, ws_fp16_a,
                 arch.num_heads, training_mode->batch_size, I_head_stride,
                 I_head_stride, I_batch_stride, ws_fp16_a_stride, 0
             );
@@ -604,7 +651,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             );
 
             batched_accumulate_weight_grads_kernel<<<(arch.num_heads * arch.hidden_dim * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                ws_dW, organism->ad_tape->grad_buffer, param_map->interaction_start,
+                ws_dW, ca_state->tape.grad_buffer, param_map->interaction_start,
                 arch.hidden_dim * arch.hidden_dim, arch.num_heads, ws_dW_interaction_stride
             );
 
@@ -629,14 +676,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // === PERCEPTION BACKWARD ===
             batched_relu_backward_kernel<<<(arch.num_heads * total_samples * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                dL_dperception, organism->perception_activations_saved, ws_dpregelu,
+                dL_dperception, ca_state->perception_saved, ws_dpregelu,
                 arch.num_heads, total_samples * arch.hidden_dim,
                 I_head_stride, ws_dpregelu_stride
             );
 
             int ws_im2col_stride = total_samples * col_width;
             batched_im2col_kernel<<<(arch.num_heads * total_samples + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                ca_state->ca_concentration, ws_im2col,
+                organism->batch_ca_states_pool, ws_im2col,
                 arch.num_heads, training_mode->batch_size, arch.grid_size, arch.channels,
                 0, ws_im2col_stride
             );
@@ -660,11 +707,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             );
 
             batched_accumulate_weight_grads_kernel<<<(arch.num_heads * arch.channels * arch.hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-                ws_dW, organism->ad_tape->grad_buffer, param_map->perception_start,
+                ws_dW, ca_state->tape.grad_buffer, param_map->perception_start,
                 arch.channels * arch.hidden_dim, arch.num_heads, ws_dW_perception_stride
             );
 
-        }
+            SLIME_DEBUG_PRINT("V:hybrid:712 post_perception_backward\n");
+            }  // end if (buffers != nullptr)
+        }  // end if (!eval_only) for CA backward
+        SLIME_DEBUG_PRINT("V:hybrid:715 post_ca_backward\n");
 
         int total_ca_params = arch.num_heads * arch.channels * arch.hidden_dim * 3;
 
@@ -682,9 +732,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         dim3 adam_grid((total_ca_params + BLOCK_SIZE - 1) / BLOCK_SIZE);
         dim3 adam_block(BLOCK_SIZE);
 
+        SLIME_DEBUG_PRINT("V:hybrid:733 pre_adam_fp16\n");
         adam_update_fp16_kernel<<<adam_grid, adam_block>>>(
             ca_state->perception_weights,
-            organism->ad_tape->grad_buffer,
+            ca_state->tape.grad_buffer,
             training_mode->adam_m_perception,
             training_mode->adam_v_perception,
             total_ca_params,
@@ -696,6 +747,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             gradient_clip_norm
         );
         CUDA_LAUNCH_CHECK();
+        SLIME_DEBUG_PRINT("V:hybrid:746 post_adam_fp16\n");
 
         dim3 pooling_adam_grid((arch.channels + BLOCK_SIZE - 1) / BLOCK_SIZE);
         adam_update_kernel<<<pooling_adam_grid, adam_block>>>(
@@ -751,7 +803,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         float* gradient_magnitudes = organism->gradient_magnitudes_pool;
 
         extract_head_gradient_magnitudes_kernel<<<1, BLOCK_SIZE>>>(
-            organism->ad_tape,
+            &ca_state->tape,
             param_map->head_param_offsets,
             param_map->head_param_counts,
             gradient_magnitudes,
@@ -768,50 +820,61 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             training_mode->coherence_fitness_weight
         );
         CUDA_LAUNCH_CHECK();
-            } // end if (!eval_only)
-    }
+        SLIME_DEBUG_PRINT("V:hybrid:821 post_gradient_fitness\n");
+        }  // end if (training_mode->batch_images != nullptr)
+    }  // end if (tid == 0) for training code
+    }  // end if (training_mode->use_gradients)
+    SLIME_DEBUG_PRINT("V:hybrid:825 post_training entry_idx=%d\n", entry_idx);
 
-    float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
-
-    component_evolution_kernel<<<component_grid, component_block>>>(
-        organism,
-        organism->pool,
-        organism->archive,
-        organism->voronoi_cells,
-        organism->num_voronoi_cells,
-        &organism->archive_size,
-        organism->chemical_field,
-        organism->behavioral_agents,
-        organism->fitness_history,
-        organism->coherence_history,
-        generation,
-        arch,
-        component_workspace_genomes
-    );
-
-    CUDA_LAUNCH_CHECK();
-    cudaDeviceSynchronize();  // CDP barrier - required
-
-    if (!training_mode->use_gradients) {
-        float* workspace_genomes = organism->buffers->organism_workspace_genomes;
-
-        neural_ca_update_kernel<<<pool->capacity, 1>>>(
+    // GLOBAL operation - processes all entries internally, launch once
+    if (tid == 0 && entry_idx == 0) {
+        SLIME_DEBUG_PRINT("V:hybrid:828 pre_component_evolution\n");
+        float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
+        component_evolution_kernel<<<component_grid, component_block>>>(
             organism,
-            organism->chemical_field,
-            organism->effective_rank_history,
-            organism->fp32_ca_workspace,
-            generation,
             organism->pool,
+            organism->archive,
+            organism->voronoi_cells,
+            organism->num_voronoi_cells,
+            &organism->archive_size,
+            organism->chemical_field,
+            organism->behavioral_agents,
             organism->fitness_history,
             organism->coherence_history,
-            workspace_genomes,
-            organism->trace_buffer,
-            arch.grid_size
+            generation,
+            arch,
+            component_workspace_genomes
         );
         CUDA_LAUNCH_CHECK();
-        cudaDeviceSynchronize();  // CDP barrier - required
-    } else {
+        SLIME_DEBUG_PRINT("V:hybrid:847 pre_component_sync\n");
+        cudaDeviceSynchronize();
+        SLIME_DEBUG_PRINT("V:hybrid:849 post_component_sync\n");
 
+        if (!training_mode->use_gradients) {
+            SLIME_DEBUG_PRINT("V:hybrid:852 pre_neural_ca\n");
+            float* workspace_genomes = organism->buffers->organism_workspace_genomes;
+            neural_ca_update_kernel<<<pool->capacity, 1>>>(
+                organism,
+                organism->chemical_field,
+                organism->effective_rank_history,
+                ca_state->fp32_workspace,
+                generation,
+                organism->pool,
+                organism->fitness_history,
+                organism->coherence_history,
+                workspace_genomes,
+                organism->trace_buffer,
+                arch.grid_size
+            );
+            CUDA_LAUNCH_CHECK();
+            cudaDeviceSynchronize();
+        }
+    }
+
+    // PER-ENTRY operations - each block handles its own entry in parallel
+    SLIME_DEBUG_PRINT("V:hybrid:873 pre_per_entry entry_idx=%d\n", entry_idx);
+    if (tid == 0 && training_mode->use_gradients) {
+        SLIME_DEBUG_PRINT("V:hybrid:875 per_entry_start entry_idx=%d\n", entry_idx);
         dim3 update_grid(field_grid.x, field_grid.y, 1);
         update_field_from_ca_kernel<<<update_grid, field_block>>>(
             pool,
@@ -822,12 +885,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         CUDA_LAUNCH_CHECK();
 
         int weight_count = arch.num_heads * arch.channels * arch.hidden_dim;
-
         int convert_threads = BLOCK_SIZE;
         int convert_blocks = (weight_count + convert_threads - 1) / convert_threads;
         convert_weights_to_fp32<<<convert_blocks, convert_threads>>>(
             ca_state->perception_weights,
-            organism->fp32_ca_workspace,
+            ca_state->fp32_workspace,
             weight_count
         );
         CUDA_LAUNCH_CHECK();
@@ -847,20 +909,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
     float* behavioral_workspace_genomes = organism->buffers->behavioral_workspace_genomes_buffer;
 
-    behavioral_update_kernel<<<component_grid, component_block>>>(
-        organism,
-        organism->behavioral_agents,
-        organism->chemical_field,
-        organism->chemical_field->history,
-        generation,
-        arch,
-        behavioral_workspace_genomes
-    );
+    // behavioral_update_kernel removed - already called in Phase 3 of persistent_evolution_kernel
 
-    CUDA_LAUNCH_CHECK();
-
-    if (generation % EMBEDDING_UPDATE_FREQ == 0) {
-        zero_scalar_kernel<<<1, 1>>>(organism->buffers->behavioral_reconstruction_error);
+    // Embedding update only needs to run once, not per-entry
+    if (tid == 0 && entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
+            zero_scalar_kernel<<<1, 1>>>(organism->buffers->behavioral_reconstruction_error);
 
         int hw_dim = BEHAVIORAL_DIM_HW_MAX;
         int task_dim = BEHAVIORAL_DIM_TASK_MAX;
@@ -883,41 +936,52 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             hw_dim,
             task_dim,
             gen_dim,
-            organism->buffers->behavioral_features_buffer
+            organism->buffers->behavioral_features_buffer,
+            organism->chemical_field->concentration,
+            arch.grid_size
         );
         CUDA_LAUNCH_CHECK();
     }
 
-    uint64_t mem_genome_hash = entry->genome_hash;
-    float ctx_metabolic = entry->fitness;
-    float ctx_stress = entry->hunger;
+    // Memory update - only from block 0 to avoid redundant launches
+    if (tid == 0 && entry_idx == 0) {
+        uint64_t mem_genome_hash = entry->genome_hash;
+        float ctx_metabolic = entry->fitness;
+        float ctx_stress = entry->hunger;
 
-    float ctx_morphogen = local_ca_mean;
+        float ctx_morphogen = local_ca_mean;
 
-    memory_update_kernel<<<1, BLOCK_SIZE>>>(
-        organism->chemical_field->history,
-        organism->fitness_history,
-        organism->memory_compaction_valid_flags,
-        organism->memory_compaction_scan,
-        organism->memory_compaction_recursive_workspace,
-        organism->memory_compaction_buffer,
-        generation,
-        primary_genome,
-        entry->gradients,
-        mem_genome_hash,
-        ctx_metabolic,
-        ctx_stress,
-        ctx_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy
-    );
-    CUDA_LAUNCH_CHECK();
+        memory_update_kernel<<<1, BLOCK_SIZE>>>(
+            organism->chemical_field->history,
+            organism->fitness_history,
+            organism->memory_compaction_valid_flags,
+            organism->memory_compaction_scan,
+            organism->memory_compaction_recursive_workspace,
+            organism->memory_compaction_buffer,
+            generation,
+            primary_genome,
+            entry->gradients,
+            mem_genome_hash,
+            ctx_metabolic,
+            ctx_stress,
+            ctx_morphogen,
+            organism->telemetry->genome_complexity.hash_entropy,
+            organism->telemetry->archive_topology.novelty_gradient,
+            organism->telemetry->diresa_evolution.behavioral_drift_rate,
+            organism->telemetry->task_performance.accuracy
+        );
+        CUDA_LAUNCH_CHECK();
+        SLIME_DEBUG_PRINT("V:hybrid:973 post_memory_update\n");
 
-    // Synchronize to ensure ALL child kernels complete before exiting
-    // This prevents persistent loop's cudaDeviceSynchronize from blocking forever
-    cudaDeviceSynchronize();  // CDP barrier - required
+        // Synchronize to ensure ALL child kernels complete before exiting
+        // This prevents persistent loop's cudaDeviceSynchronize from blocking forever
+        SLIME_DEBUG_PRINT("V:hybrid:977 pre_final_sync\n");
+        cudaDeviceSynchronize();  // CDP barrier - required
+        SLIME_DEBUG_PRINT("V:hybrid:979 post_final_sync\n");
+    }  // end if (tid == 0)
+    SLIME_DEBUG_PRINT("V:hybrid:981 pre_syncthreads entry_idx=%d tid=%d\n", entry_idx, tid);
+    __syncthreads();
+    SLIME_DEBUG_PRINT("V:hybrid:983 kernel_exit entry_idx=%d tid=%d\n", entry_idx, tid);
 }
 
 

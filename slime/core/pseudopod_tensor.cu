@@ -214,14 +214,18 @@ __global__ void init_multihead_ca_tensor_kernel(
 
     int interaction_size = num_heads * head_dim * head_dim;
     if (tid < interaction_size) {
-        float scale = sqrtf(2.0f / (float)head_dim);
+        float fan_in = (float)head_dim;
+        float fan_out = (float)head_dim;
+        float scale = sqrtf(2.0f / (fan_in + fan_out));
         float val = validated_curand_normal(&rand_state, "init_tensor_ca_interaction", tid) * scale;
         state->interaction_weights[tid] = __float2half(val);
     }
 
     int value_size = num_heads * head_dim * channels;
     if (tid < value_size) {
-        float scale = sqrtf(2.0f / (float)head_dim);
+        float fan_in = (float)head_dim;
+        float fan_out = (float)channels;
+        float scale = sqrtf(2.0f / (fan_in + fan_out));
         float val = validated_curand_normal(&rand_state, "init_tensor_ca_value", tid) * scale;
         state->value_weights[tid] = __float2half(val);
     }

@@ -128,15 +128,7 @@ struct OrganismPreallocatedBuffers {
     MemoryEntry* memory_compaction_buffer;
     float* fitness_rank_pool;
     float* fitness_coherence_pool;
-    ADTape* ad_tape;
-    TapeEntry* ad_tape_entries_pool;
-    float* ad_tape_values_pool;
-    float* ad_tape_grads_pool;
-    int* ad_tape_levels_pool;
     CAParameterMap* param_map;
-    float* perception_activations_saved;
-    float* interaction_activations_saved;
-    float* pre_gelu_values_saved;
     int* lifecycle_phase_counts;
     float* reduction_workspace;
     float* gradient_features_pool;
@@ -206,6 +198,21 @@ struct OrganismPreallocatedBuffers {
     float* backward_ws_im2col;
     float* backward_ws_dpregelu;
     curandState* rng_states;
+    // Per-entry tape buffer pools (wired to ca_state->tape)
+    TapeEntry* ad_tape_entries_pool;
+    float* ad_tape_values_pool;
+    float* ad_tape_grads_pool;
+    int* ad_tape_levels_pool;
+    // Per-entry saved activation pools (wired to ca_state->*_saved)
+    float* perception_activations_saved;
+    float* interaction_activations_saved;
+    float* pre_gelu_values_saved;
+    float* batched_ca_output;
+    // Batched training buffers - sized for BATCH_SIZE_MAX concurrent samples
+    float* batch_affinity_reduced;      // [BATCH_SIZE_MAX * CA_FIELD_SIZE]
+    float* batch_flow_field;            // [BATCH_SIZE_MAX * CA_FIELD_SIZE * 2]
+    float* batch_reintegration_buffer;  // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX]
+    float* batch_prev_concentration;    // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX] - previous step's final state for recurrence
 };
 
 struct Dataset;
@@ -265,12 +272,8 @@ struct Organism {
     TraceBuffer* trace_buffer;
     HardwareGeometry* hardware_geom;
 
-    ADTape* ad_tape;
     CAParameterMap* param_map;
 
-    float* perception_activations_saved;
-    float* interaction_activations_saved;
-    float* pre_gelu_values_saved;
     int current_activation_grid_size;  // Track current allocation size for dynamic reallocation
 
     HybridTrainingMode* training_mode;
@@ -296,17 +299,11 @@ struct Organism {
     int* pool_compaction_scan;
     int* pool_compaction_recursive_workspace;
 
-    half* fp16_ca_workspace;
-    float* fp32_ca_workspace;
-
-    float* rd_u_field;
-    float* rd_v_field;
-    float* rd_u_next;
-    float* rd_v_next;
-
     float* resource_density;
     float* resource_next;
     float* fitness_landscape;
+    float* resource_gradient_x;
+    float* resource_gradient_y;
 
     int* lifecycle_phase_counts;
 
@@ -337,11 +334,6 @@ struct Organism {
     uint8_t* elite_compressed_pool;
     uint32_t* elite_size_pool;
 
-    TapeEntry* ad_tape_entries_pool;
-    float* ad_tape_values_pool;
-    float* ad_tape_grads_pool;
-    int* ad_tape_levels_pool;
-
     float* adam_m_perception_pool;
     float* adam_v_perception_pool;
     float* adam_m_interaction_pool;
@@ -368,6 +360,12 @@ struct Organism {
     int* weight_inherit_num_pending;
 
     curandState* rng_states;
+
+    // Batched training buffers - sized for BATCH_SIZE_MAX concurrent samples
+    float* batch_affinity_reduced;      // [BATCH_SIZE_MAX * CA_FIELD_SIZE]
+    float* batch_flow_field;            // [BATCH_SIZE_MAX * CA_FIELD_SIZE * 2]
+    float* batch_reintegration_buffer;  // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX]
+    float* batch_prev_concentration;    // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX] - previous step's final state for recurrence
 };
 
 #include "../training/hybrid_lifecycle.cu"
@@ -474,6 +472,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
         aggregate_hardware_geometry_kernel<<<1, BLOCK_SIZE>>>(organism->trace_buffer, organism->hardware_geom);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: aggregate_hardware_geometry_kernel failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
 
@@ -492,12 +491,14 @@ extern "C" __global__ void organism_lifecycle_kernel(
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: selection_kernel failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
 
         float* component_workspace_genomes = &workspace_genomes[0];
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: workspace_genomes access failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
         component_evolution_kernel<<<component_grid, component_block>>>(
@@ -518,6 +519,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: component_evolution_kernel failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
 
@@ -525,6 +527,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism, pool, GENOME_LATENT_DIM_MAX);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: compute_fitness_from_diresa_kernel failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
         printf("V:471 gen=%d\n", generation);
@@ -549,6 +552,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             genome_complexity_probe_kernel<<<1, 1>>>(organism->pool, &organism->telemetry->genome_complexity);
             err = cudaGetLastError();
             if (err != cudaSuccess) {
+                printf("FATAL [organism_lifecycle]: genome_complexity_probe_kernel failed err=%d gen=%d\n", (int)err, generation);
                 return;
             }
 
@@ -562,11 +566,17 @@ extern "C" __global__ void organism_lifecycle_kernel(
                 arch, organism->archive_size,
                 organism->voronoi_cells, organism->num_voronoi_cells,
                 &organism->telemetry->archive_topology,
-                &organism->telemetry->prev_archive_topology,
-                organism->telemetry->prev_occupied_flags,
+                &organism->telemetry->last_checkpoint,
+                organism->telemetry->last_occupancy,
                 arch->hw_dim, arch->task_dim, arch->gen_dim
             );
-            organism->telemetry->prev_archive_topology = organism->telemetry->archive_topology;
+            int current_spawned = Atomics::load_int(organism->pool->total_spawned);
+            int current_culled = Atomics::load_int(organism->pool->total_culled);
+            organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
+            organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
+            organism->telemetry->last_total_spawned = current_spawned;
+            organism->telemetry->last_total_culled = current_culled;
+            organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
             diresa_evolution_probe_kernel<<<1, 1>>>(arch, organism->archive_size, &organism->telemetry->diresa_evolution);
         }
 
@@ -587,6 +597,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
 
             err = cudaGetLastError();
             if (err != cudaSuccess) {
+                printf("FATAL [organism_lifecycle]: spawn_wave_kernel failed err=%d gen=%d\n", (int)err, generation);
                 return;
             }
             printf("V:spawn_done gen=%d\n", generation);
@@ -613,6 +624,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: archive_driven_lifecycle_kernel failed err=%d gen=%d\n", (int)err, generation);
             return;
         }
         printf("V:post_archive gen=%d\n", generation);
@@ -624,7 +636,10 @@ extern "C" __global__ void organism_lifecycle_kernel(
         find_pending_weight_inherits_kernel<<<(pool->capacity + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
             pool, organism->weight_inherit_child_indices, organism->weight_inherit_parent_indices, organism->weight_inherit_num_pending);
         err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) return;
+        if (err != cudaSuccess) {
+            printf("FATAL [organism_lifecycle]: find_pending_weight_inherits_kernel failed err=%d gen=%d\n", (int)err, generation);
+            return;
+        }
 
         int h_num_pending = *organism->weight_inherit_num_pending;
         if (h_num_pending > 0) {
@@ -632,7 +647,10 @@ extern "C" __global__ void organism_lifecycle_kernel(
             inherit_ca_weights_kernel<<<dim3(weight_blocks, h_num_pending), BLOCK_SIZE>>>(
                 pool, h_num_pending, organism->weight_inherit_child_indices, organism->weight_inherit_parent_indices);
             err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) return;
+            if (err != cudaSuccess) {
+                printf("FATAL [organism_lifecycle]: inherit_ca_weights_kernel failed err=%d gen=%d pending=%d\n", (int)err, generation, h_num_pending);
+                return;
+            }
         }
 
         // Phase 2: Restore weights from archive (for entries respawned via replace_from_archive_device)
@@ -707,7 +725,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism,
             organism->chemical_field,
             organism->effective_rank_history,
-            organism->fp32_ca_workspace,
+            organism->buffers->fp32_ca_workspace,
             generation,
             organism->pool,
             organism->fitness_history,
@@ -801,6 +819,8 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->resource_density,
             organism->resource_next,
             organism->fitness_landscape,
+            organism->resource_gradient_x,
+            organism->resource_gradient_y,
             arch.grid_size,
             rf_dt,
             rf_diffusivity,
@@ -1065,13 +1085,29 @@ __global__ void compute_fitness_from_diresa_kernel(
     if (tid == 0) {
         float variance = var_sum / latent_dim;
         if (variance < 0.0f) {
-            entry->fitness = 0.0f;
+            // FATAL: Negative variance is mathematically impossible - numerical corruption
+            printf("FATAL [compute_fitness]: entry=%d negative variance=%f, culling\n", entry_idx, variance);
+            entry->alive = false;
+            pool->alive_flags[entry_idx] = false;
             return;
         }
         float effective_rank = sqrtf(variance) * latent_dim;
         float gen_gap_term = 1.0f - entry->generalization_gap;
+
+        // Check for NaN/invalid fitness components - preserve existing fitness if components not yet valid
+        // This prevents gen 0 organisms from having their init_fitness_prior overwritten with NaN
+        bool has_nan = isnan(entry->task_accuracy) || isnan(entry->generalization_gap) || isnan(entry->hardware_efficiency);
+        if (has_nan) {
+            // Fitness components not yet computed (gen 0) - keep existing fitness prior
+            return;
+        }
+
         if (gen_gap_term <= 0.0f || entry->task_accuracy <= 0.0f || effective_rank <= 0.0f || entry->hardware_efficiency <= 0.0f) {
-            entry->fitness = 0.0f;
+            // Invalid fitness inputs - cull rather than silently set to zero
+            printf("WARN [compute_fitness]: entry=%d invalid inputs (gen_gap=%.3f task_acc=%.3f rank=%.3f hw_eff=%.3f), culling\n",
+                   entry_idx, gen_gap_term, entry->task_accuracy, effective_rank, entry->hardware_efficiency);
+            entry->alive = false;
+            pool->alive_flags[entry_idx] = false;
             return;
         }
         entry->fitness = powf(entry->task_accuracy, entry->fitness_task_exponent)
@@ -1187,8 +1223,8 @@ __global__ void spawn_wave_kernel(
         // Use SoA for coalesced alive read
         if (!pool->alive_flags[i]) continue;
 
-        float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * 5];
-        float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * 5 + GENOME_SIZE];
+        float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_GENOME];
+        float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_PARENT];
 
         reconstruct_genome_from_archive(
             pool->entries[i].parent_hash,
@@ -1271,9 +1307,9 @@ __global__ void spawn_wave_kernel(
     int parent_slot = tid % qualifying_count;
     int parent_idx = qualifying_parents[parent_slot];
 
-    float* workspace_parent_genome = &workspace_genomes[tid * GENOME_SIZE * 5 + GENOME_SIZE * 2];
-    float* workspace_child_genome = &workspace_genomes[tid * GENOME_SIZE * 5 + GENOME_SIZE * 3];
-    float* workspace_parent_parent_temp = &workspace_genomes[tid * GENOME_SIZE * 5 + GENOME_SIZE * 4];
+    float* workspace_parent_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_GENOME];
+    float* workspace_child_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_CHILD_GENOME];
+    float* workspace_parent_parent_temp = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_PARENT_TEMP];
 
     reconstruct_genome_from_archive(
         pool->entries[parent_idx].parent_hash,
@@ -1745,16 +1781,6 @@ __global__ void neural_ca_update_kernel(
                    1);
     dim3 init_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
 
-    // Initialize CA state from chemical field
-    {
-        int grid_size = entry->grid_size;
-        int total_cells = grid_size * grid_size;
-        float* ca_concentration = entry->ca_state->ca_concentration;
-        for (int cell = threadIdx.x; cell < total_cells; cell += blockDim.x) {
-            ca_concentration[cell] = chemical_field->concentration[cell];
-        }
-        __syncthreads();
-    }
     int max_cells = max_grid_size * max_grid_size;
     if (arch.channels <= 0 || arch.num_heads <= 0 || arch.head_dim <= 0) {
         return;
@@ -2043,16 +2069,18 @@ __global__ void neural_ca_update_kernel(
     }
 
     // Update global chemical field from CA concentration
+    // CA concentration layout: [grid² × channels], emit channel 0 (concentration channel)
     {
         int grid_size = entry->grid_size;
+        int channels = entry->channels;
         int total_cells = grid_size * grid_size;
         float* ca_conc = entry->ca_state->ca_concentration;
-        for (int idx = threadIdx.x; idx < total_cells; idx += blockDim.x) {
-            float val = ca_conc[idx];
+        for (int cell_idx = threadIdx.x; cell_idx < total_cells; cell_idx += blockDim.x) {
+            float val = ca_conc[cell_idx * channels + 0];  // Read channel 0 from each cell
             if (isfinite(val)) {
-                atomicAdd(&chemical_field->concentration[idx], val);
+                atomicAdd(&chemical_field->concentration[cell_idx], val);
             } else {
-                if (threadIdx.x == 0) printf("!W:NaN_blocked entry=%d idx=%d\n", entry_idx, idx);
+                if (threadIdx.x == 0) printf("!W:NaN_blocked entry=%d cell=%d\n", entry_idx, cell_idx);
             }
         }
         __syncthreads();
@@ -2144,66 +2172,13 @@ __global__ void behavioral_update_kernel(
     BehavioralDimensions dims;
     dims.derive_from_genome(genome_hash, primary_genome);
 
-    int chem_diff_dt_slot = derive_param_slot(genome_hash, "chemical_diffusion_dt");
-    float chem_diff_dt = genome_to_param(genome, gradients, chem_diff_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMICAL_DIFFUSION_DT_MIN, CHEMICAL_DIFFUSION_DT_MAX);
+    if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", generation, entry_idx);
 
-    dim3 field_grid((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
-    dim3 field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
-
-    printf("V:beh_entry gen=%d entry=%d\n", generation, entry_idx);
-
-    // Diffusion-reaction on chemical field
-    {
-        int grid_size = arch.grid_size;
-        int total_cells = grid_size * grid_size;
-        float* concentration = chemical_field->concentration;
-        float* gradient_x_arr = chemical_field->gradient_x;
-        float* gradient_y_arr = chemical_field->gradient_y;
-        float* laplacian_arr = chemical_field->laplacian;
-        float* sources = chemical_field->sources;
-
-        int diffusivity_slot = derive_param_slot(genome_hash, "chem_diffusivity");
-        float diffusivity = genome_to_param(genome, gradients, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
-
-        int reaction_order_slot = derive_param_slot(genome_hash, "chem_reaction_order");
-        float reaction_order = genome_to_param(genome, gradients, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
-
-        int reaction_rate_slot = derive_param_slot(genome_hash, "chem_reaction_rate");
-        float reaction_rate = genome_to_param(genome, gradients, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, REACTION_RATE_MIN, REACTION_RATE_MAX);
-
-        int decay_rate_slot = derive_param_slot(genome_hash, "chem_decay_rate");
-        float decay_rate = genome_to_param(genome, gradients, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, DECAY_RATE_MIN, DECAY_RATE_MAX);
-
-        for (int idx = threadIdx.x; idx < total_cells; idx += blockDim.x) {
-            int x = idx % grid_size;
-            int y = idx / grid_size;
-
-            float c_center;
-            Stencils::all_operators(gradient_x_arr[idx], gradient_y_arr[idx], laplacian_arr[idx], c_center,
-                                    concentration, x, y, grid_size);
-
-            float source_contribution = sources[idx];
-            float diffusion = diffusivity * laplacian_arr[idx];
-            float reaction = reaction_rate * powf(c_center, reaction_order);
-            float decay = -decay_rate * c_center;
-
-            concentration[idx] = c_center + chem_diff_dt * (diffusion + reaction + decay + source_contribution);
-            concentration[idx] = clamp(concentration[idx], NORMALIZED_MIN, NORMALIZED_MAX);
-        }
-        __syncthreads();
-    }
-    printf("V:beh_1_diffusion gen=%d\n", generation);
-
-    // Store chemical field snapshot to temporal memory
-    {
-        int field_size = arch.grid_size * arch.grid_size;
-        float global_time = (float)generation;
-        store_chemical_snapshot(chemical_field, field_size, global_time, genome_hash, genome);
-    }
-    printf("V:beh_2_snapshot gen=%d\n", generation);
-
-    float* behavioral_field = organism->behavioral_field_pool;
-    float* behavioral_gradients_pool = organism->behavioral_gradient_pool;
+    // Per-entry behavioral field and gradient buffers with strided access
+    int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+    int behavioral_buffer_size = arch.grid_size * arch.grid_size * behavioral_dim;
+    float* behavioral_field = &organism->behavioral_field_pool[entry_idx * behavioral_buffer_size];
+    float* behavioral_gradients_pool = &organism->behavioral_gradient_pool[entry_idx * behavioral_buffer_size];
 
     // Compute behavioral field from agent positions
     {
@@ -2242,7 +2217,10 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+                if (is_meaningful(weight_sum, 1.0f)) {
+                    behavioral_field[field_idx] = field_value / weight_sum;
+                }
+                // else: preserve existing value (temporal coherence)
                 d_offset++;
             }
 
@@ -2261,7 +2239,10 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+                if (is_meaningful(weight_sum, 1.0f)) {
+                    behavioral_field[field_idx] = field_value / weight_sum;
+                }
+                // else: preserve existing value (temporal coherence)
                 d_offset++;
             }
 
@@ -2280,13 +2261,16 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                behavioral_field[field_idx] = is_meaningful(weight_sum, 1.0f) ? field_value / weight_sum : 0.0f;
+                if (is_meaningful(weight_sum, 1.0f)) {
+                    behavioral_field[field_idx] = field_value / weight_sum;
+                }
+                // else: preserve existing value (temporal coherence)
                 d_offset++;
             }
         }
         __syncthreads();
     }
-    printf("V:beh_3_behavioral_field gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_3_behavioral_field gen=%d\n", generation);
 
     // Warp-level CA on behavioral field
     {
@@ -2335,7 +2319,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    printf("V:beh_4_warp_ca gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_4_warp_ca gen=%d\n", generation);
 
     // Compute behavioral gradients
     {
@@ -2349,7 +2333,7 @@ __global__ void behavioral_update_kernel(
 
             for (int dim = 0; dim < behavioral_dim; dim++) {
                 float grad_x, grad_y;
-                Stencils::gradients_at(grad_x, grad_y, &behavioral_gradients_pool[dim], x, y, grid_size * behavioral_dim);
+                Stencils::gradients_at(grad_x, grad_y, &behavioral_gradients_pool[dim], x, y, grid_size, behavioral_dim);
 
                 float grad_sq = grad_x * grad_x + grad_y * grad_y;
                 float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
@@ -2363,7 +2347,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    printf("V:beh_5_grad gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", generation);
 
     int chemotaxis_dt_slot = derive_param_slot(genome_hash, "chemotaxis_dt");
     float chemotaxis_dt = genome_to_param(genome, gradients, chemotaxis_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMOTAXIS_DT_MIN, CHEMOTAXIS_DT_MAX);
@@ -2452,7 +2436,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    printf("V:beh_6_chemotaxis gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_6_chemotaxis gen=%d\n", generation);
 
     // Store navigation history to temporal memory
     {
@@ -2506,7 +2490,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    printf("V:beh_7_done gen=%d entry=%d\n", generation, entry_idx);
+    if (threadIdx.x == 0) printf("V:beh_7_done gen=%d entry=%d\n", generation, entry_idx);
 }
 
 __global__ void store_navigation_history_kernel(
@@ -2643,6 +2627,7 @@ __global__ void init_organism_kernel(
     OrganismPreallocatedBuffers* buffers
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("V:init_org_enter pool_cap=%d\n", pool_capacity);
         organism->generation = 0;
 
         float* organism_seed_genome = &workspace_genomes[0];
@@ -2688,8 +2673,11 @@ __global__ void init_organism_kernel(
         float* gradients_buffer = buffers->gradients_buffer;
 
         int pool_blocks = (pool_capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        printf("V:init_org_pre_pool blocks=%d alive_flags=%p fitness_values=%p\n", pool_blocks, (void*)organism->pool->alive_flags, (void*)organism->pool->fitness_values);
+        __threadfence();  // Ensure pool pointer writes are visible to child kernel
         init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(organism->pool, pool_capacity, delta_indices_buffer, delta_values_buffer, gradients_buffer);
         err = cudaGetLastError();
+        printf("V:init_org_post_pool err=%d\n", (int)err);
         if (err != cudaSuccess) { return; }
     }
 }
@@ -2725,8 +2713,8 @@ __global__ void init_ca_weights_kernel(
     // Xavier/Glorot initialization: std = sqrt(2.0 / (fan_in + fan_out))
     // Using genome hash as PRNG seed for reproducibility
     PRNGState rng;
-    rng.s0 = genome_hash ^ (idx * 0x9e3779b97f4a7c15ULL);
-    rng.s1 = (genome_hash >> 32) ^ (idx * 0xbf58476d1ce4e5b9ULL);
+    rng.s0 = genome_hash ^ (idx * XORSHIFT_GOLDEN_RATIO_A);
+    rng.s1 = (genome_hash >> 32) ^ (idx * XORSHIFT_GOLDEN_RATIO_B);
 
     float std_dev = sqrtf(2.0f / (float)(fan_in + fan_out));
 
@@ -2749,6 +2737,7 @@ __global__ void init_organism_phase2_kernel(
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         cudaError_t err;
+        printf("V:p2_enter seed=%u\n", seed);
 
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
@@ -2813,7 +2802,9 @@ __global__ void init_organism_phase2_kernel(
             organism->archive->hash_table_values,
             GENOME_HASH_TABLE_SIZE
         );
+        printf("V:p2_sync1_pre ht_blocks=%d\n", ht_blocks);
         err = cudaDeviceSynchronize();
+        printf("V:p2_sync1_post err=%d\n", (int)err);
         if (err != cudaSuccess) {
             printf("!E:init2 hash_table_sync err=%d\n", (int)err);
             return;
@@ -2882,11 +2873,6 @@ __global__ void init_organism_phase2_kernel(
         organism->telemetry->memory_allocation.device_heap_limit = heap_limit;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
-        // Allocate CA workspace
-        int weight_count = arch.num_heads * arch.channels * arch.hidden_dim;
-        organism->fp32_ca_workspace = buffers->fp32_ca_workspace;
-        organism->fp16_ca_workspace = buffers->fp16_ca_workspace;
-
         organism->ca_state_pool = buffers->ca_state_pool;
         organism->chemical_field = buffers->chemical_field;
 
@@ -2944,62 +2930,76 @@ __global__ void init_organism_phase2_kernel(
             entry_ca_state->flow_field = entry_ca_base + CA_CONCENTRATION_SIZE + CA_OUTPUT_SIZE + CA_AFFINITY_SIZE;
             entry_ca_state->reintegration_buffer = entry_ca_base + CA_CONCENTRATION_SIZE + CA_OUTPUT_SIZE + CA_AFFINITY_SIZE + CA_FLOW_SIZE;
 
-            entry_ca_state->perception_weights = buffers->all_ca_weights;
-            entry_ca_state->interaction_weights = buffers->all_ca_weights + perception_size;
-            entry_ca_state->value_weights = buffers->all_ca_weights + perception_size + interaction_size;
+            half* entry_weights_base = buffers->all_ca_weights + entry_idx * CA_WEIGHTS_PER_ENTRY_STRIDE;
+            entry_ca_state->perception_weights = entry_weights_base;
+            entry_ca_state->interaction_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE;
+            entry_ca_state->value_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE;
 
             int fp32_stride = CA_FIELD_SIZE * (NUM_HEADS_MAX + 1) * HEAD_DIM_MAX;
             int fp16_stride = CA_FIELD_SIZE * (CHANNELS_MAX + HEAD_DIM_MAX);
             entry_ca_state->fp32_workspace = buffers->fp32_ca_workspace + entry_idx * fp32_stride;
             entry_ca_state->fp16_workspace = buffers->fp16_ca_workspace + entry_idx * fp16_stride;
 
-            // Initialize embedded ADTape struct with POISON values (fail-loud debugging)
-            // 0xDEAD... pointers will segfault if dereferenced; INT_MIN sizes will fail bounds checks
-            entry_ca_state->tape.entries = (TapeEntry*)0xDEADDEAD00000001ULL;
-            entry_ca_state->tape.capacity = INT_MIN;
-            entry_ca_state->tape.current_size = INT_MIN;
-            entry_ca_state->tape.value_buffer = (float*)0xDEADDEAD00000002ULL;
-            entry_ca_state->tape.grad_buffer = (float*)0xDEADDEAD00000003ULL;
-            entry_ca_state->tape.value_levels = (int*)0xDEADDEAD00000004ULL;
-            entry_ca_state->tape.value_capacity = INT_MIN;
-            entry_ca_state->tape.current_value_idx = INT_MIN;
-            entry_ca_state->tape.max_level = INT_MIN;
-            entry_ca_state->tape.needs_weight_restore = 0;  // Must be 0: actual control flow depends on this
-            entry_ca_state->tape.restore_elite_idx = INT_MIN;
+            // Wire per-entry ADTape buffers from pools
+            entry_ca_state->tape.entries = buffers->ad_tape_entries_pool + entry_idx * TAPE_ENTRIES_PER_ENTRY;
+            entry_ca_state->tape.capacity = TAPE_ENTRIES_PER_ENTRY;
+            entry_ca_state->tape.current_size = 0;
+            entry_ca_state->tape.value_buffer = buffers->ad_tape_values_pool + entry_idx * TAPE_VALUES_PER_ENTRY;
+            entry_ca_state->tape.grad_buffer = buffers->ad_tape_grads_pool + entry_idx * TAPE_VALUES_PER_ENTRY;
+            entry_ca_state->tape.value_levels = buffers->ad_tape_levels_pool + entry_idx * TAPE_VALUES_PER_ENTRY;
+            entry_ca_state->tape.value_capacity = TAPE_VALUES_PER_ENTRY;
+            entry_ca_state->tape.current_value_idx = 0;
+            entry_ca_state->tape.max_level = 0;
+            entry_ca_state->tape.needs_weight_restore = 0;
+            entry_ca_state->tape.restore_elite_idx = INT_MAX;
 
-            // Initialize embedded TraceBuffer struct with POISON values
-            entry_ca_state->trace.traces = (ExecutionTrace*)0xDEADDEAD00000005ULL;
-            entry_ca_state->trace.capacity = INT_MIN;
-            entry_ca_state->trace.current_idx = INT_MIN;
+            // Wire per-entry TraceBuffer from organism trace pool
+            entry_ca_state->trace.traces = buffers->trace_array + entry_idx * TRACE_CAPACITY;
+            entry_ca_state->trace.capacity = TRACE_CAPACITY;
+            entry_ca_state->trace.current_idx = 0;
 
-            // Initialize saved activation pointers with POISON values
-            entry_ca_state->perception_saved = (float*)0xDEADDEAD00000006ULL;
-            entry_ca_state->interaction_saved = (float*)0xDEADDEAD00000007ULL;
-            entry_ca_state->pre_gelu_saved = (float*)0xDEADDEAD00000008ULL;
+            // Wire saved activation buffers (shared - one training entry at a time)
+            entry_ca_state->perception_saved = buffers->perception_activations_saved;
+            entry_ca_state->interaction_saved = buffers->interaction_activations_saved;
+            entry_ca_state->pre_gelu_saved = buffers->pre_gelu_values_saved;
 
             entry->ca_state = entry_ca_state;
         }
 
         float* all_chem_fields = buffers->all_chem_fields;
-        organism->chemical_field->concentration = all_chem_fields;
-        organism->chemical_field->gradient_x = all_chem_fields + CA_FIELD_SIZE;
-        organism->chemical_field->gradient_y = all_chem_fields + CA_FIELD_SIZE * 2;
-        organism->chemical_field->laplacian = all_chem_fields + CA_FIELD_SIZE * 3;
-        organism->chemical_field->sources = all_chem_fields + CA_FIELD_SIZE * 4;
-        organism->chemical_field->decay_factors = all_chem_fields + CA_FIELD_SIZE * 5;
+        organism->chemical_field->concentration = all_chem_fields + CA_FIELD_SIZE * CHEM_CONCENTRATION;
+        organism->chemical_field->gradient_x = all_chem_fields + CA_FIELD_SIZE * CHEM_GRADIENT_X;
+        organism->chemical_field->gradient_y = all_chem_fields + CA_FIELD_SIZE * CHEM_GRADIENT_Y;
+        organism->chemical_field->laplacian = all_chem_fields + CA_FIELD_SIZE * CHEM_LAPLACIAN;
+        organism->chemical_field->sources = all_chem_fields + CA_FIELD_SIZE * CHEM_SOURCES;
+        organism->chemical_field->decay_factors = all_chem_fields + CA_FIELD_SIZE * CHEM_DECAY_FACTORS;
 
         organism->fitness_history = buffers->fitness_history;
         organism->effective_rank_history = buffers->effective_rank_history;
         organism->coherence_history = buffers->coherence_history;
 
         float* all_rd_fields = buffers->all_rd_fields;
-        organism->resource_density = all_rd_fields;
-        organism->resource_next = all_rd_fields + CA_FIELD_SIZE;
-        organism->fitness_landscape = all_rd_fields + CA_FIELD_SIZE * 2;
-        organism->rd_u_field = all_rd_fields + CA_FIELD_SIZE * 3;
-        organism->rd_v_field = all_rd_fields + CA_FIELD_SIZE * 4;
-        organism->rd_u_next = all_rd_fields + CA_FIELD_SIZE * 5;
-        organism->rd_v_next = all_rd_fields + CA_FIELD_SIZE * 6;
+        organism->resource_density = all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_DENSITY;
+        organism->resource_next = all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_NEXT;
+        organism->fitness_landscape = all_rd_fields + CA_FIELD_SIZE * RD_FITNESS_LANDSCAPE;
+        organism->resource_gradient_x = all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_GRADIENT_X;
+        organism->resource_gradient_y = all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_GRADIENT_Y;
+
+        // Initialize resource_density before gradients can be computed from it
+        dim3 init_grid((arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM, (arch.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+        dim3 init_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
+
+        init_resource_fields_kernel<<<init_grid, init_block>>>(
+            organism->resource_density,
+            organism->fitness_landscape,
+            arch.grid_size,
+            seed * RNG_SEED_MULTIPLIER,
+            primary_genome,
+            organism->pool->entries[0].genome_hash
+        );
+        printf("V:p2_sync2_pre grid_size=%d\n", arch.grid_size);
+        err = cudaDeviceSynchronize();
+        printf("V:p2_sync2_post err=%d\n", (int)err);
 
         float* shared_workspace = buffers->shared_workspace;
         organism->coherence_workspace_pool = shared_workspace;
@@ -3117,27 +3117,16 @@ __global__ void init_organism_phase2_kernel(
         organism->coherence_history = buffers->coherence_history;
         organism->effective_rank_history = buffers->effective_rank_history;
 
-        organism->ad_tape = buffers->ad_tape;
-        organism->ad_tape_entries_pool = buffers->ad_tape_entries_pool;
-        organism->ad_tape_values_pool = buffers->ad_tape_values_pool;
-        organism->ad_tape_grads_pool = buffers->ad_tape_grads_pool;
-        organism->ad_tape_levels_pool = buffers->ad_tape_levels_pool;
-        init_ad_tape_kernel<<<1, 1>>>(organism->ad_tape, organism->ad_tape_entries_pool, organism->ad_tape_values_pool, organism->ad_tape_grads_pool, organism->ad_tape_levels_pool, MAX_TAPE_SIZE, MAX_TAPE_VALUES);
-
         organism->rng_states = buffers->rng_states;
-        init_rng_states_kernel<<<(POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->rng_states, POOL_CAPACITY_MAX, 0x12345678);
-        cudaDeviceSynchronize();
+        init_rng_states_kernel<<<(POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->rng_states, POOL_CAPACITY_MAX, CURAND_DEFAULT_SEED);
+        printf("V:p2_sync3_pre rng\n");
+        err = cudaDeviceSynchronize();
+        printf("V:p2_sync3_post err=%d\n", (int)err);
 
         // Allocate CA parameter map
         organism->param_map = buffers->param_map;
         init_ca_param_map_kernel<<<1, 1>>>(organism->param_map, arch);
 
-        // Allocate CA activation buffers for backward pass (implicit differentiation)
-        int act_batch = 1;
-        int act_size = act_batch * arch.num_heads * arch.grid_size * arch.grid_size * arch.hidden_dim;
-        organism->perception_activations_saved = buffers->perception_activations_saved;
-        organism->interaction_activations_saved = buffers->interaction_activations_saved;
-        organism->pre_gelu_values_saved = buffers->pre_gelu_values_saved;
         organism->current_activation_grid_size = arch.grid_size;  // Initialize grid size tracker
 
         // Allocate lifecycle phase tracking
@@ -3147,7 +3136,7 @@ __global__ void init_organism_phase2_kernel(
         organism->reduction_workspace = buffers->reduction_workspace;
         int total_cells = arch.grid_size * arch.grid_size * arch.channels;
         organism->reduction_total_cells = total_cells;
-        organism->reduction_num_blocks = (total_cells + 255) / 256;  // 256 threads per block
+        organism->reduction_num_blocks = (total_cells + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         organism->gradient_features_pool = buffers->gradient_features_pool;
         organism->gradient_logits_pool = buffers->gradient_logits_pool;
@@ -3180,6 +3169,10 @@ __global__ void init_organism_phase2_kernel(
 
         // Allocate batch training pools
         organism->batch_ca_states_pool = buffers->batch_ca_states_pool;
+        organism->batch_affinity_reduced = buffers->batch_affinity_reduced;
+        organism->batch_flow_field = buffers->batch_flow_field;
+        organism->batch_reintegration_buffer = buffers->batch_reintegration_buffer;
+        organism->batch_prev_concentration = buffers->batch_prev_concentration;
         organism->batch_labels_pool = buffers->batch_labels_pool;
         organism->task_loss_pool = buffers->task_loss_pool;
         organism->reg_loss_pool = buffers->reg_loss_pool;
@@ -3198,9 +3191,11 @@ __global__ void init_organism_phase2_kernel(
         // Use preallocated classifier workspace: pooling_weights + fc_weights + fc_bias
         float* classifier_workspace = buffers->classifier_workspace;
 
-        int max_classifier_size = max(dims.hw_dim, max(dims.hw_dim * num_classes, num_classes));
+        // Classifier input_dim = num_heads * channels (from spatial pooling of CA output)
+        int classifier_input_dim = arch.num_heads * arch.channels;
+        int max_classifier_size = max(classifier_input_dim, max(classifier_input_dim * num_classes, num_classes));
         int classifier_blocks = (max_classifier_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        init_classifier_kernel<<<classifier_blocks, BLOCK_SIZE>>>(organism->classifier, dims.hw_dim, num_classes, seed + 777777, classifier_workspace);
+        init_classifier_kernel<<<classifier_blocks, BLOCK_SIZE>>>(organism->classifier, classifier_input_dim, num_classes, seed + 777777, classifier_workspace);
 
         // Wire up training_mode->classifier to point to organism->classifier
         organism->training_mode->classifier = organism->classifier;
@@ -3294,7 +3289,9 @@ __global__ void init_organism_phase2_kernel(
             printf("!E:init2 chemical_field err=%d\n", (int)err);
             return;
         }
+        printf("V:p2_sync4_pre chem_field\n");
         err = cudaDeviceSynchronize();
+        printf("V:p2_sync4_post err=%d\n", (int)err);
 
         set_chemical_sources_from_agents_kernel<<<1, POOL_CAPACITY_MAX>>>(
             organism->chemical_field->sources,
@@ -3314,7 +3311,9 @@ __global__ void init_organism_phase2_kernel(
             printf("!E:init2 chem_sources err=%d\n", (int)err);
             return;
         }
+        printf("V:p2_sync5_pre chem_sources\n");
         err = cudaDeviceSynchronize();
+        printf("V:p2_sync5_post err=%d\n", (int)err);
 
         int voronoi_init_dt_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "voronoi_init_dt");
         float voronoi_init_dt_norm = (primary_genome[voronoi_init_dt_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
@@ -3391,8 +3390,8 @@ __global__ void init_organism_phase2_kernel(
         clear_buffer_kernel<<<1, BLOCK_SIZE>>>(organism->effective_rank_history, effective_rank_size);
         err = cudaGetLastError();
 
-        printf("V:init2_complete ad_tape=%p param_map=%p training_mode=%p ca_state_pool=%p\n",
-               (void*)organism->ad_tape, (void*)organism->param_map,
+        printf("V:init2_complete param_map=%p training_mode=%p ca_state_pool=%p\n",
+               (void*)organism->param_map,
                (void*)organism->training_mode, (void*)organism->ca_state_pool);
     }
 }
@@ -3489,28 +3488,23 @@ __global__ void persistent_evolution_kernel(
     printf("V:persistent_entry seed=%u dataset_arr=%p test_arr=%p buffers=%p audit=%p\n",
            seed, (void*)dataset_array, (void*)test_dataset_array, (void*)buffers, (void*)audit);
 
-    PRNGState rng;
-    rng.s0 = seed * 0x9e3779b97f4a7c15ULL;
-    rng.s1 = seed * 0xbf58476d1ce4e5b9ULL;
-
-    float organism_seed_genome[GENOME_SIZE];
-    for (int i = 0; i < GENOME_SIZE; i++) {
-        organism_seed_genome[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
-    }
-
-    uint64_t organism_genome_hash = gpu_sha256(organism_seed_genome, GENOME_SIZE);
-
-    int pool_capacity_slot = derive_param_slot(organism_genome_hash, "pool_capacity");
-    float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, (organism_seed_genome[pool_capacity_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
-    int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
-
     Organism* organism = buffers->organism;
     float* organism_workspace_genomes = buffers->organism_workspace_genomes;
     cudaError_t err;
 
+    PRNGState rng;
+    rng.s0 = seed * XORSHIFT_GOLDEN_RATIO_A;
+    rng.s1 = seed * XORSHIFT_GOLDEN_RATIO_B;
+
     for (int i = 0; i < GENOME_SIZE; i++) {
-        organism_workspace_genomes[i] = organism_seed_genome[i];
+        organism_workspace_genomes[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
     }
+
+    uint64_t organism_genome_hash = gpu_sha256(organism_workspace_genomes, GENOME_SIZE);
+
+    int pool_capacity_slot = derive_param_slot(organism_genome_hash, "pool_capacity");
+    float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, (organism_workspace_genomes[pool_capacity_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, test_dataset_array, pool_capacity, organism_workspace_genomes, buffers);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -3545,17 +3539,15 @@ __global__ void persistent_evolution_kernel(
            organism->chemical_field ? (void*)organism->chemical_field->concentration : nullptr);
 
     int generation = 0;
-    int watchdog_cycles = 0;
     // V: vertex probe - exposes graph connectivity at persistent loop entry
     printf("V:persistent org=%p pool=%p cap=%d dataset=%p audit=%p\n",
            (void*)organism, (void*)organism->pool, organism->pool->capacity,
            (void*)organism->current_dataset, (void*)audit);
-    while (watchdog_cycles < MAX_KERNEL_CYCLES) {
-        watchdog_cycles++;
+    while (true) {
         // Parallel reduction to compute cached_mean before lifecycle kernels read it
         int reduction_blocks = organism->reduction_num_blocks;
         int total_cells = organism->reduction_total_cells;
-        reduce_concentration_mean_kernel<<<reduction_blocks, 256, 256 * sizeof(float)>>>(
+        reduce_concentration_mean_kernel<<<reduction_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
             organism->chemical_field, total_cells, organism->reduction_workspace);
         cudaDeviceSynchronize();
         finalize_concentration_mean_kernel<<<1, 1>>>(
@@ -3759,7 +3751,7 @@ __global__ void persistent_evolution_kernel(
         printf("V:P2_start gen=%d\n", generation);
         neural_ca_update_kernel<<<capacity, WARP_SIZE>>>(
             organism, organism->chemical_field, organism->effective_rank_history,
-            organism->fp32_ca_workspace, generation, organism->pool,
+            organism->buffers->fp32_ca_workspace, generation, organism->pool,
             organism->fitness_history, organism->coherence_history,
             organism_workspace_genomes, organism->trace_buffer, arch_p1.grid_size);
         err = cudaGetLastError();
@@ -3783,7 +3775,7 @@ __global__ void persistent_evolution_kernel(
         // Produces telemetry (classification accuracy, gradient magnitudes) for DIRESA
         if (generation % CHECKPOINT_INTERVAL == 0) {
             printf("V:checkpoint gen=%d\n", generation);
-            int lifecycle_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            int lifecycle_blocks = capacity;  // One block per pool entry
             hybrid_organism_lifecycle_kernel<<<lifecycle_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
                 organism,
                 organism->training_mode,

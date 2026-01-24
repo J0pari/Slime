@@ -23,12 +23,12 @@ __device__ constexpr uint64_t fnv1a_hash(const char* str) {
 __device__ __forceinline__ int derive_param_slot(uint64_t genome_hash, const char* param_id) {
     uint64_t id_hash = fnv1a_hash(param_id);
 
-    
+
     uint64_t combined = genome_hash ^ id_hash;
     combined ^= (combined >> 33);
-    combined *= 0xff51afd7ed558ccdULL;
+    combined *= HASH_MIX_CONSTANT_A;
     combined ^= (combined >> 33);
-    combined *= 0xc4ceb9fe1a85ec53ULL;
+    combined *= HASH_MIX_CONSTANT_B;
     combined ^= (combined >> 33);
 
     return (int)(combined % GENOME_SIZE);

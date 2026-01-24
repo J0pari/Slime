@@ -192,17 +192,17 @@ __device__ __forceinline__ float elite_to_cell_distance_sq(
 
 __device__ uint64_t gpu_sha256(float* genome, uint32_t size) {
 
-    uint64_t hash = 0x9e3779b97f4a7c15ULL;
+    uint64_t hash = XORSHIFT_GOLDEN_RATIO_A;
 
     for (uint32_t i = 0; i < size; i++) {
         uint32_t bits = __float_as_uint(genome[i]);
 
-        hash ^= bits + 0x9e3779b9 + (hash << JENKINS_FINAL_SHIFT_A) + (hash >> 2);
+        hash ^= bits + HASH_GOLDEN_RATIO_32 + (hash << JENKINS_FINAL_SHIFT_A) + (hash >> 2);
         hash += (hash << 3);
         hash ^= (hash >> JENKINS_FINAL_SHIFT_B);
         hash += (hash << (WMMA_TILE_DIM - 1));
 
-        hash *= 0xc4ceb9fe1a85ec53ULL;
+        hash *= HASH_MIX_CONSTANT_B;
         hash ^= hash >> HASH_FINALIZER_SHIFT;
     }
 

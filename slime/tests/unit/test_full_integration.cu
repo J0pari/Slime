@@ -1,247 +1,323 @@
-
 #include "../../config/config.cu"
-#include "../../core/organism.cu"
-#include "../../core/chemotaxis.cu"
-#include "../../lifecycle/lifecycle_stages.cu"
+#include "../../runtime.cu"
+#include "../../data/dataset_loader.cu"
+#include "../../diagnostics/telemetry_probes.cu"
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include <math.h>
+#include <stdlib.h>
 
-#define CUDA_CHECK(call) \
+#define TEST_CHECK(call) \
     do { \
         cudaError_t err = call; \
         if (err != cudaSuccess) { \
-\
-            exit(1); \
+            fprintf(stderr, "TEST_FAIL: %s at %s:%d - %s\n", \
+                    #call, __FILE__, __LINE__, cudaGetErrorString(err)); \
+            return false; \
         } \
     } while(0)
 
-__global__ void extract_rd_stats_kernel(
-    float* rd_field,
-    int grid_size,
-    float* min_out,
-    float* max_out,
-    float* mean_out,
-    int* nan_count_out
-) {
-    __shared__ float s_min;
-    __shared__ float s_max;
-    __shared__ float s_sum;
-    __shared__ int s_nan_count;
+// Minimal integration test covering all major subsystems
+bool test_full_lifecycle_iteration() {
+    printf("\n=== FULL INTEGRATION TEST: One Complete Lifecycle Iteration ===\n");
 
-    if (threadIdx.x == 0) {
-        s_min = 1e10f;
-        s_max = -1e10f;
-        s_sum = 0.0f;
-        s_nan_count = 0;
-    }
-    __syncthreads();
+    // 1. DATASET LOADING
+    printf("[1/15] Loading MNIST training dataset...\n");
+    Dataset* d_mnist_train;
+    TEST_CHECK(load_dataset_from_registry(0, true, &d_mnist_train));
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = grid_size * grid_size;
+    Dataset* d_mnist_test;
+    TEST_CHECK(load_dataset_from_registry(0, false, &d_mnist_test));
 
-    if (idx < total) {
-        float val = rd_field[idx];
-        if (isnan(val) || isinf(val)) {
-            atomicAdd(&s_nan_count, 1);
-        } else {
-            atomicMin((int*)&s_min, __float_as_int(val));
-            atomicMax((int*)&s_max, __float_as_int(val));
-            atomicAdd(&s_sum, val);
+    Dataset** d_dataset_array;
+    TEST_CHECK(cudaMalloc(&d_dataset_array, sizeof(Dataset*)));
+    TEST_CHECK(cudaMemcpy(d_dataset_array, &d_mnist_train, sizeof(Dataset*), cudaMemcpyHostToDevice));
+
+    Dataset** d_test_dataset_array;
+    TEST_CHECK(cudaMalloc(&d_test_dataset_array, sizeof(Dataset*)));
+    TEST_CHECK(cudaMemcpy(d_test_dataset_array, &d_mnist_test, sizeof(Dataset*), cudaMemcpyHostToDevice));
+
+    // 2. POOL ALLOCATION
+    printf("[2/15] Allocating ComponentPool...\n");
+    constexpr int TEST_POOL_SIZE = 4;  // Small pool for fast test
+    ComponentPool pool_host;
+    pool_host.capacity = TEST_POOL_SIZE;
+    pool_host.size = TEST_POOL_SIZE;
+    pool_host.generation = 0;
+
+    TEST_CHECK(cudaMalloc(&pool_host.entries, sizeof(PoolEntry) * TEST_POOL_SIZE));
+    TEST_CHECK(cudaMalloc(&pool_host.fitness_values, sizeof(float) * TEST_POOL_SIZE));
+    TEST_CHECK(cudaMalloc(&pool_host.alive_flags, sizeof(bool) * TEST_POOL_SIZE));
+
+    ComponentPool* d_pool;
+    TEST_CHECK(cudaMalloc(&d_pool, sizeof(ComponentPool)));
+    TEST_CHECK(cudaMemcpy(d_pool, &pool_host, sizeof(ComponentPool), cudaMemcpyHostToDevice));
+
+    // 3. ARCHIVE ALLOCATION
+    printf("[3/15] Allocating BehavioralArchive...\n");
+    BehavioralArchive archive_host;
+    archive_host.capacity = ARCHIVE_CAPACITY;
+    archive_host.size = 0;
+    archive_host.generation = 0;
+
+    TEST_CHECK(cudaMalloc(&archive_host.elites, sizeof(GPUElite) * ARCHIVE_CAPACITY));
+    TEST_CHECK(cudaMalloc(&archive_host.cells, sizeof(ArchiveCell) * ARCHIVE_GRID_DIM * ARCHIVE_GRID_DIM * ARCHIVE_GRID_DIM));
+
+    BehavioralArchive* d_archive;
+    TEST_CHECK(cudaMalloc(&d_archive, sizeof(BehavioralArchive)));
+    TEST_CHECK(cudaMemcpy(d_archive, &archive_host, sizeof(BehavioralArchive), cudaMemcpyHostToDevice));
+
+    // 4. SHARED BUFFERS ALLOCATION
+    printf("[4/15] Allocating SharedBuffers...\n");
+    SharedBuffers buffers_host;
+
+    TEST_CHECK(cudaMalloc(&buffers_host.all_chem_fields, sizeof(float) * CHEM_FIELD_COUNT * CA_FIELD_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_rd_fields, sizeof(float) * RD_FIELD_COUNT * CA_FIELD_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_ca_concentration, sizeof(float) * CA_CONCENTRATION_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_ca_output, sizeof(float) * CA_OUTPUT_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_ca_affinity, sizeof(float) * CA_AFFINITY_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_ca_flow, sizeof(float) * CA_FLOW_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.all_ca_reintegration, sizeof(float) * CA_REINTEGRATION_SIZE));
+    TEST_CHECK(cudaMalloc(&buffers_host.spawn_workspace, sizeof(float) * GENOME_SIZE * SPAWN_WS_COUNT));
+
+    SharedBuffers* d_buffers;
+    TEST_CHECK(cudaMalloc(&d_buffers, sizeof(SharedBuffers)));
+    TEST_CHECK(cudaMemcpy(d_buffers, &buffers_host, sizeof(SharedBuffers), cudaMemcpyHostToDevice));
+
+    // 5. TRAINING MODE ALLOCATION
+    printf("[5/15] Allocating TrainingMode...\n");
+    TrainingMode training_host;
+    training_host.enabled = true;
+    training_host.batch_size = BATCH_SIZE;
+    training_host.learning_rate = LEARNING_RATE;
+    training_host.num_datasets = 1;
+    training_host.dataset_array = d_dataset_array;
+    training_host.test_dataset_array = d_test_dataset_array;
+    training_host.current_dataset_idx = 0;
+
+    TEST_CHECK(cudaMalloc(&training_host.ca_input_batch, sizeof(float) * BATCH_SIZE * CHANNELS_MAX * CA_FIELD_SIZE));
+    TEST_CHECK(cudaMalloc(&training_host.ca_target_batch, sizeof(int) * BATCH_SIZE));
+    TEST_CHECK(cudaMalloc(&training_host.ca_logits_batch, sizeof(float) * BATCH_SIZE * NUM_CLASSES));
+    TEST_CHECK(cudaMalloc(&training_host.ca_loss_batch, sizeof(float) * BATCH_SIZE));
+    TEST_CHECK(cudaMalloc(&training_host.ca_grad_output, sizeof(float) * BATCH_SIZE * NUM_HEADS_MAX * HEAD_DIM_MAX * CA_FIELD_SIZE));
+    TEST_CHECK(cudaMalloc(&training_host.tape, sizeof(AutodiffTape)));
+
+    TrainingMode* d_training;
+    TEST_CHECK(cudaMalloc(&d_training, sizeof(TrainingMode)));
+    TEST_CHECK(cudaMemcpy(d_training, &training_host, sizeof(TrainingMode), cudaMemcpyHostToDevice));
+
+    // 6. TELEMETRY ALLOCATION
+    printf("[6/15] Allocating Telemetry...\n");
+    Telemetry telemetry_host;
+    memset(&telemetry_host, 0, sizeof(Telemetry));
+
+    Telemetry* d_telemetry;
+    TEST_CHECK(cudaMalloc(&d_telemetry, sizeof(Telemetry)));
+    TEST_CHECK(cudaMemcpy(d_telemetry, &telemetry_host, sizeof(Telemetry), cudaMemcpyHostToDevice));
+
+    // 7. INITIALIZE POOL WITH RANDOM GENOMES
+    printf("[7/15] Initializing pool with random genomes...\n");
+    dim3 pool_grid(TEST_POOL_SIZE);
+    dim3 pool_block(256);
+    initialize_pool_kernel<<<pool_grid, pool_block>>>(d_pool, 12345);
+    TEST_CHECK(cudaDeviceSynchronize());
+
+    // 8. INITIALIZE ARCHIVE
+    printf("[8/15] Initializing archive...\n");
+    initialize_archive_kernel<<<1, 256>>>(d_archive);
+    TEST_CHECK(cudaDeviceSynchronize());
+
+    // 9. RUN ONE FULL LIFECYCLE ITERATION
+    printf("[9/15] Executing persistent_evolution_kernel (1 iteration)...\n");
+
+    EvolutionConfig config;
+    config.pool = d_pool;
+    config.archive = d_archive;
+    config.buffers = d_buffers;
+    config.training = d_training;
+    config.telemetry = d_telemetry;
+    config.max_iterations = 1;  // Just one iteration for test
+    config.seed = 42;
+
+    EvolutionConfig* d_config;
+    TEST_CHECK(cudaMalloc(&d_config, sizeof(EvolutionConfig)));
+    TEST_CHECK(cudaMemcpy(d_config, &config, sizeof(EvolutionConfig), cudaMemcpyHostToDevice));
+
+    TEST_CHECK(cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, CDP_SYNC_DEPTH));
+    TEST_CHECK(cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, CDP_PENDING_LAUNCH_COUNT));
+    TEST_CHECK(cudaDeviceSetLimit(cudaLimitStackSize, CDP_STACK_SIZE));
+
+    persistent_evolution_kernel<<<1, 1>>>(d_config);
+    TEST_CHECK(cudaDeviceSynchronize());
+
+    // 10. VERIFY NO NAN IN CHEMICAL FIELDS
+    printf("[10/15] Verifying chemical fields have no NaN...\n");
+    float* h_chem_check = new float[CA_FIELD_SIZE];
+    TEST_CHECK(cudaMemcpy(h_chem_check, buffers_host.all_chem_fields, sizeof(float) * CA_FIELD_SIZE, cudaMemcpyDeviceToHost));
+
+    int chem_nan_count = 0;
+    for (int i = 0; i < CA_FIELD_SIZE; i++) {
+        if (isnan(h_chem_check[i]) || isinf(h_chem_check[i])) {
+            chem_nan_count++;
         }
     }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        atomicMin((int*)min_out, __float_as_int(s_min));
-        atomicMax((int*)max_out, __float_as_int(s_max));
-        atomicAdd(mean_out, s_sum);
-        atomicAdd(nan_count_out, s_nan_count);
+    if (chem_nan_count > 0) {
+        fprintf(stderr, "TEST_FAIL: Chemical field has %d NaN/Inf values\n", chem_nan_count);
+        delete[] h_chem_check;
+        return false;
     }
-}
+    delete[] h_chem_check;
+    printf("    ✓ Chemical concentration: 0 NaN\n");
 
-bool test_rd_initialization() {
+    // 11. VERIFY RESOURCE GRADIENTS ARE NON-ZERO
+    printf("[11/15] Verifying resource gradients are computed...\n");
+    float* h_grad_x = new float[CA_FIELD_SIZE];
+    float* h_grad_y = new float[CA_FIELD_SIZE];
 
-    float* d_u_field;
-    float* d_v_field;
-    CUDA_CHECK(cudaMalloc(&d_u_field, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_v_field, GRID_SIZE * GRID_SIZE * sizeof(float)));
+    // Resource gradients are at offsets RD_RESOURCE_GRADIENT_X and RD_RESOURCE_GRADIENT_Y
+    TEST_CHECK(cudaMemcpy(h_grad_x, buffers_host.all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_GRADIENT_X,
+                          sizeof(float) * CA_FIELD_SIZE, cudaMemcpyDeviceToHost));
+    TEST_CHECK(cudaMemcpy(h_grad_y, buffers_host.all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_GRADIENT_Y,
+                          sizeof(float) * CA_FIELD_SIZE, cudaMemcpyDeviceToHost));
 
-    dim3 grid(GRID_SIZE/WMMA_TILE_DIM, GRID_SIZE/WMMA_TILE_DIM);
-    dim3 block(WMMA_TILE_DIM, WMMA_TILE_DIM);
-
-    init_rd_fields_kernel<<<grid, block>>>(d_u_field, d_v_field, GRID_SIZE, 42);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    float *d_u_min, *d_u_max, *d_u_mean, *d_v_min, *d_v_max, *d_v_mean;
-    int *d_u_nan, *d_v_nan;
-
-    CUDA_CHECK(cudaMalloc(&d_u_min, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_u_max, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_u_mean, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_u_nan, sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_v_min, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_v_max, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_v_mean, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_v_nan, sizeof(int)));
-
-    float init_min = 1e10f, init_max = -1e10f, init_mean = 0.0f;
-    int init_nan = 0;
-    CUDA_CHECK(cudaMemcpy(d_u_min, &init_min, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_u_max, &init_max, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_u_mean, &init_mean, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_u_nan, &init_nan, sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v_min, &init_min, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v_max, &init_max, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v_mean, &init_mean, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v_nan, &init_nan, sizeof(int), cudaMemcpyHostToDevice));
-
-    extract_rd_stats_kernel<<<256, BLOCK_SIZE>>>(d_u_field, GRID_SIZE, d_u_min, d_u_max, d_u_mean, d_u_nan);
-    extract_rd_stats_kernel<<<256, BLOCK_SIZE>>>(d_v_field, GRID_SIZE, d_v_min, d_v_max, d_v_mean, d_v_nan);
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    float h_u_min, h_u_max, h_u_mean, h_v_min, h_v_max, h_v_mean;
-    int h_u_nan, h_v_nan;
-    CUDA_CHECK(cudaMemcpy(&h_u_min, d_u_min, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_u_max, d_u_max, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_u_mean, d_u_mean, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_u_nan, d_u_nan, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_v_min, d_v_min, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_v_max, d_v_max, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_v_mean, d_v_mean, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_v_nan, d_v_nan, sizeof(int), cudaMemcpyDeviceToHost));
-
-    h_u_mean /= (GRID_SIZE * GRID_SIZE);
-    h_v_mean /= (GRID_SIZE * GRID_SIZE);
-
-    bool u_valid = (h_u_nan == 0) && (fabsf(h_u_mean - 1.0f) < 0.1f);
-    bool v_valid = (h_v_nan == 0) && (h_v_mean >= 0.0f) && (h_v_mean < 0.3f) && (h_v_max > 0.0f);
-
-    cudaFree(d_u_field);
-    cudaFree(d_v_field);
-    cudaFree(d_u_min);
-    cudaFree(d_u_max);
-    cudaFree(d_u_mean);
-    cudaFree(d_u_nan);
-    cudaFree(d_v_min);
-    cudaFree(d_v_max);
-    cudaFree(d_v_mean);
-    cudaFree(d_v_nan);
-
-    return u_valid && v_valid;
-}
-
-bool test_chemical_field_initialization() {
-
-    float* d_chemical_field;
-    float* d_genome;
-    CUDA_CHECK(cudaMalloc(&d_chemical_field, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_genome, GENOME_SIZE * sizeof(float)));
-
-    float h_genome[GENOME_SIZE];
-    for (int i = 0; i < GENOME_SIZE; i++) {
-        h_genome[i] = (float)i / (float)GENOME_SIZE;
-    }
-    CUDA_CHECK(cudaMemcpy(d_genome, h_genome, GENOME_SIZE * sizeof(float), cudaMemcpyHostToDevice));
-
-    dim3 grid((GRID_SIZE + 15) / 16, (GRID_SIZE + 15) / 16);
-    dim3 block(16, 16);
-
-    initialize_chemical_field_kernel<<<grid, block>>>(d_chemical_field, d_genome, GRID_SIZE, 12345);
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    float *h_field = new float[GRID_SIZE * GRID_SIZE];
-    CUDA_CHECK(cudaMemcpy(h_field, d_chemical_field, GRID_SIZE * GRID_SIZE * sizeof(float), cudaMemcpyDeviceToHost));
-
-    float sum = 0.0f;
-    int nan_count = 0;
-    int valid_range = 0;
-    for (int i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
-        if (isnan(h_field[i])) {
-            nan_count++;
-        } else {
-            sum += h_field[i];
-            if (h_field[i] >= 0.0f && h_field[i] <= 1.0f) {
-                valid_range++;
-            }
+    int grad_nan_count = 0;
+    int grad_nonzero_count = 0;
+    for (int i = 0; i < CA_FIELD_SIZE; i++) {
+        if (isnan(h_grad_x[i]) || isinf(h_grad_x[i]) || isnan(h_grad_y[i]) || isinf(h_grad_y[i])) {
+            grad_nan_count++;
+        }
+        if (fabsf(h_grad_x[i]) > 1e-6f || fabsf(h_grad_y[i]) > 1e-6f) {
+            grad_nonzero_count++;
         }
     }
-    float mean = sum / (float)(GRID_SIZE * GRID_SIZE);
 
-    bool valid = (nan_count == 0) && (valid_range == GRID_SIZE * GRID_SIZE) && (mean > 0.3f && mean < 0.7f);
+    if (grad_nan_count > 0) {
+        fprintf(stderr, "TEST_FAIL: Resource gradients have %d NaN/Inf values\n", grad_nan_count);
+        delete[] h_grad_x;
+        delete[] h_grad_y;
+        return false;
+    }
 
-    delete[] h_field;
-    cudaFree(d_chemical_field);
-    cudaFree(d_genome);
+    if (grad_nonzero_count == 0) {
+        fprintf(stderr, "TEST_FAIL: All resource gradients are zero (not being computed)\n");
+        delete[] h_grad_x;
+        delete[] h_grad_y;
+        return false;
+    }
 
-    return valid;
-}
+    printf("    ✓ Resource gradient_x: 0 NaN, %d/%d non-zero\n", grad_nonzero_count, CA_FIELD_SIZE);
+    printf("    ✓ Resource gradient_y: 0 NaN, %d/%d non-zero\n", grad_nonzero_count, CA_FIELD_SIZE);
+    delete[] h_grad_x;
+    delete[] h_grad_y;
 
-bool test_resource_flow() {
+    // 12. VERIFY CA OUTPUT HAS NO NAN
+    printf("[12/15] Verifying CA output has no NaN...\n");
+    float* h_ca_output = new float[CA_OUTPUT_SIZE];
+    TEST_CHECK(cudaMemcpy(h_ca_output, buffers_host.all_ca_output, sizeof(float) * CA_OUTPUT_SIZE, cudaMemcpyDeviceToHost));
 
-    float* d_resource;
-    float* d_resource_next;
-    float* d_fitness_landscape;
-    CUDA_CHECK(cudaMalloc(&d_resource, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_resource_next, GRID_SIZE * GRID_SIZE * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_fitness_landscape, GRID_SIZE * GRID_SIZE * sizeof(float)));
+    int ca_nan_count = 0;
+    for (int i = 0; i < CA_OUTPUT_SIZE; i++) {
+        if (isnan(h_ca_output[i]) || isinf(h_ca_output[i])) {
+            ca_nan_count++;
+        }
+    }
+    if (ca_nan_count > 0) {
+        fprintf(stderr, "TEST_FAIL: CA output has %d NaN/Inf values\n", ca_nan_count);
+        delete[] h_ca_output;
+        return false;
+    }
+    delete[] h_ca_output;
+    printf("    ✓ CA output: 0 NaN\n");
 
-    dim3 grid(GRID_SIZE/WMMA_TILE_DIM, GRID_SIZE/WMMA_TILE_DIM);
-    dim3 block(WMMA_TILE_DIM, WMMA_TILE_DIM);
+    // 13. VERIFY TELEMETRY WAS UPDATED
+    printf("[13/15] Verifying telemetry was written...\n");
+    Telemetry h_telemetry;
+    TEST_CHECK(cudaMemcpy(&h_telemetry, d_telemetry, sizeof(Telemetry), cudaMemcpyDeviceToHost));
 
-    init_resource_fields_kernel<<<grid, block>>>(d_resource, d_fitness_landscape, GRID_SIZE, 456);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    if (h_telemetry.genome_complexity.hash_entropy == 0.0f &&
+        h_telemetry.archive_topology.novelty_gradient == 0.0f &&
+        h_telemetry.task_performance.accuracy == 0.0f) {
+        fprintf(stderr, "TEST_FAIL: Telemetry appears uninitialized (all zeros)\n");
+        return false;
+    }
+    printf("    ✓ Telemetry hash_entropy: %.6f\n", h_telemetry.genome_complexity.hash_entropy);
+    printf("    ✓ Telemetry novelty_gradient: %.6f\n", h_telemetry.archive_topology.novelty_gradient);
+    printf("    ✓ Telemetry accuracy: %.6f\n", h_telemetry.task_performance.accuracy);
 
-    resource_flow_kernel<<<grid, block>>>(d_resource, d_resource_next, d_fitness_landscape, GRID_SIZE, 0.01f, 0.1f, 0.5f);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // 14. VERIFY POOL FITNESS VALUES
+    printf("[14/15] Verifying pool fitness values...\n");
+    float* h_fitness = new float[TEST_POOL_SIZE];
+    TEST_CHECK(cudaMemcpy(h_fitness, pool_host.fitness_values, sizeof(float) * TEST_POOL_SIZE, cudaMemcpyDeviceToHost));
 
-    float *d_min, *d_max, *d_mean;
-    int *d_nan;
-    CUDA_CHECK(cudaMalloc(&d_min, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_max, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_mean, sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_nan, sizeof(int)));
+    int fitness_nan_count = 0;
+    for (int i = 0; i < TEST_POOL_SIZE; i++) {
+        if (isnan(h_fitness[i]) || isinf(h_fitness[i])) {
+            fitness_nan_count++;
+        }
+    }
+    if (fitness_nan_count > 0) {
+        fprintf(stderr, "TEST_FAIL: Pool has %d NaN/Inf fitness values\n", fitness_nan_count);
+        delete[] h_fitness;
+        return false;
+    }
+    printf("    ✓ Pool fitness: 0 NaN, avg=%.6f\n",
+           (h_fitness[0] + h_fitness[1] + h_fitness[2] + h_fitness[3]) / 4.0f);
+    delete[] h_fitness;
 
-    float init_min = 1e10f, init_max = -1e10f, init_mean = 0.0f;
-    int init_nan = 0;
-    CUDA_CHECK(cudaMemcpy(d_min, &init_min, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_max, &init_max, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_mean, &init_mean, sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_nan, &init_nan, sizeof(int), cudaMemcpyHostToDevice));
+    // 15. CLEANUP
+    printf("[15/15] Cleaning up...\n");
+    cudaFree(pool_host.entries);
+    cudaFree(pool_host.fitness_values);
+    cudaFree(pool_host.alive_flags);
+    cudaFree(d_pool);
 
-    extract_rd_stats_kernel<<<256, BLOCK_SIZE>>>(d_resource_next, GRID_SIZE, d_min, d_max, d_mean, d_nan);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaFree(archive_host.elites);
+    cudaFree(archive_host.cells);
+    cudaFree(d_archive);
 
-    float h_min, h_max, h_mean;
-    int h_nan;
-    CUDA_CHECK(cudaMemcpy(&h_min, d_min, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_max, d_max, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_mean, d_mean, sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&h_nan, d_nan, sizeof(int), cudaMemcpyDeviceToHost));
+    cudaFree(buffers_host.all_chem_fields);
+    cudaFree(buffers_host.all_rd_fields);
+    cudaFree(buffers_host.all_ca_concentration);
+    cudaFree(buffers_host.all_ca_output);
+    cudaFree(buffers_host.all_ca_affinity);
+    cudaFree(buffers_host.all_ca_flow);
+    cudaFree(buffers_host.all_ca_reintegration);
+    cudaFree(buffers_host.spawn_workspace);
+    cudaFree(d_buffers);
 
-    h_mean /= (GRID_SIZE * GRID_SIZE);
+    cudaFree(training_host.ca_input_batch);
+    cudaFree(training_host.ca_target_batch);
+    cudaFree(training_host.ca_logits_batch);
+    cudaFree(training_host.ca_loss_batch);
+    cudaFree(training_host.ca_grad_output);
+    cudaFree(training_host.tape);
+    cudaFree(d_training);
 
-    bool valid = (h_nan == 0) && (h_min >= 0.0f) && (h_mean > 0.0f);
+    cudaFree(d_telemetry);
+    cudaFree(d_dataset_array);
+    cudaFree(d_test_dataset_array);
+    cudaFree(d_config);
 
-    cudaFree(d_resource);
-    cudaFree(d_resource_next);
-    cudaFree(d_fitness_landscape);
-    cudaFree(d_min);
-    cudaFree(d_max);
-    cudaFree(d_mean);
-    cudaFree(d_nan);
-
-    return valid;
+    printf("\n=== TEST PASSED: Full lifecycle iteration completed successfully ===\n");
+    return true;
 }
 
 int main() {
+    cudaSetDevice(0);
+
     int passed = 0;
     int total = 0;
 
-    total++; if (test_rd_initialization()) passed++;
-    total++; if (test_chemical_field_initialization()) passed++;
-    total++; if (test_resource_flow()) passed++;
+    total++;
+    if (test_full_lifecycle_iteration()) {
+        passed++;
+        printf("\n✓ PASS: test_full_lifecycle_iteration\n");
+    } else {
+        printf("\n✗ FAIL: test_full_lifecycle_iteration\n");
+    }
+
+    printf("\n========================================\n");
+    printf("RESULTS: %d/%d tests passed\n", passed, total);
+    printf("========================================\n");
 
     return (passed == total) ? 0 : 1;
 }

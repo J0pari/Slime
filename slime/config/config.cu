@@ -47,6 +47,34 @@
 
 
 
+enum SpawnWorkspaceSlot {
+    SPAWN_WS_TEMP_GENOME = 0,
+    SPAWN_WS_TEMP_PARENT,
+    SPAWN_WS_PARENT_GENOME,
+    SPAWN_WS_CHILD_GENOME,
+    SPAWN_WS_PARENT_PARENT_TEMP,
+    SPAWN_WS_COUNT
+};
+
+enum ChemFieldSlot {
+    CHEM_CONCENTRATION = 0,
+    CHEM_GRADIENT_X,
+    CHEM_GRADIENT_Y,
+    CHEM_LAPLACIAN,
+    CHEM_SOURCES,
+    CHEM_DECAY_FACTORS,
+    CHEM_FIELD_COUNT
+};
+
+enum RDFieldSlot {
+    RD_RESOURCE_DENSITY = 0,
+    RD_RESOURCE_NEXT,
+    RD_FITNESS_LANDSCAPE,
+    RD_RESOURCE_GRADIENT_X,
+    RD_RESOURCE_GRADIENT_Y,
+    RD_FIELD_COUNT
+};
+
 constexpr int WMMA_TILE_DIM = 16;
 constexpr int WARP_SIZE = 32;
 constexpr int BANK_PAD = 1;
@@ -88,8 +116,8 @@ constexpr int TRACE_CAPACITY = GENOME_SIZE;
 constexpr int MAX_HISTORY_LENGTH = GENOME_SIZE;
 constexpr int MAX_DELTAS_PER_ENTRY = 128;
 constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;  // Weight deltas for Lamarckian inheritance
-constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY;
-constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY;
+constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY * POOL_CAPACITY_MAX;
+constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY * POOL_CAPACITY_MAX;
 constexpr int MAX_JACOBI_SWEEPS = 100;   
 constexpr int MAX_SPARSE_NEIGHBORS = 10;
 constexpr int MAX_CA_KERNEL_SIZE = 3;
@@ -313,6 +341,20 @@ constexpr float FRACTIONAL_OU_KERNEL_OFFSET = 1.5f;
 constexpr unsigned int RNG_SEED_MULTIPLIER = 1337u;
 constexpr unsigned int LCG_MULTIPLIER = 1664525u;
 constexpr unsigned int LCG_INCREMENT = 1013904223u;
+
+// Knuth's golden ratio multipliers for xorshift128+ initialization
+constexpr uint64_t XORSHIFT_GOLDEN_RATIO_A = 0x9e3779b97f4a7c15ULL;
+constexpr uint64_t XORSHIFT_GOLDEN_RATIO_B = 0xbf58476d1ce4e5b9ULL;
+
+// Golden ratio constant for hash mixing (phi * 2^32)
+constexpr uint32_t HASH_GOLDEN_RATIO_32 = 0x9e3779b9u;
+
+// SplitMix64 and MurmurHash3 mixing constants
+constexpr uint64_t HASH_MIX_CONSTANT_A = 0xff51afd7ed558ccdULL;
+constexpr uint64_t HASH_MIX_CONSTANT_B = 0xc4ceb9fe1a85ec53ULL;
+
+// Default seed for curandState initialization
+constexpr unsigned long CURAND_DEFAULT_SEED = 0x12345678UL;
 
 constexpr int XORSHIFT128_ROTL_A = 24;
 constexpr int XORSHIFT128_ROTL_B = 37;
@@ -641,7 +683,7 @@ constexpr int CHANNELS_MAX = CHANNELS_OCTETS_MAX * WMMA_ALIGNMENT;
 constexpr int HIDDEN_DIM_MIN = HEAD_DIM_MIN;
 constexpr int HIDDEN_DIM_MAX = NUM_HEADS_MAX * HEAD_DIM_MAX;
 constexpr int GRID_SIZE_MIN = 64;
-constexpr int GRID_SIZE_MAX = 128;
+constexpr int GRID_SIZE_MAX = 64;
 constexpr int MAX_HEAD_DIM = HEAD_DIM_MAX;
 constexpr int MAX_CHANNELS = CHANNELS_MAX;
 
@@ -655,6 +697,24 @@ constexpr int CA_AFFINITY_SIZE = CA_FIELD_SIZE * AFFINITY_REDUCED_DIMS;
 constexpr int CA_FLOW_SIZE = CA_FIELD_SIZE * FLOW_FIELD_DIMS;
 constexpr int CA_REINTEGRATION_SIZE = CA_FIELD_SIZE * CHANNELS_MAX;
 constexpr int CA_STATE_STRIDE = CA_CONCENTRATION_SIZE + CA_OUTPUT_SIZE + CA_AFFINITY_SIZE + CA_FLOW_SIZE + CA_REINTEGRATION_SIZE;
+
+// Per-entry CA weight sizes (FP16 half precision)
+constexpr int CA_PERCEPTION_WEIGHT_SIZE = NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX;
+constexpr int CA_INTERACTION_WEIGHT_SIZE = NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX;
+constexpr int CA_VALUE_WEIGHT_SIZE = NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX;
+constexpr int CA_WEIGHTS_PER_ENTRY_STRIDE = CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE + CA_VALUE_WEIGHT_SIZE;
+
+// Batch size limits (needed before SAVED_ACTIVATION_SIZE)
+constexpr int BATCH_SIZE_MIN = 8;
+constexpr int BATCH_SIZE_MAX = 32;
+
+// Per-entry saved activation sizes for gradient training
+// Layout: batch_size * num_heads * (grid_size * grid_size) * head_dim
+constexpr int SAVED_ACTIVATION_SIZE = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
+
+// Per-entry autodiff tape buffer sizes
+constexpr int TAPE_ENTRIES_PER_ENTRY = TAPE_CAPACITY;
+constexpr int TAPE_VALUES_PER_ENTRY = VALUE_CAPACITY;
 
 // Backward pass workspace chunking - sized for memory-bounded gradient computation
 // col_width = 9 * channels for 3x3 kernel im2col
@@ -672,10 +732,8 @@ constexpr size_t BACKWARD_WS_DPREGELU_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CH
 
 constexpr float LEARNING_RATE_MIN = 0.0001f;
 constexpr float LEARNING_RATE_MAX = 0.01f;
-constexpr float BATCH_SIZE_NORM_MIN = 0.0f;  
+constexpr float BATCH_SIZE_NORM_MIN = 0.0f;
 constexpr float BATCH_SIZE_NORM_MAX = 1.0f;
-constexpr int BATCH_SIZE_MIN = 8;
-constexpr int BATCH_SIZE_MAX = 32;
 constexpr float DECAY_RATE_MIN = 0.9f;
 constexpr float DECAY_RATE_MAX = 0.999f;
 constexpr float ADAM_BETA1_MIN = 0.85f;
@@ -751,8 +809,6 @@ constexpr float ARCHIVE_ACCEPTANCE_NOVELTY_WEIGHT = 0.5f;
 constexpr float ARCHIVE_ACCEPTANCE_QUALITY_WEIGHT = 0.5f;
 
 constexpr int AUDIT_SAMPLE_COUNT = 8;
-constexpr int AUDIT_IMAGE_SIZE = 28 * 28;
-constexpr int AUDIT_CA_SNAPSHOT_SIZE = 64 * 64;
 
 struct AuditBuffer {
     volatile int ready;
@@ -765,13 +821,14 @@ struct AuditBuffer {
     float loss;
     float accuracy;
 
-    unsigned char sample_images[AUDIT_SAMPLE_COUNT * AUDIT_IMAGE_SIZE];
+    // Arrays sized by CA_FIELD_SIZE - data is resampled to grid_size
+    unsigned char sample_images[AUDIT_SAMPLE_COUNT * CA_FIELD_SIZE];
     int sample_labels[AUDIT_SAMPLE_COUNT];
     float sample_logits[AUDIT_SAMPLE_COUNT * NUM_CLASSES_MAX];
     int sample_predictions[AUDIT_SAMPLE_COUNT];
     float sample_confidences[AUDIT_SAMPLE_COUNT];
 
-    float ca_snapshot[AUDIT_CA_SNAPSHOT_SIZE];
+    float ca_snapshot[CA_FIELD_SIZE];
 
     float train_accuracy;
     float test_accuracy;

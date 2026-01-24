@@ -149,17 +149,17 @@ __global__ void multi_head_ca_with_tape_kernel(
                            cell_y * grid_size * arch.head_dim +
                            cell_x * arch.head_dim;
 
-    __shared__ float neighborhood[3][3][MAX_HEAD_DIM + BANK_PAD];
+    __shared__ float neighborhood[3][3][MAX_CHANNELS + BANK_PAD];
 
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             int nx = min(max(cell_x + dx, 0), grid_size - 1);
             int ny = min(max(cell_y + dy, 0), grid_size - 1);
-            int state_idx = batch_id * cells_per_grid * arch.head_dim +
-                           ny * grid_size * arch.head_dim +
-                           nx * arch.head_dim;
+            int state_idx = batch_id * cells_per_grid * arch.channels +
+                           ny * grid_size * arch.channels +
+                           nx * arch.channels;
 
-            if (threadIdx.z < arch.head_dim) {
+            if (threadIdx.z < arch.channels) {
                 neighborhood[dy + 1][dx + 1][threadIdx.z] = ldg_float(&ca_state[state_idx + threadIdx.z]);
             }
         }
@@ -260,6 +260,8 @@ __global__ void apply_ca_gradients_kernel(
         float grad = tape->grad_buffer[tape_idx];
 
         if (isnan(grad) || isinf(grad)) {
+            printf("WARN [apply_ca_gradients]: head=%d param=%d tape_idx=%d grad=%f is NaN/Inf, skipping\n",
+                   head_id, param_idx, tape_idx, grad);
             return;
         }
 
@@ -270,10 +272,14 @@ __global__ void apply_ca_gradients_kernel(
         if (is_fp16 && param_ptr_fp16 != nullptr) {
             float val = __half2float(*param_ptr_fp16);
             if (isnan(val)) {
+                printf("WARN [apply_ca_gradients]: head=%d param=%d weight is NaN before update, skipping\n",
+                       head_id, param_idx);
                 return;
             }
             val -= learning_rate * grad;
             if (isnan(val) || isinf(val)) {
+                printf("WARN [apply_ca_gradients]: head=%d param=%d val=%f after update is NaN/Inf, skipping\n",
+                       head_id, param_idx, val);
                 return;
             }
             *param_ptr_fp16 = __float2half(val);

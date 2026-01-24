@@ -12,15 +12,17 @@
 #include <cmath>
 #include <cstring>
 
-extern int stbi_write_png(char const *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
+// Forward declaration - implementation provided by report_generator.cu
+extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 
 // Write sample images as PNG files
 // Returns 0 on success, 1 on failure
 int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
+    int img_size = audit->grid_size * audit->grid_size;
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
         char png_path[256];
         snprintf(png_path, sizeof(png_path), "%s/samples/gen%04d_s%d.png", session_dir, gen, s);
-        if (!stbi_write_png(png_path, 28, 28, 1, &audit->sample_images[s * AUDIT_IMAGE_SIZE], 28)) {
+        if (!stbi_write_png(png_path, audit->grid_size, audit->grid_size, 1, &audit->sample_images[s * img_size], audit->grid_size)) {
             fprintf(stderr, "FATAL: Cannot create sample %s\n", png_path);
             return 1;
         }
@@ -31,11 +33,17 @@ int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
 // Write CA state snapshot as PNG file
 // Returns 0 on success, 1 on failure
 int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
-    unsigned char pixels[AUDIT_CA_SNAPSHOT_SIZE];
-    for (int i = 0; i < AUDIT_CA_SNAPSHOT_SIZE; i++) {
+    int ca_size = audit->grid_size * audit->grid_size;
+    unsigned char* pixels = (unsigned char*)malloc(ca_size);
+    if (!pixels) {
+        fprintf(stderr, "FATAL: Cannot allocate pixels for CA snapshot\n");
+        return 1;
+    }
+    for (int i = 0; i < ca_size; i++) {
         float val = audit->ca_snapshot[i];
         if (std::isnan(val)) {
             fprintf(stderr, "FATAL: NAN in CA snapshot at index %d, gen %d\n", i, gen);
+            free(pixels);
             return 1;
         }
         val = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
@@ -46,10 +54,12 @@ int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
     // Replace .pgm with .png
     char* ext = strstr(png_path, ".pgm");
     if (ext) { strcpy(ext, ".png"); }
-    if (!stbi_write_png(png_path, 64, 64, 1, pixels, 64)) {
+    if (!stbi_write_png(png_path, audit->grid_size, audit->grid_size, 1, pixels, audit->grid_size)) {
         fprintf(stderr, "FATAL: Cannot create CA state %s\n", png_path);
+        free(pixels);
         return 1;
     }
+    free(pixels);
     return 0;
 }
 
@@ -85,8 +95,15 @@ int write_predictions_csv(const char* path, int gen, AuditBuffer* audit) {
 // Append paths to manifest file
 void append_to_manifest(const char* manifest_path, const char* predictions_path,
                         const char* ca_path, double elapsed_sec) {
-    FILE* mf = fopen(manifest_path, "a");
+    FILE* mf = fopen(manifest_path, "r");
+    bool need_header = (mf == NULL);
+    if (mf) fclose(mf);
+
+    mf = fopen(manifest_path, "a");
     if (mf) {
+        if (need_header) {
+            fprintf(mf, "file,size,sha256,elapsed_sec\n");
+        }
         fprintf(mf, "%s,%.2f\n", predictions_path, elapsed_sec);
         fprintf(mf, "%s,%.2f\n", ca_path, elapsed_sec);
         fclose(mf);

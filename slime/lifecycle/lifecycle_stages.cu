@@ -368,18 +368,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     }
     __syncthreads();
 
-    float* entry_genome = nullptr;
-    float* parent_genome_temp = nullptr;
-    float ctx_metabolic = 0.0f;
-    float ctx_stress = 0.0f;
-    float ctx_morphogen = 0.0f;
-    uint64_t entry_hash = 0;
-    const float* entry_gradients = nullptr;
-    LifecyclePhase new_phase = LifecyclePhase::DORMANT;
-
     if (valid) {
-        entry_genome = &workspace_genomes[compact_idx * GENOME_SIZE * 2];
-        parent_genome_temp = &workspace_genomes[compact_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+        float* entry_genome = &workspace_genomes[compact_idx * GENOME_SIZE * 2];
+        float* parent_genome_temp = &workspace_genomes[compact_idx * GENOME_SIZE * 2 + GENOME_SIZE];
 
         reconstruct_genome_from_archive(
             entry->parent_hash,
@@ -395,21 +386,26 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             diresa_genome_weights
         );
 
-        ctx_metabolic = entry->fitness;
-        ctx_stress = entry->hunger;
-        ctx_morphogen = sample_neighborhood(chemical_field->concentration, actual_idx, grid_size);
+        float ctx_metabolic = entry->fitness;
+        float ctx_stress = entry->hunger;
+        float ctx_morphogen = sample_neighborhood(chemical_field->concentration, actual_idx, grid_size);
 
-        entry_hash = entry->genome_hash;
-        entry_gradients = entry->gradients;
+        uint64_t entry_hash = entry->genome_hash;
+        const float* entry_gradients = entry->gradients;
 
-        new_phase = local_state.decide_transition(tid, true, entry_hash, entry_genome, entry_gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        LifecyclePhase new_phase = local_state.decide_transition(tid, true, entry_hash, entry_genome, entry_gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        (void)new_phase; // Used by decide_transition side effects
     }
 
     float my_fitness = valid ? local_state.local_fitness[tid] : 0.0f;
     float my_coherence = valid ? local_state.local_coherence[tid] : 0.0f;
+    float my_stress = valid ? pool->entries[actual_idx].hunger : 0.0f;
+    float my_morphogen = valid ? sample_neighborhood(chemical_field->concentration, actual_idx, grid_size) : 0.0f;
 
     __shared__ float block_avg_fitness;
     __shared__ float block_avg_coherence;
+    __shared__ float block_avg_stress;
+    __shared__ float block_avg_morphogen;
     __shared__ int block_active_count;
 
     int threads_in_block = min((int)blockDim.x, pool->alive_indices_count - block_id * blockDim.x);
@@ -417,10 +413,14 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
 
     float total_fitness = BlockReduce<BLOCK_SIZE>::sum(my_fitness);
     float total_coherence = BlockReduce<BLOCK_SIZE>::sum(my_coherence);
+    float total_stress = BlockReduce<BLOCK_SIZE>::sum(my_stress);
+    float total_morphogen = BlockReduce<BLOCK_SIZE>::sum(my_morphogen);
 
     if (tid == 0) {
         block_avg_fitness = total_fitness / threads_in_block;
         block_avg_coherence = total_coherence / threads_in_block;
+        block_avg_stress = total_stress / threads_in_block;
+        block_avg_morphogen = total_morphogen / threads_in_block;
         block_active_count = threads_in_block;
     }
     __syncthreads();
@@ -433,6 +433,11 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     float* block_genome = &workspace_genomes[block_leader_compact * GENOME_SIZE * 2];
     const float* block_gradients = pool->entries[block_leader_actual].gradients;
 
+    // Block collective context
+    float block_ctx_metabolic = block_avg_fitness;
+    float block_ctx_stress = block_avg_stress;
+    float block_ctx_morphogen = block_avg_morphogen;
+
     int boost_threshold_center_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_center");
     int boost_threshold_steepness_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_steepness");
     int crisis_fitness_mult_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_fitness_mult");
@@ -442,14 +447,14 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     int elite_fitness_inherit_slot = derive_param_slot(block_genome_hash, "lifecycle_elite_fitness_inherit");
     int elite_coherence_reset_slot = derive_param_slot(block_genome_hash, "lifecycle_elite_coherence_reset");
 
-    float boost_threshold_center = genome_to_param(block_genome, block_gradients, boost_threshold_center_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_CENTER_MIN, LIFECYCLE_BOOST_THRESHOLD_CENTER_MAX);
-    float boost_threshold_steepness = genome_to_param(block_genome, block_gradients, boost_threshold_steepness_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MAX);
-    float crisis_fitness_mult = genome_to_param(block_genome, block_gradients, crisis_fitness_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_FITNESS_MULT_MIN, LIFECYCLE_CRISIS_FITNESS_MULT_MAX);
-    float crisis_coherence = genome_to_param(block_genome, block_gradients, crisis_coherence_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_COHERENCE_MIN, LIFECYCLE_CRISIS_COHERENCE_MAX);
-    float crisis_threshold_center = genome_to_param(block_genome, block_gradients, crisis_threshold_center_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_THRESHOLD_CENTER_MIN, LIFECYCLE_CRISIS_THRESHOLD_CENTER_MAX);
-    float crisis_threshold_steepness = genome_to_param(block_genome, block_gradients, crisis_threshold_steepness_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MAX);
-    float elite_fitness_inherit = genome_to_param(block_genome, block_gradients, elite_fitness_inherit_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_FITNESS_INHERIT_MIN, LIFECYCLE_ELITE_FITNESS_INHERIT_MAX);
-    float elite_coherence_reset = genome_to_param(block_genome, block_gradients, elite_coherence_reset_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_COHERENCE_RESET_MIN, LIFECYCLE_ELITE_COHERENCE_RESET_MAX);
+    float boost_threshold_center = genome_to_param(block_genome, block_gradients, boost_threshold_center_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_CENTER_MIN, LIFECYCLE_BOOST_THRESHOLD_CENTER_MAX);
+    float boost_threshold_steepness = genome_to_param(block_genome, block_gradients, boost_threshold_steepness_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MAX);
+    float crisis_fitness_mult = genome_to_param(block_genome, block_gradients, crisis_fitness_mult_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_FITNESS_MULT_MIN, LIFECYCLE_CRISIS_FITNESS_MULT_MAX);
+    float crisis_coherence = genome_to_param(block_genome, block_gradients, crisis_coherence_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_COHERENCE_MIN, LIFECYCLE_CRISIS_COHERENCE_MAX);
+    float crisis_threshold_center = genome_to_param(block_genome, block_gradients, crisis_threshold_center_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_THRESHOLD_CENTER_MIN, LIFECYCLE_CRISIS_THRESHOLD_CENTER_MAX);
+    float crisis_threshold_steepness = genome_to_param(block_genome, block_gradients, crisis_threshold_steepness_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MAX);
+    float elite_fitness_inherit = genome_to_param(block_genome, block_gradients, elite_fitness_inherit_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_FITNESS_INHERIT_MIN, LIFECYCLE_ELITE_FITNESS_INHERIT_MAX);
+    float elite_coherence_reset = genome_to_param(block_genome, block_gradients, elite_coherence_reset_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_COHERENCE_RESET_MIN, LIFECYCLE_ELITE_COHERENCE_RESET_MAX);
 
     float boost_prob = 1.0f / (1.0f + expf(-boost_threshold_steepness * (block_avg_fitness - boost_threshold_center)));
     if (valid && boost_prob > 0.5f) {
@@ -497,10 +502,6 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
                 pool->entries[worst_actual].coherence = elite_coherence_reset;
             }
         }
-    }
-
-    if (valid) {
-        local_state.phases[tid] = new_phase;
     }
 
     __syncthreads();

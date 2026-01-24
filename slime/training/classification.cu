@@ -11,40 +11,48 @@
 
 namespace cg = cooperative_groups;
 
+// Input layout: [batch × num_heads × grid² × channels]
+// Output layout: [batch × (num_heads × channels)]
 __global__ void spatial_pooling_kernel(
-    float* __restrict__ ca_state,
+    float* __restrict__ ca_output,
     float* __restrict__ pooling_weights,
     float* __restrict__ features,
     int batch_size,
+    int num_heads,
     int grid_size,
     int channels
 ) {
     int batch_idx = blockIdx.x;
-    int channel = blockIdx.y * blockDim.x + threadIdx.x;
+    int feature_idx = blockIdx.y * blockDim.x + threadIdx.x;
+    int num_features = num_heads * channels;
 
-    if (batch_idx >= batch_size || channel >= channels) return;
+    if (batch_idx >= batch_size || feature_idx >= num_features) return;
+
+    int head = feature_idx / channels;
+    int channel = feature_idx % channels;
 
     float sum = 0.0f;
     int spatial_size = grid_size * grid_size;
-    int base_idx = batch_idx * spatial_size * channels;
 
-    // Each thread handles one (batch, channel) - iterate ALL spatial positions
-    // Use texture cache for read-only ca_state access
+    // CA output layout: [batch × num_heads × grid² × channels]
+    int batch_stride = num_heads * spatial_size * channels;
+    int head_stride = spatial_size * channels;
+
+    int base_idx = batch_idx * batch_stride + head * head_stride;
+
     for (int spatial = 0; spatial < spatial_size; spatial++) {
-        int y = spatial / grid_size;
-        int x = spatial % grid_size;
-        int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        sum += ldg_float(&ca_state[idx]);
+        int idx = base_idx + spatial * channels + channel;
+        sum += ldg_float(&ca_output[idx]);
     }
 
     float avg = sum / spatial_size;
-    float weight = ldg_float(&pooling_weights[channel]);
+    float weight = ldg_float(&pooling_weights[feature_idx]);
     float weighted = avg * weight;
 
     if (isnan(weighted) || isinf(weighted)) {
         return;
     }
-    features[batch_idx * channels + channel] = weighted;
+    features[batch_idx * num_features + feature_idx] = weighted;
 }
 
 __global__ void classification_head_kernel(
@@ -240,50 +248,55 @@ __global__ void classification_head_backward_kernel(
     }
 }
 
+// Input grad layout: [batch × (num_heads × channels)]
+// CA output layout: [batch × num_heads × grid² × channels]
 __global__ void spatial_pooling_backward_kernel(
     float* __restrict__ features_grad,
-    float* __restrict__ ca_state,
+    float* __restrict__ ca_output,
     float* __restrict__ pooling_weights,
     float* __restrict__ pooling_weights_grad,
-    float* __restrict__ ca_state_grad,
+    float* __restrict__ ca_output_grad,
     int batch_size,
+    int num_heads,
     int grid_size,
     int channels
 ) {
     int batch_idx = blockIdx.x;
-    int channel = blockIdx.y * blockDim.x + threadIdx.x;
+    int feature_idx = blockIdx.y * blockDim.x + threadIdx.x;
+    int num_features = num_heads * channels;
 
-    if (batch_idx >= batch_size || channel >= channels) return;
+    if (batch_idx >= batch_size || feature_idx >= num_features) return;
 
-    // Use texture cache for read-only inputs
-    float feat_grad = ldg_float(&features_grad[batch_idx * channels + channel]);
+    int head = feature_idx / channels;
+    int channel = feature_idx % channels;
+
+    float feat_grad = ldg_float(&features_grad[batch_idx * num_features + feature_idx]);
 
     if (isnan(feat_grad) || isinf(feat_grad)) {
         return;
     }
 
     int spatial_size = grid_size * grid_size;
-    int base_idx = batch_idx * spatial_size * channels;
 
-    // Each thread handles one (batch, channel) - iterate ALL spatial positions
-    // Use texture cache for read-only ca_state access
+    // CA output layout: [batch × num_heads × grid² × channels]
+    int batch_stride = num_heads * spatial_size * channels;
+    int head_stride = spatial_size * channels;
+
+    int base_idx = batch_idx * batch_stride + head * head_stride;
+
     float ca_avg = 0.0f;
     for (int spatial = 0; spatial < spatial_size; spatial++) {
-        int y = spatial / grid_size;
-        int x = spatial % grid_size;
-        int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        ca_avg += ldg_float(&ca_state[idx]);
+        int idx = base_idx + spatial * channels + channel;
+        ca_avg += ldg_float(&ca_output[idx]);
     }
     ca_avg /= spatial_size;
 
-    Atomics::add_float(&pooling_weights_grad[channel], feat_grad * ca_avg);
+    Atomics::add_float(&pooling_weights_grad[feature_idx], feat_grad * ca_avg);
 
-    float ca_grad_val = feat_grad * ldg_float(&pooling_weights[channel]) / spatial_size;
+    float ca_grad_val = feat_grad * ldg_float(&pooling_weights[feature_idx]) / spatial_size;
     for (int spatial = 0; spatial < spatial_size; spatial++) {
-        int y = spatial / grid_size;
-        int x = spatial % grid_size;
-        int idx = base_idx + y * grid_size * channels + x * channels + channel;
-        ca_state_grad[idx] += ca_grad_val;
+        int idx = base_idx + spatial * channels + channel;
+        ca_output_grad[idx] += ca_grad_val;
     }
 }
 

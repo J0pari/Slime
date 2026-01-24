@@ -102,7 +102,11 @@ __global__ void recall_memory_kernel(
             }
         }
 
-        output[tid] = weight_total > 0.0f ? weighted_sum / weight_total : 0.0f;
+        // Temporal coherence: if no memories contribute, preserve existing output value
+        if (weight_total > 0.0f) {
+            output[tid] = weighted_sum / weight_total;
+        }
+        // else: preserve existing output[tid] (no memories to recall)
     }
 }
 

@@ -556,20 +556,46 @@ extern "C" __global__ void sample_batch_kernel(
     }
 }
 
+// Channel layout per architecture.md:
+// 0-5: ChemicalField (concentration, grad_x, grad_y, laplacian, sources, decay_factors)
+// 6-9: RDField (resource_density, fitness_landscape, U_field, V_field)
+// 10: BehavioralField
+// 11-13: Dataset sample (image channels)
+// 14: Previous CA output (recurrence)
+// 15: Temporal retrieval
+
 __global__ void inject_sample_to_ca_kernel(
-    float* batch,
     float* ca_state,
     int batch_size,
     int channels,
-    int grid_size
+    int grid_size,
+    // ChemicalField sources (channels 0-5)
+    float* chem_concentration,
+    float* chem_gradient_x,
+    float* chem_gradient_y,
+    float* chem_laplacian,
+    float* chem_sources,
+    float* chem_decay_factors,
+    // RD field sources (channels 6-9)
+    float* rd_resource_density,
+    float* rd_fitness_landscape,
+    float* rd_resource_gradient_x,
+    float* rd_resource_gradient_y,
+    // Behavioral field (channel 10)
+    float* behavioral_field,
+    // Dataset sample (channels 11-13)
+    float* batch_images,
+    int image_channels,
+    // Recurrence (channel 14) - previous step's final concentration, layout: [batch × grid² × channels]
+    float* prev_concentration,
+    // Temporal retrieval (channel 15)
+    float* attractor_field
 ) {
     int batch_idx = blockIdx.z;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (batch_idx >= batch_size || y >= grid_size || x >= grid_size) return;
-
-    float sample_value = batch[batch_idx * grid_size * grid_size + y * grid_size + x];
 
     if (ca_state == nullptr) {
         if (threadIdx.x == 0 && threadIdx.y == 0 && batch_idx == 0) {
@@ -578,16 +604,39 @@ __global__ void inject_sample_to_ca_kernel(
         return;
     }
 
-    if (isnan(sample_value) || isinf(sample_value)) {
-        printf("FATAL [inject_sample_to_ca]: Invalid sample value %f at batch=%d y=%d x=%d\n",
-               sample_value, batch_idx, y, x);
-        return;
-    }
+    int spatial_idx = y * grid_size + x;
+    int base_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
 
-    int base_idx = batch_idx * grid_size * grid_size * channels + y * grid_size * channels + x * channels;
-    for (int c = 0; c < channels; c++) {
-        ca_state[base_idx + c] = sample_value;
-    }
+    // Channel 0-5: ChemicalField (shared across batches)
+    ca_state[base_idx + 0] = chem_concentration[spatial_idx];
+    ca_state[base_idx + 1] = chem_gradient_x[spatial_idx];
+    ca_state[base_idx + 2] = chem_gradient_y[spatial_idx];
+    ca_state[base_idx + 3] = chem_laplacian[spatial_idx];
+    ca_state[base_idx + 4] = chem_sources[spatial_idx];
+    ca_state[base_idx + 5] = chem_decay_factors[spatial_idx];
+
+    // Channel 6-9: RD fields (shared across batches)
+    ca_state[base_idx + 6] = rd_resource_density[spatial_idx];
+    ca_state[base_idx + 7] = rd_fitness_landscape[spatial_idx];
+    ca_state[base_idx + 8] = rd_resource_gradient_x[spatial_idx];
+    ca_state[base_idx + 9] = rd_resource_gradient_y[spatial_idx];
+
+    // Channel 10: Behavioral field (shared across batches)
+    ca_state[base_idx + 10] = behavioral_field[spatial_idx];
+
+    // Channel 11-13: Dataset sample (per-batch, replicate channel 0 if grayscale)
+    int img_base = batch_idx * grid_size * grid_size * image_channels;
+    ca_state[base_idx + 11] = batch_images[img_base + spatial_idx];
+    ca_state[base_idx + 12] = batch_images[img_base + ((image_channels > 1) ? grid_size * grid_size : 0) + spatial_idx];
+    ca_state[base_idx + 13] = batch_images[img_base + ((image_channels > 2) ? 2 * grid_size * grid_size : 0) + spatial_idx];
+
+    // Channel 14: Previous concentration (recurrence) - channel 0 from previous step's final state
+    // prev_concentration layout: [batch × grid² × channels]
+    int prev_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
+    ca_state[base_idx + 14] = prev_concentration[prev_idx + 0];
+
+    // Channel 15: Temporal/attractor retrieval (shared across batches)
+    ca_state[base_idx + 15] = attractor_field[spatial_idx];
 }
 
 __host__ bool read_binary_blob(const char* path, void* buffer, size_t size, size_t skip_bytes) {

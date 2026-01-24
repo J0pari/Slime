@@ -729,7 +729,7 @@ struct Stencils {
         const float* __restrict__ global,
         int x, int y,
         int grid_size,
-        int stride = 1
+        int stride
     ) {
         #pragma unroll
         for (int dy = -1; dy <= 1; dy++) {
@@ -746,10 +746,11 @@ struct Stencils {
     __device__ static float laplacian_at(
         const float* __restrict__ global,
         int x, int y,
-        int grid_size
+        int grid_size,
+        int stride
     ) {
         float stencil[3][3];
-        load_3x3(stencil, global, x, y, grid_size);
+        load_3x3(stencil, global, x, y, grid_size, stride);
         return laplacian_2d(stencil);
     }
 
@@ -757,10 +758,11 @@ struct Stencils {
     __device__ static float gradient_x_at(
         const float* __restrict__ global,
         int x, int y,
-        int grid_size
+        int grid_size,
+        int stride
     ) {
         float stencil[3][3];
-        load_3x3(stencil, global, x, y, grid_size);
+        load_3x3(stencil, global, x, y, grid_size, stride);
         return gradient_x(stencil);
     }
 
@@ -768,10 +770,11 @@ struct Stencils {
     __device__ static float gradient_y_at(
         const float* __restrict__ global,
         int x, int y,
-        int grid_size
+        int grid_size,
+        int stride
     ) {
         float stencil[3][3];
-        load_3x3(stencil, global, x, y, grid_size);
+        load_3x3(stencil, global, x, y, grid_size, stride);
         return gradient_y(stencil);
     }
 
@@ -781,10 +784,11 @@ struct Stencils {
         float& grad_y,
         const float* __restrict__ global,
         int x, int y,
-        int grid_size
+        int grid_size,
+        int stride
     ) {
         float stencil[3][3];
-        load_3x3(stencil, global, x, y, grid_size);
+        load_3x3(stencil, global, x, y, grid_size, stride);
         grad_x = gradient_x(stencil);
         grad_y = gradient_y(stencil);
     }
@@ -797,10 +801,11 @@ struct Stencils {
         float& center,
         const float* __restrict__ global,
         int x, int y,
-        int grid_size
+        int grid_size,
+        int stride
     ) {
         float stencil[3][3];
-        load_3x3(stencil, global, x, y, grid_size);
+        load_3x3(stencil, global, x, y, grid_size, stride);
         grad_x = gradient_x(stencil);
         grad_y = gradient_y(stencil);
         lap = laplacian_2d(stencil);

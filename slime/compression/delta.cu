@@ -83,14 +83,15 @@ __device__ void reconstruct_genome_from_archive(
             diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
             reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
         } else {
+            printf("ORPHAN [reconstruct]: parent=%llu evicted, de novo genesis\n", (unsigned long long)parent_hash);
+            curandState_t rng;
+            curand_init(parent_hash, 0, 0, &rng);
             for (int i = 0; i < genome_length; i++) {
-                output_genome[i] = 0.0f;
+                output_genome[i] = curand_normal(&rng) * 0.1f;
             }
             for (int i = 0; i < num_deltas && i < max_deltas; i++) {
                 uint16_t idx = delta_indices[i];
-                if (idx < genome_length) {
-                    output_genome[idx] = delta_values[i];
-                }
+                if (idx < genome_length) output_genome[idx] += delta_values[i];
             }
         }
     }
