@@ -49,7 +49,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     CAParameterMap* param_map,
     int generation,
     float* workspace_genomes,
-    bool eval_only
+    bool eval_only,
+    AuditBuffer* audit
 ) {
     extern __shared__ float sdata[];
     int entry_idx = blockIdx.x;
@@ -83,6 +84,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     if (tid == 0) sdata[0] = local_ca_mean;
     __syncthreads();
     local_ca_mean = sdata[0];
+
+    // Shared error flag - if tid==0 detects an error, all threads must exit together
+    __shared__ int s_error_flag;
+    if (tid == 0) s_error_flag = 0;
+    __syncthreads();
 
     // Sequential setup - only thread 0 (other threads wait for parallel Flow Lenia)
     __shared__ float* s_primary_genome;
@@ -197,17 +203,17 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                    (void*)ca_state,
                    (void*)training_mode,
                    (void*)param_map);
-            return;
+            s_error_flag = 1;
         }
 
-        if (training_mode->batch_images == nullptr || training_mode->batch_labels == nullptr) {
+        if (!s_error_flag && (training_mode->batch_images == nullptr || training_mode->batch_labels == nullptr)) {
             printf("!E:hybrid batch_buffers_null images=%p labels=%p\n",
                    (void*)training_mode->batch_images,
                    (void*)training_mode->batch_labels);
-            return;
+            s_error_flag = 1;
         }
 
-        sample_batch_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
+        if (!s_error_flag) sample_batch_kernel<<<training_mode->batch_size, BLOCK_SIZE>>>(
             organism->current_dataset,
             training_mode,
             training_mode->batch_size,
@@ -293,10 +299,15 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         }
 
         SLIME_DEBUG_PRINT("V:hybrid:276 pre_sync\n");
-        cudaDeviceSynchronize();  // CDP barrier - required
-        SLIME_DEBUG_PRINT("V:hybrid:278 post_sync\n");
         }  // end if (tid == 0)
+
+        // All threads check error flag and exit together if error detected
         __syncthreads();
+        if (s_error_flag) return;
+
+        // Skip cudaDeviceSynchronize to avoid CDP blocking across blocks
+        // Child kernels may still be running - Flow Lenia will use current buffer state
+        SLIME_DEBUG_PRINT("V:hybrid:278 post_sync\n");
 
     // Flow Lenia: transport mass based on CA affinity gradients (ALL threads of ALL blocks)
     {
@@ -486,7 +497,28 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             );
             CUDA_LAUNCH_CHECK();
             SLIME_DEBUG_PRINT("V:hybrid:482 post_task_performance\n");
-            cudaDeviceSynchronize();  // CDP barrier - required
+
+            // Block 0 syncs and populates audit buffer with forward pass results
+            if (entry_idx == 0 && audit) {
+                cudaDeviceSynchronize();
+                populate_audit_buffer(
+                    audit,
+                    generation,
+                    logits,
+                    training_mode->batch_labels,
+                    training_mode->batch_images,
+                    training_mode->batch_size,
+                    num_classes,
+                    organism->pool->entries[0].ca_state->ca_concentration,
+                    arch.grid_size,
+                    organism->telemetry->task_performance.train_accuracy,
+                    organism->telemetry->task_performance.test_accuracy,
+                    organism->telemetry,
+                    organism->pool
+                );
+                SLIME_DEBUG_PRINT("V:hybrid:audit_done gen=%d\n", generation);
+            }
+
             SLIME_DEBUG_PRINT("V:hybrid:484 post_sync\n");
 
             // Skip backward pass for eval-only mode (test evaluation)
@@ -846,9 +878,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             component_workspace_genomes
         );
         CUDA_LAUNCH_CHECK();
-        SLIME_DEBUG_PRINT("V:hybrid:847 pre_component_sync\n");
-        cudaDeviceSynchronize();
-        SLIME_DEBUG_PRINT("V:hybrid:849 post_component_sync\n");
+        // Component evolution sync handled by parent after this kernel returns
 
         if (!training_mode->use_gradients) {
             SLIME_DEBUG_PRINT("V:hybrid:852 pre_neural_ca\n");
@@ -867,7 +897,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 arch.grid_size
             );
             CUDA_LAUNCH_CHECK();
-            cudaDeviceSynchronize();
+            // Neural CA sync handled by parent after this kernel returns
         }
     }
 
@@ -973,14 +1003,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         CUDA_LAUNCH_CHECK();
         SLIME_DEBUG_PRINT("V:hybrid:973 post_memory_update\n");
 
-        // Synchronize to ensure ALL child kernels complete before exiting
-        // This prevents persistent loop's cudaDeviceSynchronize from blocking forever
-        SLIME_DEBUG_PRINT("V:hybrid:977 pre_final_sync\n");
-        cudaDeviceSynchronize();  // CDP barrier - required
-        SLIME_DEBUG_PRINT("V:hybrid:979 post_final_sync\n");
-    }  // end if (tid == 0)
-    SLIME_DEBUG_PRINT("V:hybrid:981 pre_syncthreads entry_idx=%d tid=%d\n", entry_idx, tid);
-    __syncthreads();
+        // Child kernel sync handled by parent's cudaDeviceSynchronize after this kernel returns
+    }  // end if (tid == 0 && entry_idx == 0)
+
+    // NOTE: No __syncthreads here - it would deadlock since entry 0's tid=0
+    // is blocked at cudaDeviceSynchronize while other threads wait at syncthreads
     SLIME_DEBUG_PRINT("V:hybrid:983 kernel_exit entry_idx=%d tid=%d\n", entry_idx, tid);
 }
 

@@ -621,10 +621,9 @@ __device__ void populate_audit_buffer(
         }
     }
 
-    if (ca_concentration) {
+    if (ca_concentration && pool && pool->entries[0].channels > 0) {
         int snap_grid = 64;
-        // CA concentration layout: [grid² × channels], snapshot channel 0
-        int channels = (pool && pool->entries[0].channels > 0) ? pool->entries[0].channels : 16;
+        int channels = pool->entries[0].channels;
         for (int y = 0; y < snap_grid && y < grid_size; y++) {
             for (int x = 0; x < snap_grid && x < grid_size; x++) {
                 int cell_idx = y * grid_size + x;

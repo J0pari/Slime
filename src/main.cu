@@ -290,7 +290,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.memory_data_pool, sizeof(float) * POOL_CAPACITY_MAX * (BEHAVIORAL_DIM_MAX + AGENT_SPATIAL_DIMS), "memory_data_pool");
     CUDA_ALLOC_CHECK(buffers_host.prediction_error_history, sizeof(float) * TELEMETRY_DETAILED, "prediction_error_history");
     CUDA_ALLOC_CHECK(buffers_host.trace_buffer, sizeof(TraceBuffer), "trace_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.trace_array, sizeof(ExecutionTrace) * GENOME_SIZE, "trace_array");
+    CUDA_ALLOC_CHECK(buffers_host.trace_array, sizeof(ExecutionTrace) * TRACE_CAPACITY * POOL_CAPACITY_MAX, "trace_array");
     CUDA_ALLOC_CHECK(buffers_host.hardware_geom, sizeof(HardwareGeometry), "hardware_geom");
     CUDA_ALLOC_CHECK(buffers_host.delta_indices_pool, sizeof(uint16_t) * POOL_CAPACITY_MAX * MAX_DELTAS_PER_ENTRY, "delta_indices_pool");
     CUDA_ALLOC_CHECK(buffers_host.delta_values_pool, sizeof(float) * POOL_CAPACITY_MAX * MAX_DELTAS_PER_ENTRY, "delta_values_pool");

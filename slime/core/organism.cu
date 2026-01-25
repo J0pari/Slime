@@ -379,7 +379,14 @@ __global__ void compute_fitness_from_diresa_kernel(Organism* organism, Component
 __global__ void reduce_concentration_mean_kernel(ChemicalField* field, int total_cells, float* partial_sums);
 __global__ void finalize_concentration_mean_kernel(ChemicalField* field, float* partial_sums, int num_blocks, int total_cells);
 __global__ void coherence_kernel(float* prediction_errors, float* coherence_out, int history_length);
-__global__ void initialize_ca_from_field_kernel(ComponentPool* pool, float* chemical_concentration, int max_grid_size, int entry_idx);
+__global__ void initialize_ca_from_field_kernel(
+    ComponentPool* pool,
+    const float* chem_concentration, const float* chem_gradient_x, const float* chem_gradient_y,
+    const float* chem_laplacian, const float* chem_sources, const float* chem_decay_factors,
+    const float* rd_resource_density, const float* rd_fitness_landscape,
+    const float* rd_resource_gradient_x, const float* rd_resource_gradient_y,
+    const float* behavioral_field, const float* attractor_field,
+    int max_grid_size, int entry_idx);
 __global__ void update_field_from_ca_kernel(ComponentPool* pool, float* chemical_concentration, int max_grid_size, int entry_idx);
 __global__ void prepare_ca_fp16_kernel(ComponentPool* pool, int max_grid_size, ArchitectureParams arch, int entry_idx);
 __global__ void multi_head_ca_tensor_kernel(ComponentPool* pool, int max_grid_size, ArchitectureParams arch, int entry_idx);
@@ -2910,10 +2917,8 @@ __global__ void init_organism_phase2_kernel(
         dim3 weight_init_grid((total_weights_size + BLOCK_SIZE - 1) / BLOCK_SIZE, pool_capacity);
         dim3 weight_init_block(BLOCK_SIZE);
 
-        init_organism_ca_weights_kernel<<<weight_init_grid, weight_init_block>>>(
-            organism->pool,
-            arch
-        );
+        // NOTE: init_organism_ca_weights_kernel moved to after entry->ca_state setup loop
+        // (was causing race condition - kernel read entry->ca_state before it was initialized)
 
         float* all_ca_state = buffers->all_ca_state;
         MultiHeadCAState* ca_state_pool = buffers->ca_state_pool;
@@ -2965,6 +2970,12 @@ __global__ void init_organism_phase2_kernel(
 
             entry->ca_state = entry_ca_state;
         }
+
+        // Now that entry->ca_state and weight pointers are initialized, launch weight init kernel
+        init_organism_ca_weights_kernel<<<weight_init_grid, weight_init_block>>>(
+            organism->pool,
+            arch
+        );
 
         float* all_chem_fields = buffers->all_chem_fields;
         organism->chemical_field->concentration = all_chem_fields + CA_FIELD_SIZE * CHEM_CONCENTRATION;
@@ -3749,6 +3760,52 @@ __global__ void persistent_evolution_kernel(
 
         // ========== PHASE 2: Per-Entry CA Processing ==========
         printf("V:P2_start gen=%d\n", generation);
+
+        // Initialize per-entry CA from shared chemical field (stigmergy loop: chemical_field → per-entry CA)
+        // This completes the bidirectional data flow: training→chemical_field→diffusion→per-entry CA
+        dim3 init_field_grid((arch_p1.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM,
+                             (arch_p1.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+        dim3 init_field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
+
+        // Get attractor field from temporal history for channel 15
+        float* attractor_field = nullptr;
+        if (organism->chemical_field->history != nullptr &&
+            organism->chemical_field->history->count > 0) {
+            // Use most recent temporal snapshot
+            int recent_idx = (organism->chemical_field->history->head +
+                              organism->chemical_field->history->count - 1) %
+                             organism->chemical_field->history->capacity;
+            attractor_field = organism->chemical_field->history->entries[recent_idx].data;
+        }
+
+        for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
+            initialize_ca_from_field_kernel<<<init_field_grid, init_field_block>>>(
+                organism->pool,
+                // ChemicalField (channels 0-5)
+                organism->chemical_field->concentration,
+                organism->chemical_field->gradient_x,
+                organism->chemical_field->gradient_y,
+                organism->chemical_field->laplacian,
+                organism->chemical_field->sources,
+                nullptr,  // decay_factors - use nullptr if not stored
+                // RDField (channels 6-9)
+                organism->resource_density,
+                organism->fitness_landscape,
+                organism->resource_gradient_x,
+                organism->resource_gradient_y,
+                // BehavioralField (channel 10)
+                organism->behavioral_field_pool,
+                // Temporal retrieval (channel 15)
+                attractor_field,
+                arch_p1.grid_size,
+                entry_idx
+            );
+        }
+        err = cudaGetLastError();
+        if (err != cudaSuccess) { printf("!E:P2_init_ca gen=%d err=%d\n", generation, (int)err); return; }
+        cudaDeviceSynchronize();
+        printf("V:P2_init_ca gen=%d\n", generation);
+
         neural_ca_update_kernel<<<capacity, WARP_SIZE>>>(
             organism, organism->chemical_field, organism->effective_rank_history,
             organism->buffers->fp32_ca_workspace, generation, organism->pool,
@@ -3756,6 +3813,20 @@ __global__ void persistent_evolution_kernel(
             organism_workspace_genomes, organism->trace_buffer, arch_p1.grid_size);
         err = cudaGetLastError();
         if (err != cudaSuccess) { printf("!E:P2_ca gen=%d err=%d\n", generation, (int)err); return; }
+        cudaDeviceSynchronize();
+
+        // Update shared chemical field from per-entry CA output (stigmergy loop: per-entry CA → chemical_field)
+        // This completes the bidirectional data flow: per-entry CA→chemical_field→diffusion→next iteration
+        for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
+            update_field_from_ca_kernel<<<init_field_grid, init_field_block>>>(
+                organism->pool,
+                organism->chemical_field->concentration,
+                arch_p1.grid_size,
+                entry_idx
+            );
+        }
+        err = cudaGetLastError();
+        if (err != cudaSuccess) { printf("!E:P2_update_field gen=%d err=%d\n", generation, (int)err); return; }
 
         cudaDeviceSynchronize();  // BARRIER: Phase 2 complete
         printf("V:P2_done gen=%d\n", generation);
@@ -3775,14 +3846,16 @@ __global__ void persistent_evolution_kernel(
         // Produces telemetry (classification accuracy, gradient magnitudes) for DIRESA
         if (generation % CHECKPOINT_INTERVAL == 0) {
             printf("V:checkpoint gen=%d\n", generation);
-            int lifecycle_blocks = capacity;  // One block per pool entry
+
+            int lifecycle_blocks = capacity;
             hybrid_organism_lifecycle_kernel<<<lifecycle_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
                 organism,
                 organism->training_mode,
                 organism->param_map,
                 generation,
                 organism_workspace_genomes,
-                false  // eval_only=false for training
+                false,  // eval_only=false for training
+                audit
             );
             err = cudaGetLastError();
             if (err != cudaSuccess) {
@@ -3811,7 +3884,8 @@ __global__ void persistent_evolution_kernel(
                     organism->param_map,
                     generation,
                     organism_workspace_genomes,
-                    true  // eval_only=true for test
+                    true,  // eval_only=true for test
+                    nullptr  // no audit during test eval
                 );
                 err = cudaGetLastError();
                 if (err != cudaSuccess) {

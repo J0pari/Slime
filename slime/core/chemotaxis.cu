@@ -110,6 +110,101 @@ __global__ void update_field_from_ca_kernel(
     }
 }
 
+// Initialize per-entry CA state from shared chemical field and RD fields
+// This is the reverse of update_field_from_ca_kernel - completing the bidirectional stigmergy loop
+// Channel layout matches inject_sample_to_ca_kernel:
+// 0-5: ChemicalField (concentration, gradients, laplacian, sources, decay)
+// 6-9: RDField (resource_density, fitness_landscape, resource gradients)
+// 10: BehavioralField
+// 11-13: Dataset samples (zeroed for evolutionary path - training encodes patterns in chemical field)
+// 14: Previous CA output (recurrence)
+// 15: Temporal retrieval
+__global__ void initialize_ca_from_field_kernel(
+    ComponentPool* __restrict__ pool,
+    // ChemicalField components (channels 0-5)
+    const float* __restrict__ chem_concentration,
+    const float* __restrict__ chem_gradient_x,
+    const float* __restrict__ chem_gradient_y,
+    const float* __restrict__ chem_laplacian,
+    const float* __restrict__ chem_sources,
+    const float* __restrict__ chem_decay_factors,
+    // RDField components (channels 6-9)
+    const float* __restrict__ rd_resource_density,
+    const float* __restrict__ rd_fitness_landscape,
+    const float* __restrict__ rd_resource_gradient_x,
+    const float* __restrict__ rd_resource_gradient_y,
+    // BehavioralField (channel 10)
+    const float* __restrict__ behavioral_field,
+    // Temporal retrieval (channel 15)
+    const float* __restrict__ attractor_field,
+    int max_grid_size,
+    int entry_idx
+) {
+    if (entry_idx >= pool->capacity) return;
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!entry->alive) return;
+
+    int grid_size = entry->grid_size;
+    int channels = entry->channels;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= grid_size || y >= grid_size) return;
+
+    int cell_idx = y * grid_size + x;
+    float* ca_concentration = entry->ca_state->ca_concentration;
+    int base_idx = cell_idx * channels;
+
+    // Channel 0-5: ChemicalField
+    ca_concentration[base_idx + 0] = chem_concentration[cell_idx];
+    ca_concentration[base_idx + 1] = chem_gradient_x[cell_idx];
+    ca_concentration[base_idx + 2] = chem_gradient_y[cell_idx];
+    ca_concentration[base_idx + 3] = chem_laplacian[cell_idx];
+    ca_concentration[base_idx + 4] = chem_sources[cell_idx];
+    ca_concentration[base_idx + 5] = (chem_decay_factors != nullptr) ? chem_decay_factors[cell_idx] : 0.0f;
+
+    // Channel 6-9: RDField
+    ca_concentration[base_idx + 6] = rd_resource_density[cell_idx];
+    ca_concentration[base_idx + 7] = rd_fitness_landscape[cell_idx];
+    ca_concentration[base_idx + 8] = rd_resource_gradient_x[cell_idx];
+    ca_concentration[base_idx + 9] = rd_resource_gradient_y[cell_idx];
+
+    // Channel 10: BehavioralField
+    ca_concentration[base_idx + 10] = behavioral_field[cell_idx];
+
+    // Channel 11-13: Dataset samples - NOT present in evolutionary path
+    // The training encodes dataset patterns into chemical field, which we read above
+    // Setting to zero is intentional - these channels are for training only
+    if (channels > 11) ca_concentration[base_idx + 11] = 0.0f;
+    if (channels > 12) ca_concentration[base_idx + 12] = 0.0f;
+    if (channels > 13) ca_concentration[base_idx + 13] = 0.0f;
+
+    // Channel 14: Previous CA output (recurrence) - read from ca_output channel 0
+    if (channels > 14) {
+        // Use previous iteration's CA output for recurrence
+        float* ca_output = entry->ca_state->ca_output;
+        if (ca_output != nullptr) {
+            // ca_output layout: [num_heads × grid² × head_dim], sum across heads for recurrence
+            int num_heads = entry->num_heads;
+            int head_dim = entry->head_dim;
+            float recurrence = 0.0f;
+            for (int h = 0; h < num_heads; h++) {
+                int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
+                recurrence += ca_output[output_idx];  // First element of each head's output
+            }
+            ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
+        } else {
+            ca_concentration[base_idx + 14] = 0.0f;
+        }
+    }
+
+    // Channel 15: Temporal retrieval
+    if (channels > 15) {
+        ca_concentration[base_idx + 15] = (attractor_field != nullptr) ? attractor_field[cell_idx] : 0.0f;
+    }
+}
+
 __global__ void diffusion_reaction_kernel(
     float* __restrict__ concentration,
     float* __restrict__ gradient_x,

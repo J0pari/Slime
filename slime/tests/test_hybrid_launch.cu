@@ -4,8 +4,9 @@
 struct Organism;
 struct HybridTrainingMode;
 struct CAParameterMap;
+struct AuditBuffer;
 
-extern "C" __global__ void hybrid_organism_lifecycle_kernel(Organism*, HybridTrainingMode*, CAParameterMap*, int);
+extern "C" __global__ void hybrid_organism_lifecycle_kernel(Organism*, HybridTrainingMode*, CAParameterMap*, int, float*, bool, AuditBuffer*);
 
 __global__ void test_wrapper_kernel() {
     if (threadIdx.x == 0 && blockIdx.x == 0) {

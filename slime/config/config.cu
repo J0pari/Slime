@@ -6,8 +6,7 @@
 #include <math_constants.h>
 
 // ============================================================================
-// DEBUG CONFIGURATION
-// Set to 0 for release builds to eliminate error-check branching overhead
+// DEBUG CONFIGURATION - NEVER DISABLE
 // ============================================================================
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
@@ -33,7 +32,7 @@
         } \
     } while(0)
 
-#define SLIME_DEBUG_PRINT(...) printf(__VA_ARGS__)
+#define SLIME_DEBUG_PRINT(...) printf(__VA_ARGS__)  // TESTED 2026-01-25: disabling does NOT fix hangs - NOT a printf buffer issue
 #else
 // Release mode: no-op macros
 #define CUDA_LAUNCH_CHECK() ((void)0)
