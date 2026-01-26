@@ -360,12 +360,6 @@ struct Organism {
     int* weight_inherit_num_pending;
 
     curandState* rng_states;
-
-    // Batched training buffers - sized for BATCH_SIZE_MAX concurrent samples
-    float* batch_affinity_reduced;      // [BATCH_SIZE_MAX * CA_FIELD_SIZE]
-    float* batch_flow_field;            // [BATCH_SIZE_MAX * CA_FIELD_SIZE * 2]
-    float* batch_reintegration_buffer;  // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX]
-    float* batch_prev_concentration;    // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX] - previous step's final state for recurrence
 };
 
 #include "../training/hybrid_lifecycle.cu"
@@ -403,18 +397,7 @@ __global__ void init_pool_kernel(ComponentPool* pool, int capacity, uint16_t* de
 __global__ void compact_pool_alive_indices_kernel(ComponentPool* pool, int* flags, int* scan_workspace, int* scan_recursive_workspace, int capacity);
 __global__ void init_organism_ca_weights_kernel(ComponentPool* pool, ArchitectureParams arch);
 
-__device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* pool, int idx) {
-    ArchitectureParams arch;
-    arch.num_heads = pool->entries[idx].num_heads;
-    arch.channels = pool->entries[idx].channels;
-    arch.hidden_dim = pool->entries[idx].hidden_dim;
-    arch.head_dim = pool->entries[idx].head_dim;
-    arch.grid_size = pool->entries[idx].grid_size;
-    // Gate center derived from coherence: low coherence → conservative, high → aggressive
-    float coherence = fminf(fmaxf(pool->entries[idx].coherence, 0.0f), 1.0f);
-    arch.ca_gate_center = 2.0f - 1.5f * coherence;
-    return arch;
-}
+// get_arch_from_pool moved to pool.cu for proper include ordering
 
 extern "C" __global__ void organism_lifecycle_kernel(
     Organism* organism,
@@ -585,6 +568,9 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->telemetry->last_total_culled = current_culled;
             organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
             diresa_evolution_probe_kernel<<<1, 1>>>(arch, organism->archive_size, &organism->telemetry->diresa_evolution);
+
+            // Mark telemetry as valid so populate_audit_buffer copies the data
+            organism->telemetry->valid = true;
         }
 
         float spawn_prob = spawn_rate * expf(-Atomics::load_int(organism->pool->active_count) / (float)organism->pool->capacity);
@@ -1641,7 +1627,8 @@ __global__ void populate_organism_flow_params_kernel(
 __global__ void reduce_affinity_kernel(ComponentPool* pool, int max_grid_size, int entry_idx) {
     if (entry_idx >= pool->capacity) return;
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive || entry->ca_state == nullptr) return;
+    if (!entry->alive) return;
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "alive entry has null ca_state");
 
     int cell_idx = blockIdx.x;
     int grid_size = entry->grid_size;
@@ -1673,7 +1660,8 @@ __global__ void reduce_affinity_kernel(ComponentPool* pool, int max_grid_size, i
 __global__ void compute_flow_field_kernel(ComponentPool* pool, int max_grid_size, int entry_idx) {
     if (entry_idx >= pool->capacity) return;
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive || entry->ca_state == nullptr) return;
+    if (!entry->alive) return;
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "alive entry has null ca_state");
 
     int grid_size = entry->grid_size;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1712,7 +1700,8 @@ __global__ void compute_flow_field_kernel(ComponentPool* pool, int max_grid_size
 __global__ void clear_reintegration_buffer_kernel(ComponentPool* pool, int max_buffer_size, int entry_idx) {
     if (entry_idx >= pool->capacity) return;
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive || entry->ca_state == nullptr) return;
+    if (!entry->alive) return;
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "alive entry has null ca_state");
 
     int buffer_size = entry->grid_size * entry->grid_size * entry->channels;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1724,7 +1713,8 @@ __global__ void clear_reintegration_buffer_kernel(ComponentPool* pool, int max_b
 __global__ void reintegration_redistribute_kernel(ComponentPool* pool, int max_grid_size, int entry_idx) {
     if (entry_idx >= pool->capacity) return;
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive || entry->ca_state == nullptr) return;
+    if (!entry->alive) return;
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "alive entry has null ca_state");
 
     int grid_size = entry->grid_size;
     int source_x = blockIdx.x;
@@ -1753,7 +1743,8 @@ __global__ void reintegration_redistribute_kernel(ComponentPool* pool, int max_g
 __global__ void copy_reintegration_to_concentration_kernel(ComponentPool* pool, int max_buffer_size, int entry_idx) {
     if (entry_idx >= pool->capacity) return;
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive || entry->ca_state == nullptr) return;
+    if (!entry->alive) return;
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "alive entry has null ca_state");
 
     int buffer_size = entry->grid_size * entry->grid_size * entry->channels;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3180,10 +3171,6 @@ __global__ void init_organism_phase2_kernel(
 
         // Allocate batch training pools
         organism->batch_ca_states_pool = buffers->batch_ca_states_pool;
-        organism->batch_affinity_reduced = buffers->batch_affinity_reduced;
-        organism->batch_flow_field = buffers->batch_flow_field;
-        organism->batch_reintegration_buffer = buffers->batch_reintegration_buffer;
-        organism->batch_prev_concentration = buffers->batch_prev_concentration;
         organism->batch_labels_pool = buffers->batch_labels_pool;
         organism->task_loss_pool = buffers->task_loss_pool;
         organism->reg_loss_pool = buffers->reg_loss_pool;
@@ -3787,7 +3774,7 @@ __global__ void persistent_evolution_kernel(
                 organism->chemical_field->gradient_y,
                 organism->chemical_field->laplacian,
                 organism->chemical_field->sources,
-                nullptr,  // decay_factors - use nullptr if not stored
+                organism->chemical_field->decay_factors,
                 // RDField (channels 6-9)
                 organism->resource_density,
                 organism->fitness_landscape,
@@ -3901,28 +3888,28 @@ __global__ void persistent_evolution_kernel(
                 organism->training_mode->is_train_batch = true;
             }
 
-            // V: pre-audit vertex probe - expose all edges to populate_audit_buffer
-            printf("V:pre_audit audit=%p tm=%p logits=%p tele=%p\n",
-                   (void*)audit, (void*)organism->training_mode,
-                   (void*)organism->gradient_logits_pool, (void*)organism->telemetry);
-            printf("V:pre_audit_edges pool=%p pool[0].ca=%p dataset=%p desc=%p\n",
-                   (void*)organism->pool,
-                   organism->pool ? (void*)organism->pool->entries[0].ca_state : nullptr,
-                   (void*)organism->current_dataset,
-                   organism->current_dataset ? (void*)organism->current_dataset->descriptor : nullptr);
-
-            if (audit && organism->training_mode && organism->gradient_logits_pool) {
+            // Audit buffer population - diagnose any null pointers blocking output
+            if (!audit) {
+                printf("[audit:gen%d] audit=null, allocated in main.cu via cudaHostAlloc\n", generation);
+            } else if (!organism->training_mode) {
+                printf("[audit:gen%d] training_mode=null, set from buffers->training_mode in init\n", generation);
+            } else if (!organism->gradient_logits_pool) {
+                printf("[audit:gen%d] gradient_logits_pool=null, allocated in main.cu buffers_host\n", generation);
+            } else if (!organism->current_dataset) {
+                printf("[audit:gen%d] current_dataset=null, set by curriculum selection\n", generation);
+            } else if (!organism->current_dataset->descriptor) {
+                printf("[audit:gen%d] dataset->descriptor=null, set by load_dataset_from_registry\n", generation);
+            } else if (!organism->pool) {
+                printf("[audit:gen%d] pool=null, created by init_pool_kernel\n", generation);
+            } else if (!organism->telemetry) {
+                printf("[audit:gen%d] telemetry=null, allocated in main.cu buffers_host\n", generation);
+            } else {
                 int num_classes = organism->current_dataset->descriptor->num_classes;
                 int grid_size = organism->pool->entries[0].grid_size;
                 float* ca_conc = organism->pool->entries[0].ca_state ?
                     organism->pool->entries[0].ca_state->ca_concentration : nullptr;
-                printf("V:audit_call gen=%d n_cls=%d grid=%d ca_conc=%p labels=%p imgs=%p batch=%d train_acc=%.4f test_acc=%.4f\n",
-                       generation, num_classes, grid_size, (void*)ca_conc,
-                       (void*)organism->training_mode->batch_labels,
-                       (void*)organism->training_mode->batch_images,
-                       organism->training_mode->batch_size,
-                       organism->telemetry->task_performance.train_accuracy,
-                       organism->telemetry->task_performance.test_accuracy);
+                printf("[audit:gen%d] calling populate_audit_buffer classes=%d grid=%d batch=%d\n",
+                       generation, num_classes, grid_size, organism->training_mode->batch_size);
                 populate_audit_buffer(
                     audit,
                     generation,

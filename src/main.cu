@@ -309,9 +309,9 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.ad_tape_grads_pool, sizeof(float) * MAX_TAPE_VALUES, "ad_tape_grads_pool");
     CUDA_ALLOC_CHECK(buffers_host.ad_tape_levels_pool, sizeof(int) * MAX_TAPE_VALUES, "ad_tape_levels_pool");
     CUDA_ALLOC_CHECK(buffers_host.param_map, sizeof(CAParameterMap), "param_map");
-    CUDA_ALLOC_CHECK(buffers_host.perception_activations_saved, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "perception_activations_saved");
-    CUDA_ALLOC_CHECK(buffers_host.interaction_activations_saved, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "interaction_activations_saved");
-    CUDA_ALLOC_CHECK(buffers_host.pre_gelu_values_saved, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "pre_gelu_values_saved");
+    CUDA_ALLOC_CHECK(buffers_host.perception_activations_saved, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "perception_activations_saved");
+    CUDA_ALLOC_CHECK(buffers_host.interaction_activations_saved, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "interaction_activations_saved");
+    CUDA_ALLOC_CHECK(buffers_host.pre_gelu_values_saved, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "pre_gelu_values_saved");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_phase_counts, sizeof(int) * 8, "lifecycle_phase_counts");
     CUDA_ALLOC_CHECK(buffers_host.gradient_features_pool, sizeof(float) * BATCH_SIZE_MAX * HARDWARE_FEATURES_DIM, "gradient_features_pool");
     CUDA_ALLOC_CHECK(buffers_host.gradient_logits_pool, sizeof(float) * BATCH_SIZE_MAX * NUM_CLASSES_MAX, "gradient_logits_pool");
@@ -373,6 +373,14 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
+    // Backward pass workspace buffers (sized for BACKWARD_CHUNK_SAMPLES)
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_a, BACKWARD_WS_FP16_A_SIZE, "backward_ws_fp16_a");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_b, BACKWARD_WS_FP16_B_SIZE, "backward_ws_fp16_b");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dW, BACKWARD_WS_DW_SIZE, "backward_ws_dW");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dI, BACKWARD_WS_DI_SIZE, "backward_ws_dI");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_W_T, BACKWARD_WS_W_T_SIZE, "backward_ws_W_T");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_im2col, BACKWARD_WS_IM2COL_SIZE, "backward_ws_im2col");
+    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dpregelu, BACKWARD_WS_DPREGELU_SIZE, "backward_ws_dpregelu");
 
     cudaMemcpy(buffers, &buffers_host, sizeof(OrganismPreallocatedBuffers), cudaMemcpyHostToDevice);
 
@@ -391,17 +399,40 @@ int main() {
         return 1;
     }
 
-    printf("[H31] Kernel launched, starting audit polling loop\n"); fflush(stdout);
-    printf("H:poll_loop_start\n"); fflush(stdout);
+    printf("[H31] Kernel launched, polling audit buffer\n"); fflush(stdout);
 
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
+    int polls_without_ready = 0;
+    int forced_gen = 0;
+    auto last_csv_time = std::chrono::steady_clock::now();
 
     while (true) {
-        // Memory fence to ensure we see GPU writes to mapped memory
         std::atomic_thread_fence(std::memory_order_acquire);
 
+        // FAILSAFE 1: Force CSV write after 30 seconds without any output
+        auto now_check = std::chrono::steady_clock::now();
+        double sec_since_csv = std::chrono::duration<double>(now_check - last_csv_time).count();
+        if (sec_since_csv > 30.0 && !h_audit->ready) {
+            printf("[FAILSAFE] No ready signal for %.1f sec - forcing CSV write gen=%d\n", sec_since_csv, forced_gen);
+            h_audit->generation = forced_gen++;
+            h_audit->ready = 1;
+            h_audit->consumed = 0;
+        }
+
+        // FAILSAFE 2: Counter-based backup
+        polls_without_ready++;
+        if (polls_without_ready > 600 && !h_audit->ready) {
+            printf("[FAILSAFE2] %d polls without ready - forcing CSV\n", polls_without_ready);
+            h_audit->generation = forced_gen++;
+            h_audit->ready = 1;
+            h_audit->consumed = 0;
+            polls_without_ready = 0;
+        }
+
         if (h_audit->ready && !h_audit->consumed) {
+            polls_without_ready = 0;
+            last_csv_time = std::chrono::steady_clock::now();
             int gen = h_audit->generation;
             if (gen != last_gen) {
                 last_gen = gen;

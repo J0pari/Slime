@@ -37,8 +37,10 @@ struct FlowLeniaOps {
         float beta_A,
         float n
     ) {
-        float ratio = A_sum_center / fmaxf(beta_A, safe_epsilon(beta_A));
-        float alpha = powf(fmaxf(ratio, 0.0f), n);
+        float ratio = A_sum_center / fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
+        float safe_ratio = fmaxf(ratio, safe_epsilon(ratio));
+        float safe_n = fmaxf(fabsf(n), safe_epsilon(n));
+        float alpha = powf(safe_ratio, safe_n);
         alpha = clamp(alpha, 0.0f, 1.0f);
 
         float grad_U_x = (U_E - U_center) * CENTERED_DIFFERENCE_SCALE;
@@ -181,9 +183,12 @@ struct FlowLeniaOps {
     // Soft clamp for differentiable alpha computation (replaces hard clamp)
     __device__ static float soft_clamp(float x, float min_val, float max_val, float sharpness) {
         float range = max_val - min_val;
-        float safe_range = fmaxf(range, safe_epsilon(range));
+        float safe_range = fmaxf(fabsf(range), safe_epsilon(range));
         float scaled = (x - min_val) / safe_range;
-        float sigmoid_val = 1.0f / (1.0f + expf(-sharpness * (scaled - CENTERED_DIFFERENCE_SCALE)));
+        // sharpness already bounded by FLOW_LENIA_SHARPNESS_MAX in config
+        float exp_arg = -sharpness * (scaled - CENTERED_DIFFERENCE_SCALE);
+        exp_arg = fmaxf(fminf(exp_arg, EXPF_ARG_LIMIT), -EXPF_ARG_LIMIT);
+        float sigmoid_val = 1.0f / (1.0f + expf(exp_arg));
         return min_val + range * sigmoid_val;
     }
 
@@ -198,8 +203,11 @@ struct FlowLeniaOps {
         float alpha_max,
         float sharpness
     ) {
-        float ratio = A_sum_center / fmaxf(beta_A, safe_epsilon(beta_A));
-        float alpha = soft_clamp(powf(ratio, n), alpha_min, alpha_max, sharpness);
+        float ratio = A_sum_center / fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
+        float safe_ratio = fmaxf(ratio, safe_epsilon(ratio));
+        float safe_n = fmaxf(fabsf(n), safe_epsilon(n));
+        float alpha = powf(safe_ratio, safe_n);
+        alpha = soft_clamp(alpha, alpha_min, alpha_max, sharpness);
 
         float grad_U_x = (U_E - U_center) * CENTERED_DIFFERENCE_SCALE;
         float grad_U_y = (U_N - U_center) * CENTERED_DIFFERENCE_SCALE;

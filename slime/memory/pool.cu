@@ -85,6 +85,20 @@ struct ComponentPool {
     float* fitness_values;  // [capacity] - mirrors entries[i].fitness
 };
 
+// Extract ArchitectureParams from a pool entry
+__device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* pool, int idx) {
+    ArchitectureParams arch;
+    arch.num_heads = pool->entries[idx].num_heads;
+    arch.channels = pool->entries[idx].channels;
+    arch.hidden_dim = pool->entries[idx].hidden_dim;
+    arch.head_dim = pool->entries[idx].head_dim;
+    arch.grid_size = pool->entries[idx].grid_size;
+    // Gate center derived from coherence: low coherence → conservative, high → aggressive
+    float coherence = fminf(fmaxf(pool->entries[idx].coherence, 0.0f), 1.0f);
+    arch.ca_gate_center = 2.0f - 1.5f * coherence;
+    return arch;
+}
+
 // DIRESA autoencoder - needs PoolEntry definition above
 #include "../learning/diresa.cu"
 

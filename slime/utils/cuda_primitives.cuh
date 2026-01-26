@@ -5,19 +5,15 @@
 #include <cuda_fp16.h>
 #include <cuda/atomic>
 #include <curand_kernel.h>
+#include "../config/config.cu"
 
 struct PoolEntry;
 
 // =============================================================================
 // UNIFIED EPSILON SYSTEM
 // One mechanism for all numerical stability needs. Context emerges from data.
+// Uses MACHINE_EPS, FLOAT_MIN_NORMAL, EXPF_ARG_LIMIT from config.cu
 // =============================================================================
-
-// Machine epsilon: smallest x such that 1.0f + x != 1.0f
-constexpr float MACHINE_EPS = 1.192092896e-07f;  // FLT_EPSILON
-
-// Minimum positive normalized float (prevents underflow to denormals)
-constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  // FLT_MIN
 
 // Context-driven epsilon: scales with the magnitude of the reference value
 // Use this for ALL numerical stability (divisions, logs, sqrt, powers, etc.)

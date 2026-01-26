@@ -81,8 +81,16 @@ struct TaskPerformanceMetrics {
     float test_accuracy;
     float loss;
     float classification_stability;
+    float avg_confidence;
     int correct_predictions;
     int total_predictions;
+};
+
+struct PopulationMetrics {
+    float total_accuracy;
+    float total_generalization_gap;
+    float total_hardware_efficiency;
+    float total_fitness;
 };
 
 struct MemoryAllocationMetrics {
@@ -106,6 +114,7 @@ struct TelemetryBuffer {
     ArchiveTopologyMetrics archive_topology;
     DIRESAEvolutionMetrics diresa_evolution;
     TaskPerformanceMetrics task_performance;
+    PopulationMetrics population_metrics;
     MemoryAllocationMetrics memory_allocation;
     int generation;
     bool valid;
@@ -538,7 +547,7 @@ __device__ void populate_audit_buffer(
         if (++timeout_ms > 5000) {
             printf("V:audit_timeout gen=%d ready=%d consumed=%d\n",
                    generation, audit->ready, audit->consumed);
-            return;  // 5s timeout, skip update
+            break;  // Force continue - CSV MUST happen
         }
         __nanosleep(1000000);  // 1ms
     }
@@ -556,6 +565,7 @@ __device__ void populate_audit_buffer(
     audit->batch_size = batch_size;
     audit->num_classes = num_classes;
     audit->grid_size = grid_size;
+    printf("V:audit_cp1 batch=%d classes=%d grid=%d\n", batch_size, num_classes, grid_size);
 
     int samples_to_copy = (batch_size < AUDIT_SAMPLE_COUNT) ? batch_size : AUDIT_SAMPLE_COUNT;
 
@@ -582,6 +592,7 @@ __device__ void populate_audit_buffer(
             audit->sample_logits[s * NUM_CLASSES_MAX + c] = logits[s * num_classes + c];
         }
     }
+    printf("V:audit_cp2 samples_copied=%d\n", samples_to_copy);
 
     int correct = 0;
     float total_loss = 0.0f;
@@ -609,6 +620,7 @@ __device__ void populate_audit_buffer(
     audit->train_accuracy = train_accuracy;
     audit->test_accuracy = test_accuracy;
     audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
+    printf("V:audit_cp3 correct=%d/%d acc=%.4f\n", correct, batch_size, audit->accuracy);
 
     if (batch_images) {
         int img_size = grid_size * grid_size;
@@ -620,6 +632,7 @@ __device__ void populate_audit_buffer(
             }
         }
     }
+    printf("V:audit_cp4 images_done\n");
 
     if (ca_concentration && pool && pool->entries[0].channels > 0) {
         int snap_grid = 64;
@@ -632,6 +645,7 @@ __device__ void populate_audit_buffer(
             }
         }
     }
+    printf("V:audit_cp5 ca_done\n");
 
     // Copy pool metrics and per-entry snapshots
     if (pool) {
@@ -669,6 +683,7 @@ __device__ void populate_audit_buffer(
             audit->pool_entry_genome_hash[i] = 0;
         }
     }
+    printf("V:audit_cp6 pool_done\n");
 
     // Copy telemetry metrics (existing computed values)
     if (telemetry && telemetry->valid) {
@@ -759,6 +774,73 @@ __device__ void populate_audit_buffer(
         audit->per_class_correct[c] = 0.0f;
         audit->per_class_total[c] = 0.0f;
     }
+
+    // === AXIS CORRELATIONS ===
+    if (telemetry && telemetry->valid) {
+        audit->axis_corr_hw_task = telemetry->archive_topology.axis_corr_hw_task;
+        audit->axis_corr_hw_gen = telemetry->archive_topology.axis_corr_hw_gen;
+        audit->axis_corr_task_gen = telemetry->archive_topology.axis_corr_task_gen;
+        audit->hash_clustering_coefficient = telemetry->archive_topology.hash_clustering_coefficient;
+    } else {
+        audit->axis_corr_hw_task = 0.0f;
+        audit->axis_corr_hw_gen = 0.0f;
+        audit->axis_corr_task_gen = 0.0f;
+        audit->hash_clustering_coefficient = 0.0f;
+    }
+
+    // === MEMORY ALLOCATION ===
+    if (telemetry && telemetry->valid) {
+        audit->memory_gpu_allocated = telemetry->memory_allocation.total_gpu_allocated;
+        audit->memory_gpu_free = telemetry->memory_allocation.total_gpu_free;
+        audit->memory_ca_state_size = telemetry->memory_allocation.ca_state_size;
+        audit->memory_chemical_field_size = telemetry->memory_allocation.chemical_field_size;
+        audit->memory_archive_size = telemetry->memory_allocation.archive_pools_size;
+    } else {
+        audit->memory_gpu_allocated = 0;
+        audit->memory_gpu_free = 0;
+        audit->memory_ca_state_size = 0;
+        audit->memory_chemical_field_size = 0;
+        audit->memory_archive_size = 0;
+    }
+
+    // === FITNESS EXPONENTS (from entry 0) ===
+    if (pool && pool->entries[0].alive) {
+        PoolEntry* e0 = &pool->entries[0];
+        audit->fitness_alpha = e0->fitness_task_exponent;
+        audit->fitness_beta = e0->fitness_gen_exponent;
+        audit->fitness_gamma = e0->fitness_rank_exponent;
+        audit->fitness_delta = e0->fitness_efficiency_exponent;
+    } else {
+        audit->fitness_alpha = 1.0f;
+        audit->fitness_beta = 1.0f;
+        audit->fitness_gamma = 1.0f;
+        audit->fitness_delta = 1.0f;
+    }
+
+    // === HARDWARE GEOMETRY (placeholder - needs HardwareGeometry* param) ===
+    audit->hw_warp_divergence_entropy = 0.0f;
+    audit->hw_warp_convergence_rate = 1.0f;
+    audit->hw_active_thread_fraction = 1.0f;
+    audit->hw_memory_coalescing_efficiency = 1.0f;
+    audit->hw_cache_line_utilization = 1.0f;
+    audit->hw_tensor_core_usage = 0.0f;
+    audit->hw_instruction_throughput = 0.0f;
+    audit->hw_occupancy_variance = 0.0f;
+    audit->hw_arithmetic_intensity = 0.0f;
+    audit->hw_memory_bandwidth_saturation = 0.0f;
+
+    // === CHEMICAL FIELD (placeholder - needs ChemicalField* param) ===
+    audit->chemical_concentration_mean = 0.0f;
+    audit->chemical_concentration_max = 0.0f;
+    audit->chemical_gradient_magnitude_mean = 0.0f;
+    audit->chemical_source_activity = 0.0f;
+    audit->chemical_decay_rate_mean = 0.0f;
+
+    // === FLOW-LENIA (placeholder - needs ca_state stats) ===
+    audit->flow_lenia_mass_total = 0.0f;
+    audit->flow_lenia_mass_conservation_error = 0.0f;
+    audit->flow_lenia_affinity_mean = 0.0f;
+    audit->flow_lenia_flow_magnitude_mean = 0.0f;
 
     // Signal data ready (must be last, after all writes complete)
     __threadfence_system();

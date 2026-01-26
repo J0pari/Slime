@@ -162,7 +162,8 @@ __global__ void initialize_ca_from_field_kernel(
     ca_concentration[base_idx + 2] = chem_gradient_y[cell_idx];
     ca_concentration[base_idx + 3] = chem_laplacian[cell_idx];
     ca_concentration[base_idx + 4] = chem_sources[cell_idx];
-    ca_concentration[base_idx + 5] = (chem_decay_factors != nullptr) ? chem_decay_factors[cell_idx] : 0.0f;
+    DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
+    ca_concentration[base_idx + 5] = chem_decay_factors[cell_idx];
 
     // Channel 6-9: RDField
     ca_concentration[base_idx + 6] = rd_resource_density[cell_idx];
@@ -183,23 +184,21 @@ __global__ void initialize_ca_from_field_kernel(
     // Channel 14: Previous CA output (recurrence) - read from ca_output channel 0
     if (channels > 14) {
         // Use previous iteration's CA output for recurrence
+        // ca_output is allocated as part of ca_state (organism.cu:2927), so if ca_state exists, ca_output exists
         float* ca_output = entry->ca_state->ca_output;
-        if (ca_output != nullptr) {
-            // ca_output layout: [num_heads × grid² × head_dim], sum across heads for recurrence
-            int num_heads = entry->num_heads;
-            int head_dim = entry->head_dim;
-            float recurrence = 0.0f;
-            for (int h = 0; h < num_heads; h++) {
-                int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
-                recurrence += ca_output[output_idx];  // First element of each head's output
-            }
-            ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
-        } else {
-            ca_concentration[base_idx + 14] = 0.0f;
+        DEVICE_FATAL_IF(ca_output == nullptr, "ca_output null but ca_state exists");
+        // ca_output layout: [num_heads × grid² × head_dim], sum across heads for recurrence
+        int num_heads = entry->num_heads;
+        int head_dim = entry->head_dim;
+        float recurrence = 0.0f;
+        for (int h = 0; h < num_heads; h++) {
+            int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
+            recurrence += ca_output[output_idx];  // First element of each head's output
         }
+        ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
     }
 
-    // Channel 15: Temporal retrieval
+    // Channel 15: Temporal retrieval - nullptr valid at gen 0 before any history snapshots
     if (channels > 15) {
         ca_concentration[base_idx + 15] = (attractor_field != nullptr) ? attractor_field[cell_idx] : 0.0f;
     }

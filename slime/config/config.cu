@@ -40,8 +40,33 @@
 #define SLIME_DEBUG_PRINT(...) ((void)0)
 #endif
 
+// Device-side fatal error - prints location and message, then traps
+// Use for invariant violations that should never happen if code is correct
+#define DEVICE_FATAL(msg) \
+    do { \
+        printf("!FATAL [%s:%d] %s\n", __FILE__, __LINE__, msg); \
+        __trap(); \
+    } while(0)
 
+#define DEVICE_FATAL_IF(cond, msg) \
+    do { \
+        if (cond) { \
+            printf("!FATAL [%s:%d] %s\n", __FILE__, __LINE__, msg); \
+            __trap(); \
+        } \
+    } while(0)
 
+// ============================================================================
+// NUMERIC STABILITY CONSTANTS
+// ============================================================================
+// Machine epsilon: smallest x such that 1.0f + x != 1.0f
+constexpr float MACHINE_EPS = 1.192092896e-07f;  // FLT_EPSILON
+
+// Minimum positive normalized float (prevents underflow to denormals)
+constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  // FLT_MIN
+
+// Maximum safe argument for expf() before overflow (ln(FLT_MAX) ≈ 88.72)
+constexpr float EXPF_ARG_LIMIT = 88.0f;
 
 
 
@@ -895,6 +920,56 @@ struct AuditBuffer {
     int pool_entry_age[POOL_CAPACITY_MAX];
     int pool_entry_num_deltas[POOL_CAPACITY_MAX];
     uint64_t pool_entry_genome_hash[POOL_CAPACITY_MAX];
+
+    // === AXIS CORRELATIONS ===
+    // Cross-axis behavioral coordinate correlations
+    float axis_corr_hw_task;
+    float axis_corr_hw_gen;
+    float axis_corr_task_gen;
+    float hash_clustering_coefficient;
+
+    // === HARDWARE GEOMETRY ===
+    // Execution efficiency metrics for hw_coords projection
+    float hw_warp_divergence_entropy;
+    float hw_warp_convergence_rate;
+    float hw_active_thread_fraction;
+    float hw_memory_coalescing_efficiency;
+    float hw_cache_line_utilization;
+    float hw_tensor_core_usage;
+    float hw_instruction_throughput;
+    float hw_occupancy_variance;
+    float hw_arithmetic_intensity;
+    float hw_memory_bandwidth_saturation;
+
+    // === CHEMICAL FIELD STATE ===
+    // Stigmergic substrate dynamics
+    float chemical_concentration_mean;
+    float chemical_concentration_max;
+    float chemical_gradient_magnitude_mean;
+    float chemical_source_activity;
+    float chemical_decay_rate_mean;
+
+    // === FLOW-LENIA DYNAMICS ===
+    // Mass-conservative neural CA metrics
+    float flow_lenia_mass_total;
+    float flow_lenia_mass_conservation_error;
+    float flow_lenia_affinity_mean;
+    float flow_lenia_flow_magnitude_mean;
+
+    // === FITNESS EXPONENTS ===
+    // Genome-evolved fitness function shape (entry 0)
+    float fitness_alpha;  // task exponent
+    float fitness_beta;   // generalization gap exponent
+    float fitness_gamma;  // rank exponent
+    float fitness_delta;  // efficiency exponent
+
+    // === MEMORY ALLOCATION ===
+    // GPU memory budget tracking
+    size_t memory_gpu_allocated;
+    size_t memory_gpu_free;
+    size_t memory_ca_state_size;
+    size_t memory_chemical_field_size;
+    size_t memory_archive_size;
 };
 
 #endif

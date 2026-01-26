@@ -608,7 +608,7 @@ __global__ void store_elite_weight_deltas_kernel(
     const float* genome,
     int* num_deltas_out
 ) {
-    if (archive->weight_deltas == nullptr) return;
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
@@ -642,7 +642,7 @@ __global__ void store_elite_weight_deltas_kernel(
     } else if (matrix == 2) {
         current = __half2float(value_weights[local_idx]);
     } else {
-        return;
+        DEVICE_FATAL("invalid matrix index from get_ca_xavier_scale");
     }
 
     float delta = current - baseline;
@@ -675,7 +675,7 @@ __global__ void restore_elite_weights_kernel(
     half* interaction_weights,
     half* value_weights
 ) {
-    if (archive->weight_deltas == nullptr) return;
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];
@@ -713,7 +713,7 @@ __global__ void apply_weight_deltas_kernel(
     half* interaction_weights,
     half* value_weights
 ) {
-    if (archive->weight_deltas == nullptr) return;
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];
