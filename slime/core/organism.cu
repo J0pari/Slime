@@ -3923,7 +3923,10 @@ __global__ void persistent_evolution_kernel(
                     organism->telemetry->task_performance.train_accuracy,
                     organism->telemetry->task_performance.test_accuracy,
                     organism->telemetry,
-                    organism->pool
+                    organism->pool,
+                    organism->chemical_field,
+                    organism->pool->entries[0].ca_state,
+                    organism->hardware_geom
                 );
             }
         }

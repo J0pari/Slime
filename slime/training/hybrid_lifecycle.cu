@@ -248,6 +248,29 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int src_idx = (offset + idx) % dataset_size;
                     batch_labels_out[idx] = all_labels[src_idx];
                 }
+                // DIAGNOSTIC: Print ALL 32 labels to verify dataset loading
+                if (generation == 0) {
+                    printf("[DIAG:labels] gen=%d bsz=%d all_labels=%p batch_labels=%p dsz=%d offset=%d\n",
+                           generation, batch_size, (void*)all_labels, (void*)batch_labels_out, dataset_size, offset);
+                    printf("[DIAG:labels] src[0-7]:  %d %d %d %d %d %d %d %d\n",
+                           (int)all_labels[0], (int)all_labels[1], (int)all_labels[2], (int)all_labels[3],
+                           (int)all_labels[4], (int)all_labels[5], (int)all_labels[6], (int)all_labels[7]);
+                    printf("[DIAG:labels] src[8-15]: %d %d %d %d %d %d %d %d\n",
+                           (int)all_labels[8], (int)all_labels[9], (int)all_labels[10], (int)all_labels[11],
+                           (int)all_labels[12], (int)all_labels[13], (int)all_labels[14], (int)all_labels[15]);
+                    printf("[DIAG:labels] dst[0-7]:  %d %d %d %d %d %d %d %d\n",
+                           batch_labels_out[0], batch_labels_out[1], batch_labels_out[2], batch_labels_out[3],
+                           batch_labels_out[4], batch_labels_out[5], batch_labels_out[6], batch_labels_out[7]);
+                    printf("[DIAG:labels] dst[8-15]: %d %d %d %d %d %d %d %d\n",
+                           batch_labels_out[8], batch_labels_out[9], batch_labels_out[10], batch_labels_out[11],
+                           batch_labels_out[12], batch_labels_out[13], batch_labels_out[14], batch_labels_out[15]);
+                    printf("[DIAG:labels] dst[16-23]: %d %d %d %d %d %d %d %d\n",
+                           batch_labels_out[16], batch_labels_out[17], batch_labels_out[18], batch_labels_out[19],
+                           batch_labels_out[20], batch_labels_out[21], batch_labels_out[22], batch_labels_out[23]);
+                    printf("[DIAG:labels] dst[24-31]: %d %d %d %d %d %d %d %d\n",
+                           batch_labels_out[24], batch_labels_out[25], batch_labels_out[26], batch_labels_out[27],
+                           batch_labels_out[28], batch_labels_out[29], batch_labels_out[30], batch_labels_out[31]);
+                }
             }
 
             // All threads do bilinear interpolation via thread loop
@@ -285,8 +308,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 batch_images_out[idx * grid_size * grid_size + pixel_idx] = value;
             }
         }
-        __syncthreads();  // Ensure sample_batch complete before continuing
-        SLIME_DEBUG_PRINT("V:hybrid:sample_batch_complete entry=%d tid=%d\n", entry_idx, tid);
+        __syncthreads();
 
         // ========== RESET_TAPE (replaced CDP launch) ==========
         // Per-entry operation: ALL threads in ALL blocks participate
@@ -307,8 +329,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 tape->max_level = 0;
             }
         }
-        __syncthreads();  // Ensure reset_tape complete before continuing
-        SLIME_DEBUG_PRINT("V:hybrid:reset_tape_complete entry=%d tid=%d\n", entry_idx, tid);
+        __syncthreads();
 
         // ========== INJECT_SAMPLE_TO_CA (replaced CDP launch) ==========
         // Global operation: only entry_idx==0 block processes, ALL threads participate
@@ -374,8 +395,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 ca_out[base_idx + 15] = attractor_field[spatial_idx];
             }
         }
-        __syncthreads();  // Ensure inject_sample_to_ca complete before continuing
-        SLIME_DEBUG_PRINT("V:hybrid:inject_sample_complete entry=%d tid=%d\n", entry_idx, tid);
+        __syncthreads();
 
         // ========== MULTI_HEAD_CA (replaced CDP launch, register-based) ==========
         // Global operation: only entry_idx==0 block processes, ALL threads participate
@@ -499,21 +519,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
         }
-        __syncthreads();  // Ensure multi_head_ca complete before continuing
-        SLIME_DEBUG_PRINT("V:hybrid:multi_head_ca_complete entry=%d tid=%d\n", entry_idx, tid);
-
-        // Remaining CDP launches still inside tid==0 (to be transformed)
-        if (tid == 0) {
-        SLIME_DEBUG_PRINT("V:hybrid:post_ca tid0_section\n");
-        }  // end if (tid == 0) - placeholder for remaining transforms
+        __syncthreads();
 
         // All threads check error flag and exit together if error detected
         __syncthreads();
         if (s_error_flag) return;
-
-        // Skip cudaDeviceSynchronize to avoid CDP blocking across blocks
-        // Child kernels may still be running - Flow Lenia will use current buffer state
-        SLIME_DEBUG_PRINT("V:hybrid:278 post_sync\n");
 
     // Flow Lenia: transport mass based on CA affinity gradients (ALL threads of ALL blocks)
     {
@@ -631,8 +641,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         }  // end Flow Lenia
         __syncthreads();
 
-        SLIME_DEBUG_PRINT("V:hybrid:412 post_flow_lenia tid=%d\n", tid);
-
         // ========== FORWARD PASS (replaced CDP launches) ==========
         // Global operations: only entry_idx==0 block processes, ALL threads participate
         float* ca_output_grad = nullptr;
@@ -676,7 +684,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:spatial_pooling_complete tid=%d\n", tid);
 
             // ========== CLASSIFICATION_HEAD (replaced CDP launch) ==========
             float* logits = organism->gradient_logits_pool;
@@ -701,7 +708,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:classification_head_complete tid=%d\n", tid);
 
             // ========== ZERO_SCALAR (replaced CDP launch) ==========
             float* loss_out = organism->gradient_loss_pool;
@@ -757,7 +763,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:cross_entropy_complete tid=%d\n", tid);
 
             // ========== TASK_PERFORMANCE_PROBE (replaced CDP launch) ==========
             // Thread 0 computes accuracy metrics
@@ -803,14 +808,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 organism->telemetry->task_performance.avg_confidence = avg_confidence;
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:task_performance_complete tid=%d\n", tid);
         }
-        __syncthreads();  // All entries sync before backward pass
+        __syncthreads();
 
-        // ========== BACKWARD PASS (replaced CDP launches) ==========
-        // Global operations: only entry_idx==0 block processes, ALL threads participate
+        // ========== BACKWARD PASS ==========
         if (entry_idx == 0 && training_mode->batch_images != nullptr && training_mode->classifier != nullptr && !eval_only) {
-            SLIME_DEBUG_PRINT("V:hybrid:enter_backward eval_only=%d\n", eval_only);
 
             // Re-access variables for backward pass
             float* features = organism->gradient_features_pool;
@@ -850,7 +852,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 ca_output_grad[i] = 0.0f;
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:zero_grads_complete tid=%d\n", tid);
 
             // ========== CLASSIFICATION_HEAD_BACKWARD (replaced CDP launch) ==========
             // Total work: batch_size × num_classes, uses atomicAdd for gradient accumulation
@@ -873,7 +874,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:class_backward_complete tid=%d\n", tid);
 
             // ========== SPATIAL_POOLING_BACKWARD (replaced CDP launch) ==========
             // Total work: batch_size × num_features
@@ -910,13 +910,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:pooling_backward_complete tid=%d\n", tid);
         }
 
         // ========== CA BACKWARD PASS (replaced CDP launches) ==========
         // Global operation: only entry_idx==0 block processes, ALL threads participate
         if (entry_idx == 0 && !eval_only) {
-            SLIME_DEBUG_PRINT("V:hybrid:enter_ca_backward\n");
             float* dL_dperception = organism->buffers->dL_dperception_buffer;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer;
 
@@ -1134,7 +1132,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:value_backward_complete tid=%d\n", tid);
 
             // === INTERACTION BACKWARD (replaced CDP launches) ===
             // Interaction weights are [head_dim × head_dim] per head
@@ -1324,7 +1321,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:interaction_backward_complete tid=%d\n", tid);
 
             // === PERCEPTION BACKWARD (replaced CDP launches) ===
             // Forward pass: perception[h] = relu(sum_{dy,dx,c} neighborhood[dy][dx][c] * W[c,h])
@@ -1459,11 +1455,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-
-            SLIME_DEBUG_PRINT("V:hybrid:perception_backward_complete tid=%d\n", tid);
             }  // end CA backward scope
         }  // end if (!eval_only) for CA backward
-        SLIME_DEBUG_PRINT("V:hybrid:715 post_ca_backward\n");
 
         // ========== ADAM UPDATES (replaced CDP launches) ==========
         // Global operation: only entry_idx==0 block processes, ALL threads participate
@@ -1489,8 +1482,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             float lr = training_mode->learning_rate;
             int timestep = training_mode->adam_timestep;
-
-            SLIME_DEBUG_PRINT("V:hybrid:adam_fp16_start tid=%d\n", tid);
 
             // Adam update for CA PERCEPTION weights (FP16) - thread loop
             {
@@ -1584,7 +1575,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:adam_fp16_complete tid=%d\n", tid);
 
             // Adam update for pooling weights (FP32) - thread loop
             {
@@ -1680,7 +1670,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 training_mode->adam_timestep++;
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:adam_complete tid=%d\n", tid);
 
             // Extract head gradient magnitudes - thread loop
             float* gradient_magnitudes = organism->gradient_magnitudes_pool;
@@ -1712,15 +1701,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
-            SLIME_DEBUG_PRINT("V:hybrid:gradient_fitness_complete tid=%d\n", tid);
         }  // end if (entry_idx == 0 && batch_images != nullptr)
     }  // end if (training_mode->use_gradients)
-    SLIME_DEBUG_PRINT("V:hybrid:825 post_training entry_idx=%d\n", entry_idx);
 
     // ========== COMPONENT EVOLUTION (replaced CDP launch, thread loops) ==========
     // GLOBAL operation: only entry_idx==0 block processes, ALL threads participate
     if (entry_idx == 0) {
-        SLIME_DEBUG_PRINT("V:hybrid:828 pre_component_evolution\n");
         float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
         GPUElite* archive = organism->archive;
         int archive_size_val = organism->archive_size;
@@ -1873,12 +1859,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }
         __syncthreads();
-        SLIME_DEBUG_PRINT("V:hybrid:component_evolution_complete tid=%d\n", tid);
 
         // ========== NEURAL CA UPDATE (replaced CDP launch, warp-level WMMA) ==========
         // Only when NOT using gradients (non-training path)
         if (!training_mode->use_gradients) {
-            SLIME_DEBUG_PRINT("V:hybrid:852 pre_neural_ca\n");
             float* nca_workspace_genomes = organism->buffers->organism_workspace_genomes;
             int warp_id = tid / WARP_SIZE;
             int lane_id = tid % WARP_SIZE;
@@ -2170,14 +2154,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 __syncthreads();
 
             }  // end entry loop
-            SLIME_DEBUG_PRINT("V:hybrid:neural_ca_complete tid=%d\n", tid);
         }  // end if (!use_gradients)
     }  // end if (entry_idx == 0)
 
     // PER-ENTRY operations - each block handles its own entry in parallel (thread loops)
-    SLIME_DEBUG_PRINT("V:hybrid:873 pre_per_entry entry_idx=%d\n", entry_idx);
+    // REMOVED: spam prints at 2178/2180 - all 256 threads were printing, causing massive slowdown
     if (training_mode->use_gradients) {
-        SLIME_DEBUG_PRINT("V:hybrid:875 per_entry_start entry_idx=%d\n", entry_idx);
 
         // update_field_from_ca - thread loop (replaced CDP launch)
         {
@@ -2260,7 +2242,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }
         __syncthreads();
-        SLIME_DEBUG_PRINT("V:hybrid:per_entry_complete entry_idx=%d\n", entry_idx);
     }
 
     float* behavioral_workspace_genomes = organism->buffers->behavioral_workspace_genomes_buffer;
@@ -2386,7 +2367,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }
         __syncthreads();
-        SLIME_DEBUG_PRINT("V:hybrid:embedding_update_complete tid=%d\n", tid);
     }
 
     // Memory update - thread loops (replaced CDP launch)
@@ -2470,7 +2450,30 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
         }
-        SLIME_DEBUG_PRINT("V:hybrid:memory_update_complete tid=%d\n", tid);
+        // === SYNC BATCH CA → ENTRY CA STATE (closes training→archive loop) ===
+        // Training operates on batch buffers. Archive/fitness/telemetry read entry state.
+        // Without this copy, the eight loops are severed - archive sees zeros, fitness meaningless.
+        if (entry_idx == 0 && organism->batch_ca_states_pool) {
+            int grid_size_sync = arch.grid_size;
+            int channels_sync = arch.channels;
+            int spatial = grid_size_sync * grid_size_sync;
+            int copy_size = spatial * channels_sync;
+            int pool_cap = organism->pool->capacity;
+            int batch_sz = training_mode->batch_size;
+
+            // Copy batch samples back to corresponding entry CA states
+            // This connects: training CA output → entry state → archive insertion → fitness
+            for (int e = 0; e < pool_cap && e < batch_sz; e++) {
+                PoolEntry* ent = &organism->pool->entries[e];
+                if (ent->alive && ent->ca_state && ent->ca_state->ca_concentration) {
+                    int src_offset = e * copy_size;
+                    for (int idx = tid; idx < copy_size; idx += blockDim.x) {
+                        ent->ca_state->ca_concentration[idx] = organism->batch_ca_states_pool[src_offset + idx];
+                    }
+                }
+            }
+        }
+        __syncthreads();
 
         // === POPULATE AUDIT BUFFER ===
         // Signal host with comprehensive telemetry from all 47+ system components
@@ -2480,7 +2483,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* batch_images = training_mode->batch_images;
             int batch_size = training_mode->batch_size;
             int num_classes = organism->current_dataset->descriptor->num_classes;
-            float* ca_concentration = ca_state->ca_concentration;
+            float* ca_concentration = ca_state->ca_concentration;  // Now contains actual training CA
             int grid_size = entry->grid_size;
             float train_acc = organism->telemetry->task_performance.train_accuracy;
             float test_acc = organism->telemetry->task_performance.test_accuracy;
@@ -2498,15 +2501,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 train_acc,
                 test_acc,
                 organism->telemetry,
-                organism->pool
+                organism->pool,
+                organism->chemical_field,
+                ca_state,
+                organism->hardware_geom
             );
-            SLIME_DEBUG_PRINT("V:hybrid:audit_populated gen=%d\n", generation);
         }
     }  // end if (entry_idx == 0)
-
-    // NOTE: No __syncthreads here - it would deadlock since entry 0's tid=0
-    // is blocked at cudaDeviceSynchronize while other threads wait at syncthreads
-    SLIME_DEBUG_PRINT("V:hybrid:983 kernel_exit entry_idx=%d tid=%d\n", entry_idx, tid);
 }
 
 

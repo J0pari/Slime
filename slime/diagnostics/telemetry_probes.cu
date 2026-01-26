@@ -5,6 +5,9 @@
 #include "../memory/archive.cu"
 #include "../memory/pool.cu"
 #include "../utils/cuda_primitives.cuh"
+#include "../core/ca_state.cuh"
+#include "../core/chemotaxis.cu"
+#include "../metrics/hardware_geometry.cu"
 #include <cuda_runtime.h>
 #include <cmath>
 
@@ -392,10 +395,53 @@ __global__ void archive_topology_probe_kernel(
     metrics->gen_axis_max = (occupied > 0) ? gen_max : 0.0f;
     metrics->gen_axis_mean = (occupied > 0) ? (gen_sum / occupied) : 0.0f;
 
-    // Axis correlations (placeholder - would need full centroid data)
-    metrics->axis_corr_hw_task = 0.0f;
-    metrics->axis_corr_hw_gen = 0.0f;
-    metrics->axis_corr_task_gen = 0.0f;
+    // Axis correlations - Pearson correlation between centroid magnitudes
+    float sum_hw_task = 0.0f, sum_hw_gen = 0.0f, sum_task_gen = 0.0f;
+    float sum_hw_sq = 0.0f, sum_task_sq = 0.0f, sum_gen_sq = 0.0f;
+    int corr_n = 0;
+    for (int i = 0; i < num_cells; i++) {
+        if (voronoi_cells[i].density > 0) {
+            float hw_mag = 0.0f, task_mag = 0.0f, gen_mag = 0.0f;
+            for (int d = 0; d < hw_dim && voronoi_cells[i].hw_centroid; d++) {
+                hw_mag += voronoi_cells[i].hw_centroid[d] * voronoi_cells[i].hw_centroid[d];
+            }
+            for (int d = 0; d < task_dim && voronoi_cells[i].task_centroid; d++) {
+                task_mag += voronoi_cells[i].task_centroid[d] * voronoi_cells[i].task_centroid[d];
+            }
+            for (int d = 0; d < gen_dim && voronoi_cells[i].gen_centroid; d++) {
+                gen_mag += voronoi_cells[i].gen_centroid[d] * voronoi_cells[i].gen_centroid[d];
+            }
+            hw_mag = sqrtf(hw_mag); task_mag = sqrtf(task_mag); gen_mag = sqrtf(gen_mag);
+            sum_hw_task += hw_mag * task_mag;
+            sum_hw_gen += hw_mag * gen_mag;
+            sum_task_gen += task_mag * gen_mag;
+            sum_hw_sq += hw_mag * hw_mag;
+            sum_task_sq += task_mag * task_mag;
+            sum_gen_sq += gen_mag * gen_mag;
+            corr_n++;
+        }
+    }
+    if (corr_n > 1) {
+        float hw_mean = hw_sum / corr_n;
+        float task_mean = task_sum / corr_n;
+        float gen_mean = gen_sum / corr_n;
+        float hw_var = sum_hw_sq / corr_n - hw_mean * hw_mean;
+        float task_var = sum_task_sq / corr_n - task_mean * task_mean;
+        float gen_var = sum_gen_sq / corr_n - gen_mean * gen_mean;
+        float hw_std = sqrtf(fmaxf(hw_var, 1e-10f));
+        float task_std = sqrtf(fmaxf(task_var, 1e-10f));
+        float gen_std = sqrtf(fmaxf(gen_var, 1e-10f));
+        float cov_hw_task = sum_hw_task / corr_n - hw_mean * task_mean;
+        float cov_hw_gen = sum_hw_gen / corr_n - hw_mean * gen_mean;
+        float cov_task_gen = sum_task_gen / corr_n - task_mean * gen_mean;
+        metrics->axis_corr_hw_task = cov_hw_task / (hw_std * task_std);
+        metrics->axis_corr_hw_gen = cov_hw_gen / (hw_std * gen_std);
+        metrics->axis_corr_task_gen = cov_task_gen / (task_std * gen_std);
+    } else {
+        metrics->axis_corr_hw_task = 0.0f;
+        metrics->axis_corr_hw_gen = 0.0f;
+        metrics->axis_corr_task_gen = 0.0f;
+    }
 
     metrics->total_population = total_pop;
 
@@ -529,7 +575,10 @@ __device__ void populate_audit_buffer(
     float train_accuracy,
     float test_accuracy,
     TelemetryBuffer* telemetry,
-    ComponentPool* pool
+    ComponentPool* pool,
+    ChemicalField* chemical_field,
+    MultiHeadCAState* ca_state,
+    HardwareGeometry* hardware_geom
 ) {
     // V: entry probe - all inputs
     printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
@@ -817,30 +866,75 @@ __device__ void populate_audit_buffer(
         audit->fitness_delta = 1.0f;
     }
 
-    // === HARDWARE GEOMETRY (placeholder - needs HardwareGeometry* param) ===
-    audit->hw_warp_divergence_entropy = 0.0f;
-    audit->hw_warp_convergence_rate = 1.0f;
-    audit->hw_active_thread_fraction = 1.0f;
-    audit->hw_memory_coalescing_efficiency = 1.0f;
-    audit->hw_cache_line_utilization = 1.0f;
-    audit->hw_tensor_core_usage = 0.0f;
-    audit->hw_instruction_throughput = 0.0f;
-    audit->hw_occupancy_variance = 0.0f;
-    audit->hw_arithmetic_intensity = 0.0f;
-    audit->hw_memory_bandwidth_saturation = 0.0f;
+    // Hardware geometry metrics
+    if (hardware_geom) {
+        audit->hw_warp_divergence_entropy = hardware_geom->warp_divergence_entropy;
+        audit->hw_warp_convergence_rate = hardware_geom->warp_convergence_rate;
+        audit->hw_active_thread_fraction = hardware_geom->active_thread_fraction;
+        audit->hw_memory_coalescing_efficiency = hardware_geom->memory_coalescing_efficiency;
+        audit->hw_cache_line_utilization = hardware_geom->cache_line_utilization;
+        audit->hw_tensor_core_usage = hardware_geom->tensor_core_usage;
+        audit->hw_instruction_throughput = hardware_geom->instruction_throughput;
+        audit->hw_occupancy_variance = hardware_geom->occupancy_variance;
+        audit->hw_arithmetic_intensity = hardware_geom->arithmetic_intensity;
+        audit->hw_memory_bandwidth_saturation = hardware_geom->memory_bandwidth_saturation;
+    }
 
-    // === CHEMICAL FIELD (placeholder - needs ChemicalField* param) ===
-    audit->chemical_concentration_mean = 0.0f;
-    audit->chemical_concentration_max = 0.0f;
-    audit->chemical_gradient_magnitude_mean = 0.0f;
-    audit->chemical_source_activity = 0.0f;
-    audit->chemical_decay_rate_mean = 0.0f;
+    // Chemical field metrics
+    if (chemical_field && chemical_field->concentration) {
+        int total_cells = grid_size * grid_size;
+        float conc_sum = 0.0f, conc_max = 0.0f;
+        float grad_mag_sum = 0.0f;
+        float source_sum = 0.0f;
+        float decay_sum = 0.0f;
+        for (int i = 0; i < total_cells; i++) {
+            float c = chemical_field->concentration[i];
+            conc_sum += c;
+            if (c > conc_max) conc_max = c;
+            if (chemical_field->gradient_x && chemical_field->gradient_y) {
+                float gx = chemical_field->gradient_x[i];
+                float gy = chemical_field->gradient_y[i];
+                grad_mag_sum += sqrtf(gx * gx + gy * gy);
+            }
+            if (chemical_field->sources) source_sum += chemical_field->sources[i];
+            if (chemical_field->decay_factors) decay_sum += chemical_field->decay_factors[i];
+        }
+        audit->chemical_concentration_mean = conc_sum / total_cells;
+        audit->chemical_concentration_max = conc_max;
+        audit->chemical_gradient_magnitude_mean = grad_mag_sum / total_cells;
+        audit->chemical_source_activity = source_sum / total_cells;
+        audit->chemical_decay_rate_mean = decay_sum / total_cells;
+    }
 
-    // === FLOW-LENIA (placeholder - needs ca_state stats) ===
-    audit->flow_lenia_mass_total = 0.0f;
-    audit->flow_lenia_mass_conservation_error = 0.0f;
-    audit->flow_lenia_affinity_mean = 0.0f;
-    audit->flow_lenia_flow_magnitude_mean = 0.0f;
+    // Flow-Lenia metrics from ca_state
+    if (ca_state && pool && pool->entries[0].channels > 0) {
+        int channels = pool->entries[0].channels;
+        int total_cells = grid_size * grid_size;
+        float mass_total = 0.0f;
+        float affinity_sum = 0.0f;
+        float flow_mag_sum = 0.0f;
+        if (ca_state->ca_concentration) {
+            for (int i = 0; i < total_cells * channels; i++) {
+                mass_total += ca_state->ca_concentration[i];
+            }
+        }
+        if (ca_state->affinity_reduced) {
+            for (int i = 0; i < total_cells; i++) {
+                affinity_sum += ca_state->affinity_reduced[i];
+            }
+        }
+        if (ca_state->flow_field) {
+            for (int i = 0; i < total_cells; i++) {
+                float fx = ca_state->flow_field[i * 2];
+                float fy = ca_state->flow_field[i * 2 + 1];
+                flow_mag_sum += sqrtf(fx * fx + fy * fy);
+            }
+        }
+        audit->flow_lenia_mass_total = mass_total;
+        audit->flow_lenia_mass_conservation_error = 0.0f;  // Would need prev mass to compute
+        audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
+        audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
+    }
 
     // Signal data ready (must be last, after all writes complete)
     __threadfence_system();
