@@ -270,6 +270,66 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
     }
 }
 
+__device__ void diresa_encode_backward(const float* features, const float* latent_grad, float* features_grad, const DIRESAWeights* weights) {
+    float hidden1[DIRESA_HIDDEN1_MAX];
+    float hidden2[DIRESA_HIDDEN2_MAX];
+    float hidden1_grad[DIRESA_HIDDEN1_MAX];
+    float hidden2_grad[DIRESA_HIDDEN2_MAX];
+
+    // Recompute forward pass to get activations
+    for (int i = 0; i < weights->hidden1; i++) {
+        float sum = weights->encoder_b1[i];
+        for (int j = 0; j < weights->input_dim; j++) {
+            sum += features[j] * weights->encoder_w1[j * weights->hidden1 + i];
+        }
+        hidden1[i] = relu(sum);
+    }
+
+    for (int i = 0; i < weights->hidden2; i++) {
+        float sum = weights->encoder_b2[i];
+        for (int j = 0; j < weights->hidden1; j++) {
+            sum += hidden1[j] * weights->encoder_w2[j * weights->hidden2 + i];
+        }
+        hidden2[i] = relu(sum);
+    }
+
+    // Backward pass Layer 3: latent_grad → hidden2_grad
+    for (int i = 0; i < weights->hidden2; i++) {
+        hidden2_grad[i] = 0.0f;
+    }
+
+    for (int i = 0; i < weights->output_dim; i++) {
+        float grad = latent_grad[i];
+        for (int j = 0; j < weights->hidden2; j++) {
+            hidden2_grad[j] += grad * weights->encoder_w3[j * weights->output_dim + i];
+        }
+    }
+
+    // Backward pass Layer 2: hidden2_grad → hidden1_grad (with ReLU)
+    for (int i = 0; i < weights->hidden1; i++) {
+        hidden1_grad[i] = 0.0f;
+    }
+
+    for (int i = 0; i < weights->hidden2; i++) {
+        float grad = hidden2_grad[i] * (hidden2[i] > 0.0f ? 1.0f : 0.0f);
+        for (int j = 0; j < weights->hidden1; j++) {
+            hidden1_grad[j] += grad * weights->encoder_w2[j * weights->hidden2 + i];
+        }
+    }
+
+    // Backward pass Layer 1: hidden1_grad → features_grad (with ReLU)
+    for (int i = 0; i < weights->input_dim; i++) {
+        features_grad[i] = 0.0f;
+    }
+
+    for (int i = 0; i < weights->hidden1; i++) {
+        float grad = hidden1_grad[i] * (hidden1[i] > 0.0f ? 1.0f : 0.0f);
+        for (int j = 0; j < weights->input_dim; j++) {
+            features_grad[j] += grad * weights->encoder_w1[j * weights->hidden1 + i];
+        }
+    }
+}
+
 // Decoder forward pass
 __device__ void diresa_decode(const float* latent, float* reconstructed, const DIRESAWeights* weights) {
     float hidden1[DIRESA_HIDDEN2_MAX];

@@ -105,6 +105,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     __shared__ float* s_primary_genome;
     __shared__ int s_num_classes;
     __shared__ int s_behavioral_dim;
+    __shared__ int s_num_features;
     __shared__ ArchitectureParams s_arch;
     __shared__ dim3 s_component_grid;
     __shared__ dim3 s_component_block;
@@ -117,6 +118,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     float* primary_parent_temp;
     int num_classes;
     int behavioral_dim;
+    int num_features;
     ArchitectureParams arch;
     dim3 component_grid;
     dim3 component_block;
@@ -155,8 +157,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         arch.hidden_dim = entry->hidden_dim;
         arch.head_dim = entry->head_dim;
         arch.grid_size = entry->grid_size;
-        float accuracy = organism->telemetry->task_performance.accuracy;
+        float accuracy = entry->task_accuracy;
         arch.ca_gate_center = 2.0f - 1.5f * fminf(fmaxf(accuracy, 0.0f), 1.0f);
+
+        num_features = arch.num_heads * arch.channels;
 
         component_grid = dim3(POOL_CAPACITY_MAX);  // One block per pool entry
         component_block = dim3(WARP_SIZE);  // Match behavioral_update_kernel expectations
@@ -169,6 +173,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         s_primary_genome = primary_genome;
         s_num_classes = num_classes;
         s_behavioral_dim = behavioral_dim;
+        s_num_features = num_features;
         s_arch = arch;
         s_component_grid = component_grid;
         s_component_block = component_block;
@@ -184,6 +189,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     primary_parent_temp = primary_genome + GENOME_SIZE;
     num_classes = s_num_classes;
     behavioral_dim = s_behavioral_dim;
+    num_features = s_num_features;
     arch = s_arch;
     component_grid = s_component_grid;
     component_block = s_component_block;
@@ -653,7 +659,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int grid_size = arch.grid_size;
             int channels = arch.channels;
             int num_heads_local = arch.num_heads;
-            int num_features = num_heads_local * channels;
             int spatial_size = grid_size * grid_size;
 
             // ========== SPATIAL_POOLING (replaced CDP launch) ==========
@@ -681,6 +686,22 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                 if (!isnan(weighted) && !isinf(weighted)) {
                     features[batch_idx * num_features + feature_idx] = weighted;
+                }
+            }
+            __syncthreads();
+
+            // ========== DIRESA TASK ENCODING ==========
+            if (tid == 0) {
+                BehavioralDimensions dims;
+                dims.derive_from_genome(entry->genome_hash, primary_genome);
+                int task_dim = dims.task_dim();
+
+                if (organism->diresa_task_weights->input_dim == num_features) {
+                    for (int b = 0; b < batch_size; b++) {
+                        diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], organism->diresa_task_weights);
+                    }
+                } else {
+                    printf("ERROR: diresa_task_weights->input_dim=%d != num_features=%d\n", organism->diresa_task_weights->input_dim, num_features);
                 }
             }
             __syncthreads();
@@ -770,6 +791,22 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int correct = 0;
                 float avg_confidence = 0.0f;
 
+                int grid_size = entry->grid_size;
+
+                // Level 1: Partition field by entry_idx (spatial partitioning to avoid race conditions)
+                int pool_capacity = organism->pool->capacity;
+                int entries_per_side = (int)ceilf(sqrtf((float)pool_capacity));
+                int entry_region_size = grid_size / entries_per_side;
+
+                int entry_tile_y = entry_idx / entries_per_side;
+                int entry_tile_x = entry_idx % entries_per_side;
+                int entry_offset_y = entry_tile_y * entry_region_size;
+                int entry_offset_x = entry_tile_x * entry_region_size;
+
+                // Level 2: Within entry's exclusive region, tile by batch samples
+                int tiles_per_side = (int)ceilf(sqrtf((float)batch_size));
+                int tile_size = entry_region_size / tiles_per_side;
+
                 for (int b = 0; b < batch_size; b++) {
                     float* batch_logits = &logits[b * num_classes];
                     int true_label = batch_labels[b];
@@ -784,7 +821,24 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         }
                     }
 
-                    if (pred_class == true_label) correct++;
+                    bool is_correct = (pred_class == true_label);
+                    if (is_correct) correct++;
+
+                    // Tile batch samples within entry's exclusive spatial region
+                    int tile_y = b / tiles_per_side;
+                    int tile_x = b % tiles_per_side;
+                    float sample_accuracy = is_correct ? 1.0f : 0.0f;
+
+                    for (int dy = 0; dy < tile_size; dy++) {
+                        for (int dx = 0; dx < tile_size; dx++) {
+                            int y = entry_offset_y + tile_y * tile_size + dy;
+                            int x = entry_offset_x + tile_x * tile_size + dx;
+                            if (y < grid_size && x < grid_size) {
+                                int pos = y * grid_size + x;
+                                organism->chemical_field->concentration[pos] = sample_accuracy;
+                            }
+                        }
+                    }
 
                     // Compute softmax for confidence
                     float sum_exp = 0.0f;
@@ -798,14 +852,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 float accuracy = (float)correct / batch_size;
                 avg_confidence /= batch_size;
 
-                // Update telemetry
+                // Update per-entry metrics
                 if (training_mode->is_train_batch) {
-                    organism->telemetry->task_performance.train_accuracy =
-                        0.9f * organism->telemetry->task_performance.train_accuracy + 0.1f * accuracy;
+                    entry->train_accuracy = 0.9f * entry->train_accuracy + 0.1f * accuracy;
                 } else {
-                    organism->telemetry->task_performance.accuracy = accuracy;
+                    entry->test_accuracy = accuracy;
                 }
-                organism->telemetry->task_performance.avg_confidence = avg_confidence;
+                entry->task_accuracy = accuracy;
+                entry->avg_confidence = avg_confidence;
             }
             __syncthreads();
         }
@@ -830,11 +884,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int grid_size = arch.grid_size;
             int channels = arch.channels;
             int num_heads_local = arch.num_heads;
-            int num_features = num_heads_local * channels;
             int spatial_size = grid_size * grid_size;
 
             // ========== ZERO GRADIENT BUFFERS (replaced 5 CDP launches) ==========
-            int fc_weights_size = num_classes * channels;
+            int fc_weights_size = num_classes * num_features;
+            int features_grad_size = batch_size * num_features;
             int ca_grad_size = batch_size * num_heads_local * spatial_size * channels;
 
             // Zero all gradient buffers via thread loop
@@ -844,8 +898,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             for (int i = tid; i < num_classes; i += blockDim.x) {
                 fc_bias_grad[i] = 0.0f;
             }
-            for (int i = tid; i < num_features; i += blockDim.x) {
+            for (int i = tid; i < features_grad_size; i += blockDim.x) {
                 features_grad[i] = 0.0f;
+            }
+            for (int i = tid; i < num_features; i += blockDim.x) {
                 pooling_weights_grad[i] = 0.0f;
             }
             for (int i = tid; i < ca_grad_size; i += blockDim.x) {
@@ -953,6 +1009,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // Warp-level identifiers for WMMA operations
             int warp_id = tid / WARP_SIZE;
+            int lane_id = tid % WARP_SIZE;
             int num_warps = blockDim.x / WARP_SIZE;
 
             // === VALUE BACKWARD (replaced CDP launches) ===
@@ -1455,7 +1512,247 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
             __syncthreads();
+
+            // Compute input gradients: d_pooled_input = sum over heads (d_prerelu @ W^T)
+            // This backpropagates through perception layer to CA inputs (channels 0-5 are chemical field)
+            // d_pooled_input: [total_samples × channels]
+            float* d_pooled_input = ws_im2col;  // reuse buffer
+            {
+                int num_cells_local = arch.grid_size * arch.grid_size;
+                int total_inputs = training_mode->batch_size * num_cells_local * arch.channels;
+                for (int idx = tid; idx < total_inputs; idx += blockDim.x) {
+                    d_pooled_input[idx] = 0.0f;
+                }
+            }
+            __syncthreads();
+
+            // Backprop through perception: d_pooled_input += d_prerelu @ W^T (sum over all heads)
+            {
+                int num_cells_local = arch.grid_size * arch.grid_size;
+                int total_samples_local = training_mode->batch_size * num_cells_local;
+                int total_work = total_samples_local * arch.channels;
+
+                for (int work_idx = tid; work_idx < total_work; work_idx += blockDim.x) {
+                    int sample_idx = work_idx / arch.channels;
+                    int channel_idx = work_idx % arch.channels;
+
+                    float d_input_accum = 0.0f;
+                    // Sum over all heads
+                    for (int h = 0; h < arch.num_heads; h++) {
+                        // Sum over all head dimensions
+                        for (int hd = 0; hd < arch.head_dim; hd++) {
+                            int W_idx = param_map->perception_start[h] + channel_idx * arch.head_dim + hd;
+                            float W_val = __half2float(ca_state->perception_weights[W_idx]);
+                            int dprerelu_idx = h * ws_dprerelu_stride + sample_idx * arch.head_dim + hd;
+                            d_input_accum += W_val * ws_dpregelu[dprerelu_idx];
+                        }
+                    }
+                    d_pooled_input[work_idx] = d_input_accum;
+                }
+            }
+            __syncthreads();
+
+            // Spread pooled gradients back to 3x3 neighborhoods (inverse of pooling)
+            // Input gradient buffer: organism->batch_ca_input_grads (needs to exist)
+            float* d_ca_input = organism->batch_ca_input_grads;
+            if (d_ca_input != nullptr) {
+                int num_cells_local = arch.grid_size * arch.grid_size;
+                int total_inputs = training_mode->batch_size * num_cells_local * arch.channels;
+                for (int idx = tid; idx < total_inputs; idx += blockDim.x) {
+                    int batch_id = idx / (num_cells_local * arch.channels);
+                    int remainder = idx % (num_cells_local * arch.channels);
+                    int cell_idx = remainder / arch.channels;
+                    int channel_idx = remainder % arch.channels;
+                    int cell_y = cell_idx / arch.grid_size;
+                    int cell_x = cell_idx % arch.grid_size;
+
+                    float grad_accum = 0.0f;
+                    // This cell contributes to 9 pooled cells (3x3 window around it)
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            int ny = cell_y + dy;
+                            int nx = cell_x + dx;
+                            if (ny >= 0 && ny < arch.grid_size && nx >= 0 && nx < arch.grid_size) {
+                                int pooled_cell_idx = ny * arch.grid_size + nx;
+                                int pooled_idx = batch_id * num_cells_local + pooled_cell_idx;
+                                grad_accum += d_pooled_input[pooled_idx * arch.channels + channel_idx];
+                            }
+                        }
+                    }
+                    d_ca_input[idx] = grad_accum;
+                }
+            }
+            __syncthreads();
+
+            // Backprop chemical field gradients to genome parameters
+            // Extract concentration gradients from channel 0 and call diffusion_reaction_backward
+            if (d_ca_input != nullptr && entry_idx == 0 && tid == 0) {
+                // Prepare concentration gradient buffer (channel 0 only)
+                int num_cells_local = arch.grid_size * arch.grid_size;
+                float* grad_concentration_buffer = organism->chemical_field->concentration;  // Temporary reuse
+
+                // Note: Actual kernel launch would happen here
+                // This requires CDP or host synchronization, which is complex
+                // For now, mark as TODO: call diffusion_reaction_backward_kernel
+                // with d_ca_input channel 0 gradients to update genome gradients
+                // for diffusivity, reaction_rate, reaction_order, decay_rate slots
+            }
+            __syncthreads();
+
             }  // end CA backward scope
+
+            // ========== FLOW-LENIA BACKWARD (gradients to flow parameters) ==========
+            // Gradient flow: ca_output_grad → transport backward → flow backward → d_beta_A, d_n
+            {
+                int batch_size = training_mode->batch_size;
+                int grid_size = arch.grid_size;
+                int channels = arch.channels;
+                int num_heads = arch.num_heads;
+                int total_cells = grid_size * grid_size;
+
+                float flow_beta_A = entry->flow_beta_A;
+                float flow_n = entry->flow_n;
+                float flow_alpha_min = entry->flow_alpha_min;
+                float flow_alpha_max = entry->flow_alpha_max;
+                float flow_sharpness = entry->flow_sharpness;
+                float flow_dt = entry->flow_resource_dt;
+
+                // Allocate gradient accumulators in shared memory
+                __shared__ float s_d_beta_A;
+                __shared__ float s_d_n;
+                if (tid == 0) {
+                    s_d_beta_A = 0.0f;
+                    s_d_n = 0.0f;
+                }
+                __syncthreads();
+
+                // Thread-local gradient accumulators
+                float local_d_beta_A = 0.0f;
+                float local_d_n = 0.0f;
+
+                // Backward through bilinear transport
+                int total_work = batch_size * total_cells;
+                for (int work_idx = tid; work_idx < total_work; work_idx += blockDim.x) {
+                    int batch_idx = work_idx / total_cells;
+                    int cell_idx = work_idx % total_cells;
+                    int source_x = cell_idx % grid_size;
+                    int source_y = cell_idx / grid_size;
+
+                    int batch_offset = batch_idx * total_cells;
+                    int flow_idx = batch_offset * 2 + cell_idx * 2;
+                    float Fx = organism->buffers->batch_flow_field[flow_idx + 0];
+                    float Fy = organism->buffers->batch_flow_field[flow_idx + 1];
+
+                    int conc_batch_offset = batch_idx * total_cells * channels;
+                    const float* batch_conc = organism->batch_ca_states_pool + conc_batch_offset;
+
+                    float d_flow_x_accum = 0.0f;
+                    float d_flow_y_accum = 0.0f;
+
+                    for (int c = 0; c < channels; c++) {
+                        float source_mass = batch_conc[cell_idx * channels + c];
+                        float d_source_mass, d_flow_x_local, d_flow_y_local;
+
+                        // ca_output_grad has layout [batch × num_heads × grid² × channels]
+                        // Reduce across heads to get per-channel gradient
+                        float channel_grad = 0.0f;
+                        for (int h = 0; h < num_heads; h++) {
+                            int grad_idx = batch_idx * num_heads * total_cells * channels +
+                                          h * total_cells * channels +
+                                          cell_idx * channels + c;
+                            channel_grad += ca_output_grad[grad_idx];
+                        }
+
+                        FlowLeniaOps::bilinear_transport_backward(
+                            source_mass,
+                            (float)source_x, (float)source_y,
+                            Fx, Fy, flow_dt, grid_size,
+                            &channel_grad,
+                            &d_source_mass, &d_flow_x_local, &d_flow_y_local,
+                            c, channels
+                        );
+
+                        d_flow_x_accum += d_flow_x_local;
+                        d_flow_y_accum += d_flow_y_local;
+                    }
+
+                    // Backward through flow computation
+                    int y = source_y;
+                    int x = source_x;
+                    int x_E = min(x + 1, grid_size - 1);
+                    int y_N = min(y + 1, grid_size - 1);
+
+                    float U_center = organism->buffers->batch_affinity_reduced[batch_offset + cell_idx];
+                    float U_E = organism->buffers->batch_affinity_reduced[batch_offset + y * grid_size + x_E];
+                    float U_N = organism->buffers->batch_affinity_reduced[batch_offset + y_N * grid_size + x];
+
+                    float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
+                    for (int c = 0; c < channels; c++) {
+                        A_sum_center += batch_conc[cell_idx * channels + c];
+                        A_sum_E += batch_conc[(y * grid_size + x_E) * channels + c];
+                        A_sum_N += batch_conc[(y_N * grid_size + x) * channels + c];
+                    }
+
+                    float d_beta_A_local, d_n_local;
+                    FlowLeniaOps::compute_flow_backward(
+                        d_flow_x_accum, d_flow_y_accum,
+                        U_center, U_E, U_N,
+                        A_sum_center, A_sum_E, A_sum_N,
+                        flow_beta_A, flow_n,
+                        flow_alpha_min, flow_alpha_max, flow_sharpness,
+                        &d_beta_A_local, &d_n_local
+                    );
+
+                    local_d_beta_A += d_beta_A_local;
+                    local_d_n += d_n_local;
+                }
+
+                // Reduce thread-local gradients to shared
+                atomicAdd(&s_d_beta_A, local_d_beta_A);
+                atomicAdd(&s_d_n, local_d_n);
+                __syncthreads();
+
+                // Apply gradients to Flow-Lenia parameters (thread 0 only)
+                if (tid == 0) {
+                    float d_beta_A = s_d_beta_A / (batch_size * total_cells);
+                    float d_n = s_d_n / (batch_size * total_cells);
+
+                    // Derive Flow-Lenia learning rate from genome
+                    float ctx_metabolic = entry->fitness;
+                    float ctx_stress = entry->hunger;
+                    float ctx_morphogen = local_ca_mean;
+                    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
+                    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
+                    float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
+                    float ctx_performance = organism->telemetry->task_performance.accuracy;
+
+                    TrainingParams train_params;
+                    train_params.derive_from_genome_hash(entry->genome_hash);
+                    float flow_lr = train_params.get_flow_lenia_lr(primary_genome, entry->gradients,
+                        ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity,
+                        ctx_niche, ctx_learning, ctx_performance);
+                    float clip_norm = train_params.get_gradient_clip_norm(primary_genome, entry->gradients,
+                        ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity,
+                        ctx_niche, ctx_learning, ctx_performance);
+
+                    // Clip gradients
+                    d_beta_A = fmaxf(-clip_norm, fminf(clip_norm, d_beta_A));
+                    d_n = fmaxf(-clip_norm, fminf(clip_norm, d_n));
+
+                    // Gradient descent update
+                    float new_beta_A = entry->flow_beta_A - flow_lr * d_beta_A;
+                    float new_n = entry->flow_n - flow_lr * d_n;
+
+                    // Clamp to valid ranges
+                    entry->flow_beta_A = fmaxf(FLOW_LENIA_BETA_A_MIN, fminf(FLOW_LENIA_BETA_A_MAX, new_beta_A));
+                    entry->flow_n = fmaxf(FLOW_LENIA_N_MIN, fminf(FLOW_LENIA_N_MAX, new_n));
+
+                    // Store raw gradients for telemetry
+                    organism->buffers->flow_beta_A_grad = d_beta_A;
+                    organism->buffers->flow_n_grad = d_n;
+                }
+                __syncthreads();
+            }
         }  // end if (!eval_only) for CA backward
 
         // ========== ADAM UPDATES (replaced CDP launches) ==========
@@ -1608,7 +1905,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // Adam update for FC weights (FP32) - thread loop
             {
-                int fc_weights_size = num_classes * behavioral_dim;
+                int fc_weights_size = num_classes * num_features;
                 float* weights = training_mode->classifier->fc_weights;
                 float* gradients = organism->fc_weights_grad;
                 float* m = organism->adam_m_fc_weights;
@@ -1748,35 +2045,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             // History updates
             organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy;
             organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence;
-
-            // Hardware efficiency computation
-            {
-                float hardware_features_temp[HARDWARE_FEATURES_DIM];
-                extract_hardware_features(organism->hardware_geom, hardware_features_temp);
-
-                float eid_fitness = pool->fitness_values[eid];
-                float eid_hunger = ent->hunger;
-
-                float hw_efficiency_sum = safe_epsilon(1.0f);
-                for (int i = 0; i < HARDWARE_FEATURES_DIM; i++) {
-                    int hw_weight_slot = derive_param_slot(ent->genome_hash, "hw_efficiency_weight");
-                    float hw_weight = genome_to_param(
-                        eid_primary_genome,
-                        ent->gradients,
-                        hw_weight_slot,
-                        eid_fitness,
-                        eid_hunger,
-                        organism->chemical_field->concentration[0],
-                        organism->telemetry->genome_complexity.hash_entropy,
-                        organism->telemetry->archive_topology.novelty_gradient,
-                        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-                        organism->telemetry->task_performance.accuracy,
-                        FITNESS_EFFICIENCY_EXPONENT_MIN, FITNESS_EFFICIENCY_EXPONENT_MAX
-                    );
-                    hw_efficiency_sum += hw_weight * hardware_features_temp[i];
-                }
-                ent->hardware_efficiency = hw_efficiency_sum;
-            }
         }
         __syncthreads();
 
@@ -2142,17 +2410,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Update global chemical field from CA concentration (channel 0)
-                {
-                    for (int cell_idx = tid; cell_idx < num_cells; cell_idx += blockDim.x) {
-                        float val = ent_ca_state->ca_concentration[cell_idx * channels + 0];
-                        if (isfinite(val)) {
-                            atomicAdd(&organism->chemical_field->concentration[cell_idx], val);
-                        }
-                    }
-                }
-                __syncthreads();
-
             }  // end entry loop
         }  // end if (!use_gradients)
     }  // end if (entry_idx == 0)
@@ -2478,6 +2735,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         // === POPULATE AUDIT BUFFER ===
         // Signal host with comprehensive telemetry from all 47+ system components
         if (tid == 0 && audit != nullptr && training_mode->batch_images != nullptr) {
+            run_telemetry_probes(organism, generation);
             float* logits = organism->gradient_logits_pool;
             int* labels = training_mode->batch_labels;
             float* batch_images = training_mode->batch_images;

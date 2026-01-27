@@ -256,6 +256,60 @@ __global__ void diffusion_reaction_kernel(
     concentration[idx] = clamp(concentration[idx], NORMALIZED_MIN, NORMALIZED_MAX);
 }
 
+__global__ void diffusion_reaction_backward_kernel(
+    const float* __restrict__ grad_concentration,
+    const float* __restrict__ concentration,
+    const float* __restrict__ laplacian,
+    float* __restrict__ grad_genome,
+    int grid_size,
+    float dt,
+    const float* genome,
+    const float* epigenetic,
+    uint64_t genome_hash,
+    float ctx_metabolic,
+    float ctx_stress,
+    float ctx_morphogen,
+    float ctx_complexity,
+    float ctx_niche,
+    float ctx_learning,
+    float ctx_performance
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= grid_size || y >= grid_size) return;
+
+    int idx = y * grid_size + x;
+    float d_concentration = grad_concentration[idx];
+    float c_center = concentration[idx];
+    float lap = laplacian[idx];
+
+    int diffusivity_slot = derive_param_slot(genome_hash, "chem_diffusivity");
+    float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
+
+    int reaction_order_slot = derive_param_slot(genome_hash, "chem_reaction_order");
+    float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
+
+    int reaction_rate_slot = derive_param_slot(genome_hash, "chem_reaction_rate");
+    float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
+
+    int decay_rate_slot = derive_param_slot(genome_hash, "chem_decay_rate");
+    float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
+
+    float c_safe = fmaxf(fabsf(c_center), safe_epsilon(c_center));
+    float c_pow = powf(c_safe, reaction_order);
+
+    float d_diffusivity = d_concentration * dt * lap;
+    float d_reaction_rate = d_concentration * dt * c_pow;
+    float d_reaction_order = d_concentration * dt * reaction_rate * c_pow * logf(c_safe);
+    float d_decay_rate = d_concentration * dt * (-c_center);
+
+    atomicAdd(&grad_genome[diffusivity_slot], d_diffusivity);
+    atomicAdd(&grad_genome[reaction_rate_slot], d_reaction_rate);
+    atomicAdd(&grad_genome[reaction_order_slot], d_reaction_order);
+    atomicAdd(&grad_genome[decay_rate_slot], d_decay_rate);
+}
+
 __global__ void behavioral_gradient_kernel(float* __restrict__ behavioral_field, float* __restrict__ behavioral_gradients, int grid_size, int hw_dim, int task_dim, int gen_dim){
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int x = blockIdx.x * blockDim.x + threadIdx.x;

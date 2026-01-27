@@ -61,18 +61,13 @@ struct ArchiveTopologyMetrics {
 };
 
 struct DIRESAEvolutionMetrics {
-    // Reconstruction fidelity (pre vs post DIRESA)
-    float recon_loss_hw;         // Hardware axis encoding loss
-    float recon_loss_task;       // Task axis encoding loss  
-    float recon_loss_gen;        // Generalization axis encoding loss
-    float recon_loss_total;      // Combined reconstruction loss
-
-    // Latent space dynamics
-    float behavioral_drift_rate; // How fast behavioral coords change
-    float latent_utilization;    // Fraction of latent dims actively used
-    float compression_ratio;     // Input dim / latent dim effective
-
-    // Hardware-behavior correlation
+    float recon_loss_hw;
+    float recon_loss_task;
+    float recon_loss_gen;
+    float recon_loss_total;
+    float behavioral_drift_rate;
+    float latent_utilization;
+    float compression_ratio;
     float hardware_feature_correlation;
     float gradient_magnitude_avg;
     int archive_injections;
@@ -182,11 +177,10 @@ __device__ void track_allocation(
         (category_size) += (size); \
     } while(0)
 
-__global__ void genome_complexity_probe_kernel(
+__device__ void genome_complexity_probe(
     ComponentPool* pool,
     GenomeComplexityMetrics* metrics
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     int capacity = pool->capacity;
     if (capacity == 0) {
@@ -258,10 +252,10 @@ __global__ void genome_complexity_probe_kernel(
     metrics->hash_entropy = entropy;
 
     metrics->delta_diversity = (float)unique_count / alive_count;
-    metrics->parameter_variance = 0.0f;
+    metrics->parameter_variance = NAN;
 }
 
-__global__ void archive_topology_probe_kernel(
+__device__ void archive_topology_probe(
     GPUElite* archive,
     int archive_size,
     VoronoiCell* voronoi_cells,
@@ -271,12 +265,11 @@ __global__ void archive_topology_probe_kernel(
     int* prev_occupied_flags,              // Which cells were occupied last gen
     int hw_dim, int task_dim, int gen_dim
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     if (archive_size == 0 || num_cells == 0) {
         metrics->occupied_cells = 0;
-        metrics->novelty_gradient = 0.0f;
-        metrics->niche_entropy = 0.0f;
+        metrics->novelty_gradient = NAN;
+        metrics->niche_entropy = NAN;
         return;
     }
 
@@ -438,9 +431,9 @@ __global__ void archive_topology_probe_kernel(
         metrics->axis_corr_hw_gen = cov_hw_gen / (hw_std * gen_std);
         metrics->axis_corr_task_gen = cov_task_gen / (task_std * gen_std);
     } else {
-        metrics->axis_corr_hw_task = 0.0f;
-        metrics->axis_corr_hw_gen = 0.0f;
-        metrics->axis_corr_task_gen = 0.0f;
+        metrics->axis_corr_hw_task = NAN;
+        metrics->axis_corr_hw_gen = NAN;
+        metrics->axis_corr_task_gen = NAN;
     }
 
     metrics->total_population = total_pop;
@@ -451,114 +444,180 @@ __global__ void archive_topology_probe_kernel(
         float variance = (sum_density_sq / occupied) - (mean_density * mean_density);
         metrics->density_variance = sqrtf(fmaxf(0.0f, variance));
     } else {
-        metrics->density_variance = 0.0f;
+        metrics->density_variance = NAN;
     }
     metrics->hash_clustering_coefficient = 1.0f - metrics->novelty_gradient;
 }
 
-__global__ void diresa_evolution_probe_kernel(
-    GPUElite* archive,
-    int archive_size,
+__device__ void diresa_evolution_probe(
+    ComponentPool* pool,
     DIRESAEvolutionMetrics* metrics
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-
-    if (archive_size == 0) {
+    int capacity = pool->capacity;
+    if (capacity == 0) {
+        metrics->recon_loss_hw = NAN;
+        metrics->recon_loss_task = NAN;
+        metrics->recon_loss_gen = NAN;
+        metrics->recon_loss_total = NAN;
         metrics->behavioral_drift_rate = NAN;
+        metrics->latent_utilization = NAN;
+        metrics->compression_ratio = NAN;
         metrics->hardware_feature_correlation = NAN;
         metrics->gradient_magnitude_avg = NAN;
         metrics->archive_injections = -1;
         return;
     }
 
+    float sum_recon_hw = 0.0f;
+    float sum_recon_task = 0.0f;
+    float sum_recon_gen = 0.0f;
+    float sum_recon_total = 0.0f;
     float sum_drift = 0.0f;
+    float sum_latent_util = 0.0f;
+    float sum_compression = 0.0f;
     float sum_hw_corr = 0.0f;
-    int recent_count = 0;
+    float sum_grad_mag = 0.0f;
+    int alive_count = 0;
 
-    int display_limit = archive_size < 5 ? archive_size : 5;
+    for (int i = 0; i < capacity; i++) {
+        if (!pool->alive_flags[i]) continue;
+        PoolEntry* e = &pool->entries[i];
 
-    for (int i = 0; i < archive_size && i < MAX_ARCHIVE_SIZE; i++) {
-        if (archive[i].generation > 0 && recent_count < 100) {
-            float drift = 0.0f;
-            for (int d = 0; d < archive->hw_dim; d++) {
-                drift += fabsf(archive->hw_coords[i * archive->hw_dim + d]);
-            }
-            for (int d = 0; d < archive->task_dim; d++) {
-                drift += fabsf(archive->task_coords[i * archive->task_dim + d]);
-            }
-            for (int d = 0; d < archive->gen_dim; d++) {
-                drift += fabsf(archive->gen_coords[i * archive->gen_dim + d]);
-            }
-            int total_dims = archive->hw_dim + archive->task_dim + archive->gen_dim;
-            sum_drift += drift / total_dims;
-
-            float hw_sum = 0.0f;
-            for (int h = 0; h < (WMMA_TILE_DIM - 1); h++) {
-                hw_sum += archive[i].hardware_features[h];
-            }
-            sum_hw_corr += hw_sum / (WMMA_TILE_DIM - 1);
-
-            if (i < display_limit) {
-            }
-
-            recent_count++;
-        }
+        sum_recon_hw += e->recon_loss_hw;
+        sum_recon_task += e->recon_loss_task;
+        sum_recon_gen += e->recon_loss_gen;
+        sum_recon_total += e->recon_loss_total;
+        sum_drift += e->behavioral_drift_rate;
+        sum_latent_util += e->latent_utilization;
+        sum_compression += e->compression_ratio;
+        sum_hw_corr += e->hardware_feature_correlation;
+        sum_grad_mag += e->gradient_magnitude;
+        alive_count++;
     }
 
-    metrics->behavioral_drift_rate = recent_count > 0 ? sum_drift / recent_count : NAN;
-    metrics->hardware_feature_correlation = recent_count > 0 ? sum_hw_corr / recent_count : NAN;
-    metrics->gradient_magnitude_avg = NAN;
-    metrics->archive_injections = recent_count;
+    if (alive_count > 0) {
+        metrics->recon_loss_hw = sum_recon_hw / alive_count;
+        metrics->recon_loss_task = sum_recon_task / alive_count;
+        metrics->recon_loss_gen = sum_recon_gen / alive_count;
+        metrics->recon_loss_total = sum_recon_total / alive_count;
+        metrics->behavioral_drift_rate = sum_drift / alive_count;
+        metrics->latent_utilization = sum_latent_util / alive_count;
+        metrics->compression_ratio = sum_compression / alive_count;
+        metrics->hardware_feature_correlation = sum_hw_corr / alive_count;
+        metrics->gradient_magnitude_avg = sum_grad_mag / alive_count;
+    } else {
+        metrics->recon_loss_hw = NAN;
+        metrics->recon_loss_task = NAN;
+        metrics->recon_loss_gen = NAN;
+        metrics->recon_loss_total = NAN;
+        metrics->behavioral_drift_rate = NAN;
+        metrics->latent_utilization = NAN;
+        metrics->compression_ratio = NAN;
+        metrics->hardware_feature_correlation = NAN;
+        metrics->gradient_magnitude_avg = NAN;
+    }
+    metrics->archive_injections = alive_count;
 }
 
-__global__ void task_performance_probe_kernel(
-    float* logits,
-    int* labels,
-    int batch_size,
-    int num_classes,
-    TaskPerformanceMetrics* metrics,
-    bool is_train_batch
+__device__ void task_performance_probe(
+    ComponentPool* pool,
+    TaskPerformanceMetrics* metrics
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-
-    int correct = 0;
-    float total_loss = 0.0f;
-
-    for (int b = 0; b < batch_size; b++) {
-        int predicted_class = 0;
-        float max_logit = logits[b * num_classes];
-
-        for (int c = 1; c < num_classes; c++) {
-            if (logits[b * num_classes + c] > max_logit) {
-                max_logit = logits[b * num_classes + c];
-                predicted_class = c;
-            }
-        }
-
-        if (predicted_class == labels[b]) {
-            correct++;
-        }
-
-        float sum_exp = 0.0f;
-        for (int c = 0; c < num_classes; c++) {
-            sum_exp += expf(logits[b * num_classes + c] - max_logit);
-        }
-        float log_sum_exp = max_logit + logf(sum_exp);
-        total_loss -= (logits[b * num_classes + labels[b]] - log_sum_exp);
+    int capacity = pool->capacity;
+    if (capacity == 0) {
+        metrics->accuracy = NAN;
+        metrics->train_accuracy = NAN;
+        metrics->test_accuracy = NAN;
+        metrics->loss = NAN;
+        metrics->classification_stability = NAN;
+        metrics->avg_confidence = NAN;
+        metrics->correct_predictions = -1;
+        metrics->total_predictions = -1;
+        return;
     }
 
-    float computed_accuracy = (float)correct / batch_size;
+    float sum_accuracy = 0.0f;
+    float sum_train_accuracy = 0.0f;
+    float sum_test_accuracy = 0.0f;
+    float sum_loss = 0.0f;
+    float sum_stability = 0.0f;
+    float sum_confidence = 0.0f;
+    int alive_count = 0;
 
-    metrics->correct_predictions = correct;
-    metrics->total_predictions = batch_size;
-    metrics->accuracy = computed_accuracy;
-    metrics->loss = total_loss / batch_size;
-    metrics->classification_stability = 0.0f;
+    for (int i = 0; i < capacity; i++) {
+        if (!pool->alive_flags[i]) continue;
+        PoolEntry* e = &pool->entries[i];
 
-    if (is_train_batch) {
-        metrics->train_accuracy = computed_accuracy;
+        sum_accuracy += e->task_accuracy;
+        sum_train_accuracy += e->train_accuracy;
+        sum_test_accuracy += e->test_accuracy;
+        sum_loss += e->task_loss;
+        sum_stability += e->classification_stability;
+        sum_confidence += e->avg_confidence;
+        alive_count++;
+    }
+
+    if (alive_count > 0) {
+        metrics->accuracy = sum_accuracy / alive_count;
+        metrics->train_accuracy = sum_train_accuracy / alive_count;
+        metrics->test_accuracy = sum_test_accuracy / alive_count;
+        metrics->loss = sum_loss / alive_count;
+        metrics->classification_stability = sum_stability / alive_count;
+        metrics->avg_confidence = sum_confidence / alive_count;
+        metrics->correct_predictions = (int)(sum_accuracy * alive_count);
+        metrics->total_predictions = alive_count;
     } else {
-        metrics->test_accuracy = computed_accuracy;
+        metrics->accuracy = NAN;
+        metrics->train_accuracy = NAN;
+        metrics->test_accuracy = NAN;
+        metrics->loss = NAN;
+        metrics->classification_stability = NAN;
+        metrics->avg_confidence = NAN;
+        metrics->correct_predictions = -1;
+        metrics->total_predictions = -1;
+    }
+}
+
+__device__ void population_metrics_probe(
+    ComponentPool* pool,
+    PopulationMetrics* metrics
+) {
+    int capacity = pool->capacity;
+    if (capacity == 0) {
+        metrics->total_accuracy = NAN;
+        metrics->total_generalization_gap = NAN;
+        metrics->total_hardware_efficiency = NAN;
+        metrics->total_fitness = NAN;
+        return;
+    }
+
+    float sum_accuracy = 0.0f;
+    float sum_gen_gap = 0.0f;
+    float sum_hw_eff = 0.0f;
+    float sum_fitness = 0.0f;
+    int alive_count = 0;
+
+    for (int i = 0; i < capacity; i++) {
+        if (!pool->alive_flags[i]) continue;
+        PoolEntry* e = &pool->entries[i];
+
+        sum_accuracy += e->task_accuracy;
+        sum_gen_gap += e->generalization_gap;
+        sum_hw_eff += e->hardware_efficiency;
+        sum_fitness += e->fitness;
+        alive_count++;
+    }
+
+    if (alive_count > 0) {
+        metrics->total_accuracy = sum_accuracy / alive_count;
+        metrics->total_generalization_gap = sum_gen_gap / alive_count;
+        metrics->total_hardware_efficiency = sum_hw_eff / alive_count;
+        metrics->total_fitness = sum_fitness / alive_count;
+    } else {
+        metrics->total_accuracy = NAN;
+        metrics->total_generalization_gap = NAN;
+        metrics->total_hardware_efficiency = NAN;
+        metrics->total_fitness = NAN;
     }
 }
 
@@ -585,30 +644,10 @@ __device__ void populate_audit_buffer(
            generation, (void*)logits, (void*)labels, (void*)batch_images,
            batch_size, num_classes, (void*)ca_concentration, grid_size);
 
-    // State machine:
-    // ready=0: GPU writing (or initial)
-    // ready=1, consumed=0: data available for host
-    // ready=1, consumed=1: host finished, GPU can overwrite
-
-    // Wait for host to finish (consumed=1) or initial state (ready=0)
-    int timeout_ms = 0;
-    while (audit->ready && !audit->consumed) {
-        if (++timeout_ms > 5000) {
-            printf("V:audit_timeout gen=%d ready=%d consumed=%d\n",
-                   generation, audit->ready, audit->consumed);
-            break;  // Force continue - CSV MUST happen
-        }
-        __nanosleep(1000000);  // 1ms
-    }
-    printf("V:audit_wait_done gen=%d wait_ms=%d ready=%d consumed=%d\n",
-           generation, timeout_ms, audit->ready, audit->consumed);
-
-    // Mark not ready BEFORE writing (prevents host from reading partial data)
+    // GPU-native: just overwrite buffer, host polls asynchronously
+    // No waiting, no handshakes - GPU runs at full speed
     audit->ready = 0;
     __threadfence_system();
-
-    // Clear consumed flag
-    audit->consumed = 0;
 
     audit->generation = generation;
     audit->batch_size = batch_size;
@@ -790,32 +829,32 @@ __device__ void populate_audit_buffer(
         audit->frontier_cells_gained = 0;
         audit->frontier_cells_lost = 0;
         audit->sparse_cell_count = 0;
-        audit->niche_entropy = 0.0f;
-        audit->novelty_gradient = 0.0f;
-        audit->elite_fitness_best = 0.0f;
-        audit->elite_fitness_mean = 0.0f;
-        audit->elite_fitness_delta = 0.0f;
-        audit->quality_floor = 0.0f;
-        audit->quality_mean = 0.0f;
-        audit->quality_range = 0.0f;
-        audit->density_mean = 0.0f;
-        audit->density_max = 0.0f;
-        audit->density_variance = 0.0f;
-        audit->hw_axis_min = 0.0f; audit->hw_axis_max = 0.0f; audit->hw_axis_mean = 0.0f;
-        audit->task_axis_min = 0.0f; audit->task_axis_max = 0.0f; audit->task_axis_mean = 0.0f;
-        audit->gen_axis_min = 0.0f; audit->gen_axis_max = 0.0f; audit->gen_axis_mean = 0.0f;
+        audit->niche_entropy = NAN;
+        audit->novelty_gradient = NAN;
+        audit->elite_fitness_best = NAN;
+        audit->elite_fitness_mean = NAN;
+        audit->elite_fitness_delta = NAN;
+        audit->quality_floor = NAN;
+        audit->quality_mean = NAN;
+        audit->quality_range = NAN;
+        audit->density_mean = NAN;
+        audit->density_max = NAN;
+        audit->density_variance = NAN;
+        audit->hw_axis_min = NAN; audit->hw_axis_max = NAN; audit->hw_axis_mean = NAN;
+        audit->task_axis_min = NAN; audit->task_axis_max = NAN; audit->task_axis_mean = NAN;
+        audit->gen_axis_min = NAN; audit->gen_axis_max = NAN; audit->gen_axis_mean = NAN;
         audit->total_population = 0;
         audit->births_this_gen = 0;
         audit->deaths_this_gen = 0;
-        audit->diresa_recon_loss_hw = 0.0f;
-        audit->diresa_recon_loss_task = 0.0f;
-        audit->diresa_recon_loss_gen = 0.0f;
-        audit->diresa_recon_loss_total = 0.0f;
-        audit->diresa_behavioral_drift = 0.0f;
-        audit->diresa_latent_utilization = 0.0f;
+        audit->diresa_recon_loss_hw = NAN;
+        audit->diresa_recon_loss_task = NAN;
+        audit->diresa_recon_loss_gen = NAN;
+        audit->diresa_recon_loss_total = NAN;
+        audit->diresa_behavioral_drift = NAN;
+        audit->diresa_latent_utilization = NAN;
         audit->genome_unique_hashes = 0;
-        audit->genome_hash_entropy = 0.0f;
-        audit->genome_avg_deltas = 0.0f;
+        audit->genome_hash_entropy = NAN;
+        audit->genome_avg_deltas = NAN;
     }
 
     // Initialize per-class tracking (to be populated by caller if available)
@@ -831,10 +870,10 @@ __device__ void populate_audit_buffer(
         audit->axis_corr_task_gen = telemetry->archive_topology.axis_corr_task_gen;
         audit->hash_clustering_coefficient = telemetry->archive_topology.hash_clustering_coefficient;
     } else {
-        audit->axis_corr_hw_task = 0.0f;
-        audit->axis_corr_hw_gen = 0.0f;
-        audit->axis_corr_task_gen = 0.0f;
-        audit->hash_clustering_coefficient = 0.0f;
+        audit->axis_corr_hw_task = NAN;
+        audit->axis_corr_hw_gen = NAN;
+        audit->axis_corr_task_gen = NAN;
+        audit->hash_clustering_coefficient = NAN;
     }
 
     // === MEMORY ALLOCATION ===
@@ -931,7 +970,7 @@ __device__ void populate_audit_buffer(
             }
         }
         audit->flow_lenia_mass_total = mass_total;
-        audit->flow_lenia_mass_conservation_error = 0.0f;  // Would need prev mass to compute
+        audit->flow_lenia_mass_conservation_error = NAN;  // Would need prev mass to compute
         audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
         audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
     }

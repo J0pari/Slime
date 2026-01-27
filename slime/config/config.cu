@@ -756,6 +756,8 @@ constexpr size_t BACKWARD_WS_DPREGELU_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CH
 
 constexpr float LEARNING_RATE_MIN = 0.0001f;
 constexpr float LEARNING_RATE_MAX = 0.01f;
+constexpr float FLOW_LENIA_LR_MIN = 0.00001f;
+constexpr float FLOW_LENIA_LR_MAX = 0.001f;
 constexpr float BATCH_SIZE_NORM_MIN = 0.0f;
 constexpr float BATCH_SIZE_NORM_MAX = 1.0f;
 constexpr float DECAY_RATE_MIN = 0.9f;

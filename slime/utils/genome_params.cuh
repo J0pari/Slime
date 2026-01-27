@@ -192,6 +192,7 @@ struct TrainingParams {
     int gradient_clip_slot;
     int learning_rate_slot;
     int batch_size_slot;
+    int flow_lenia_lr_slot;
 
     __device__ __forceinline__ void derive_from_genome_hash(uint64_t genome_hash) {
         adam_beta1_slot = derive_param_slot(genome_hash, "adam_beta1");
@@ -200,6 +201,7 @@ struct TrainingParams {
         gradient_clip_slot = derive_param_slot(genome_hash, "gradient_clip_norm");
         learning_rate_slot = derive_param_slot(genome_hash, "learning_rate");
         batch_size_slot = derive_param_slot(genome_hash, "batch_size");
+        flow_lenia_lr_slot = derive_param_slot(genome_hash, "flow_lenia_lr");
     }
 
     __device__ __forceinline__ float get_adam_beta1(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
@@ -226,6 +228,10 @@ struct TrainingParams {
     __device__ __forceinline__ int get_batch_size(const float* genome) {
         float batch_size_norm = (genome[batch_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         return BATCH_SIZE_MIN + (int)(batch_size_norm * (BATCH_SIZE_MAX - BATCH_SIZE_MIN));
+    }
+
+    __device__ __forceinline__ float get_flow_lenia_lr(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
+        return genome_to_param(genome, gradients, flow_lenia_lr_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, FLOW_LENIA_LR_MIN, FLOW_LENIA_LR_MAX);
     }
 };
 

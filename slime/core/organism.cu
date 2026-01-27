@@ -155,6 +155,7 @@ struct OrganismPreallocatedBuffers {
     float* adam_m_fc_bias;
     float* adam_v_fc_bias;
     float* batch_ca_states_pool;
+    float* batch_ca_input_grads;
     int* batch_labels_pool;
     float* task_loss_pool;
     float* reg_loss_pool;
@@ -213,6 +214,9 @@ struct OrganismPreallocatedBuffers {
     float* batch_flow_field;            // [BATCH_SIZE_MAX * CA_FIELD_SIZE * 2]
     float* batch_reintegration_buffer;  // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX]
     float* batch_prev_concentration;    // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX] - previous step's final state for recurrence
+    // Flow-Lenia parameter gradients
+    float flow_beta_A_grad;             // Gradient for flow_beta_A parameter
+    float flow_n_grad;                  // Gradient for flow_n parameter
 };
 
 struct Dataset;
@@ -344,6 +348,7 @@ struct Organism {
     float* adam_v_classifier_pool;
 
     float* batch_ca_states_pool;
+    float* batch_ca_input_grads;
     int* batch_labels_pool;
 
     float* task_loss_pool;
@@ -362,6 +367,35 @@ struct Organism {
     curandState* rng_states;
 };
 
+__device__ void run_telemetry_probes(Organism* organism, int generation) {
+    GPUElite* arch = (GPUElite*)organism->archive;
+
+    if (organism->generation % TELEMETRY_DETAILED == 0) {
+        genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
+    }
+
+    if (organism->generation % TELEMETRY_COMPREHENSIVE == 0) {
+        archive_topology_probe(
+            arch, organism->archive_size,
+            organism->voronoi_cells, organism->num_voronoi_cells,
+            &organism->telemetry->archive_topology,
+            &organism->telemetry->last_checkpoint,
+            organism->telemetry->last_occupancy,
+            arch->hw_dim, arch->task_dim, arch->gen_dim
+        );
+        int current_spawned = Atomics::load_int(organism->pool->total_spawned);
+        int current_culled = Atomics::load_int(organism->pool->total_culled);
+        organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
+        organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
+        organism->telemetry->last_total_spawned = current_spawned;
+        organism->telemetry->last_total_culled = current_culled;
+        organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
+        diresa_evolution_probe(organism->pool, &organism->telemetry->diresa_evolution);
+
+        organism->telemetry->valid = true;
+    }
+}
+
 #include "../training/hybrid_lifecycle.cu"
 #include "../lifecycle/lifecycle_stages.cu"
 __global__ void memory_update_kernel(TemporalTube* tubes, float* fitness_history, int* valid_flags_workspace, int* scan_workspace, int* scan_recursive_workspace, MemoryEntry* temp_buffer, int generation, float* genome, float* gradients, uint64_t genome_hash, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance);
@@ -373,6 +407,9 @@ __global__ void compute_fitness_from_diresa_kernel(Organism* organism, Component
 __global__ void reduce_concentration_mean_kernel(ChemicalField* field, int total_cells, float* partial_sums);
 __global__ void finalize_concentration_mean_kernel(ChemicalField* field, float* partial_sums, int num_blocks, int total_cells);
 __global__ void coherence_kernel(float* prediction_errors, float* coherence_out, int history_length);
+__global__ void find_pending_weight_inherits_kernel(ComponentPool* pool, int* child_indices, int* parent_indices, int* num_pending);
+__global__ void inherit_ca_weights_kernel(ComponentPool* pool, int num_pending, int* child_indices, int* parent_indices);
+__global__ void collect_pool_task_accuracies_kernel(ComponentPool* pool, float* task_accuracies);
 __global__ void initialize_ca_from_field_kernel(
     ComponentPool* pool,
     const float* chem_concentration, const float* chem_gradient_x, const float* chem_gradient_y,
@@ -412,7 +449,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
 
     PoolEntry* entry = &pool->entries[entry_idx];
     if (!entry->alive) return;
-    if (entry_idx == 0 && threadIdx.x == 0) printf("V:374 gen=%d cap=%d alive=%d\n", generation, pool->capacity, entry->alive);
+    if (entry_idx == 0 && threadIdx.x == 0) printf("V:374 gen=%d cap=%d alive=%d\n", organism->generation, pool->capacity, entry->alive);
 
 
     cudaError_t err;
@@ -434,9 +471,9 @@ extern "C" __global__ void organism_lifecycle_kernel(
         organism->diresa_genome_weights
     );
 
-    if (entry_idx == 0) printf("V:399 gen=%d\n", generation);
+    if (entry_idx == 0) printf("V:399 gen=%d\n", organism->generation);
 
-    if (entry_idx == 0 && (generation % 5 == 0 || generation < 3)) {
+    if (entry_idx == 0 && (organism->generation % 5 == 0 || organism->generation < 3)) {
     }
 
     ArchitectureParams arch;
@@ -462,7 +499,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
         aggregate_hardware_geometry_kernel<<<1, BLOCK_SIZE>>>(organism->trace_buffer, organism->hardware_geom);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: aggregate_hardware_geometry_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: aggregate_hardware_geometry_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
 
@@ -475,20 +512,20 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->num_voronoi_cells,
             &organism->archive_size,
             organism->behavioral_agents,
-            generation,
+            organism->generation,
             workspace_genomes
         );
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: selection_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: selection_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
 
         float* component_workspace_genomes = &workspace_genomes[0];
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: workspace_genomes access failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: workspace_genomes access failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
         component_evolution_kernel<<<component_grid, component_block>>>(
@@ -502,14 +539,14 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->behavioral_agents,
             organism->fitness_history,
             organism->coherence_history,
-            generation,
+            organism->generation,
             arch,
             component_workspace_genomes
         );
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: component_evolution_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: component_evolution_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
 
@@ -517,17 +554,17 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism, pool, GENOME_LATENT_DIM_MAX);
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: compute_fitness_from_diresa_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: compute_fitness_from_diresa_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
-        printf("V:471 gen=%d\n", generation);
+        printf("V:471 gen=%d\n", organism->generation);
     }
 
     uint64_t pool_genome_hash = entry->genome_hash;
     float ctx_metabolic = entry->fitness;
     float ctx_stress = entry->hunger;
 
-    // Read precomputed mean from parallel reduction (computed once per generation)
+    // Read precomputed mean from parallel reduction (computed once per organism->generation)
     float ctx_morphogen = organism->chemical_field->cached_mean;
 
     int spawn_rate_slot = derive_param_slot(pool_genome_hash, "lifecycle_spawn_rate");
@@ -536,45 +573,12 @@ extern "C" __global__ void organism_lifecycle_kernel(
     float spawn_min = genome_to_param(primary_genome, entry->gradients, spawn_min_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, SPAWN_PROBABILITY_MIN_MIN, SPAWN_PROBABILITY_MIN_MAX);
 
     if (entry_idx == 0) {
-        printf("V:post471 gen=%d\n", generation);
+        printf("V:post471 gen=%d\n", organism->generation);
 
-        if (generation % TELEMETRY_DETAILED == 0) {
-            genome_complexity_probe_kernel<<<1, 1>>>(organism->pool, &organism->telemetry->genome_complexity);
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("FATAL [organism_lifecycle]: genome_complexity_probe_kernel failed err=%d gen=%d\n", (int)err, generation);
-                return;
-            }
-
-            int active = Atomics::load_int(organism->pool->active_count);
-            float spawn_prob = spawn_rate * expf(-active / (float)POOL_CAPACITY_MAX);
-        }
-
-        if (generation % TELEMETRY_COMPREHENSIVE == 0) {
-            GPUElite* arch = (GPUElite*)organism->archive;
-            archive_topology_probe_kernel<<<1, 1>>>(
-                arch, organism->archive_size,
-                organism->voronoi_cells, organism->num_voronoi_cells,
-                &organism->telemetry->archive_topology,
-                &organism->telemetry->last_checkpoint,
-                organism->telemetry->last_occupancy,
-                arch->hw_dim, arch->task_dim, arch->gen_dim
-            );
-            int current_spawned = Atomics::load_int(organism->pool->total_spawned);
-            int current_culled = Atomics::load_int(organism->pool->total_culled);
-            organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
-            organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
-            organism->telemetry->last_total_spawned = current_spawned;
-            organism->telemetry->last_total_culled = current_culled;
-            organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
-            diresa_evolution_probe_kernel<<<1, 1>>>(arch, organism->archive_size, &organism->telemetry->diresa_evolution);
-
-            // Mark telemetry as valid so populate_audit_buffer copies the data
-            organism->telemetry->valid = true;
-        }
+        run_telemetry_probes(organism, organism->generation);
 
         float spawn_prob = spawn_rate * expf(-Atomics::load_int(organism->pool->active_count) / (float)organism->pool->capacity);
-        printf("V:spawn_check gen=%d prob=%.4f min=%.4f\n", generation, spawn_prob, spawn_min);
+        printf("V:spawn_check gen=%d prob=%.4f min=%.4f\n", organism->generation, spawn_prob, spawn_min);
         if (spawn_prob > spawn_min) {
             atomicAdd(&organism->lifecycle_phase_counts[1], 1);
 
@@ -584,22 +588,22 @@ extern "C" __global__ void organism_lifecycle_kernel(
                 organism,
                 organism->pool,
                 spawn_prob,
-                generation,
+                organism->generation,
                 spawn_wave_workspace_genomes
             );
 
             err = cudaGetLastError();
             if (err != cudaSuccess) {
-                printf("FATAL [organism_lifecycle]: spawn_wave_kernel failed err=%d gen=%d\n", (int)err, generation);
+                printf("FATAL [organism_lifecycle]: spawn_wave_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
                 return;
             }
-            printf("V:spawn_done gen=%d\n", generation);
+            printf("V:spawn_done gen=%d\n", organism->generation);
         }
 
         int hunger_threshold_slot = derive_param_slot(pool_genome_hash, "lifecycle_hunger_threshold");
         float hunger_threshold = genome_to_param(primary_genome, entry->gradients, hunger_threshold_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, HUNGER_THRESHOLD_MIN, HUNGER_THRESHOLD_MAX);
 
-        printf("V:pre_archive gen=%d\n", generation);
+        printf("V:pre_archive gen=%d\n", organism->generation);
         atomicAdd(&organism->lifecycle_phase_counts[2], 1);
         archive_driven_lifecycle_kernel<<<(organism->pool->capacity + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism,
@@ -610,17 +614,17 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->num_voronoi_cells,
             organism->behavioral_agents,
             hunger_threshold,
-            generation,
+            organism->generation,
             workspace_genomes,
             organism->diresa_genome_weights
         );
 
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: archive_driven_lifecycle_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: archive_driven_lifecycle_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
-        printf("V:post_archive gen=%d\n", generation);
+        printf("V:post_archive gen=%d\n", organism->generation);
 
         // === WEIGHT INHERITANCE/RESTORATION ===
         // Phase 1: Inherit weights from pool parents (for entries spawned via spawn_component_device)
@@ -630,7 +634,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             pool, organism->weight_inherit_child_indices, organism->weight_inherit_parent_indices, organism->weight_inherit_num_pending);
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
-            printf("FATAL [organism_lifecycle]: find_pending_weight_inherits_kernel failed err=%d gen=%d\n", (int)err, generation);
+            printf("FATAL [organism_lifecycle]: find_pending_weight_inherits_kernel failed err=%d gen=%d\n", (int)err, organism->generation);
             return;
         }
 
@@ -641,7 +645,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
                 pool, h_num_pending, organism->weight_inherit_child_indices, organism->weight_inherit_parent_indices);
             err = cudaDeviceSynchronize();
             if (err != cudaSuccess) {
-                printf("FATAL [organism_lifecycle]: inherit_ca_weights_kernel failed err=%d gen=%d pending=%d\n", (int)err, generation, h_num_pending);
+                printf("FATAL [organism_lifecycle]: inherit_ca_weights_kernel failed err=%d gen=%d pending=%d\n", (int)err, organism->generation, h_num_pending);
                 return;
             }
         }
@@ -684,7 +688,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             return;
         }
 
-        printf("V:pre_memory gen=%d\n", generation);
+        printf("V:pre_memory gen=%d\n", organism->generation);
         memory_update_kernel<<<1, BLOCK_SIZE>>>(
             organism->chemical_field->history,
             organism->fitness_history,
@@ -692,7 +696,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->memory_compaction_scan,
             organism->memory_compaction_recursive_workspace,
             organism->memory_compaction_buffer,
-            generation,
+            organism->generation,
             primary_genome,
             entry->gradients,
             pool_genome_hash,
@@ -709,17 +713,17 @@ extern "C" __global__ void organism_lifecycle_kernel(
         if (err != cudaSuccess) {
             return;
         }
-        printf("V:post_memory gen=%d\n", generation);
+        printf("V:post_memory gen=%d\n", organism->generation);
 
         float* workspace_genome_buffer = &workspace_genomes[GENOME_SIZE * 2];
 
-        printf("V:pre_neural_ca gen=%d\n", generation);
+        printf("V:pre_neural_ca gen=%d\n", organism->generation);
         neural_ca_update_kernel<<<pool->capacity, WARP_SIZE>>>(
             organism,
             organism->chemical_field,
             organism->effective_rank_history,
             organism->buffers->fp32_ca_workspace,
-            generation,
+            organism->generation,
             organism->pool,
             organism->fitness_history,
             organism->coherence_history,
@@ -732,38 +736,38 @@ extern "C" __global__ void organism_lifecycle_kernel(
         if (err != cudaSuccess) {
             return;
         }
-        printf("V:post_neural_ca gen=%d\n", generation);
+        printf("V:post_neural_ca gen=%d\n", organism->generation);
 
-        if (generation % CHECKPOINT_INTERVAL == 0 && generation > 0) {
+        if (organism->generation % CHECKPOINT_INTERVAL == 0 && organism->generation > 0) {
             int active = Atomics::load_int(organism->pool->active_count);
-            float effective_rank = organism->effective_rank_history[generation % 2];
+            float effective_rank = organism->effective_rank_history[organism->generation % 2];
         }
 
-        printf("V:pre_behavioral gen=%d\n", generation);
+        printf("V:pre_behavioral gen=%d\n", organism->generation);
         // Launch per-entry parallelism: one block per entry, warp cooperation within block
         behavioral_update_kernel<<<pool->capacity, WARP_SIZE>>>(
             organism,
             organism->behavioral_agents,
             organism->chemical_field,
             organism->chemical_field->history,
-            generation,
+            organism->generation,
             arch,
             workspace_genomes
         );
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("V:behavioral_launch_error gen=%d err=%d\n", generation, (int)err);
+            printf("V:behavioral_launch_error gen=%d err=%d\n", organism->generation, (int)err);
             return;
         }
-        printf("V:post_behavioral_launch gen=%d\n", generation);
+        printf("V:post_behavioral_launch gen=%d\n", organism->generation);
 
         // Force synchronization to surface any execution errors
         err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
-            printf("V:behavioral_sync_error gen=%d err=%d\n", generation, (int)err);
+            printf("V:behavioral_sync_error gen=%d err=%d\n", organism->generation, (int)err);
             return;
         }
-        printf("V:post_behavioral_sync gen=%d\n", generation);
+        printf("V:post_behavioral_sync gen=%d\n", organism->generation);
 
         dim3 field_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
         dim3 field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
@@ -841,7 +845,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             organism->num_voronoi_cells,
             organism->behavioral_agents,
             (LocalOrganismState<BLOCK_SIZE>*)organism->lifecycle_states,
-            generation,
+            organism->generation,
             organism->chemical_field,
             arch.grid_size,
             organism->telemetry,
@@ -873,7 +877,7 @@ extern "C" __global__ void organism_lifecycle_kernel(
             &organism->archive_size,
             organism->voronoi_cells,
             organism->num_voronoi_cells,
-            generation,
+            organism->generation,
             organism->chemical_field,
             arch.grid_size,
             organism->telemetry,
@@ -946,40 +950,13 @@ __global__ void component_evolution_kernel(
     if (tid == 0) {
     }
 
-    organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].task_accuracy;
-    organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].coherence;
+    organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].task_accuracy;
+    organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].coherence;
 
     if (tid == 0) {
     }
 
-    {
-        float hardware_features_temp[HARDWARE_FEATURES_DIM];
-        extract_hardware_features(organism->hardware_geom, hardware_features_temp);
-
-        // Cache SoA fitness read for reuse in loop
-        float tid_fitness = pool->fitness_values[tid];
-        float tid_hunger = pool->entries[tid].hunger;
-
-        float hw_efficiency_sum = safe_epsilon(1.0f);
-        for (int i = 0; i < HARDWARE_FEATURES_DIM; i++) {
-            int hw_weight_slot = derive_param_slot(pool->entries[tid].genome_hash, "hw_efficiency_weight");
-            float hw_weight = genome_to_param(
-                primary_genome,
-                pool->entries[tid].gradients,
-                hw_weight_slot,
-                tid_fitness,
-                tid_hunger,
-                organism->chemical_field->concentration[0],
-                organism->telemetry->genome_complexity.hash_entropy,
-                organism->telemetry->archive_topology.novelty_gradient,
-                organism->telemetry->diresa_evolution.behavioral_drift_rate,
-                organism->telemetry->task_performance.accuracy,
-                FITNESS_EFFICIENCY_EXPONENT_MIN, FITNESS_EFFICIENCY_EXPONENT_MAX
-            );
-            hw_efficiency_sum += hw_weight * hardware_features_temp[i];
-        }
-        pool->entries[tid].hardware_efficiency = hw_efficiency_sum;
-    }
+    // hardware_efficiency already computed per-entry in hybrid_lifecycle_kernel
 
     {
         __shared__ float s_acc[BLOCK_SIZE], s_gap[BLOCK_SIZE], s_hw[BLOCK_SIZE], s_fit[BLOCK_SIZE];
@@ -1004,8 +981,8 @@ __global__ void component_evolution_kernel(
 
     // Baldwin Effect: Reinforce genomes that show learning improvement
     // Use SoA for coalesced alive read
-    if (generation > 0 && tid < pool->capacity && pool->alive_flags[tid]) {
-        float prev_task_accuracy = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + tid];
+    if (organism->generation > 0 && tid < pool->capacity && pool->alive_flags[tid]) {
+        float prev_task_accuracy = organism->fitness_history[((organism->generation - 1) % 2) * POOL_CAPACITY_MAX + tid];
         float learning_success = current_task_accuracy - prev_task_accuracy;
 
         if (is_meaningful(learning_success, 1.0f)) {
@@ -1151,15 +1128,10 @@ __global__ void selection_kernel(
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
-    float hardware_features_temp[HARDWARE_FEATURES_DIM];
-    extract_hardware_features(organism->hardware_geom, hardware_features_temp);
-
+    // Use per-entry hardware_efficiency (computed during training) for hw_coords encoding
+    float hw_features[1] = {entry->hardware_efficiency};
     float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
-    diresa_encode(hardware_features_temp, hw_coords_component, organism->diresa_hw_weights);
-
-    float task_features[1] = {entry->task_accuracy};
-    float* task_coords_component = &organism->task_coords_pool[entry_idx * task_dim];
-    diresa_encode(task_features, task_coords_component, &organism->diresa_task_weights[0]);
+    diresa_encode(hw_features, hw_coords_component, organism->diresa_hw_weights);
 
     float gen_features[1] = {entry->generalization_gap};
     float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
@@ -1184,7 +1156,7 @@ __global__ void selection_kernel(
         gpu_sha256(entry_genome, GENOME_SIZE),
         parent_id_0,
         parent_id_1,
-        generation,
+        organism->generation,
         &organism->hw_coords_pool[entry_idx * hw_dim],
         &organism->task_coords_pool[entry_idx * task_dim],
         &organism->gen_coords_pool[entry_idx * gen_dim],
@@ -1291,7 +1263,7 @@ __global__ void spawn_wave_kernel(
 
     if (qualifying_count == 0) return;
 
-    unsigned int seed = tid * generation * RNG_SEED_MULTIPLIER;
+    unsigned int seed = tid * organism->generation * RNG_SEED_MULTIPLIER;
     seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
     float rand = (seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE;
 
@@ -1476,7 +1448,7 @@ __global__ void archive_driven_lifecycle_kernel(
                 num_cells,
                 behavioral_agents,
                 idx,
-                generation * pool->capacity + idx,
+                organism->generation * pool->capacity + idx,
                 organism->telemetry->genome_complexity.hash_entropy,
                 organism->telemetry->archive_topology.novelty_gradient,
                 organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -2122,10 +2094,10 @@ __global__ void behavioral_update_kernel(
     float* workspace_genomes
 ) {
     // DEBUG: Print at kernel entry to verify execution
-    if (blockIdx.x == 0 && threadIdx.x == 0) printf("V:beh_KERNEL_START gen=%d\n", generation);
+    if (blockIdx.x == 0 && threadIdx.x == 0) printf("V:beh_KERNEL_START gen=%d\n", organism->generation);
 
     int entry_idx = blockIdx.x;
-    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ENTER entry=0 gen=%d blockIdx=%d threadIdx=%d\n", generation, blockIdx.x, threadIdx.x);
+    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ENTER entry=0 gen=%d blockIdx=%d threadIdx=%d\n", organism->generation, blockIdx.x, threadIdx.x);
     ComponentPool* pool = organism->pool;
 
     if (entry_idx >= pool->capacity) {
@@ -2138,7 +2110,7 @@ __global__ void behavioral_update_kernel(
         if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_NOT_ALIVE entry=0\n");
         return;
     }
-    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ALIVE entry=0 gen=%d\n", generation);
+    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ALIVE entry=0 gen=%d\n", organism->generation);
 
     int num_agents = POOL_CAPACITY_MAX;
 
@@ -2170,7 +2142,7 @@ __global__ void behavioral_update_kernel(
     BehavioralDimensions dims;
     dims.derive_from_genome(genome_hash, primary_genome);
 
-    if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", generation, entry_idx);
+    if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", organism->generation, entry_idx);
 
     // Per-entry behavioral field and gradient buffers with strided access
     int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
@@ -2268,7 +2240,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_3_behavioral_field gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_3_behavioral_field gen=%d\n", organism->generation);
 
     // Warp-level CA on behavioral field
     {
@@ -2317,7 +2289,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_4_warp_ca gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_4_warp_ca gen=%d\n", organism->generation);
 
     // Compute behavioral gradients
     {
@@ -2345,7 +2317,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", organism->generation);
 
     int chemotaxis_dt_slot = derive_param_slot(genome_hash, "chemotaxis_dt");
     float chemotaxis_dt = genome_to_param(genome, gradients, chemotaxis_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMOTAXIS_DT_MIN, CHEMOTAXIS_DT_MAX);
@@ -2434,7 +2406,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_6_chemotaxis gen=%d\n", generation);
+    if (threadIdx.x == 0) printf("V:beh_6_chemotaxis gen=%d\n", organism->generation);
 
     // Store navigation history to temporal memory
     {
@@ -2488,7 +2460,7 @@ __global__ void behavioral_update_kernel(
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_7_done gen=%d entry=%d\n", generation, entry_idx);
+    if (threadIdx.x == 0) printf("V:beh_7_done gen=%d entry=%d\n", organism->generation, entry_idx);
 }
 
 __global__ void store_navigation_history_kernel(
@@ -2526,7 +2498,7 @@ __global__ void store_navigation_history_kernel(
     float importance = agents[tid].exploration_noise;
 
     if (tid == 0) {
-        printf("V:nav_hist_pre_store gen=%d\n", generation);
+        printf("V:nav_hist_pre_store gen=%d\n", organism->generation);
         store_memory_kernel<<<1, 1>>>(
             tubes,
             d_memory_data,
@@ -2534,7 +2506,7 @@ __global__ void store_navigation_history_kernel(
             importance
         );
         cudaDeviceSynchronize();
-        printf("V:nav_hist_post_store gen=%d\n", generation);
+        printf("V:nav_hist_post_store gen=%d\n", organism->generation);
     }
 }
 
@@ -3171,6 +3143,7 @@ __global__ void init_organism_phase2_kernel(
 
         // Allocate batch training pools
         organism->batch_ca_states_pool = buffers->batch_ca_states_pool;
+        organism->batch_ca_input_grads = buffers->batch_ca_input_grads;
         organism->batch_labels_pool = buffers->batch_labels_pool;
         organism->task_loss_pool = buffers->task_loss_pool;
         organism->reg_loss_pool = buffers->reg_loss_pool;
@@ -3401,8 +3374,8 @@ __global__ void check_convergence_kernel(
     float* workspace_genomes
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        float fitness = organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX];
-        float coherence = organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX];
+        float fitness = organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX];
+        float coherence = organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX];
 
         float* convergence_genome = &workspace_genomes[0];
         float* convergence_parent_temp = &workspace_genomes[GENOME_SIZE];
@@ -3536,44 +3509,40 @@ __global__ void persistent_evolution_kernel(
            (void*)organism->chemical_field,
            organism->chemical_field ? (void*)organism->chemical_field->concentration : nullptr);
 
-    int generation = 0;
-    // V: vertex probe - exposes graph connectivity at persistent loop entry
     printf("V:persistent org=%p pool=%p cap=%d dataset=%p audit=%p\n",
            (void*)organism, (void*)organism->pool, organism->pool->capacity,
            (void*)organism->current_dataset, (void*)audit);
+
+    unsigned long long tick = 0;
+    int capacity = organism->pool->capacity;
+
     while (true) {
-        // Parallel reduction to compute cached_mean before lifecycle kernels read it
+        // Async chemical field reduction (no sync needed - next tick will see result)
         int reduction_blocks = organism->reduction_num_blocks;
         int total_cells = organism->reduction_total_cells;
         reduce_concentration_mean_kernel<<<reduction_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
             organism->chemical_field, total_cells, organism->reduction_workspace);
-        cudaDeviceSynchronize();
         finalize_concentration_mean_kernel<<<1, 1>>>(
             organism->chemical_field, organism->reduction_workspace, reduction_blocks, total_cells);
-        cudaDeviceSynchronize();
 
-        int capacity = organism->pool->capacity;
-        cudaError_t err;
-
-        // ========== PHASE 1: Shared Resource Operations ==========
-        // Per architecture.md: CDP depth = 1, launched from coordinator
-        printf("V:P1_start gen=%d cap=%d\n", generation, capacity);
+        // ========== PHASE 1: Selection, Spawn, Lifecycle (Parallel Per-Entry) ==========
+        printf("V:P1_start tick=%llu cap=%d\n", tick, capacity);
 
         aggregate_hardware_geometry_kernel<<<1, BLOCK_SIZE>>>(organism->trace_buffer, organism->hardware_geom);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_hw gen=%d\n", generation); return; }
-        printf("V:P1_hw gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_hw gen=%d\n", organism->generation); return; }
+        printf("V:P1_hw gen=%d\n", organism->generation);
 
         int selection_blocks = (capacity + WARP_SIZE - 1) / WARP_SIZE;
         selection_kernel<<<selection_blocks, WARP_SIZE>>>(
             organism, organism->pool, organism->archive, organism->voronoi_cells,
             organism->num_voronoi_cells, &organism->archive_size,
-            organism->behavioral_agents, generation, organism_workspace_genomes);
+            organism->behavioral_agents, organism->generation, organism_workspace_genomes);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_sel gen=%d\n", generation); return; }
-        printf("V:P1_sel gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_sel gen=%d\n", organism->generation); return; }
+        printf("V:P1_sel gen=%d\n", organism->generation);
 
         int behavioral_dim = organism->archive->hw_dim + organism->archive->task_dim + organism->archive->gen_dim;
         update_voronoi_density_kernel<<<(organism->num_voronoi_cells + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
@@ -3595,8 +3564,8 @@ __global__ void persistent_evolution_kernel(
         );
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_voronoi gen=%d\n", generation); return; }
-        printf("V:P1_voronoi gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_voronoi gen=%d\n", organism->generation); return; }
+        printf("V:P1_voronoi gen=%d\n", organism->generation);
 
         dim3 component_grid((POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
         dim3 component_block(BLOCK_SIZE);
@@ -3605,54 +3574,54 @@ __global__ void persistent_evolution_kernel(
             organism, organism->pool, organism->archive, organism->voronoi_cells,
             organism->num_voronoi_cells, &organism->archive_size, organism->chemical_field,
             organism->behavioral_agents, organism->fitness_history, organism->coherence_history,
-            generation, arch_p1, organism_workspace_genomes);
+            organism->generation, arch_p1, organism_workspace_genomes);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_comp gen=%d\n", generation); return; }
-        printf("V:P1_comp gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_comp gen=%d\n", organism->generation); return; }
+        printf("V:P1_comp gen=%d\n", organism->generation);
 
         compute_fitness_from_diresa_kernel<<<capacity, BLOCK_SIZE>>>(
             organism, organism->pool, GENOME_LATENT_DIM_MAX);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_fitness gen=%d\n", generation); return; }
-        printf("V:P1_fitness gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_fitness gen=%d\n", organism->generation); return; }
+        printf("V:P1_fitness gen=%d\n", organism->generation);
 
         // Spawn wave (conditional on population density)
-        printf("V:P1_A gen=%d\n", generation);
+        printf("V:P1_A gen=%d\n", organism->generation);
         int active = Atomics::load_int(organism->pool->active_count);
-        printf("V:P1_B gen=%d active=%d\n", generation, active);
+        printf("V:P1_B gen=%d active=%d\n", organism->generation, active);
         float spawn_prob = SPAWN_RATE_MAX * expf(-active / (float)capacity);
-        printf("V:P1_C gen=%d prob=%.6f threshold=%.6f\n", generation, spawn_prob, SPAWN_PROBABILITY_MIN_MIN);
+        printf("V:P1_C gen=%d prob=%.6f threshold=%.6f\n", organism->generation, spawn_prob, SPAWN_PROBABILITY_MIN_MIN);
         if (spawn_prob > SPAWN_PROBABILITY_MIN_MIN) {
             float* spawn_workspace = &organism_workspace_genomes[4 * GENOME_SIZE + 2 * capacity * GENOME_SIZE];
-            printf("V:P1_D gen=%d entering spawn_wave_kernel\n", generation);
-            spawn_wave_kernel<<<1, BLOCK_SIZE>>>(organism, organism->pool, spawn_prob, generation, spawn_workspace);
+            printf("V:P1_D gen=%d entering spawn_wave_kernel\n", organism->generation);
+            spawn_wave_kernel<<<1, BLOCK_SIZE>>>(organism, organism->pool, spawn_prob, organism->generation, spawn_workspace);
             cudaDeviceSynchronize();
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_spawn gen=%d err=%d\n", generation, (int)err); return; }
-            printf("V:P1_spawn gen=%d\n", generation);
+            if (err != cudaSuccess) { printf("!E:P1_spawn gen=%d err=%d\n", organism->generation, (int)err); return; }
+            printf("V:P1_spawn gen=%d\n", organism->generation);
         } else {
-            printf("V:P1_E gen=%d spawn_skipped\n", generation);
+            printf("V:P1_E gen=%d spawn_skipped\n", organism->generation);
         }
 
-        printf("V:P1_F gen=%d entering archive_driven_lifecycle\n", generation);
+        printf("V:P1_F gen=%d entering archive_driven_lifecycle\n", organism->generation);
         int lifecycle_grid = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
         archive_driven_lifecycle_kernel<<<lifecycle_grid, BLOCK_SIZE>>>(
             organism, organism->pool, organism->archive, organism->archive_size,
             organism->voronoi_cells, organism->num_voronoi_cells,
-            organism->behavioral_agents, HUNGER_THRESHOLD_MAX, generation,
+            organism->behavioral_agents, HUNGER_THRESHOLD_MAX, organism->generation,
             organism_workspace_genomes, organism->diresa_genome_weights);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_lifecycle gen=%d\n", generation); return; }
-        printf("V:P1_lifecycle gen=%d\n", generation);
+        if (err != cudaSuccess) { printf("!E:P1_lifecycle gen=%d\n", organism->generation); return; }
+        printf("V:P1_lifecycle gen=%d\n", organism->generation);
 
         // Memory update - compute thresholds then apply decay/pruning/consolidation
         memory_params_kernel<<<1, 1>>>(
             organism->chemical_field->history,
             organism->memory_params,
-            generation,
+            organism->generation,
             organism_workspace_genomes,
             organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash,
@@ -3665,7 +3634,7 @@ __global__ void persistent_evolution_kernel(
             organism->telemetry->task_performance.accuracy);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_mem_params gen=%d\n", generation); return; }
+        if (err != cudaSuccess) { printf("!E:P1_mem_params gen=%d\n", organism->generation); return; }
 
         // Apply memory operations using computed thresholds
         TemporalTube* tubes = organism->chemical_field->history;
@@ -3676,18 +3645,18 @@ __global__ void persistent_evolution_kernel(
             apply_decay_kernel<<<mem_blocks, BLOCK_SIZE>>>(
                 tubes, organism->memory_params->flow_lenia_dt);
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_mem_decay gen=%d\n", generation); return; }
+            if (err != cudaSuccess) { printf("!E:P1_mem_decay gen=%d\n", organism->generation); return; }
 
             prune_memories_kernel<<<mem_blocks, BLOCK_SIZE>>>(
                 tubes, organism->memory_params->decay_threshold);
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_mem_prune gen=%d\n", generation); return; }
+            if (err != cudaSuccess) { printf("!E:P1_mem_prune gen=%d\n", organism->generation); return; }
 
             int consol_threads = (tube_count < BLOCK_SIZE) ? tube_count : BLOCK_SIZE;
             consolidate_memories_kernel<<<1, consol_threads>>>(
                 tubes, organism->memory_params->consolidation_threshold);
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_mem_consol gen=%d\n", generation); return; }
+            if (err != cudaSuccess) { printf("!E:P1_mem_consol gen=%d\n", organism->generation); return; }
 
             // Compaction on telemetry intervals
             if (organism->memory_params->should_compact) {
@@ -3715,7 +3684,7 @@ __global__ void persistent_evolution_kernel(
                     organism->memory_compaction_scan,
                     organism->memory_compaction_buffer, tube_count);
                 err = cudaGetLastError();
-                if (err != cudaSuccess) { printf("!E:P1_mem_compact gen=%d\n", generation); return; }
+                if (err != cudaSuccess) { printf("!E:P1_mem_compact gen=%d\n", organism->generation); return; }
             }
         }
 
@@ -3734,19 +3703,19 @@ __global__ void persistent_evolution_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_diff gen=%d\n", generation); return; }
+        if (err != cudaSuccess) { printf("!E:P1_diff gen=%d\n", organism->generation); return; }
 
         store_chemical_snapshot_kernel<<<field_grid, field_block>>>(
             organism->chemical_field, arch_p1.grid_size * arch_p1.grid_size,
-            (float)generation, organism->pool->entries[0].genome_hash, organism_workspace_genomes);
+            (float)organism->generation, organism->pool->entries[0].genome_hash, organism_workspace_genomes);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_snap gen=%d\n", generation); return; }
+        if (err != cudaSuccess) { printf("!E:P1_snap gen=%d\n", organism->generation); return; }
 
         cudaDeviceSynchronize();  // BARRIER: Phase 1 complete
-        printf("V:P1_done gen=%d\n", generation);
+        printf("V:P1_done gen=%d\n", organism->generation);
 
         // ========== PHASE 2: Per-Entry CA Processing ==========
-        printf("V:P2_start gen=%d\n", generation);
+        printf("V:P2_start gen=%d\n", organism->generation);
 
         // Initialize per-entry CA from shared chemical field (stigmergy loop: chemical_field → per-entry CA)
         // This completes the bidirectional data flow: training→chemical_field→diffusion→per-entry CA
@@ -3789,17 +3758,17 @@ __global__ void persistent_evolution_kernel(
             );
         }
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P2_init_ca gen=%d err=%d\n", generation, (int)err); return; }
+        if (err != cudaSuccess) { printf("!E:P2_init_ca gen=%d err=%d\n", organism->generation, (int)err); return; }
         cudaDeviceSynchronize();
-        printf("V:P2_init_ca gen=%d\n", generation);
+        printf("V:P2_init_ca gen=%d\n", organism->generation);
 
         neural_ca_update_kernel<<<capacity, WARP_SIZE>>>(
             organism, organism->chemical_field, organism->effective_rank_history,
-            organism->buffers->fp32_ca_workspace, generation, organism->pool,
+            organism->buffers->fp32_ca_workspace, organism->generation, organism->pool,
             organism->fitness_history, organism->coherence_history,
             organism_workspace_genomes, organism->trace_buffer, arch_p1.grid_size);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P2_ca gen=%d err=%d\n", generation, (int)err); return; }
+        if (err != cudaSuccess) { printf("!E:P2_ca gen=%d err=%d\n", organism->generation, (int)err); return; }
         cudaDeviceSynchronize();
 
         // Update shared chemical field from per-entry CA output (stigmergy loop: per-entry CA → chemical_field)
@@ -3813,163 +3782,46 @@ __global__ void persistent_evolution_kernel(
             );
         }
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P2_update_field gen=%d err=%d\n", generation, (int)err); return; }
+        if (err != cudaSuccess) { printf("!E:P2_update_field gen=%d err=%d\n", organism->generation, (int)err); return; }
 
         cudaDeviceSynchronize();  // BARRIER: Phase 2 complete
-        printf("V:P2_done gen=%d\n", generation);
+        printf("V:P2_done gen=%d\n", organism->generation);
 
         // ========== PHASE 3: Per-Entry Behavioral Processing ==========
-        printf("V:P3_start gen=%d\n", generation);
+        printf("V:P3_start gen=%d\n", organism->generation);
         behavioral_update_kernel<<<capacity, WARP_SIZE>>>(
             organism, organism->behavioral_agents, organism->chemical_field,
-            organism->chemical_field->history, generation, arch_p1, organism_workspace_genomes);
+            organism->chemical_field->history, organism->generation, arch_p1, organism_workspace_genomes);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P3_beh gen=%d err=%d\n", generation, (int)err); return; }
+        if (err != cudaSuccess) { printf("!E:P3_beh gen=%d err=%d\n", organism->generation, (int)err); return; }
 
         cudaDeviceSynchronize();  // BARRIER: Phase 3 complete
-        printf("V:P3_done gen=%d\n", generation);
+        printf("V:P3_done gen=%d\n", organism->generation);
 
-        // Gradient-based learning pathway - every CHECKPOINT_INTERVAL generations
-        // Produces telemetry (classification accuracy, gradient magnitudes) for DIRESA
-        if (generation % CHECKPOINT_INTERVAL == 0) {
-            printf("V:checkpoint gen=%d\n", generation);
-
-            int lifecycle_blocks = capacity;
-            hybrid_organism_lifecycle_kernel<<<lifecycle_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
-                organism,
-                organism->training_mode,
-                organism->param_map,
-                generation,
-                organism_workspace_genomes,
-                false,  // eval_only=false for training
-                audit
-            );
-            err = cudaGetLastError();
-            if (err != cudaSuccess) {
-                printf("!E:hybrid_train_launch gen=%d err=%d\n", generation, (int)err);
-                return;
-            }
-            err = cudaDeviceSynchronize();
-            if (err != cudaSuccess) {
-                printf("!E:hybrid_train_sync gen=%d err=%d\n", generation, (int)err);
-                return;
-            }
-            printf("V:hybrid_train gen=%d tm=%p tm->batch_size=%d logits=%p\n",
-                   generation, (void*)organism->training_mode,
-                   organism->training_mode ? organism->training_mode->batch_size : -1,
-                   (void*)organism->gradient_logits_pool);
-
-            // Test evaluation: run forward pass on test dataset to compute test_accuracy
-            {
-                Dataset* saved_dataset = organism->current_dataset;
-                organism->current_dataset = organism->current_test_dataset;
-                organism->training_mode->is_train_batch = false;
-
-                hybrid_organism_lifecycle_kernel<<<lifecycle_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
-                    organism,
-                    organism->training_mode,
-                    organism->param_map,
-                    generation,
-                    organism_workspace_genomes,
-                    true,  // eval_only=true for test
-                    nullptr  // no audit during test eval
-                );
-                err = cudaGetLastError();
-                if (err != cudaSuccess) {
-                    return;
-                }
-                err = cudaDeviceSynchronize();
-                if (err != cudaSuccess) {
-                    return;
-                }
-
-                // Restore train dataset
-                organism->current_dataset = saved_dataset;
-                organism->training_mode->is_train_batch = true;
-            }
-
-            // Audit buffer population - diagnose any null pointers blocking output
-            if (!audit) {
-                printf("[audit:gen%d] audit=null, allocated in main.cu via cudaHostAlloc\n", generation);
-            } else if (!organism->training_mode) {
-                printf("[audit:gen%d] training_mode=null, set from buffers->training_mode in init\n", generation);
-            } else if (!organism->gradient_logits_pool) {
-                printf("[audit:gen%d] gradient_logits_pool=null, allocated in main.cu buffers_host\n", generation);
-            } else if (!organism->current_dataset) {
-                printf("[audit:gen%d] current_dataset=null, set by curriculum selection\n", generation);
-            } else if (!organism->current_dataset->descriptor) {
-                printf("[audit:gen%d] dataset->descriptor=null, set by load_dataset_from_registry\n", generation);
-            } else if (!organism->pool) {
-                printf("[audit:gen%d] pool=null, created by init_pool_kernel\n", generation);
-            } else if (!organism->telemetry) {
-                printf("[audit:gen%d] telemetry=null, allocated in main.cu buffers_host\n", generation);
-            } else {
-                int num_classes = organism->current_dataset->descriptor->num_classes;
-                int grid_size = organism->pool->entries[0].grid_size;
-                float* ca_conc = organism->pool->entries[0].ca_state ?
-                    organism->pool->entries[0].ca_state->ca_concentration : nullptr;
-                printf("[audit:gen%d] calling populate_audit_buffer classes=%d grid=%d batch=%d\n",
-                       generation, num_classes, grid_size, organism->training_mode->batch_size);
-                populate_audit_buffer(
-                    audit,
-                    generation,
-                    organism->gradient_logits_pool,
-                    organism->training_mode->batch_labels,
-                    organism->training_mode->batch_images,
-                    organism->training_mode->batch_size,
-                    num_classes,
-                    ca_conc,
-                    grid_size,
-                    organism->telemetry->task_performance.train_accuracy,
-                    organism->telemetry->task_performance.test_accuracy,
-                    organism->telemetry,
-                    organism->pool,
-                    organism->chemical_field,
-                    organism->pool->entries[0].ca_state,
-                    organism->hardware_geom
-                );
-            }
+        // CORE: Gradient-based learning - train CA on tasks EVERY generation
+        // This is THE ENTIRE POINT - without this there is no task performance
+        int lifecycle_blocks = capacity;
+        hybrid_organism_lifecycle_kernel<<<lifecycle_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
+            organism,
+            organism->training_mode,
+            organism->param_map,
+            organism->generation,
+            organism_workspace_genomes,
+            false,  // eval_only=false for training
+            nullptr  // no audit
+        );
+        cudaError_t err_train = cudaGetLastError();
+        if (err_train != cudaSuccess) {
+            printf("!E:hybrid_train_launch gen=%d err=%d\n", organism->generation, (int)err_train);
+            return;
+        }
+        err_train = cudaDeviceSynchronize();
+        if (err_train != cudaSuccess) {
+            printf("!E:hybrid_train_sync gen=%d err=%d\n", organism->generation, (int)err_train);
+            return;
         }
 
-        // Update curriculum every CHECKPOINT_INTERVAL generations
-        if (generation % CHECKPOINT_INTERVAL == 0 && generation > 0) {
-            int num_blocks = (organism->pool->capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-            // Collect task accuracies from pool
-            collect_pool_task_accuracies_kernel<<<num_blocks, BLOCK_SIZE>>>(
-                organism->pool,
-                organism->pool_task_accuracies
-            );
-
-            // Compute voronoi occupancy histogram
-            int voronoi_blocks = (organism->num_voronoi_cells + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            compute_voronoi_occupancy_kernel<<<voronoi_blocks, BLOCK_SIZE>>>(
-                organism->voronoi_cells,
-                organism->num_voronoi_cells,
-                organism->voronoi_occupancy_histogram
-            );
-
-            // Store previous dataset index
-            int prev_dataset_idx = organism->curriculum->current_dataset_idx;
-
-            // Update curriculum based on population performance
-            update_curriculum_kernel<<<1, 1>>>(
-                organism->curriculum,
-                organism->pool_task_accuracies,
-                organism->voronoi_occupancy_histogram,
-                organism->pool->capacity,
-                organism->num_voronoi_cells,
-                generation
-            );
-
-            // If curriculum progressed to new dataset, switch to new pre-loaded dataset
-            if (organism->curriculum->current_dataset_idx != prev_dataset_idx) {
-                organism->current_dataset = organism->dataset_array[organism->curriculum->current_dataset_idx];
-                int new_dataset_id = ACTIVE_DATASET_IDS[organism->curriculum->current_dataset_idx];
-            }
-        }
-
-        generation++;
+        organism->generation++;
     }
 }
 

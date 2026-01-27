@@ -17,8 +17,23 @@ struct PoolEntry {
     float fitness;
     float coherence;
     float task_accuracy;
+    float train_accuracy;
+    float test_accuracy;
+    float task_loss;
+    float classification_stability;
+    float avg_confidence;
     float generalization_gap;
     float hardware_efficiency;
+    float gradient_magnitude;
+    float effective_rank;
+    float recon_loss_hw;
+    float recon_loss_task;
+    float recon_loss_gen;
+    float recon_loss_total;
+    float behavioral_drift_rate;
+    float latent_utilization;
+    float compression_ratio;
+    float hardware_feature_correlation;
     float hunger;
     int age;
     bool alive;
@@ -42,6 +57,17 @@ struct PoolEntry {
     int diresa_batch_size;
     float anneal_step;
     float cov_target;
+    unsigned long long active_warps;
+    unsigned long long divergent_branches;
+    unsigned long long total_branches;
+    unsigned long long global_loads;
+    unsigned long long global_stores;
+    unsigned long long l2_transactions;
+    unsigned long long dram_transactions;
+    unsigned long long inst_executed;
+    unsigned long long inst_issued;
+    unsigned long long cycles_elapsed;
+    unsigned long long tensor_core_cycles;
     float dist_weight;
     float recon_weight;
     float distance_exponent;
@@ -435,9 +461,20 @@ __device__ void spawn_component_device(
     pool->entries[i].fitness = init_fitness_prior;
     pool->fitness_values[i] = init_fitness_prior;  // SoA sync
     pool->entries[i].coherence = init_fitness_prior;
-    pool->entries[i].task_accuracy = NAN;  // Set by classification evaluation
-    pool->entries[i].generalization_gap = NAN;  // Set by held-out evaluation
-    pool->entries[i].hardware_efficiency = NAN;  // Set by hardware profiling
+    pool->entries[i].task_accuracy = NAN;
+    pool->entries[i].generalization_gap = NAN;
+    pool->entries[i].hardware_efficiency = NAN;
+    pool->entries[i].active_warps = 0;
+    pool->entries[i].divergent_branches = 0;
+    pool->entries[i].total_branches = 0;
+    pool->entries[i].global_loads = 0;
+    pool->entries[i].global_stores = 0;
+    pool->entries[i].l2_transactions = 0;
+    pool->entries[i].dram_transactions = 0;
+    pool->entries[i].inst_executed = 0;
+    pool->entries[i].inst_issued = 0;
+    pool->entries[i].cycles_elapsed = 0;
+    pool->entries[i].tensor_core_cycles = 0;
     Atomics::increment_int(pool->active_count);
 }
 

@@ -219,6 +219,68 @@ struct FlowLeniaOps {
             (1.0f - alpha) * grad_U_y - alpha * grad_A_y
         );
     }
+
+    __device__ static void compute_flow_backward(
+        float d_flow_x, float d_flow_y,
+        float U_center, float U_E, float U_N,
+        float A_sum_center, float A_sum_E, float A_sum_N,
+        float beta_A, float n,
+        float alpha_min, float alpha_max,
+        float sharpness,
+        float* d_beta_A,
+        float* d_n
+    ) {
+        // Recompute forward values needed for backward
+        float ratio = A_sum_center / fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
+        float safe_ratio = fmaxf(ratio, safe_epsilon(ratio));
+        float safe_n = fmaxf(fabsf(n), safe_epsilon(n));
+
+        float alpha_unclamped = powf(safe_ratio, safe_n);
+
+        // Soft clamp gradient
+        float range = alpha_max - alpha_min;
+        float safe_range = fmaxf(fabsf(range), safe_epsilon(range));
+        float scaled = (alpha_unclamped - alpha_min) / safe_range;
+        float exp_arg = -sharpness * (scaled - CENTERED_DIFFERENCE_SCALE);
+        exp_arg = fmaxf(fminf(exp_arg, EXPF_ARG_LIMIT), -EXPF_ARG_LIMIT);
+        float exp_val = expf(exp_arg);
+        float sigmoid_val = 1.0f / (1.0f + exp_val);
+        float d_sigmoid = sigmoid_val * (1.0f - sigmoid_val) * sharpness / safe_range;
+
+        float alpha = alpha_min + range * sigmoid_val;
+
+        float grad_U_x = (U_E - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_U_y = (U_N - U_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_x = (A_sum_E - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
+        float grad_A_y = (A_sum_N - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
+
+        // Flow output: F = (1 - alpha) * grad_U - alpha * grad_A
+        // d_flow_x/d_alpha = -grad_U_x - grad_A_x
+        // d_flow_y/d_alpha = -grad_U_y - grad_A_y
+        float d_alpha_x = d_flow_x * (-grad_U_x - grad_A_x);
+        float d_alpha_y = d_flow_y * (-grad_U_y - grad_A_y);
+        float d_alpha = d_alpha_x + d_alpha_y;
+
+        // Chain through soft_clamp
+        float d_alpha_unclamped = d_alpha * range * d_sigmoid;
+
+        // alpha_unclamped = safe_ratio^safe_n
+        // d_alpha_unclamped/d_ratio = safe_n * safe_ratio^(safe_n - 1)
+        // d_alpha_unclamped/d_n = safe_ratio^safe_n * ln(safe_ratio)
+        float d_ratio = d_alpha_unclamped * safe_n * powf(safe_ratio, safe_n - 1.0f);
+        float d_n_local = d_alpha_unclamped * alpha_unclamped * logf(safe_ratio);
+
+        // ratio = A_sum_center / beta_A
+        // d_ratio/d_beta_A = -A_sum_center / beta_A^2
+        float beta_A_safe = fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
+        *d_beta_A = d_ratio * (-A_sum_center / (beta_A_safe * beta_A_safe));
+
+        // safe_n = max(|n|, epsilon)
+        // Gradient only flows if n != 0
+        *d_n = (fabsf(n) > safe_epsilon(n)) ? d_n_local : 0.0f;
+    }
 };
+
+
 
 #endif

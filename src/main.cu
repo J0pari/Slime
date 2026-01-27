@@ -337,6 +337,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_m_fc_bias");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_v_fc_bias");
     CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_ca_states_pool");
+    CUDA_ALLOC_CHECK(buffers_host.batch_ca_input_grads, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_ca_input_grads");
     CUDA_ALLOC_CHECK(buffers_host.batched_ca_output, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "batched_ca_output");
     CUDA_ALLOC_CHECK(buffers_host.batch_affinity_reduced, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE, "batch_affinity_reduced");
     CUDA_ALLOC_CHECK(buffers_host.batch_flow_field, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * 2, "batch_flow_field");
@@ -403,36 +404,12 @@ int main() {
 
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
-    int polls_without_ready = 0;
-    int forced_gen = 0;
-    auto last_csv_time = std::chrono::steady_clock::now();
 
+    // Host only reads audit buffer, never writes - kernel runs autonomously
     while (true) {
         std::atomic_thread_fence(std::memory_order_acquire);
 
-        // FAILSAFE 1: Force CSV write after 30 seconds without any output
-        auto now_check = std::chrono::steady_clock::now();
-        double sec_since_csv = std::chrono::duration<double>(now_check - last_csv_time).count();
-        if (sec_since_csv > 30.0 && !h_audit->ready) {
-            printf("[FAILSAFE] No ready signal for %.1f sec - forcing CSV write gen=%d\n", sec_since_csv, forced_gen);
-            h_audit->generation = forced_gen++;
-            h_audit->ready = 1;
-            h_audit->consumed = 0;
-        }
-
-        // FAILSAFE 2: Counter-based backup
-        polls_without_ready++;
-        if (polls_without_ready > 600 && !h_audit->ready) {
-            printf("[FAILSAFE2] %d polls without ready - forcing CSV\n", polls_without_ready);
-            h_audit->generation = forced_gen++;
-            h_audit->ready = 1;
-            h_audit->consumed = 0;
-            polls_without_ready = 0;
-        }
-
-        if (h_audit->ready && !h_audit->consumed) {
-            polls_without_ready = 0;
-            last_csv_time = std::chrono::steady_clock::now();
+        if (h_audit->ready) {
             int gen = h_audit->generation;
             if (gen != last_gen) {
                 last_gen = gen;
@@ -440,9 +417,9 @@ int main() {
                 auto now_time = std::chrono::steady_clock::now();
                 double elapsed_sec = std::chrono::duration<double>(now_time - start_time).count();
 
-                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d\n",
+                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d (%.1fs)\n",
                        gen, h_audit->batch_size, h_audit->accuracy, h_audit->loss,
-                       h_audit->correct_count, h_audit->batch_size);
+                       h_audit->correct_count, h_audit->batch_size, elapsed_sec);
 
                 // Write sample images using audit_writer
                 if (write_sample_images(session_dir, gen, h_audit) != 0) {
@@ -475,10 +452,6 @@ int main() {
 
                 // Append to manifest
                 append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);
-
-                // Mark consumed
-                h_audit->consumed = 1;
-                std::atomic_thread_fence(std::memory_order_release);
             }
         }
 
