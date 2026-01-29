@@ -191,6 +191,28 @@ __device__ __forceinline__ float warp_scan_sum(float val) {
     return val;
 }
 
+__device__ __forceinline__ int warp_scan_int(int val) {
+    unsigned mask = __activemask();
+    int lane = threadIdx.x % WARP_SIZE;
+
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = __shfl_up_sync(mask, val, offset);
+        if (lane >= offset) val += n;
+    }
+
+    return val;
+}
+
+__device__ __forceinline__ int warp_reduce_int(int val) {
+    unsigned mask = __activemask();
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(mask, val, offset);
+    }
+    return val;
+}
+
 __device__ __forceinline__ unsigned int jenkins_hash(unsigned int a) {
     a = (a + 0x7ed55d16) + (a << JENKINS_MIX_SHIFT_A);
     a = (a ^ 0xc761c23c) ^ (a >> JENKINS_MIX_SHIFT_B);
@@ -599,6 +621,48 @@ struct BlockReduce {
         if (wid == 0) val = WarpReduce<WARP_SIZE>::sum(val);
 
         return val;
+    }
+};
+
+template<int BLOCK_SIZE, int WARP_SIZE = 32>
+struct BlockScan {
+    // Exclusive prefix sum - returns (exclusive_sum, total)
+    // Each thread gets sum of all elements before it
+    __device__ static int exclusive_sum(int val, int& total) {
+        __shared__ int warp_sums[BLOCK_SIZE / WARP_SIZE];
+        int lane = threadIdx.x % WARP_SIZE;
+        int wid = threadIdx.x / WARP_SIZE;
+
+        // Warp-level inclusive scan
+        int inclusive = warp_scan_int(val);
+
+        // Store warp totals
+        if (lane == WARP_SIZE - 1) warp_sums[wid] = inclusive;
+        __syncthreads();
+
+        // First warp scans the warp sums
+        if (wid == 0) {
+            int warp_val = (lane < BLOCK_SIZE / WARP_SIZE) ? warp_sums[lane] : 0;
+            int warp_inclusive = warp_scan_int(warp_val);
+            warp_sums[lane] = warp_inclusive;
+        }
+        __syncthreads();
+
+        // Add prefix from previous warps, convert inclusive to exclusive
+        int warp_prefix = (wid > 0) ? warp_sums[wid - 1] : 0;
+        int exclusive = inclusive - val + warp_prefix;
+
+        // Total is last warp's sum
+        total = warp_sums[BLOCK_SIZE / WARP_SIZE - 1];
+
+        return exclusive;
+    }
+
+    // Stream compaction: returns write index for each thread, -1 if predicate false
+    // total_kept receives count of elements kept
+    __device__ static int compact_index(int predicate, int& total_kept) {
+        int exclusive = exclusive_sum(predicate, total_kept);
+        return predicate ? exclusive : -1;
     }
 };
 

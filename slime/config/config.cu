@@ -830,6 +830,12 @@ constexpr float RESOURCE_INIT_MIN = 0.5f;
 constexpr float RESOURCE_INIT_MAX = 2.0f;
 constexpr float RESOURCE_NOISE_MIN = 0.0f;
 constexpr float RESOURCE_NOISE_MAX = 0.3f;
+constexpr float CHEM_INIT_BASE_MIN = 0.2f;
+constexpr float CHEM_INIT_BASE_MAX = 0.8f;
+constexpr float CHEM_INIT_GENOME_INFLUENCE_MIN = 0.0f;
+constexpr float CHEM_INIT_GENOME_INFLUENCE_MAX = 0.3f;
+constexpr float CHEM_INIT_NOISE_MIN = 0.05f;
+constexpr float CHEM_INIT_NOISE_MAX = 0.5f;
 
 constexpr float ARCHIVE_ACCEPTANCE_NOVELTY_WEIGHT = 0.5f;
 constexpr float ARCHIVE_ACCEPTANCE_QUALITY_WEIGHT = 0.5f;

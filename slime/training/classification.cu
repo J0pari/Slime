@@ -49,9 +49,10 @@ __global__ void spatial_pooling_kernel(
     float weight = ldg_float(&pooling_weights[feature_idx]);
     float weighted = avg * weight;
 
-    if (isnan(weighted) || isinf(weighted)) {
-        return;
-    }
+    // FATAL on NaN/inf - indicates upstream CA output or weight corruption
+    DEVICE_FATAL_IF(isnan(weighted), "spatial_pooling: weighted result is NaN - CA output or weights corrupted");
+    DEVICE_FATAL_IF(isinf(weighted), "spatial_pooling: weighted result is Inf - CA output or weights corrupted");
+
     features[batch_idx * num_features + feature_idx] = weighted;
 }
 
@@ -69,26 +70,16 @@ __global__ void classification_head_kernel(
 
     if (batch_idx >= batch_size || class_idx >= num_classes) return;
 
-    // Validate pointers and first values
+    // FATAL on null pointers - caller must provide valid buffers
+    DEVICE_FATAL_IF(features == nullptr, "classification_head: features is null");
+    DEVICE_FATAL_IF(fc_weights == nullptr, "classification_head: fc_weights is null");
+    DEVICE_FATAL_IF(fc_bias == nullptr, "classification_head: fc_bias is null");
+
+    // FATAL on NaN in first element - indicates data corruption
     if (batch_idx == 0 && class_idx == 0) {
-        if (features == nullptr) {
-            return;
-        }
-        if (fc_weights == nullptr) {
-            return;
-        }
-        if (fc_bias == nullptr) {
-            return;
-        }
-        if (isnan(features[0])) {
-            return;
-        }
-        if (isnan(fc_weights[0])) {
-            return;
-        }
-        if (isnan(fc_bias[0])) {
-            return;
-        }
+        DEVICE_FATAL_IF(isnan(features[0]), "classification_head: features[0] is NaN - data corrupted");
+        DEVICE_FATAL_IF(isnan(fc_weights[0]), "classification_head: fc_weights[0] is NaN - weights corrupted");
+        DEVICE_FATAL_IF(isnan(fc_bias[0]), "classification_head: fc_bias[0] is NaN - bias corrupted");
     }
 
     __shared__ float dot_products[NUM_CLASSES_MAX];
@@ -108,9 +99,9 @@ __global__ void classification_head_kernel(
     __syncthreads();
 
     if (class_idx < num_classes) {
-        if (isnan(dot_products[class_idx]) || isinf(dot_products[class_idx])) {
-            return;
-        }
+        // FATAL on NaN/inf logits - indicates computation error
+        DEVICE_FATAL_IF(isnan(dot_products[class_idx]), "classification_head: logit is NaN - computation corrupted");
+        DEVICE_FATAL_IF(isinf(dot_products[class_idx]), "classification_head: logit is Inf - computation corrupted");
         logits[batch_idx * num_classes + class_idx] = dot_products[class_idx];
     }
 }
@@ -170,7 +161,8 @@ __global__ void accuracy_kernel(
     }
 }
 
-__global__ void cross_entropy_loss_kernel(
+// Warp-optimized cross-entropy for classification pipeline
+__global__ void classification_cross_entropy_kernel(
     float* __restrict__ logits,
     int* __restrict__ labels,
     float* __restrict__ loss_out,
@@ -184,14 +176,15 @@ __global__ void cross_entropy_loss_kernel(
     if (batch_idx >= batch_size) return;
 
     int label = labels[batch_idx];
-    if (label < 0 || label >= num_classes) return;
+    DEVICE_FATAL_IF(label < 0 || label >= num_classes, "classification_cross_entropy: label out of range");
 
     float* batch_logits = &logits[batch_idx * num_classes];
 
     float local_val = (tid < num_classes) ? batch_logits[tid] : -INFINITY;
 
-    if (tid < num_classes && (isnan(local_val) || isinf(local_val))) {
-        return;
+    if (tid < num_classes) {
+        DEVICE_FATAL_IF(isnan(local_val), "classification_cross_entropy: logit is NaN");
+        DEVICE_FATAL_IF(isinf(local_val), "classification_cross_entropy: logit is Inf");
     }
 
     float max_logit = warp_reduce_max(local_val);
@@ -205,9 +198,10 @@ __global__ void cross_entropy_loss_kernel(
 
     if (tid == 0) {
         float nll = log_sum_exp - batch_logits[label];
-        if (!isnan(nll) && !isinf(nll) && nll >= 0.0f) {
-            atomicAdd(loss_out, nll / batch_size);
-        }
+        DEVICE_FATAL_IF(isnan(nll), "classification_cross_entropy: NLL is NaN");
+        DEVICE_FATAL_IF(isinf(nll), "classification_cross_entropy: NLL is Inf");
+        DEVICE_FATAL_IF(nll < 0.0f, "classification_cross_entropy: NLL is negative");
+        atomicAdd(loss_out, nll / batch_size);
     }
 
     if (tid < num_classes) {
@@ -272,9 +266,9 @@ __global__ void spatial_pooling_backward_kernel(
 
     float feat_grad = ldg_float(&features_grad[batch_idx * num_features + feature_idx]);
 
-    if (isnan(feat_grad) || isinf(feat_grad)) {
-        return;
-    }
+    // FATAL on NaN/inf gradients - indicates upstream backprop error
+    DEVICE_FATAL_IF(isnan(feat_grad), "spatial_pooling_backward: features_grad is NaN - backprop corrupted");
+    DEVICE_FATAL_IF(isinf(feat_grad), "spatial_pooling_backward: features_grad is Inf - backprop corrupted");
 
     int spatial_size = grid_size * grid_size;
 

@@ -5,6 +5,7 @@
 #include "../utils/cuda_primitives.cuh"
 #include "behavioral_ops.cuh"
 #include "genome_ops.cuh"
+#include "tubes.cu"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <curand_kernel.h>
@@ -181,6 +182,10 @@ __device__ __forceinline__ float elite_to_cell_distance_sq(
     const GPUElite* archive, int elite_idx,
     const VoronoiCell* cell, int hw_dim, int task_dim, int gen_dim
 ) {
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: gen_dim invalid");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "elite_to_cell_distance_sq: elite_idx out of bounds");
     return compute_three_axis_distance_sq(
         &archive->hw_coords[elite_idx * hw_dim],
         &archive->task_coords[elite_idx * task_dim],
@@ -265,6 +270,10 @@ __global__ void update_voronoi_density_kernel(
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
+
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: gen_dim invalid");
 
     for (int i = 0; i < num_elites; i++) {
         float dist_sq = 0.0f;
@@ -382,6 +391,11 @@ __device__ void insert_elite_device(
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: gen_dim invalid");
+    DEVICE_FATAL_IF(num_classes <= 0 || num_classes > NUM_CLASSES_MAX, "insert_elite_device: num_classes invalid");
+
     archive->fitness[idx] = fitness_val;
     archive->coherence[idx] = coherence_val;
     archive->effective_rank[idx] = effective_rank_val;
@@ -473,6 +487,11 @@ __global__ void insert_elite_kernel(
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: gen_dim invalid");
+    DEVICE_FATAL_IF(num_classes <= 0 || num_classes > NUM_CLASSES_MAX, "insert_elite_kernel: num_classes invalid");
+
     archive->fitness[idx] = fitness_val;
     archive->coherence[idx] = coherence_val;
     archive->effective_rank[idx] = effective_rank_val;
@@ -548,6 +567,10 @@ __global__ void init_voronoi_cells_kernel(
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (cell_id >= num_cells) return;
 
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: gen_dim invalid");
+
     curandState_t state;
     curand_init(seed, cell_id, 0, &state);
 
@@ -609,6 +632,10 @@ __global__ void store_elite_weight_deltas_kernel(
     int* num_deltas_out
 ) {
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "store_weight_deltas: num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "store_weight_deltas: channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "store_weight_deltas: head_dim invalid");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "store_weight_deltas: elite_idx invalid");
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
@@ -676,11 +703,16 @@ __global__ void restore_elite_weights_kernel(
     half* value_weights
 ) {
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "restore_weights: elite_idx invalid");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];
     int head_dim = archive->archived_head_dim[elite_idx];
     uint64_t genome_hash = archive->genome_hash[elite_idx];
+
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "restore_weights: archived num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "restore_weights: archived channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "restore_weights: archived head_dim invalid");
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
@@ -714,10 +746,15 @@ __global__ void apply_weight_deltas_kernel(
     half* value_weights
 ) {
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "apply_deltas: elite_idx invalid");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];
     int head_dim = archive->archived_head_dim[elite_idx];
+
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "apply_deltas: archived num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "apply_deltas: archived channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "apply_deltas: archived head_dim invalid");
 
     int num_deltas = archive->num_weight_deltas[elite_idx];
     int delta_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -739,6 +776,133 @@ __global__ void apply_weight_deltas_kernel(
     } else if (matrix == 2) {
         float current = __half2float(value_weights[local_idx]);
         value_weights[local_idx] = __float2half(current + __half2float(delta));
+    }
+}
+
+// Archive-Tube integration: store elite behavioral features in temporal memory
+__global__ void archive_to_tube_kernel(
+    const GPUElite* __restrict__ archive,
+    int elite_idx,
+    TemporalTube* __restrict__ tube
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "archive_to_tube: elite_idx invalid");
+    DEVICE_FATAL_IF(tube == nullptr, "archive_to_tube: tube is null");
+    DEVICE_FATAL_IF(tube->entries == nullptr, "archive_to_tube: tube entries is null");
+
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: gen_dim invalid");
+
+    int total_dim = hw_dim + task_dim + gen_dim;
+    int idx = tube->head;
+
+    DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "archive_to_tube: entry data buffer is null");
+    DEVICE_FATAL_IF(tube->entries[idx].size < total_dim, "archive_to_tube: entry size too small for behavioral dims");
+
+    // Pack behavioral coordinates: [hw | task | gen]
+    int offset = 0;
+    for (int d = 0; d < hw_dim; d++) {
+        tube->entries[idx].data[offset++] = archive->hw_coords[elite_idx * hw_dim + d];
+    }
+    for (int d = 0; d < task_dim; d++) {
+        tube->entries[idx].data[offset++] = archive->task_coords[elite_idx * task_dim + d];
+    }
+    for (int d = 0; d < gen_dim; d++) {
+        tube->entries[idx].data[offset++] = archive->gen_coords[elite_idx * gen_dim + d];
+    }
+
+    tube->entries[idx].size = total_dim;
+    tube->entries[idx].timestamp = tube->global_time;
+    tube->entries[idx].importance = archive->fitness[elite_idx];
+    tube->entries[idx].decay_factor = 1.0f;
+
+    tube->head = (tube->head + 1) % tube->capacity;
+    if (tube->count < tube->capacity) {
+        tube->count++;
+    }
+}
+
+// Tube-Archive integration: find closest archived elite to tube recall result
+__global__ void tube_to_archive_query_kernel(
+    const GPUElite* __restrict__ archive,
+    int archive_size,
+    const float* __restrict__ tube_recall,
+    int hw_dim,
+    int task_dim,
+    int gen_dim,
+    int* __restrict__ best_elite_idx,
+    float* __restrict__ best_distance
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_threads = blockDim.x * gridDim.x;
+
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: gen_dim invalid");
+
+    int total_dim = hw_dim + task_dim + gen_dim;
+
+    float local_best_dist = 1e9f;
+    int local_best_idx = -1;
+
+    for (int i = tid; i < archive_size; i += num_threads) {
+        float dist_sq = 0.0f;
+
+        // Compare hw coords
+        int offset = 0;
+        for (int d = 0; d < hw_dim; d++) {
+            float diff = archive->hw_coords[i * hw_dim + d] - tube_recall[offset++];
+            dist_sq += diff * diff;
+        }
+        // Compare task coords
+        for (int d = 0; d < task_dim; d++) {
+            float diff = archive->task_coords[i * task_dim + d] - tube_recall[offset++];
+            dist_sq += diff * diff;
+        }
+        // Compare gen coords
+        for (int d = 0; d < gen_dim; d++) {
+            float diff = archive->gen_coords[i * gen_dim + d] - tube_recall[offset++];
+            dist_sq += diff * diff;
+        }
+
+        if (dist_sq < local_best_dist) {
+            local_best_dist = dist_sq;
+            local_best_idx = i;
+        }
+    }
+
+    // Warp reduction for best
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        float other_dist = __shfl_down_sync(0xffffffff, local_best_dist, offset);
+        int other_idx = __shfl_down_sync(0xffffffff, local_best_idx, offset);
+        if (other_dist < local_best_dist) {
+            local_best_dist = other_dist;
+            local_best_idx = other_idx;
+        }
+    }
+
+    // Lane 0 of each warp atomically updates global best
+    if ((threadIdx.x & (WARP_SIZE - 1)) == 0) {
+        // Simple atomic min pattern using CAS
+        float old_dist = *best_distance;
+        while (local_best_dist < old_dist) {
+            float assumed = old_dist;
+            old_dist = __int_as_float(atomicCAS(
+                (int*)best_distance,
+                __float_as_int(assumed),
+                __float_as_int(local_best_dist)
+            ));
+            if (old_dist == assumed) {
+                *best_elite_idx = local_best_idx;
+                break;
+            }
+        }
     }
 }
 

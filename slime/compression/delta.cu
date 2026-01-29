@@ -19,12 +19,36 @@ struct DeltaGenome {
     float* delta_values;
 };
 
+__device__ void compute_genome_deltas(
+    float* child_genome,
+    float* parent_genome,
+    uint16_t* delta_indices,
+    float* delta_values,
+    uint16_t* num_deltas,
+    uint16_t max_deltas,
+    uint64_t child_genome_hash
+) {
+    int threshold_slot = derive_param_slot(child_genome_hash, "delta_threshold");
+    float delta_threshold = (child_genome[threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+
+    for (int j = 0; j < GENOME_SIZE; j++) {
+        float diff = child_genome[j] - parent_genome[j];
+        if (fabsf(diff) > delta_threshold) {
+            int delta_idx = atomicAdd((unsigned int*)num_deltas, 1);
+            if (delta_idx < max_deltas) {
+                delta_indices[delta_idx] = j;
+                delta_values[delta_idx] = diff;
+            }
+        }
+    }
+}
+
 __global__ void compute_delta_kernel(float* child_genome, float* parent_genome, uint16_t* delta_indices, float* delta_values, uint16_t* num_deltas, int genome_length, uint64_t child_genome_hash) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= genome_length) return;
 
     int threshold_slot = derive_param_slot(child_genome_hash, "delta_threshold");
-    float delta_threshold = (child_genome[threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;  
+    float delta_threshold = (child_genome[threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
 
     float diff = child_genome[tid] - parent_genome[tid];
     if (fabsf(diff) > delta_threshold) {

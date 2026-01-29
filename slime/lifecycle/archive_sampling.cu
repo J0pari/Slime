@@ -119,8 +119,6 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     // Mark for batch weight restoration via restore_elite_weights_kernel + apply_weight_deltas_kernel
     entry->ca_state->tape.needs_weight_restore = 1;
     entry->ca_state->tape.restore_elite_idx = elite_idx;
-
-    Atomics::increment_int(pool->total_spawned);
 }
 
 #endif

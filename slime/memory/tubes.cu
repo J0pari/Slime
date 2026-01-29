@@ -53,7 +53,6 @@ __global__ void apply_decay_kernel(
     float timestep
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -115,7 +114,6 @@ __global__ void prune_memories_kernel(
     float decay_threshold
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) 
     if (idx < tube->count) {
         int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -147,7 +145,7 @@ __global__ void consolidate_memories_kernel(
     __shared__ bool merged[MAX_MEMORY_SIZE + BANK_PAD];
 
     int idx = threadIdx.x;
-    if (idx == 0)     if (idx < tube->count) {
+    if (idx < tube->count) {
         merged[idx] = false;
     }
     __syncthreads();
@@ -165,13 +163,13 @@ __global__ void consolidate_memories_kernel(
             float similarity = 0.0f;
             if (entry->data && other->data) {
                 int min_size = min(entry->size, other->size);
-                if (min_size <= 0) {
-                    return;
+                // Skip this pair if no valid data, continue to check other pairs
+                if (min_size > 0) {
+                    for (int k = 0; k < min_size; k++) {
+                        similarity += entry->data[k] * other->data[k];
+                    }
+                    similarity /= sqrtf((float)min_size);
                 }
-                for (int k = 0; k < min_size; k++) {
-                    similarity += entry->data[k] * other->data[k];
-                }
-                similarity /= sqrtf((float)min_size);
             }
 
             if (similarity > similarity_threshold) {
@@ -192,13 +190,16 @@ __global__ void consolidate_memories_kernel(
 __global__ void init_tube_kernel(
     TemporalTube* tube,
     int capacity,
-    float decay_rate
+    float decay_rate,
+    float* data_buffer,
+    int entry_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < capacity) {
-        tube->entries[idx].data = nullptr;
-        tube->entries[idx].size = 0;
+        // Wire data immediately - never leave entries with null data
+        tube->entries[idx].data = &data_buffer[idx * entry_size];
+        tube->entries[idx].size = entry_size;
         tube->entries[idx].timestamp = 0.0f;
         tube->entries[idx].decay_factor = 1.0f;
         tube->entries[idx].importance = 0.0f;
@@ -213,20 +214,6 @@ __global__ void init_tube_kernel(
     }
 }
 
-__global__ void wire_tube_data_kernel(
-    TemporalTube* tube,
-    float* data_buffer,
-    int entry_size
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= tube->capacity) return;
-
-    tube->entries[idx].data = &data_buffer[idx * entry_size];
-    tube->entries[idx].size = entry_size;
-
-    if (idx == 0) {
-    }
-}
 
 __global__ void memory_stats_kernel(
     TemporalTube* tube,

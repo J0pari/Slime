@@ -123,31 +123,14 @@ struct TelemetryBuffer {
     int last_total_culled;
 };
 
-__device__ void print_size(const char* prefix, const char* label, size_t size_bytes, const char* suffix) {
-    if (size_bytes < BYTES_PER_KB) {
-    } else if (size_bytes < BYTES_PER_MB) {
-    } else {
-    }
-}
-
 __device__ void track_allocation(
-    const char* label,
     void* ptr,
     size_t size_bytes,
     cudaError_t result,
     MemoryAllocationMetrics* metrics
 ) {
-    if (result != cudaSuccess) {
+    if (result != cudaSuccess || ptr == nullptr) {
         return;
-    }
-
-    if (ptr == nullptr) {
-        return;
-    }
-
-    if (size_bytes < BYTES_PER_KB) {
-    } else if (size_bytes < BYTES_PER_MB) {
-    } else {
     }
     metrics->total_gpu_allocated += size_bytes;
 }
@@ -157,23 +140,15 @@ __device__ void track_allocation(
         size_t heap_limit = Atomics::load_size(&(metrics)->device_heap_limit); \
         size_t heap_used = Atomics::load_size(&(metrics)->device_heap_allocated); \
         size_t heap_free = heap_limit - heap_used; \
-\
         if (heap_free < (size)) { \
-\
             return; \
         } \
         cudaError_t alloc_err = cudaMalloc(&(ptr), (size)); \
-\
-        if (alloc_err != cudaSuccess) { \
-\
-            return; \
-        } \
-        if ((ptr) == nullptr) { \
-\
+        if (alloc_err != cudaSuccess || (ptr) == nullptr) { \
             return; \
         } \
         Atomics::add_size(&(metrics)->device_heap_allocated, (size)); \
-        track_allocation(#ptr, (void*)(ptr), (size), alloc_err, (metrics)); \
+        track_allocation((void*)(ptr), (size), alloc_err, (metrics)); \
         (category_size) += (size); \
     } while(0)
 

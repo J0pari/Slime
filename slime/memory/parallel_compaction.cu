@@ -164,43 +164,104 @@ __global__ void exclusive_scan_single_kernel(
     }
 }
 
-// Device-side recursive multi-block exclusive scan (CDP)
-// workspace must have size >= N (partitioned across recursion levels)
-__global__ void exclusive_scan_recursive_kernel(
+// Multi-block exclusive scan using cooperative groups
+// workspace: block_sums array of size gridDim.x
+__global__ void exclusive_scan_coop_kernel(
     int* input,
     int* output,
-    int* workspace,
-    int N,
-    int block_size
+    int* block_sums,
+    int N
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
-    if (N <= 0) return;
+    __shared__ int warp_sums[WARP_SIZE];
 
-    int num_blocks = (N + block_size - 1) / block_size;
+    int val = (tid < N) ? input[tid] : 0;
 
-    if (num_blocks == 1) {
-        // Single block case - do it inline
-        scan_phase1_kernel<<<1, block_size>>>(input, output, workspace, N);
-        cudaDeviceSynchronize();
-        return;
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(val, offset);
+        if (lane >= offset) val += n;
     }
 
-    // Multi-block case
-    int* block_sums = workspace;
-    int* next_workspace = workspace + num_blocks;
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
 
-    // Phase 1: local scans, collect block totals
-    scan_phase1_kernel<<<num_blocks, block_size>>>(input, output, block_sums, N);
-    cudaDeviceSynchronize();
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += n;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
 
-    // Phase 2: recursively scan block sums (CDP recursion)
-    exclusive_scan_recursive_kernel<<<1, 1>>>(block_sums, block_sums, next_workspace, num_blocks, block_size);
-    cudaDeviceSynchronize();
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < N) ? input[tid] : 0);
 
-    // Phase 3: add block prefixes
-    scan_phase3_kernel<<<num_blocks, block_size>>>(output, block_sums, N);
-    cudaDeviceSynchronize();
+    if (tid < N) {
+        output[tid] = exclusive_val;
+    }
+
+    if (threadIdx.x == blockDim.x - 1) {
+        block_sums[blockIdx.x] = inclusive_val;
+    }
+
+    grid.sync();
+
+    // Phase 2: block 0 scans block_sums
+    if (blockIdx.x == 0) {
+        __shared__ int bsum_shared[WARP_SIZE];
+        int num_blocks = gridDim.x;
+
+        int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
+
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(bval, offset);
+            if (lane >= offset) bval += n;
+        }
+
+        if (lane == WARP_SIZE - 1) {
+            bsum_shared[warp_id] = bval;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(ws, offset);
+                if (lane >= offset) ws += n;
+            }
+            bsum_shared[lane] = ws;
+        }
+        __syncthreads();
+
+        int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+        int b_inclusive = bprefix + bval;
+        int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
+
+        if (threadIdx.x < num_blocks) {
+            block_sums[threadIdx.x] = b_exclusive;
+        }
+    }
+
+    grid.sync();
+
+    // Phase 3: add block prefix
+    if (tid < N && blockIdx.x > 0) {
+        output[tid] += block_sums[blockIdx.x];
+    }
 }
 
 __global__ void compact_entries_kernel(
@@ -273,139 +334,422 @@ __global__ void finalize_and_copy_compacted_kernel(
     }
 }
 
-__global__ void compact_memory_tubes_parallel_kernel(
+// Fused compaction using cooperative groups
+__global__ void compact_memory_tubes_coop_kernel(
     TemporalTube* tube,
-    int* valid_flags_workspace,
-    int* scan_workspace,
-    int* scan_recursive_workspace,
+    int* valid_flags,
+    int* scan_output,
+    int* block_sums,
     MemoryEntry* temp_buffer,
     float decay_threshold
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
+
+    __shared__ int shared_old_count;
+    __shared__ int shared_new_count;
+    __shared__ int warp_sums[WARP_SIZE];
+
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        shared_old_count = tube->count;
+    }
+    grid.sync();
 
     int old_count = tube->count;
+    int capacity = tube->capacity;
 
-    dim3 mark_grid((tube->capacity + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    dim3 mark_block(BLOCK_SIZE);
-
-    mark_valid_entries_kernel<<<mark_grid, mark_block>>>(
-        tube,
-        valid_flags_workspace,
-        decay_threshold
-    );
-    cudaDeviceSynchronize();
-
-    // Use device-side recursive scan for correct multi-block behavior
-    exclusive_scan_recursive_kernel<<<1, 1>>>(
-        valid_flags_workspace,
-        scan_workspace,
-        scan_recursive_workspace,
-        tube->capacity,
-        BLOCK_SIZE
-    );
-    cudaDeviceSynchronize();
-
-    compact_entries_kernel<<<mark_grid, mark_block>>>(
-        tube,
-        valid_flags_workspace,
-        scan_workspace,
-        temp_buffer,
-        old_count
-    );
-    cudaDeviceSynchronize();
-
-    int new_count = 0;
-    if (old_count > 0) {
-        int last_valid_idx = old_count - 1;
-
-        int last_write_idx = scan_workspace[last_valid_idx];
-        int last_valid_flag = valid_flags_workspace[last_valid_idx];
-
-        new_count = last_write_idx + last_valid_flag;
+    // Phase 1: Mark valid entries
+    if (tid < capacity) {
+        int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tube->entries[entry_idx];
+        valid_flags[tid] = (tid < old_count && entry->decay_factor >= decay_threshold && entry->size > 0) ? 1 : 0;
+    } else if (tid < capacity) {
+        valid_flags[tid] = 0;
     }
 
-    copy_compacted_kernel<<<mark_grid, mark_block>>>(
-        tube,
-        temp_buffer,
-        new_count
-    );
-    cudaDeviceSynchronize();
+    grid.sync();
+
+    // Phase 2: Exclusive scan (inline from exclusive_scan_coop_kernel logic)
+    int val = (tid < capacity) ? valid_flags[tid] : 0;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(val, offset);
+        if (lane >= offset) val += n;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += n;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
+
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < capacity) ? valid_flags[tid] : 0);
+
+    if (tid < capacity) {
+        scan_output[tid] = exclusive_val;
+    }
+
+    if (threadIdx.x == blockDim.x - 1) {
+        block_sums[blockIdx.x] = inclusive_val;
+    }
+
+    grid.sync();
+
+    // Block 0 scans block_sums
+    if (blockIdx.x == 0) {
+        __shared__ int bsum_shared[WARP_SIZE];
+        int num_blocks = gridDim.x;
+
+        int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
+
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(bval, offset);
+            if (lane >= offset) bval += n;
+        }
+
+        if (lane == WARP_SIZE - 1) {
+            bsum_shared[warp_id] = bval;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(ws, offset);
+                if (lane >= offset) ws += n;
+            }
+            bsum_shared[lane] = ws;
+        }
+        __syncthreads();
+
+        int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+        int b_inclusive = bprefix + bval;
+        int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
+
+        if (threadIdx.x < num_blocks) {
+            block_sums[threadIdx.x] = b_exclusive;
+        }
+    }
+
+    grid.sync();
+
+    // Add block prefix
+    if (tid < capacity && blockIdx.x > 0) {
+        scan_output[tid] += block_sums[blockIdx.x];
+    }
+
+    grid.sync();
+
+    // Phase 3: Compact entries
+    if (tid < old_count && valid_flags[tid]) {
+        int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
+        int write_pos = scan_output[tid];
+        temp_buffer[write_pos] = tube->entries[entry_idx];
+    }
+
+    grid.sync();
+
+    // Compute new_count
+    if (tid == 0) {
+        if (old_count > 0) {
+            shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
+        } else {
+            shared_new_count = 0;
+        }
+    }
+
+    grid.sync();
+
+    int new_count = shared_new_count;
+
+    // Phase 4: Copy compacted back
+    if (tid < new_count) {
+        tube->entries[tid] = temp_buffer[tid];
+    }
+
+    if (tid == 0) {
+        tube->count = new_count;
+        tube->head = new_count % capacity;
+    }
 }
 
-__global__ void prune_and_compact_memories_kernel(
+// Fused prune and compact using cooperative groups
+__global__ void prune_and_compact_coop_kernel(
     TemporalTube* tube,
-    int* valid_flags_workspace,
-    int* scan_workspace,
-    int* scan_recursive_workspace,
+    int* valid_flags,
+    int* scan_output,
+    int* block_sums,
     MemoryEntry* temp_buffer,
     float decay_threshold
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
-    if (idx < tube->count) {
-        int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
+    int old_count = tube->count;
+    int capacity = tube->capacity;
+
+    __shared__ int shared_new_count;
+    __shared__ int warp_sums[WARP_SIZE];
+
+    // Phase 1: Prune entries below threshold
+    if (tid < old_count) {
+        int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
-
         if (entry->decay_factor < decay_threshold) {
             entry->size = 0;
         }
     }
+
+    grid.sync();
+
+    // Phase 2: Mark valid entries
+    int is_valid = 0;
+    if (tid < old_count) {
+        int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tube->entries[entry_idx];
+        is_valid = (entry->decay_factor >= decay_threshold && entry->size > 0) ? 1 : 0;
+    }
+    if (tid < capacity) {
+        valid_flags[tid] = is_valid;
+    }
+
+    grid.sync();
+
+    // Phase 3: Exclusive scan
+    int val = (tid < capacity) ? valid_flags[tid] : 0;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(val, offset);
+        if (lane >= offset) val += n;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
     __syncthreads();
 
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        compact_memory_tubes_parallel_kernel<<<1, 1>>>(
-            tube,
-            valid_flags_workspace,
-            scan_workspace,
-            scan_recursive_workspace,
-            temp_buffer,
-            decay_threshold
-        );
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += n;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
+
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < capacity) ? valid_flags[tid] : 0);
+
+    if (tid < capacity) {
+        scan_output[tid] = exclusive_val;
+    }
+
+    if (threadIdx.x == blockDim.x - 1) {
+        block_sums[blockIdx.x] = inclusive_val;
+    }
+
+    grid.sync();
+
+    // Block 0 scans block_sums
+    if (blockIdx.x == 0) {
+        __shared__ int bsum_shared[WARP_SIZE];
+        int num_blocks = gridDim.x;
+
+        int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
+
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(bval, offset);
+            if (lane >= offset) bval += n;
+        }
+
+        if (lane == WARP_SIZE - 1) {
+            bsum_shared[warp_id] = bval;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(ws, offset);
+                if (lane >= offset) ws += n;
+            }
+            bsum_shared[lane] = ws;
+        }
+        __syncthreads();
+
+        int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+        int b_inclusive = bprefix + bval;
+        int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
+
+        if (threadIdx.x < num_blocks) {
+            block_sums[threadIdx.x] = b_exclusive;
+        }
+    }
+
+    grid.sync();
+
+    if (tid < capacity && blockIdx.x > 0) {
+        scan_output[tid] += block_sums[blockIdx.x];
+    }
+
+    grid.sync();
+
+    // Phase 4: Compact entries
+    if (tid < old_count && valid_flags[tid]) {
+        int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
+        int write_pos = scan_output[tid];
+        temp_buffer[write_pos] = tube->entries[entry_idx];
+    }
+
+    grid.sync();
+
+    // Compute new_count
+    if (tid == 0) {
+        if (old_count > 0) {
+            shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
+        } else {
+            shared_new_count = 0;
+        }
+    }
+
+    grid.sync();
+
+    int new_count = shared_new_count;
+
+    // Phase 5: Copy compacted back
+    if (tid < new_count) {
+        tube->entries[tid] = temp_buffer[tid];
+    }
+
+    if (tid == 0) {
+        tube->count = new_count;
+        tube->head = new_count % capacity;
     }
 }
 
-__global__ void refine_elite_kernel(
+// Fused elite refinement using cooperative groups
+// Tape must be pre-populated with forward pass data from upstream
+__global__ void refine_elite_coop_kernel(
     GPUElite* elite,
     ADTape* tape,
-    float* genome_buffer,
-    uint8_t* elite_compressed_pool,
-    uint32_t* elite_size_pool,
     int elite_idx,
     float learning_rate,
     float gradient_clip_norm
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Gradient-based optimization in DIRESA latent space
     float* latent = &elite->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX];
 
-    reset_tape_kernel<<<(VALUE_CAPACITY + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(tape);
+    // Backward pass (single block handles sequential op traversal)
+    if (blockIdx.x == 0) {
+        // Seed gradient at output
+        if (tape->current_size > 0 && threadIdx.x == 0) {
+            int output_idx = tape->entries[tape->current_size - 1].output_idx;
+            tape->grad_buffer[output_idx] = 1.0f;
+        }
+        __syncthreads();
 
-    for (int i = 0; i < GENOME_LATENT_DIM_MAX; i++) {
-        tape->value_buffer[i] = latent[i];
+        for (int op_idx = tape->current_size - 1; op_idx >= 0; op_idx--) {
+            TapeEntry* entry = &tape->entries[op_idx];
+            float grad_out = tape->grad_buffer[entry->output_idx];
+
+            if (threadIdx.x == 0 && grad_out != 0.0f) {
+                switch (entry->op) {
+                    case OP_ADD:
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out);
+                        atomicAdd(&tape->grad_buffer[entry->input2_idx], grad_out);
+                        break;
+                    case OP_MUL:
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * tape->value_buffer[entry->input2_idx]);
+                        atomicAdd(&tape->grad_buffer[entry->input2_idx], grad_out * tape->value_buffer[entry->input1_idx]);
+                        break;
+                    case OP_RELU:
+                        if (entry->aux_data > 0.0f) {
+                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out);
+                        }
+                        break;
+                    case OP_EXP:
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * tape->value_buffer[entry->output_idx]);
+                        break;
+                    case OP_LOG: {
+                        float input_val = entry->aux_data;
+                        if (input_val > 1e-8f) {
+                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out / input_val);
+                        }
+                        break;
+                    }
+                    case OP_TANH: {
+                        float tanh_val = entry->aux_data;
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * (1.0f - tanh_val * tanh_val));
+                        break;
+                    }
+                    case OP_SQRT:
+                        if (entry->aux_data > 1e-8f) {
+                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out / (2.0f * entry->aux_data));
+                        }
+                        break;
+                    case OP_SIN:
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * cosf(entry->aux_data));
+                        break;
+                    case OP_COS:
+                        atomicAdd(&tape->grad_buffer[entry->input1_idx], -grad_out * sinf(entry->aux_data));
+                        break;
+                    default:
+                        break;
+                }
+            }
+            __syncthreads();
+        }
     }
 
-    int fitness_op_idx = 0;
-    ad_backward_kernel<<<1, BLOCK_SIZE>>>(tape, fitness_op_idx, 1.0f);
+    grid.sync();
 
-    dim3 grad_grid((GENOME_LATENT_DIM_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE);
-    dim3 grad_block(BLOCK_SIZE);
-
-    apply_gradients_kernel<<<grad_grid, grad_block>>>(
-        latent,
-        tape->grad_buffer,
-        GENOME_LATENT_DIM_MAX,
-        learning_rate,
-        gradient_clip_norm
-    );
+    // Apply gradients with clipping
+    if (tid < GENOME_LATENT_DIM_MAX) {
+        float grad = tape->grad_buffer[tid];
+        float grad_norm = fabsf(grad);
+        if (grad_norm > gradient_clip_norm) {
+            grad = grad * (gradient_clip_norm / grad_norm);
+        }
+        latent[tid] -= learning_rate * grad;
+    }
 }
 
+// Fused memory update using cooperative groups
 __global__ void memory_update_kernel(
     TemporalTube* tubes,
     float* fitness_history,
-    int* valid_flags_workspace,
-    int* scan_workspace,
-    int* scan_recursive_workspace,
+    int* valid_flags,
+    int* scan_output,
+    int* block_sums,
     MemoryEntry* temp_buffer,
     int generation,
     float* genome,
@@ -419,80 +763,272 @@ __global__ void memory_update_kernel(
     float ctx_learning,
     float ctx_performance
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
-    if (!tubes || tubes->count <= 0) return;
+    __shared__ float shared_decay_threshold;
+    __shared__ float shared_consolidation_threshold;
+    __shared__ float shared_flow_lenia_dt;
+    __shared__ float shared_fitness_trend;
+    __shared__ int shared_should_compact;
+    __shared__ int shared_old_count;
+    __shared__ int shared_new_count;
+    __shared__ int warp_sums[WARP_SIZE];
 
-    int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
-    int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
-    int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
-    int compaction_interval_slot = derive_param_slot(genome_hash, "memory_compaction_interval");
-
-    float decay_threshold = genome_to_param(
-        genome, gradients, decay_threshold_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
-    );
-
-    float consolidation_threshold = genome_to_param(
-        genome, gradients, consolidation_threshold_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
-    );
-
-    float flow_lenia_dt = genome_to_param(
-        genome, gradients, flow_dt_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
-    );
-
-    float compaction_interval_norm = genome_to_param(
-        genome, gradients, compaction_interval_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        0.0f, 1.0f
-    );
-    int compaction_interval = 1 + (int)(compaction_interval_norm * 15.0f);
-    bool should_compact = (generation % compaction_interval == 0);
+    if (tubes == nullptr || tubes->count <= 0) return;
 
     int tube_count = tubes->count;
-    int mem_blocks = (tube_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int capacity = tubes->capacity;
 
-    apply_decay_kernel<<<mem_blocks, BLOCK_SIZE>>>(tubes, flow_lenia_dt);
-    cudaDeviceSynchronize();
+    // Thread 0 computes genome-derived parameters
+    if (tid == 0) {
+        int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
+        int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
+        int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
+        int compaction_interval_slot = derive_param_slot(genome_hash, "memory_compaction_interval");
 
-    prune_memories_kernel<<<mem_blocks, BLOCK_SIZE>>>(tubes, decay_threshold);
-    cudaDeviceSynchronize();
-
-    int consol_threads = (tube_count < BLOCK_SIZE) ? tube_count : BLOCK_SIZE;
-    consolidate_memories_kernel<<<1, consol_threads>>>(tubes, consolidation_threshold);
-    cudaDeviceSynchronize();
-
-    if (should_compact && valid_flags_workspace && scan_workspace && temp_buffer) {
-        int old_count = tubes->count;
-
-        mark_valid_entries_kernel<<<mem_blocks, BLOCK_SIZE>>>(
-            tubes, valid_flags_workspace, decay_threshold
+        shared_decay_threshold = genome_to_param(
+            genome, gradients, decay_threshold_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
         );
-        cudaDeviceSynchronize();
 
-        exclusive_scan_single_kernel<<<1, BLOCK_SIZE>>>(
-            valid_flags_workspace, scan_workspace, tubes->capacity
+        shared_consolidation_threshold = genome_to_param(
+            genome, gradients, consolidation_threshold_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
         );
-        cudaDeviceSynchronize();
 
-        compact_entries_kernel<<<mem_blocks, BLOCK_SIZE>>>(
-            tubes, valid_flags_workspace, scan_workspace, temp_buffer, old_count
+        shared_flow_lenia_dt = genome_to_param(
+            genome, gradients, flow_dt_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
         );
-        cudaDeviceSynchronize();
 
-        finalize_and_copy_compacted_kernel<<<mem_blocks, BLOCK_SIZE>>>(
-            tubes, valid_flags_workspace, scan_workspace, temp_buffer, old_count
+        float compaction_interval_norm = genome_to_param(
+            genome, gradients, compaction_interval_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            0.0f, 1.0f
         );
-        cudaDeviceSynchronize();
+        int compaction_interval = 1 + (int)(compaction_interval_norm * 15.0f);
+        shared_should_compact = (generation % compaction_interval == 0) ? 1 : 0;
+        shared_old_count = tube_count;
+
+        // Compute fitness trend from history (current vs previous generation)
+        int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
+        int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
+        float curr_fitness = fitness_history[curr_gen_offset];
+        float prev_fitness = (generation > 0) ? fitness_history[prev_gen_offset] : curr_fitness;
+        shared_fitness_trend = curr_fitness - prev_fitness;
+    }
+
+    grid.sync();
+
+    float decay_threshold = shared_decay_threshold;
+    float consolidation_threshold = shared_consolidation_threshold;
+    float flow_lenia_dt = shared_flow_lenia_dt;
+    float fitness_trend = shared_fitness_trend;
+    int should_compact = shared_should_compact;
+    int old_count = shared_old_count;
+
+    // Phase 1: Apply decay and modulate importance by fitness trend
+    if (tid < tube_count) {
+        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tubes->entries[entry_idx];
+        entry->decay_factor *= expf(-flow_lenia_dt);
+
+        // Boost importance of memories formed during fitness improvement
+        // Positive fitness trend → increase importance; negative → decrease
+        float importance_delta = fitness_trend * 0.1f;
+        entry->importance = clamp(entry->importance + importance_delta, 0.0f, 1.0f);
+    }
+
+    grid.sync();
+
+    // Phase 2: Prune memories below threshold
+    if (tid < tube_count) {
+        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tubes->entries[entry_idx];
+        if (entry->decay_factor < decay_threshold) {
+            entry->size = 0;
+        }
+    }
+
+    grid.sync();
+
+    // Phase 3: Consolidate similar memories (block 0 handles sequentially)
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        for (int i = 0; i < tube_count; i++) {
+            int entry_i = (tubes->head - tube_count + i + capacity) % capacity;
+            MemoryEntry* mi = &tubes->entries[entry_i];
+            if (mi->size == 0) continue;
+
+            for (int j = i + 1; j < tube_count; j++) {
+                int entry_j = (tubes->head - tube_count + j + capacity) % capacity;
+                MemoryEntry* mj = &tubes->entries[entry_j];
+                if (mj->size == 0) continue;
+
+                int min_size = (mi->size < mj->size) ? mi->size : mj->size;
+                if (min_size > 0) {
+                    float similarity = 0.0f;
+                    for (int k = 0; k < min_size; k++) {
+                        float diff = mi->data[k] - mj->data[k];
+                        similarity += diff * diff;
+                    }
+                    similarity = 1.0f - sqrtf(similarity / min_size);
+
+                    if (similarity > consolidation_threshold) {
+                        for (int k = 0; k < min_size; k++) {
+                            mi->data[k] = 0.5f * (mi->data[k] + mj->data[k]);
+                        }
+                        mi->decay_factor = fmaxf(mi->decay_factor, mj->decay_factor);
+                        mj->size = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    grid.sync();
+
+    // Phase 4-7: Compaction (if needed)
+    if (should_compact && valid_flags && scan_output && temp_buffer) {
+        // Mark valid entries
+        int is_valid = 0;
+        if (tid < old_count) {
+            int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
+            MemoryEntry* entry = &tubes->entries[entry_idx];
+            is_valid = (entry->decay_factor >= decay_threshold && entry->size > 0) ? 1 : 0;
+        }
+        if (tid < capacity) {
+            valid_flags[tid] = is_valid;
+        }
+
+        grid.sync();
+
+        // Exclusive scan
+        int val = (tid < capacity) ? valid_flags[tid] : 0;
+
+        auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(val, offset);
+            if (lane >= offset) val += n;
+        }
+
+        if (lane == WARP_SIZE - 1) {
+            warp_sums[warp_id] = val;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(warp_sum, offset);
+                if (lane >= offset) warp_sum += n;
+            }
+            warp_sums[lane] = warp_sum;
+        }
+        __syncthreads();
+
+        int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+        int inclusive_val = warp_offset + val;
+        int exclusive_val = inclusive_val - ((tid < capacity) ? valid_flags[tid] : 0);
+
+        if (tid < capacity) {
+            scan_output[tid] = exclusive_val;
+        }
+
+        if (threadIdx.x == blockDim.x - 1) {
+            block_sums[blockIdx.x] = inclusive_val;
+        }
+
+        grid.sync();
+
+        // Block 0 scans block_sums
+        if (blockIdx.x == 0) {
+            __shared__ int bsum_shared[WARP_SIZE];
+            int num_blocks = gridDim.x;
+
+            int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
+
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(bval, offset);
+                if (lane >= offset) bval += n;
+            }
+
+            if (lane == WARP_SIZE - 1) {
+                bsum_shared[warp_id] = bval;
+            }
+            __syncthreads();
+
+            if (warp_id == 0) {
+                int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+                #pragma unroll
+                for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                    int n = warp.shfl_up(ws, offset);
+                    if (lane >= offset) ws += n;
+                }
+                bsum_shared[lane] = ws;
+            }
+            __syncthreads();
+
+            int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+            int b_inclusive = bprefix + bval;
+            int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
+
+            if (threadIdx.x < num_blocks) {
+                block_sums[threadIdx.x] = b_exclusive;
+            }
+        }
+
+        grid.sync();
+
+        if (tid < capacity && blockIdx.x > 0) {
+            scan_output[tid] += block_sums[blockIdx.x];
+        }
+
+        grid.sync();
+
+        // Compact entries
+        if (tid < old_count && valid_flags[tid]) {
+            int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
+            int write_pos = scan_output[tid];
+            temp_buffer[write_pos] = tubes->entries[entry_idx];
+        }
+
+        grid.sync();
+
+        // Compute new_count
+        if (tid == 0) {
+            if (old_count > 0) {
+                shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
+            } else {
+                shared_new_count = 0;
+            }
+        }
+
+        grid.sync();
+
+        int new_count = shared_new_count;
+
+        // Copy compacted back
+        if (tid < new_count) {
+            tubes->entries[tid] = temp_buffer[tid];
+        }
+
+        if (tid == 0) {
+            tubes->count = new_count;
+            tubes->head = new_count % capacity;
+        }
     }
 }
 

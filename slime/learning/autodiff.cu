@@ -6,9 +6,11 @@
 #include <cuda_runtime.h>
 
 enum TapeOp {
+    OP_NONE,
     OP_ADD,
     OP_MUL,
     OP_TANH,
+    OP_RELU,
     OP_EXP,
     OP_LOG,
     OP_SQRT,
@@ -172,6 +174,12 @@ __device__ int ad_cos(ADTape* tape, int x_idx) {
     return tape_record_unary(tape, OP_COS, x_idx, result, x);
 }
 
+__device__ int ad_relu(ADTape* tape, int x_idx) {
+    float x = tape->value_buffer[x_idx];
+    float result = fmaxf(0.0f, x);
+    return tape_record_unary(tape, OP_RELU, x_idx, result, x);
+}
+
 __device__ void backward_op(TapeEntry* entry, float* value_buffer, float* grad_buffer) {
     float out_grad = grad_buffer[entry->output_idx];
     if (out_grad == 0.0f) return;
@@ -191,6 +199,13 @@ __device__ void backward_op(TapeEntry* entry, float* value_buffer, float* grad_b
         case OP_TANH: {
             float tanh_x = entry->aux_data;
             atomicAdd(&grad_buffer[entry->input1_idx], out_grad * (1.0f - tanh_x * tanh_x));
+            break;
+        }
+        case OP_RELU: {
+            float x = entry->aux_data;
+            if (x > 0.0f) {
+                atomicAdd(&grad_buffer[entry->input1_idx], out_grad);
+            }
             break;
         }
         case OP_EXP:

@@ -2849,26 +2849,17 @@ __global__ void init_organism_phase2_kernel(
         organism->chemical_field->history = buffers->chemical_field_history;
         organism->chemical_field->history->entries = buffers->chemical_field_history_entries;
 
+        float* history_data_buffer = buffers->history_data_buffer;
         init_tube_kernel<<<(MAX_HISTORY_LENGTH + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
             organism->chemical_field->history,
             MAX_HISTORY_LENGTH,
-            default_decay_rate
-        );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 init_tube err=%d\n", (int)err);
-            return;
-        }
-
-        float* history_data_buffer = buffers->history_data_buffer;
-        wire_tube_data_kernel<<<(MAX_HISTORY_LENGTH + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(
-            organism->chemical_field->history,
+            default_decay_rate,
             history_data_buffer,
             field_size
         );
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("!E:init2 wire_tube err=%d\n", (int)err);
+            printf("!E:init2 init_tube err=%d\n", (int)err);
             return;
         }
 
@@ -3021,12 +3012,13 @@ __global__ void init_organism_phase2_kernel(
                            DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                            DIRESA_HIDDEN1_MAX * HARDWARE_FEATURES_DIM + HARDWARE_FEATURES_DIM;
 
-        size_t task_stride = dims.task_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+        int task_input_dim = first_entry->num_heads * first_entry->channels;
+        size_t task_stride = task_input_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                              DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                              DIRESA_HIDDEN2_MAX * dims.task_dim + dims.task_dim +
                              dims.task_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                              DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                             DIRESA_HIDDEN1_MAX * dims.task_dim + dims.task_dim;
+                             DIRESA_HIDDEN1_MAX * task_input_dim + task_input_dim;
 
         size_t gen_stride = 1 * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                             DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
@@ -3052,7 +3044,7 @@ __global__ void init_organism_phase2_kernel(
             HARDWARE_FEATURES_DIM, dims.hw_dim, first_entry, seed + 999999);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_task_weights, organism->diresa_task_weight_pool, task_stride,
-            dims.task_dim, dims.task_dim, first_entry, seed + 888888);
+            task_input_dim, dims.task_dim, first_entry, seed + 888888);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_gen_weights, organism->diresa_gen_weight_pool, gen_stride,
             1, dims.gen_dim, first_entry, seed + 777777);
@@ -3724,15 +3716,12 @@ __global__ void persistent_evolution_kernel(
         dim3 init_field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
 
         // Get attractor field from temporal history for channel 15
-        float* attractor_field = nullptr;
-        if (organism->chemical_field->history != nullptr &&
-            organism->chemical_field->history->count > 0) {
-            // Use most recent temporal snapshot
-            int recent_idx = (organism->chemical_field->history->head +
-                              organism->chemical_field->history->count - 1) %
-                             organism->chemical_field->history->capacity;
-            attractor_field = organism->chemical_field->history->entries[recent_idx].data;
-        }
+        // History entries always have valid data (wired at init_tube_kernel)
+        int history_idx = organism->chemical_field->history->count > 0
+            ? (organism->chemical_field->history->head + organism->chemical_field->history->count - 1)
+              % organism->chemical_field->history->capacity
+            : 0;
+        float* attractor_field = organism->chemical_field->history->entries[history_idx].data;
 
         for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
             initialize_ca_from_field_kernel<<<init_field_grid, init_field_block>>>(
@@ -3807,8 +3796,7 @@ __global__ void persistent_evolution_kernel(
             organism->param_map,
             organism->generation,
             organism_workspace_genomes,
-            false,  // eval_only=false for training
-            nullptr  // no audit
+            audit
         );
         cudaError_t err_train = cudaGetLastError();
         if (err_train != cudaSuccess) {

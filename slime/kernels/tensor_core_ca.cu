@@ -173,6 +173,8 @@ __global__ void multi_head_ca_tensor_kernel(
     int entry_idx
 ) {
     int head = blockIdx.y;
+    int tid = threadIdx.x;
+    int block_threads = blockDim.x;
 
     if (entry_idx >= pool->capacity) return;
     if (head >= arch.num_heads) return;
@@ -180,20 +182,18 @@ __global__ void multi_head_ca_tensor_kernel(
     PoolEntry* entry = &pool->entries[entry_idx];
     if (!entry->alive) return;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;
 
     MultiHeadCAState* ca_state = entry->ca_state;
 
-    // Record hardware trace metrics
-    TraceBuffer* trace_buffer = &ca_state->trace;
-    if (trace_buffer->current_idx < trace_buffer->capacity) {
-        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-        if (trace_idx < trace_buffer->capacity) {
-            int warp_id = (threadIdx.x + blockIdx.x * blockDim.x) / 32;
-            record_warp_metrics(&trace_buffer->traces[trace_idx], warp_id);
+    if (tid == 0) {
+        TraceBuffer* trace_buffer = &ca_state->trace;
+        if (trace_buffer->current_idx < trace_buffer->capacity) {
+            int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+            if (trace_idx < trace_buffer->capacity) {
+                record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
+            }
         }
     }
 
@@ -204,66 +204,79 @@ __global__ void multi_head_ca_tensor_kernel(
     half* value_weights = ca_state->value_weights;
     float* ca_output_fp32 = ca_state->ca_output;
 
-    int num_warps = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
+    int perception_size = num_cells * arch.head_dim;
+    int weight_offset = head * arch.channels * arch.head_dim;
+    int output_offset = head * num_cells * arch.head_dim;
 
-    tensor_core_perception_kernel<<<(num_warps * WARP_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        fp16_workspace,
-        perception_weights,
-        fp32_workspace,
-        grid_size,
-        head,
-        arch
-    );
+    // Perception: input[num_cells × channels] × weights[channels × head_dim]
+    for (int out_idx = tid; out_idx < perception_size; out_idx += block_threads) {
+        int cell = out_idx / arch.head_dim;
+        int dim = out_idx % arch.head_dim;
+        float acc = 0.0f;
+        for (int c = 0; c < arch.channels; c++) {
+            acc += __half2float(fp16_workspace[cell * arch.channels + c]) *
+                   __half2float(perception_weights[weight_offset + c * arch.head_dim + dim]);
+        }
+        fp32_workspace[output_offset + out_idx] = acc;
+    }
+    __syncthreads();
 
-    relu_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        fp32_workspace + head * num_cells * arch.head_dim,
-        num_cells * arch.head_dim
-    );
+    // ReLU
+    for (int i = tid; i < perception_size; i += block_threads) {
+        fp32_workspace[output_offset + i] = fmaxf(0.0f, fp32_workspace[output_offset + i]);
+    }
+    __syncthreads();
 
+    // FP32 → FP16
     half* interaction_input = fp16_workspace + num_cells * arch.channels;
-    convert_fp32_to_fp16_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        fp32_workspace + head * num_cells * arch.head_dim,
-        interaction_input,
-        num_cells,
-        arch.head_dim
-    );
+    for (int i = tid; i < perception_size; i += block_threads) {
+        interaction_input[i] = __float2half(fp32_workspace[output_offset + i]);
+    }
+    __syncthreads();
 
+    // Interaction: input[num_cells × head_dim] × weights[head_dim × head_dim]
     float* interaction_output = fp32_workspace + arch.num_heads * num_cells * arch.head_dim;
+    int interaction_weight_offset = head * arch.head_dim * arch.head_dim;
+    for (int out_idx = tid; out_idx < perception_size; out_idx += block_threads) {
+        int cell = out_idx / arch.head_dim;
+        int dim = out_idx % arch.head_dim;
+        float acc = 0.0f;
+        for (int k = 0; k < arch.head_dim; k++) {
+            acc += __half2float(interaction_input[cell * arch.head_dim + k]) *
+                   __half2float(interaction_weights[interaction_weight_offset + k * arch.head_dim + dim]);
+        }
+        interaction_output[out_idx] = acc;
+    }
+    __syncthreads();
 
-    int num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
-    tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
-        interaction_input,
-        interaction_weights + head * arch.head_dim * arch.head_dim,
-        interaction_output,
-        num_cells,
-        arch.head_dim,
-        arch.head_dim
-    );
+    // GELU
+    for (int i = tid; i < perception_size; i += block_threads) {
+        float x = interaction_output[i];
+        interaction_output[i] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
+    }
+    __syncthreads();
 
-    gelu_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        interaction_output,
-        num_cells * arch.head_dim
-    );
-
+    // FP32 → FP16
     half* value_input = interaction_input;
-    convert_fp32_to_fp16_kernel<<<(num_cells * arch.head_dim + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-        interaction_output,
-        value_input,
-        num_cells,
-        arch.head_dim
-    );
+    for (int i = tid; i < perception_size; i += block_threads) {
+        value_input[i] = __float2half(interaction_output[i]);
+    }
+    __syncthreads();
 
+    // Value: input[num_cells × head_dim] × weights[head_dim × channels]
     float* head_output = ca_output_fp32 + head * num_cells * arch.channels;
-
-    num_tiles = ((num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM) * ((arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
-    tensor_core_matmul_kernel<<<dim3((num_tiles + WARP_SIZE - 1) / WARP_SIZE, 1), dim3(WARP_SIZE, 1)>>>(
-        value_input,
-        value_weights + head * arch.head_dim * arch.channels,
-        head_output,
-        num_cells,
-        arch.channels,
-        arch.head_dim
-    );
+    int value_weight_offset = head * arch.head_dim * arch.channels;
+    int value_output_size = num_cells * arch.channels;
+    for (int out_idx = tid; out_idx < value_output_size; out_idx += block_threads) {
+        int cell = out_idx / arch.channels;
+        int chan = out_idx % arch.channels;
+        float acc = 0.0f;
+        for (int k = 0; k < arch.head_dim; k++) {
+            acc += __half2float(value_input[cell * arch.head_dim + k]) *
+                   __half2float(value_weights[value_weight_offset + k * arch.channels + chan]);
+        }
+        head_output[out_idx] = acc;
+    }
 }
 
 #endif

@@ -126,11 +126,8 @@ __global__ void gpu_svd_kernel(
                 int global_idx = base_row + tid;
                 if (global_idx < n && tile_row == tile_col) {
                     float diag_val = shared_A[tid][tid];
-                    if (diag_val < 0.0f) {
-                        S[global_idx] = 0.0f;
-                        return;
-                    }
-                    S[global_idx] = sqrtf(diag_val);
+                    // Negative diagonal: singular value is 0 (no early return - all threads must reach syncthreads)
+                    S[global_idx] = (diag_val >= 0.0f) ? sqrtf(diag_val) : 0.0f;
                 }
             }
             __syncthreads();
@@ -169,6 +166,10 @@ __global__ void coherence_kernel(
     float* __restrict__ coherence_out,
     int history_length
 ) {
+    DEVICE_FATAL_IF(prediction_errors == nullptr, "coherence_kernel: prediction_errors is null");
+    DEVICE_FATAL_IF(coherence_out == nullptr, "coherence_kernel: coherence_out is null");
+    DEVICE_FATAL_IF(history_length < 2, "coherence_kernel: history_length must be >= 2");
+
     __shared__ float learning_progress;
 
     if (threadIdx.x == 0) learning_progress = 0.0f;
@@ -180,10 +181,10 @@ __global__ void coherence_kernel(
     if (tid < history_length - 1) {
         float curr_error = prediction_errors[tid];
         float next_error = prediction_errors[tid + 1];
-        if (curr_error <= 0.0f) {
-            return;
+        // Valid data: compute progress; invalid data (curr_error <= 0): local_progress stays 0
+        if (curr_error > 0.0f) {
+            local_progress = fmaxf(0.0f, (curr_error - next_error) / curr_error);
         }
-        local_progress = fmaxf(0.0f, (curr_error - next_error) / curr_error);
     }
 
     __syncthreads();

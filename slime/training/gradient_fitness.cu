@@ -16,6 +16,13 @@ __global__ void extract_head_gradient_magnitudes_kernel(
     float* __restrict__ gradient_magnitudes,
     int num_heads
 ) {
+    DEVICE_FATAL_IF(tape == nullptr, "extract_head_gradient_magnitudes: tape is null");
+    DEVICE_FATAL_IF(tape->grad_buffer == nullptr, "extract_head_gradient_magnitudes: grad_buffer is null");
+    DEVICE_FATAL_IF(param_start_indices == nullptr, "extract_head_gradient_magnitudes: param_start_indices is null");
+    DEVICE_FATAL_IF(param_counts == nullptr, "extract_head_gradient_magnitudes: param_counts is null");
+    DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "extract_head_gradient_magnitudes: gradient_magnitudes is null");
+    DEVICE_FATAL_IF(num_heads <= 0, "extract_head_gradient_magnitudes: num_heads must be positive");
+
     int head_id = blockIdx.x;
 
     if (head_id >= num_heads) return;
@@ -23,11 +30,16 @@ __global__ void extract_head_gradient_magnitudes_kernel(
     int start_idx = param_start_indices[head_id];
     int count = param_counts[head_id];
 
+    DEVICE_FATAL_IF(start_idx < 0, "extract_head_gradient_magnitudes: negative start_idx");
+    DEVICE_FATAL_IF(count < 0, "extract_head_gradient_magnitudes: negative count");
+    DEVICE_FATAL_IF(start_idx + count > tape->value_capacity, "extract_head_gradient_magnitudes: param range exceeds tape capacity");
+
     float local_sum = 0.0f;
 
     for (int i = threadIdx.x; i < count; i += blockDim.x) {
         int param_idx = start_idx + i;
         float grad = tape->grad_buffer[param_idx];
+        DEVICE_FATAL_IF(isnan(grad), "extract_head_gradient_magnitudes: gradient is NaN");
         local_sum += grad * grad;
     }
 
@@ -50,12 +62,19 @@ __global__ void compute_gradient_fitness_kernel(
     float gradient_weight,
     float coherence_weight
 ) {
+    DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "compute_gradient_fitness: gradient_magnitudes is null");
+    DEVICE_FATAL_IF(coherence_values == nullptr, "compute_gradient_fitness: coherence_values is null");
+    DEVICE_FATAL_IF(fitness_out == nullptr, "compute_gradient_fitness: fitness_out is null");
+    DEVICE_FATAL_IF(num_heads <= 0, "compute_gradient_fitness: num_heads must be positive");
+
     int head_id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (head_id >= num_heads) return;
 
     float grad_mag = gradient_magnitudes[head_id];
     float coherence = coherence_values[head_id];
+    DEVICE_FATAL_IF(isnan(grad_mag), "compute_gradient_fitness: gradient_magnitude is NaN");
+    DEVICE_FATAL_IF(isnan(coherence), "compute_gradient_fitness: coherence is NaN");
 
     __shared__ float mean_grad;
     __shared__ float std_grad;
@@ -89,12 +108,20 @@ __global__ void update_fitness_ema_kernel(
     int num_heads,
     float alpha
 ) {
+    DEVICE_FATAL_IF(current_fitness == nullptr, "update_fitness_ema: current_fitness is null");
+    DEVICE_FATAL_IF(fitness_ema == nullptr, "update_fitness_ema: fitness_ema is null");
+    DEVICE_FATAL_IF(num_heads <= 0, "update_fitness_ema: num_heads must be positive");
+    DEVICE_FATAL_IF(alpha < 0.0f || alpha > 1.0f, "update_fitness_ema: alpha must be in [0,1]");
+
     int head_id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (head_id >= num_heads) return;
 
     float curr = current_fitness[head_id];
     float prev_ema = fitness_ema[head_id];
+
+    DEVICE_FATAL_IF(isnan(curr), "update_fitness_ema: current_fitness is NaN");
+    DEVICE_FATAL_IF(isnan(prev_ema), "update_fitness_ema: prev_ema is NaN");
 
     fitness_ema[head_id] = alpha * curr + (1.0f - alpha) * prev_ema;
 }
@@ -107,6 +134,13 @@ __global__ void compute_relative_fitness_kernel(
     int behavioral_dim,
     int k_neighbors
 ) {
+    DEVICE_FATAL_IF(absolute_fitness == nullptr, "compute_relative_fitness: absolute_fitness is null");
+    DEVICE_FATAL_IF(behavioral_coords == nullptr, "compute_relative_fitness: behavioral_coords is null");
+    DEVICE_FATAL_IF(relative_fitness == nullptr, "compute_relative_fitness: relative_fitness is null");
+    DEVICE_FATAL_IF(num_components <= 0, "compute_relative_fitness: num_components must be positive");
+    DEVICE_FATAL_IF(behavioral_dim <= 0, "compute_relative_fitness: behavioral_dim must be positive");
+    DEVICE_FATAL_IF(k_neighbors <= 0 || k_neighbors > 5, "compute_relative_fitness: k_neighbors must be in [1,5]");
+
     int comp_id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (comp_id >= num_components) return;

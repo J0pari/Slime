@@ -172,6 +172,18 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     int head_dim_slot = derive_param_slot(genome_hash, "arch_head_dim");
     int grid_size_slot = derive_param_slot(genome_hash, "arch_grid_size");
 
+    // FATAL on invalid slots - upstream must provide valid genome hash
+    DEVICE_FATAL_IF(num_heads_slot < 0 || num_heads_slot >= GENOME_SIZE, "arch_num_heads slot out of bounds");
+    DEVICE_FATAL_IF(channels_slot < 0 || channels_slot >= GENOME_SIZE, "arch_channels slot out of bounds");
+    DEVICE_FATAL_IF(head_dim_slot < 0 || head_dim_slot >= GENOME_SIZE, "arch_head_dim slot out of bounds");
+    DEVICE_FATAL_IF(grid_size_slot < 0 || grid_size_slot >= GENOME_SIZE, "arch_grid_size slot out of bounds");
+
+    // FATAL on NaN genome values - upstream must provide valid genome data
+    DEVICE_FATAL_IF(isnan(genome[num_heads_slot]), "arch_num_heads genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[channels_slot]), "arch_channels genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[head_dim_slot]), "arch_head_dim genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[grid_size_slot]), "arch_grid_size genome value is NaN");
+
     float num_heads_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[num_heads_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
     float channels_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[channels_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
     float head_dim_norm = fmaxf(NORMALIZED_MIN, fminf(NORMALIZED_MAX, (genome[head_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
@@ -186,6 +198,13 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     entry->channels = channels_octets * WMMA_ALIGNMENT;
     entry->grid_size = (int)fmaxf((float)GRID_SIZE_MIN, fminf((float)GRID_SIZE_MAX, GRID_SIZE_MIN + grid_size_norm * (GRID_SIZE_MAX - GRID_SIZE_MIN)));
     entry->hidden_dim = entry->num_heads * entry->head_dim;
+
+    // FATAL on invalid derived dimensions - computation logic error
+    DEVICE_FATAL_IF(entry->num_heads <= 0, "derived num_heads <= 0");
+    DEVICE_FATAL_IF(entry->head_dim <= 0, "derived head_dim <= 0");
+    DEVICE_FATAL_IF(entry->channels <= 0, "derived channels <= 0");
+    DEVICE_FATAL_IF(entry->grid_size <= 0, "derived grid_size <= 0");
+    DEVICE_FATAL_IF(entry->hidden_dim <= 0, "derived hidden_dim <= 0");
 }
 
 __device__ __forceinline__ void derive_diresa(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
@@ -280,22 +299,14 @@ struct PRNGState {
 
         float levy_num = sinf(alpha_phi);
         float cos_phi = cosf(phi);
-        if (cos_phi <= 0.0f) {
-            return NAN;
-        }
+        DEVICE_FATAL_IF(cos_phi <= 0.0f, "levy_stable: cos_phi <= 0 indicates PRNG corruption");
         float levy_denom = powf(cos_phi, (1.0f / alpha));
 
-        if (W <= 0.0f || W >= 1.0f) {
-            return NAN;
-        }
+        DEVICE_FATAL_IF(W <= 0.0f || W >= 1.0f, "levy_stable: W out of (0,1) indicates PRNG corruption");
         float log_w = -logf(W);
-        if (log_w <= 0.0f) {
-            return NAN;
-        }
+        DEVICE_FATAL_IF(log_w <= 0.0f, "levy_stable: log_w <= 0 indicates PRNG corruption");
         float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
-        if (cos_one_minus_alpha_phi <= 0.0f) {
-            return NAN;
-        }
+        DEVICE_FATAL_IF(cos_one_minus_alpha_phi <= 0.0f, "levy_stable: cos_one_minus_alpha_phi <= 0 indicates PRNG corruption");
         float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - alpha) / alpha));
 
         return (levy_num / levy_denom * levy_factor) * scale;
@@ -436,19 +447,16 @@ __device__ void spawn_component_device(
 
     pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
     pool->entries[i].num_deltas = 0;
-    int delta_threshold_slot = derive_param_slot(pool->entries[i].genome_hash, "delta_threshold");
-    delta_threshold = (child_genome[delta_threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
 
-    for (int j = 0; j < GENOME_SIZE; j++) {
-        float diff = child_genome[j] - parent_genome[j];
-        if (fabsf(diff) > delta_threshold) {
-            int delta_idx = atomicAdd((int*)&pool->entries[i].num_deltas, 1);
-            if (delta_idx < pool->entries[i].max_deltas) {
-                pool->entries[i].delta_indices[delta_idx] = j;
-                pool->entries[i].delta_values[delta_idx] = diff;
-            }
-        }
-    }
+    compute_genome_deltas(
+        child_genome,
+        parent_genome,
+        pool->entries[i].delta_indices,
+        pool->entries[i].delta_values,
+        &pool->entries[i].num_deltas,
+        pool->entries[i].max_deltas,
+        pool->entries[i].genome_hash
+    );
 
     PoolInitParams init_params;
     init_params.derive_from_genome(pool->entries[i].genome_hash, child_genome);
@@ -593,7 +601,9 @@ __device__ __noinline__ float compute_genome_distance(
         entry2->parent_hash
     );
 
-    if (idx1 < 0 || idx2 < 0) return 1e10f;
+    // Parent must exist in archive - missing parent indicates data corruption
+    DEVICE_FATAL_IF(idx1 < 0, "compute_genome_distance: entry1->parent_hash not found in archive");
+    DEVICE_FATAL_IF(idx2 < 0, "compute_genome_distance: entry2->parent_hash not found in archive");
 
     const float* latent1 = &archive->latent_genome[idx1 * GENOME_LATENT_DIM_MAX];
     const float* latent2 = &archive->latent_genome[idx2 * GENOME_LATENT_DIM_MAX];
@@ -891,9 +901,7 @@ __global__ void compute_pool_stats_kernel(
     }
 }
 
-// Device kernel to compact pool alive indices (CDP)
-// Must be called before kernels that iterate only over alive entries
-// Since POOL_CAPACITY_MAX = BLOCK_SIZE, single-block scan is sufficient
+// Fused pool compaction using cooperative groups with multi-block scan
 __global__ void compact_pool_alive_indices_kernel(
     ComponentPool* pool,
     int* flags,
@@ -901,25 +909,131 @@ __global__ void compact_pool_alive_indices_kernel(
     int* scan_recursive_workspace,
     int capacity
 ) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    cg::grid_group grid = cg::this_grid();
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
 
-    int blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    __shared__ int warp_sums[WARP_SIZE];
+    __shared__ int alive_count;
 
-    // Step 1: Mark alive entries
-    mark_alive_kernel<<<blocks, BLOCK_SIZE>>>(pool, flags);
-    cudaDeviceSynchronize();
+    // Phase 1: Mark alive entries
+    int is_alive = 0;
+    if (tid < capacity) {
+        is_alive = pool->alive_flags[tid] ? 1 : 0;
+        flags[tid] = is_alive;
+    }
 
-    // Step 2: Exclusive scan (device-side recursive for correctness)
-    exclusive_scan_recursive_kernel<<<1, 1>>>(flags, scan_workspace, scan_recursive_workspace, capacity, BLOCK_SIZE);
-    cudaDeviceSynchronize();
+    grid.sync();
 
-    // Step 3: Scatter indices
-    scatter_alive_indices_kernel<<<blocks, BLOCK_SIZE>>>(pool, flags, scan_workspace);
-    cudaDeviceSynchronize();
+    // Phase 2: Warp-level inclusive scan within each block
+    int val = (tid < capacity) ? flags[tid] : 0;
 
-    // Step 4: Finalize count
-    finalize_alive_count_kernel<<<1, 1>>>(pool, flags, scan_workspace, capacity);
-    cudaDeviceSynchronize();
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(val, offset);
+        if (lane >= offset) val += n;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += n;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
+
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < capacity) ? flags[tid] : 0);
+
+    if (tid < capacity) {
+        scan_workspace[tid] = exclusive_val;
+    }
+
+    // Store block sum into recursive workspace for inter-block prefix
+    if (threadIdx.x == blockDim.x - 1) {
+        scan_recursive_workspace[blockIdx.x] = inclusive_val;
+    }
+
+    grid.sync();
+
+    // Phase 3: Block 0 scans the block sums in recursive workspace
+    if (blockIdx.x == 0) {
+        __shared__ int bsum_shared[WARP_SIZE];
+        int num_blocks = gridDim.x;
+
+        int bval = (threadIdx.x < num_blocks) ? scan_recursive_workspace[threadIdx.x] : 0;
+
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(bval, offset);
+            if (lane >= offset) bval += n;
+        }
+
+        if (lane == WARP_SIZE - 1) {
+            bsum_shared[warp_id] = bval;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+            #pragma unroll
+            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+                int n = warp.shfl_up(ws, offset);
+                if (lane >= offset) ws += n;
+            }
+            bsum_shared[lane] = ws;
+        }
+        __syncthreads();
+
+        int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+        int b_inclusive = bprefix + bval;
+        int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? scan_recursive_workspace[threadIdx.x] : 0);
+
+        if (threadIdx.x < num_blocks) {
+            scan_recursive_workspace[threadIdx.x] = b_exclusive;
+        }
+    }
+
+    grid.sync();
+
+    // Phase 4: Add block prefix from recursive workspace to get global exclusive scan
+    if (tid < capacity && blockIdx.x > 0) {
+        scan_workspace[tid] += scan_recursive_workspace[blockIdx.x];
+    }
+
+    grid.sync();
+
+    // Phase 5: Scatter alive indices using scan results
+    if (tid < capacity && flags[tid]) {
+        int write_pos = scan_workspace[tid];
+        pool->alive_indices[write_pos] = tid;
+    }
+
+    // Phase 6: Compute alive count from final scan value
+    if (tid == 0) {
+        if (capacity > 0) {
+            alive_count = scan_workspace[capacity - 1] + flags[capacity - 1];
+        } else {
+            alive_count = 0;
+        }
+    }
+
+    grid.sync();
+
+    if (tid == 0) {
+        pool->alive_indices_count = alive_count;
+    }
 }
 
 __global__ void collect_pool_task_accuracies_kernel(

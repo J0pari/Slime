@@ -566,8 +566,8 @@ __global__ void create_attractors_kernel(
 
     
     float context_metabolic = attractor_strengths[0];
-    float context_stress = 0.0f;
-    float context_morphogen = 0.0f;
+    float context_stress = attractor_strengths[1];
+    float context_morphogen = attractor_strengths[2];
 
     ChemotaxisParams params;
     params.derive_from_genome_hash(genome_hash);
@@ -1063,7 +1063,8 @@ __global__ void initialize_chemical_field_kernel(
     float* __restrict__ chemical_field,
     const float* __restrict__ genome,
     int grid_size,
-    unsigned int seed
+    unsigned int seed,
+    uint64_t genome_hash
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -1075,16 +1076,23 @@ __global__ void initialize_chemical_field_kernel(
     curandState state;
     curand_init(seed, idx, 0, &state);
 
-    float base_value = 0.5f;
-    float genome_influence = 0.0f;
+    int base_slot = derive_param_slot(genome_hash, "chem_init_base_value");
+    float base_norm = (genome[base_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    float base_value = CHEM_INIT_BASE_MIN + base_norm * (CHEM_INIT_BASE_MAX - CHEM_INIT_BASE_MIN);
+
+    int influence_slot = derive_param_slot(genome_hash, "chem_init_genome_influence");
+    float influence_norm = (genome[influence_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    float influence_scale = CHEM_INIT_GENOME_INFLUENCE_MIN + influence_norm * (CHEM_INIT_GENOME_INFLUENCE_MAX - CHEM_INIT_GENOME_INFLUENCE_MIN);
 
     int genome_idx = (x + y * grid_size) % GENOME_SIZE;
-    if (genome != nullptr) {
-        genome_influence = genome[genome_idx] * 0.1f;
-    }
+    float genome_influence = genome[genome_idx] * influence_scale;
+
+    int noise_slot = derive_param_slot(genome_hash, "chem_init_noise_scale");
+    float noise_norm = (genome[noise_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    float noise_scale = CHEM_INIT_NOISE_MIN + noise_norm * (CHEM_INIT_NOISE_MAX - CHEM_INIT_NOISE_MIN);
 
     float rand_val = validated_curand_uniform(&state, "initialize_chemical_field", idx);
-    float noise = (rand_val - 0.5f) * 0.2f;
+    float noise = (rand_val - 0.5f) * noise_scale;
 
     chemical_field[idx] = base_value + genome_influence + noise;
     chemical_field[idx] = clamp(chemical_field[idx], 0.0f, 1.0f);

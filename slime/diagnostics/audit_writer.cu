@@ -8,12 +8,11 @@
 #define AUDIT_WRITER_CU
 
 #include "../config/config.cu"
+// Forward declare stbi_write_png - implementation in report_generator.cu
+extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 #include <cstdio>
 #include <cmath>
 #include <cstring>
-
-// Forward declaration - implementation provided by report_generator.cu
-extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 
 // Write sample images as PNG files
 // Returns 0 on success, 1 on failure

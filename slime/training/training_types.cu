@@ -89,6 +89,91 @@ struct AdaptiveCurriculum {
     float min_generations_threshold;
 };
 
+// Unified gradient buffer: collects gradients from all sources for optimizer consumption
+struct UnifiedGradientBuffer {
+    // CA weight gradients (FP32 for accumulation, applied to FP16 weights)
+    float* perception_grads;     // [num_heads × channels × head_dim]
+    float* interaction_grads;    // [num_heads × head_dim × head_dim]
+    float* value_grads;          // [num_heads × head_dim × channels]
+
+    // Classification head gradients
+    float* pooling_weight_grads; // [num_heads × channels]
+    float* fc_weight_grads;      // [num_classes × num_features]
+    float* fc_bias_grads;        // [num_classes]
+
+    // Gradient source tracking
+    int has_autodiff_grads;      // Nonzero if autodiff contributed gradients this step
+    int has_backprop_grads;      // Nonzero if classification backprop contributed gradients
+
+    // Dimensions for validation
+    int perception_size;
+    int interaction_size;
+    int value_size;
+    int num_classes;
+    int num_features;
+};
+
+__global__ void init_unified_gradient_buffer_kernel(
+    UnifiedGradientBuffer* grad_buf,
+    float* perception_grads,
+    float* interaction_grads,
+    float* value_grads,
+    float* pooling_weight_grads,
+    float* fc_weight_grads,
+    float* fc_bias_grads,
+    ArchitectureParams arch,
+    int num_classes
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    grad_buf->perception_grads = perception_grads;
+    grad_buf->interaction_grads = interaction_grads;
+    grad_buf->value_grads = value_grads;
+    grad_buf->pooling_weight_grads = pooling_weight_grads;
+    grad_buf->fc_weight_grads = fc_weight_grads;
+    grad_buf->fc_bias_grads = fc_bias_grads;
+
+    grad_buf->perception_size = arch.num_heads * arch.channels * arch.head_dim;
+    grad_buf->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
+    grad_buf->value_size = arch.num_heads * arch.head_dim * arch.channels;
+    grad_buf->num_classes = num_classes;
+    grad_buf->num_features = arch.num_heads * arch.channels;
+
+    grad_buf->has_autodiff_grads = 0;
+    grad_buf->has_backprop_grads = 0;
+}
+
+__global__ void zero_unified_gradients_kernel(
+    UnifiedGradientBuffer* grad_buf
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = grad_buf->perception_size + grad_buf->interaction_size + grad_buf->value_size;
+
+    if (idx < grad_buf->perception_size) {
+        grad_buf->perception_grads[idx] = 0.0f;
+    } else if (idx < grad_buf->perception_size + grad_buf->interaction_size) {
+        grad_buf->interaction_grads[idx - grad_buf->perception_size] = 0.0f;
+    } else if (idx < total) {
+        grad_buf->value_grads[idx - grad_buf->perception_size - grad_buf->interaction_size] = 0.0f;
+    }
+
+    int class_total = grad_buf->num_features + grad_buf->num_classes * grad_buf->num_features + grad_buf->num_classes;
+    if (idx < grad_buf->num_features) {
+        grad_buf->pooling_weight_grads[idx] = 0.0f;
+    }
+    if (idx < grad_buf->num_classes * grad_buf->num_features) {
+        grad_buf->fc_weight_grads[idx] = 0.0f;
+    }
+    if (idx < grad_buf->num_classes) {
+        grad_buf->fc_bias_grads[idx] = 0.0f;
+    }
+
+    if (idx == 0) {
+        grad_buf->has_autodiff_grads = 0;
+        grad_buf->has_backprop_grads = 0;
+    }
+}
+
 __global__ void init_ca_param_map_kernel(CAParameterMap* param_map, ArchitectureParams arch) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         param_map->perception_size = arch.num_heads * arch.channels * arch.head_dim;

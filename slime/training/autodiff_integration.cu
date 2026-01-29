@@ -259,11 +259,9 @@ __global__ void apply_ca_gradients_kernel(
     if ((param_ptr_fp16 != nullptr || param_ptr_fp32 != nullptr) && tape_idx >= 0 && tape_idx < tape->current_value_idx) {
         float grad = tape->grad_buffer[tape_idx];
 
-        if (isnan(grad) || isinf(grad)) {
-            printf("WARN [apply_ca_gradients]: head=%d param=%d tape_idx=%d grad=%f is NaN/Inf, skipping\n",
-                   head_id, param_idx, tape_idx, grad);
-            return;
-        }
+        // FATAL on NaN/inf gradients - indicates autodiff tape corruption
+        DEVICE_FATAL_IF(isnan(grad), "apply_ca_gradients: gradient is NaN - autodiff tape corrupted");
+        DEVICE_FATAL_IF(isinf(grad), "apply_ca_gradients: gradient is Inf - autodiff tape corrupted");
 
         if (fabsf(grad) > gradient_clip) {
             grad = copysignf(gradient_clip, grad);
@@ -271,17 +269,12 @@ __global__ void apply_ca_gradients_kernel(
 
         if (is_fp16 && param_ptr_fp16 != nullptr) {
             float val = __half2float(*param_ptr_fp16);
-            if (isnan(val)) {
-                printf("WARN [apply_ca_gradients]: head=%d param=%d weight is NaN before update, skipping\n",
-                       head_id, param_idx);
-                return;
-            }
+            // FATAL on NaN weights - indicates weight corruption
+            DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight is NaN before update - data corrupted");
             val -= learning_rate * grad;
-            if (isnan(val) || isinf(val)) {
-                printf("WARN [apply_ca_gradients]: head=%d param=%d val=%f after update is NaN/Inf, skipping\n",
-                       head_id, param_idx, val);
-                return;
-            }
+            // FATAL on NaN/inf after update - indicates numerical instability
+            DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight became NaN after update");
+            DEVICE_FATAL_IF(isinf(val), "apply_ca_gradients: weight became Inf after update");
             *param_ptr_fp16 = __float2half(val);
         } else if (param_ptr_fp32 != nullptr) {
             *param_ptr_fp32 -= learning_rate * grad;
@@ -396,6 +389,109 @@ __global__ void relu_backward_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         dL_dprerelu[idx] = dL_dP[idx] * ((P[idx] > 0.0f) ? 1.0f : 0.0f);
+    }
+}
+
+// F009: Route autodiff tape gradients to unified gradient buffer
+__global__ void route_autodiff_to_unified_kernel(
+    ADTape* __restrict__ tape,
+    CAParameterMap* __restrict__ param_map,
+    UnifiedGradientBuffer* __restrict__ grad_buf,
+    float gradient_clip,
+    ArchitectureParams arch
+) {
+    int param_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int head_id = blockIdx.y;
+
+    if (head_id >= arch.num_heads) return;
+
+    int perception_base = param_map->perception_start[head_id];
+    int interaction_base = param_map->interaction_start[head_id];
+    int value_base = param_map->value_start[head_id];
+
+    int per_head_perception = arch.channels * arch.head_dim;
+    int per_head_interaction = arch.head_dim * arch.head_dim;
+    int per_head_value = arch.head_dim * arch.channels;
+    int total_per_head = per_head_perception + per_head_interaction + per_head_value;
+
+    if (param_idx >= total_per_head) return;
+
+    int tape_idx = -1;
+    float* target = nullptr;
+    int target_idx = -1;
+
+    if (param_idx < per_head_perception) {
+        tape_idx = perception_base + param_idx;
+        target = grad_buf->perception_grads;
+        target_idx = head_id * per_head_perception + param_idx;
+    } else if (param_idx < per_head_perception + per_head_interaction) {
+        int local_idx = param_idx - per_head_perception;
+        tape_idx = interaction_base + local_idx;
+        target = grad_buf->interaction_grads;
+        target_idx = head_id * per_head_interaction + local_idx;
+    } else {
+        int local_idx = param_idx - per_head_perception - per_head_interaction;
+        tape_idx = value_base + local_idx;
+        target = grad_buf->value_grads;
+        target_idx = head_id * per_head_value + local_idx;
+    }
+
+    if (tape_idx >= 0 && tape_idx < tape->current_value_idx && target != nullptr) {
+        float grad = tape->grad_buffer[tape_idx];
+
+        DEVICE_FATAL_IF(isnan(grad), "route_autodiff: gradient is NaN");
+        DEVICE_FATAL_IF(isinf(grad), "route_autodiff: gradient is Inf");
+
+        if (fabsf(grad) > gradient_clip) {
+            grad = copysignf(gradient_clip, grad);
+        }
+
+        atomicAdd(&target[target_idx], grad);
+        tape->grad_buffer[tape_idx] = 0.0f;
+
+        if (param_idx == 0 && head_id == 0) {
+            grad_buf->has_autodiff_grads = 1;
+        }
+    }
+}
+
+// F010: Route classification backprop gradients to unified buffer
+__global__ void route_classification_to_unified_kernel(
+    float* __restrict__ pooling_grads_in,
+    float* __restrict__ fc_weight_grads_in,
+    float* __restrict__ fc_bias_grads_in,
+    UnifiedGradientBuffer* __restrict__ grad_buf,
+    int num_features,
+    int num_classes
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Route pooling weight gradients
+    if (idx < num_features) {
+        float grad = pooling_grads_in[idx];
+        DEVICE_FATAL_IF(isnan(grad), "route_classification: pooling grad is NaN");
+        atomicAdd(&grad_buf->pooling_weight_grads[idx], grad);
+        pooling_grads_in[idx] = 0.0f;
+    }
+
+    // Route FC weight gradients
+    if (idx < num_classes * num_features) {
+        float grad = fc_weight_grads_in[idx];
+        DEVICE_FATAL_IF(isnan(grad), "route_classification: fc_weight grad is NaN");
+        atomicAdd(&grad_buf->fc_weight_grads[idx], grad);
+        fc_weight_grads_in[idx] = 0.0f;
+    }
+
+    // Route FC bias gradients
+    if (idx < num_classes) {
+        float grad = fc_bias_grads_in[idx];
+        DEVICE_FATAL_IF(isnan(grad), "route_classification: fc_bias grad is NaN");
+        atomicAdd(&grad_buf->fc_bias_grads[idx], grad);
+        fc_bias_grads_in[idx] = 0.0f;
+    }
+
+    if (idx == 0) {
+        grad_buf->has_backprop_grads = 1;
     }
 }
 
