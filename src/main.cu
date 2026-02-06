@@ -68,33 +68,28 @@ int main() {
     printf("[H10] Predicted stack allocation: %zu threads * %d bytes = %zu MB\n",
         max_possible_threads, CDP_STACK_SIZE, predicted_stack_alloc / BYTES_PER_MB); fflush(stdout);
 
-    printf("[H11] Setting device heap limit to %zu MB\n", DEVICE_MALLOC_HEAP_MB); fflush(stdout);
     cudaDeviceSetLimit(cudaLimitMallocHeapSize, DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB);
     cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[H11b] Mem after heap limit: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
+    printf("[H11] heap_limit=%zu MB, %zu MB free\n", DEVICE_MALLOC_HEAP_MB, free_mem / BYTES_PER_MB); fflush(stdout);
 
     cudaError_t err = cudaSuccess;
 
     Dataset* d_datasets[NUM_ACTIVE_DATASETS];
-    printf("[H8] Loading %d active datasets for curriculum...\n", NUM_ACTIVE_DATASETS); fflush(stdout);
-
     Dataset* d_test_datasets[NUM_ACTIVE_DATASETS];
     for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
         int dataset_id = HOST_ACTIVE_DATASET_IDS[i];
-        printf("[H8.%d] Loading train dataset %d...\n", i, dataset_id); fflush(stdout);
         err = load_dataset_from_registry(dataset_id, true, &d_datasets[i]);
         if (err != cudaSuccess) {
             printf("[H-ERR] Train dataset %d load failed: %s\n", dataset_id, cudaGetErrorString(err));
             return 1;
         }
-        printf("[H8.%d] Loading test dataset %d...\n", i, dataset_id); fflush(stdout);
         err = load_dataset_from_registry(dataset_id, false, &d_test_datasets[i]);
         if (err != cudaSuccess) {
             printf("[H-ERR] Test dataset %d load failed: %s\n", dataset_id, cudaGetErrorString(err));
             return 1;
         }
     }
-    printf("[H9] All %d train+test dataset pairs loaded\n", NUM_ACTIVE_DATASETS); fflush(stdout);
+    printf("[H9] %d train+test dataset pairs loaded\n", NUM_ACTIVE_DATASETS); fflush(stdout);
 
     // Allocate device array of dataset pointers (train)
     Dataset** d_dataset_array;
@@ -161,19 +156,14 @@ int main() {
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H26] Mem before setting sync_depth: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
 
-    printf("[H28] Setting sync_depth=%d\n", CDP_SYNC_DEPTH); fflush(stdout);
     cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, CDP_SYNC_DEPTH);
     cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[H28b] Mem after sync_depth: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
+    printf("[H28] sync_depth=%d, %zu MB free\n", CDP_SYNC_DEPTH, free_mem / BYTES_PER_MB); fflush(stdout);
 
     constexpr size_t CDP_PENDING_LAUNCH_COUNT = 32768;
-    printf("[H28b2] Setting pending_launch_count=%zu\n", CDP_PENDING_LAUNCH_COUNT); fflush(stdout);
     cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, CDP_PENDING_LAUNCH_COUNT);
     cudaMemGetInfo(&free_mem, &total_mem);
-    printf("[H28b3] Mem after pending_launch_count: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
-
-    printf("[H28c] NOT setting global stack limit - let CUDA allocate per-kernel dynamically\n"); fflush(stdout);
-    printf("[H28d] Each kernel will use only the stack it needs (default 1024, up to %d for init_organism)\n", CDP_STACK_SIZE); fflush(stdout);
+    printf("[H28b] pending_launch_count=%zu, %zu MB free\n", CDP_PENDING_LAUNCH_COUNT, free_mem / BYTES_PER_MB); fflush(stdout);
 
     AuditBuffer* h_audit = nullptr;
     AuditBuffer* d_audit = nullptr;
@@ -386,7 +376,6 @@ int main() {
 
     cudaMemcpy(buffers, &buffers_host, sizeof(OrganismPreallocatedBuffers), cudaMemcpyHostToDevice);
 
-    printf("[H29] Launching persistent_evolution_kernel<<<1,1>>>\n"); fflush(stdout);
     persistent_evolution_kernel<<<1, 1>>>(
         (unsigned int)time(nullptr),
         d_dataset_array,

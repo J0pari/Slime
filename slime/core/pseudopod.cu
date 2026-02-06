@@ -29,10 +29,7 @@ __global__ void compute_coherence_kernel(
     if (tid < history_length - 1) {
         float current_loss = loss_history[tid];
         float next_loss = loss_history[tid + 1];
-
-        if (current_loss <= 0.0f) {
-            return;
-        }
+        DEVICE_FATAL_IF(current_loss <= 0.0f, "coherence_kernel: loss history contains non-positive value");
         local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
     }
 

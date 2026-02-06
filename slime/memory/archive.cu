@@ -100,7 +100,7 @@ __device__ bool hash_table_insert(
     uint64_t genome_hash,
     int archive_idx
 ) {
-    if (genome_hash == HASH_TABLE_EMPTY_KEY) return false;  // Invalid key
+    DEVICE_FATAL_IF(genome_hash == HASH_TABLE_EMPTY_KEY, "hash_table_insert: empty key sentinel passed as genome_hash");
 
     int slot = hash_table_slot(genome_hash);
     int probes = 0;
@@ -110,19 +110,15 @@ __device__ bool hash_table_insert(
         uint64_t old = atomicCAS((unsigned long long*)&keys[slot], expected, genome_hash);
 
         if (old == HASH_TABLE_EMPTY_KEY) {
-            // Successfully claimed empty slot
             values[slot] = archive_idx;
             return true;
         }
-        if (old == genome_hash) {
-            // Key already exists (duplicate)
-            return false;
-        }
-        // Slot occupied by different key, linear probe
+        DEVICE_FATAL_IF(old == genome_hash, "hash_table_insert: duplicate key - genome already in table");
         slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
         probes++;
     }
-    return false;  // Table full
+    DEVICE_FATAL_IF(true, "hash_table_insert: table full after probing all slots");
+    return false;
 }
 
 __device__ void hash_table_remove(
@@ -143,12 +139,11 @@ __device__ void hash_table_remove(
             values[slot] = -1;
             return;
         }
-        if (keys[slot] == HASH_TABLE_EMPTY_KEY) {
-            return;  // Not found
-        }
+        DEVICE_FATAL_IF(keys[slot] == HASH_TABLE_EMPTY_KEY, "hash_table_remove: key not found in table");
         slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
         probes++;
     }
+    DEVICE_FATAL_IF(true, "hash_table_remove: exhausted probe limit");
 }
 
 __global__ void init_hash_table_kernel(

@@ -81,14 +81,12 @@ __global__ void cross_entropy_loss_kernel(
 
     atomicAdd(loss_out, sample_loss / (float)batch_size);
 
-    // Compute gradients if requested
-    if (gradients != nullptr) {
-        float* sample_grads = &gradients[sample * num_classes];
-        for (int c = 0; c < num_classes; c++) {
-            float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
-            float grad = (softmax_c - (c == label ? 1.0f : 0.0f)) / (float)batch_size;
-            sample_grads[c] = grad;
-        }
+    DEVICE_FATAL_IF(gradients == nullptr, "cross_entropy_kernel: gradients buffer required");
+    float* sample_grads = &gradients[sample * num_classes];
+    for (int c = 0; c < num_classes; c++) {
+        float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
+        float grad = (softmax_c - (c == label ? 1.0f : 0.0f)) / (float)batch_size;
+        sample_grads[c] = grad;
     }
 }
 
@@ -141,13 +139,12 @@ __global__ void cross_entropy_label_smoothing_kernel(
 
     atomicAdd(loss_out, sample_loss / (float)batch_size);
 
-    if (gradients != nullptr) {
-        float* sample_grads = &gradients[sample * num_classes];
-        for (int c = 0; c < num_classes; c++) {
-            float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
-            float target = smooth_weight + (c == label ? true_weight : 0.0f);
-            sample_grads[c] = (softmax_c - target) / (float)batch_size;
-        }
+    DEVICE_FATAL_IF(gradients == nullptr, "cross_entropy_label_smoothing_kernel: gradients buffer required");
+    float* sample_grads = &gradients[sample * num_classes];
+    for (int c = 0; c < num_classes; c++) {
+        float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
+        float target = smooth_weight + (c == label ? true_weight : 0.0f);
+        sample_grads[c] = (softmax_c - target) / (float)batch_size;
     }
 }
 
