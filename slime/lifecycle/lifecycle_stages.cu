@@ -225,19 +225,9 @@ extern "C" __global__ void lifecycle_transition_kernel(
     float* entry_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
     float* parent_genome_temp = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
     if (entry->alive) {
-        reconstruct_genome_from_archive(
-            entry->parent_hash,
-            archive,
-            archive_size,
-            entry->delta_indices,
-            entry->delta_values,
-            entry->num_deltas,
-            entry->max_deltas,
-            entry_genome,
-            GENOME_SIZE,
-            parent_genome_temp,
-            diresa_genome_weights
-        );
+        reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, entry_genome, GENOME_SIZE, parent_genome_temp, diresa_genome_weights);
     }
 
 
@@ -368,19 +358,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
         float* entry_genome = &workspace_genomes[compact_idx * GENOME_SIZE * 2];
         float* parent_genome_temp = &workspace_genomes[compact_idx * GENOME_SIZE * 2 + GENOME_SIZE];
 
-        reconstruct_genome_from_archive(
-            entry->parent_hash,
-            archive,
-            *archive_size,
-            entry->delta_indices,
-            entry->delta_values,
-            entry->num_deltas,
-            entry->max_deltas,
-            entry_genome,
-            GENOME_SIZE,
-            parent_genome_temp,
-            diresa_genome_weights
-        );
+        reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, entry_genome, GENOME_SIZE, parent_genome_temp, diresa_genome_weights);
 
         float ctx_metabolic = entry->fitness;
         float ctx_stress = entry->hunger;
@@ -390,7 +370,7 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
         const float* entry_gradients = entry->gradients;
 
         LifecyclePhase new_phase = local_state.decide_transition(tid, true, entry_hash, entry_genome, entry_gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        (void)new_phase; // Used by decide_transition side effects
+        (void)new_phase; 
     }
 
     float my_fitness = valid ? local_state.local_fitness[tid] : 0.0f;
@@ -491,7 +471,7 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
                 local_state.phases[worst_tid] = LifecyclePhase::REACTIVATING;
                 float new_fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
                 pool->entries[worst_actual].fitness = new_fitness;
-                pool->fitness_values[worst_actual] = new_fitness;  // SoA sync
+                pool->fitness_values[worst_actual] = new_fitness;  
                 pool->entries[worst_actual].coherence = elite_coherence_reset;
             }
         }

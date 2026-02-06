@@ -7,13 +7,7 @@
 struct GPUElite;
 struct MultiHeadCAState;
 
-enum EntryType : uint8_t {
-    ENTRY_ROOT = 0,   // Genome stored directly in archive under own genome_hash
-    ENTRY_CHILD = 1   // Genome reconstructed from parent + deltas
-};
-
 struct PoolEntry {
-    EntryType type;
     int id;
     float fitness;
     float coherence;
@@ -43,21 +37,12 @@ struct PoolEntry {
     uint64_t genome_hash;
     int generation;
     float* gradients;
-
-    union {
-        struct {
-            float* genome;
-        } root;
-
-        struct {
-            uint64_t parent_hash;
-            int parent_idx;
-            uint16_t num_deltas;
-            uint16_t max_deltas;
-            uint16_t* delta_indices;
-            float* delta_values;
-        } child;
-    };
+    uint64_t parent_hash;
+    int parent_idx;
+    uint16_t num_deltas;
+    uint16_t max_deltas;
+    uint16_t* delta_indices;
+    float* delta_values;
     int num_heads;
     int channels;
     int hidden_dim;
@@ -210,7 +195,7 @@ __device__ __forceinline__ float genome_to_param_impl(
     int enhancer_1_slot = (primary_slot * 0x51b3e1f4 + 0x3f2a9c71) % GENOME_SIZE;
     int enhancer_2_slot = (primary_slot * 0x7a2e914c + 0x5d8b4e3a) % GENOME_SIZE;
     int enhancer_3_slot = (primary_slot * 0x2f1a8c9d + 0x9b7e5f2c) % GENOME_SIZE;
-    int enhancer_4_slot = (primary_slot * 0x4b7c2e91 + 0x6a5d3f1c) % GENOME_SIZE;  // Telemetry enhancers
+    int enhancer_4_slot = (primary_slot * 0x4b7c2e91 + 0x6a5d3f1c) % GENOME_SIZE;  
     int enhancer_5_slot = (primary_slot * 0x9c3e7a2f + 0x8b4f1d6e) % GENOME_SIZE;
     int enhancer_6_slot = (primary_slot * 0x6f1b8d3c + 0x2e9a4c5b) % GENOME_SIZE;
     int enhancer_7_slot = (primary_slot * 0x3a7f5e2c + 0x1d6b9f4a) % GENOME_SIZE;
@@ -232,10 +217,10 @@ __device__ __forceinline__ float genome_to_param_impl(
             enhancer_1 * context_metabolic +
             enhancer_2 * context_stress +
             enhancer_3 * context_morphogen +
-            enhancer_4 * context_complexity +    // Self-awareness (genetic diversity perception)
-            enhancer_5 * context_niche +         // Environmental awareness (archive topology)
-            enhancer_6 * context_learning +      // Learning state awareness (DIRESA drift)
-            enhancer_7 * context_performance     // Performance awareness (MNIST accuracy)
+            enhancer_4 * context_complexity +    
+            enhancer_5 * context_niche +         
+            enhancer_6 * context_learning +      
+            enhancer_7 * context_performance     
         );
 
     float expressed_val = base_val * epigenetic_factor * (1.0f + context_modulation);

@@ -53,27 +53,14 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
 
     entry->id = atomicAdd((int*)&pool->total_spawned, 1);
     entry->age = 0;
-    entry->parent_hash = archive->genome_hash[elite_idx];
-    entry->parent_idx = INT_MAX;  // No pool parent - weights from archive
     entry->genome_hash = archive->genome_hash[elite_idx];
-    entry->num_deltas = 0;
     entry->alive = true;
+    entry->parent_idx = -1;
+    entry->parent_hash = archive->genome_hash[elite_idx];
+    entry->num_deltas = 0;
 
     float* elite_genome = workspace_genome;
-    float* temp_parent = workspace_genome + GENOME_SIZE;
-    reconstruct_genome_from_archive(
-        entry->parent_hash,
-        archive,
-        archive_size,
-        entry->delta_indices,
-        entry->delta_values,
-        entry->num_deltas,
-        entry->max_deltas,
-        elite_genome,
-        GENOME_SIZE,
-        temp_parent,
-        diresa_genome_weights
-    );
+    diresa_decode(&archive->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX], elite_genome, diresa_genome_weights);
 
     int fitness_inherit_center_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_center");
     int fitness_inherit_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_steepness");
@@ -83,9 +70,9 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
 
     entry->fitness = archive->fitness[elite_idx] * fitness_modulation;
     entry->coherence = archive->coherence[elite_idx];
-    entry->task_accuracy = NAN;  // Requires fresh evaluation
-    entry->generalization_gap = NAN;  // Requires fresh evaluation
-    entry->hardware_efficiency = NAN;  // Requires fresh evaluation
+    entry->task_accuracy = NAN;  
+    entry->generalization_gap = NAN;  
+    entry->hardware_efficiency = NAN;  
     entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
     entry->generation = archive->generation[elite_idx];
 

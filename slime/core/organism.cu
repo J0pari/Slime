@@ -132,8 +132,8 @@ struct OrganismPreallocatedBuffers {
     float* fc_weights_grad;
     float* fc_bias_grad;
     float* features_grad;
-    float* adam_m_ca_pool;  // unified: [perception | interaction | value]
-    float* adam_v_ca_pool;  // unified: [perception | interaction | value]
+    float* adam_m_ca_pool;  
+    float* adam_v_ca_pool;  
     float* adam_m_pooling;
     float* adam_v_pooling;
     float* adam_m_fc_weights;
@@ -192,12 +192,12 @@ struct OrganismPreallocatedBuffers {
     float* interaction_activations_saved;
     float* pre_gelu_values_saved;
     float* batched_ca_output;
-    float* batch_affinity_reduced;      // [BATCH_SIZE_MAX * CA_FIELD_SIZE]
-    float* batch_flow_field;            // [BATCH_SIZE_MAX * CA_FIELD_SIZE * 2]
-    float* batch_reintegration_buffer;  // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX]
-    float* batch_prev_concentration;    // [BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX] - previous step's final state for recurrence
-    float flow_beta_A_grad;             // Gradient for flow_beta_A parameter
-    float flow_n_grad;                  // Gradient for flow_n parameter
+    float* batch_affinity_reduced;      
+    float* batch_flow_field;            
+    float* batch_reintegration_buffer;  
+    float* batch_prev_concentration;    
+    float flow_beta_A_grad;             
+    float flow_n_grad;                  
 };
 
 struct Dataset;
@@ -242,22 +242,22 @@ struct Organism {
     float* diresa_gen_weight_pool;
     float* diresa_genome_weight_pool;
 
-    float* hw_coords_pool;     // [pool_capacity * DIM_HW_MAX]
-    float* task_coords_pool;   // [pool_capacity * DIM_TASK_MAX]
-    float* gen_coords_pool;    // [pool_capacity * DIM_GEN_MAX]
+    float* hw_coords_pool;     
+    float* task_coords_pool;   
+    float* gen_coords_pool;    
 
     uint16_t* delta_indices_pool;
     float* delta_values_pool;
     uint16_t* delta_counts_pool;
 
-    float* latent_genome_pool;  // DIRESA-compressed genomes [MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX]
+    float* latent_genome_pool;  
 
     TraceBuffer* trace_buffer;
     HardwareGeometry* hardware_geom;
 
     CAParameterMap* param_map;
 
-    int current_activation_grid_size;  // Track current allocation size for dynamic reallocation
+    int current_activation_grid_size;  
 
     HybridTrainingMode* training_mode;
     Dataset** dataset_array;
@@ -290,9 +290,9 @@ struct Organism {
 
     int* lifecycle_phase_counts;
 
-    float* reduction_workspace;  // Partial sums for parallel reduction of chemical field mean
-    int reduction_num_blocks;    // Number of blocks used in reduction
-    int reduction_total_cells;   // Total cells in chemical field for mean computation
+    float* reduction_workspace;  
+    int reduction_num_blocks;    
+    int reduction_total_cells;   
 
     float* gradient_features_pool;
     float* gradient_logits_pool;
@@ -317,8 +317,8 @@ struct Organism {
     uint8_t* elite_compressed_pool;
     uint32_t* elite_size_pool;
 
-    float* adam_m_ca_pool;  // unified: [perception | interaction | value]
-    float* adam_v_ca_pool;  // unified: [perception | interaction | value]
+    float* adam_m_ca_pool;  
+    float* adam_v_ca_pool;  
 
     float* batch_ca_states_pool;
     float* batch_ca_input_grads;
@@ -407,13 +407,9 @@ __global__ void component_evolution_kernel(
     float* primary_parent_temp = &workspace_genomes[tid * 2 * GENOME_SIZE + GENOME_SIZE];
 
     PoolEntry* entry = &pool->entries[tid];
-    if (entry->type == ENTRY_ROOT) {
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            primary_genome[i] = entry->root.genome[i];
-        }
-    } else {
-        reconstruct_child_genome(entry, archive, primary_genome, primary_parent_temp, organism->diresa_genome_weights);
-    }
+    reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
     if (tid == 0) {
     }
@@ -498,13 +494,9 @@ __global__ void selection_kernel(
     float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
     float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
 
-    if (entry->type == ENTRY_ROOT) {
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            organism_genome[i] = entry->root.genome[i];
-        }
-    } else {
-        reconstruct_child_genome(entry, archive, organism_genome, temp_parent, organism->diresa_genome_weights);
-    }
+    reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, organism_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
 
     float* latent_genome = organism->latent_genome_pool + entry_idx * GENOME_LATENT_DIM_MAX;
     diresa_encode(organism_genome, latent_genome, &organism->diresa_genome_weights[0]);
@@ -574,13 +566,9 @@ __global__ void spawn_wave_kernel(
         float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_PARENT];
 
         PoolEntry* spawn_entry = &pool->entries[i];
-        if (spawn_entry->type == ENTRY_ROOT) {
-            for (int j = 0; j < GENOME_SIZE; j++) {
-                temp_genome[j] = spawn_entry->root.genome[j];
-            }
-        } else {
-            reconstruct_child_genome(spawn_entry, (GPUElite*)organism->archive, temp_genome, temp_parent, organism->diresa_genome_weights);
-        }
+        reconstruct_genome_from_archive(spawn_entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+            spawn_entry->delta_indices, spawn_entry->delta_values, spawn_entry->num_deltas,
+            spawn_entry->max_deltas, temp_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
 
         uint64_t temp_hash = pool->entries[i].genome_hash;
         int fitness_threshold_slot = derive_param_slot(temp_hash, "spawn_fitness_threshold");
@@ -652,13 +640,9 @@ __global__ void spawn_wave_kernel(
     float* workspace_parent_parent_temp = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_PARENT_TEMP];
 
     PoolEntry* parent_entry = &pool->entries[parent_idx];
-    if (parent_entry->type == ENTRY_ROOT) {
-        for (int j = 0; j < GENOME_SIZE; j++) {
-            workspace_parent_genome[j] = parent_entry->root.genome[j];
-        }
-    } else {
-        reconstruct_child_genome(parent_entry, (GPUElite*)organism->archive, workspace_parent_genome, workspace_parent_parent_temp, organism->diresa_genome_weights);
-    }
+    reconstruct_genome_from_archive(parent_entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+        parent_entry->delta_indices, parent_entry->delta_values, parent_entry->num_deltas,
+        parent_entry->max_deltas, workspace_parent_genome, GENOME_SIZE, workspace_parent_parent_temp, organism->diresa_genome_weights);
 
     uint64_t parent_hash = pool->entries[parent_idx].genome_hash;
     float parent_morphogen = sample_neighborhood(
@@ -739,13 +723,9 @@ __global__ void culling_kernel(
     if (entry->alive) {
         float* entry_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
         float* entry_parent_temp = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
-        if (entry->type == ENTRY_ROOT) {
-            for (int j = 0; j < GENOME_SIZE; j++) {
-                entry_genome[j] = entry->root.genome[j];
-            }
-        } else {
-            reconstruct_child_genome(entry, archive, entry_genome, entry_parent_temp, organism->diresa_genome_weights);
-        }
+        reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
 
         uint64_t entry_genome_hash = entry->genome_hash;
         float ctx_metabolic = entry->fitness;
@@ -842,13 +822,9 @@ __global__ void populate_organism_flow_params_kernel(
 
     float* entry_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* entry_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
-    if (entry->type == ENTRY_ROOT) {
-        for (int j = 0; j < GENOME_SIZE; j++) {
-            entry_genome[j] = entry->root.genome[j];
-        }
-    } else {
-        reconstruct_child_genome(entry, (GPUElite*)organism->archive, entry_genome, entry_parent_temp, organism->diresa_genome_weights);
-    }
+    reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
 
     float* genome = entry_genome;
     float* epigenetic = entry->gradients;
@@ -982,13 +958,9 @@ __global__ void behavioral_update_kernel(
     float* primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
 
-    if (entry->type == ENTRY_ROOT) {
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            primary_genome[i] = entry->root.genome[i];
-        }
-    } else {
-        reconstruct_child_genome(entry, (GPUElite*)organism->archive, primary_genome, primary_parent_temp, organism->diresa_genome_weights);
-    }
+    reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
     uint64_t genome_hash = entry->genome_hash;
     float* genome = primary_genome;
@@ -1365,13 +1337,9 @@ __global__ void init_behavioral_dimensions_kernel(
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
         PoolEntry* entry = &organism->pool->entries[0];
 
-        if (entry->type == ENTRY_ROOT) {
-            for (int i = 0; i < GENOME_SIZE; i++) {
-                primary_genome[i] = entry->root.genome[i];
-            }
-        } else {
-            reconstruct_child_genome(entry, (GPUElite*)organism->archive, primary_genome, primary_parent_temp, organism->diresa_genome_weights);
-        }
+        reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
         dims.derive_from_genome(entry->genome_hash, primary_genome);
@@ -1456,7 +1424,7 @@ __global__ void init_organism_kernel(
 
         int pool_blocks = (pool_capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
         printf("V:init_org_pre_pool blocks=%d alive_flags=%p fitness_values=%p\n", pool_blocks, (void*)organism->pool->alive_flags, (void*)organism->pool->fitness_values);
-        __threadfence();  // Ensure pool pointer writes are visible to child kernel
+        __threadfence();  
         init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(organism->pool, pool_capacity, delta_indices_buffer, delta_values_buffer, gradients_buffer);
         err = cudaGetLastError();
         printf("V:init_org_post_pool err=%d\n", (int)err);
@@ -1498,13 +1466,9 @@ __global__ void init_organism_phase2_kernel(
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
         PoolEntry* entry = &organism->pool->entries[0];
 
-        if (entry->type == ENTRY_ROOT) {
-            for (int i = 0; i < GENOME_SIZE; i++) {
-                primary_genome[i] = entry->root.genome[i];
-            }
-        } else {
-            reconstruct_child_genome(entry, (GPUElite*)organism->archive, primary_genome, primary_parent_temp, organism->diresa_genome_weights);
-        }
+        reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
         dims.derive_from_genome(entry->genome_hash, primary_genome);
@@ -1855,7 +1819,7 @@ __global__ void init_organism_phase2_kernel(
         organism->param_map = buffers->param_map;
         init_ca_param_map_kernel<<<1, 1>>>(organism->param_map, arch);
 
-        organism->current_activation_grid_size = arch.grid_size;  // Initialize grid size tracker
+        organism->current_activation_grid_size = arch.grid_size;  
 
         organism->lifecycle_phase_counts = buffers->lifecycle_phase_counts;
 
@@ -2069,9 +2033,9 @@ __global__ void init_organism_phase2_kernel(
             primary_genome,
             organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash,
-            0.5f,  // ctx_metabolic - initial neutral value
-            0.1f,  // ctx_stress - initial low stress
-            0.3f,  // ctx_morphogen - initial low concentration
+            0.5f,  
+            0.1f,  
+            0.3f,  
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -2112,13 +2076,9 @@ __global__ void check_convergence_kernel(
         float* convergence_genome = &workspace_genomes[0];
         float* convergence_parent_temp = &workspace_genomes[GENOME_SIZE];
         PoolEntry* best_entry = &organism->pool->entries[0];
-        if (best_entry->type == ENTRY_ROOT) {
-            for (int i = 0; i < GENOME_SIZE; i++) {
-                convergence_genome[i] = best_entry->root.genome[i];
-            }
-        } else {
-            reconstruct_child_genome(best_entry, (GPUElite*)organism->archive, convergence_genome, convergence_parent_temp, organism->diresa_genome_weights);
-        }
+        reconstruct_genome_from_archive(best_entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+            best_entry->delta_indices, best_entry->delta_values, best_entry->num_deltas,
+            best_entry->max_deltas, convergence_genome, GENOME_SIZE, convergence_parent_temp, organism->diresa_genome_weights);
 
         uint64_t genome_hash = organism->pool->entries[0].genome_hash;
         float* genome = convergence_genome;
@@ -2388,7 +2348,7 @@ __global__ void persistent_evolution_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) { printf("!E:P1_snap gen=%d\n", organism->generation); return; }
 
-        cudaDeviceSynchronize();  // BARRIER: Phase 1 complete
+        cudaDeviceSynchronize();  
         printf("V:P1_done gen=%d\n", organism->generation);
 
         printf("V:P2_start gen=%d\n", organism->generation);
@@ -2438,7 +2398,7 @@ __global__ void persistent_evolution_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) { printf("!E:P2_update_field gen=%d err=%d\n", organism->generation, (int)err); return; }
 
-        cudaDeviceSynchronize();  // BARRIER: Phase 2 complete
+        cudaDeviceSynchronize();  
         printf("V:P2_done gen=%d\n", organism->generation);
 
         printf("V:P3_start gen=%d\n", organism->generation);
@@ -2448,7 +2408,7 @@ __global__ void persistent_evolution_kernel(
         err = cudaGetLastError();
         if (err != cudaSuccess) { printf("!E:P3_beh gen=%d err=%d\n", organism->generation, (int)err); return; }
 
-        cudaDeviceSynchronize();  // BARRIER: Phase 3 complete
+        cudaDeviceSynchronize();  
         printf("V:P3_done gen=%d\n", organism->generation);
 
 

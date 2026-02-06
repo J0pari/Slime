@@ -46,8 +46,8 @@ struct HybridTrainingMode {
     ClassificationHead* classifier;
     float learning_rate;
     float gradient_clip_norm;
-    float* adam_m;  // unified: [perception | interaction | value | policy]
-    float* adam_v;  // unified: [perception | interaction | value | policy]
+    float* adam_m;  
+    float* adam_v;  
     int perception_size;
     int interaction_size;
     int value_size;
@@ -57,8 +57,8 @@ struct HybridTrainingMode {
 };
 
 struct Dataset {
-    const DatasetDescriptor* descriptor;  // Points to entry in DATASET_REGISTRY
-    unsigned char* samples;               // Raw sample data (format determined by descriptor->encoding)
+    const DatasetDescriptor* descriptor;  
+    unsigned char* samples;               
     unsigned char* labels;
     int num_samples;
     bool is_train;
@@ -69,16 +69,16 @@ struct DatasetStats {
     float population_mean_accuracy;
     float population_best_accuracy;
     float population_accuracy_variance;
-    float niche_diversity;  // Voronoi cell occupancy entropy
+    float niche_diversity;  
     int num_generations_trained;
     bool activation_threshold_met;
 };
 
 struct AdaptiveCurriculum {
     DatasetStats stats[NUM_ACTIVE_DATASETS];
-    int current_dataset_idx;  // Index into ACTIVE_DATASET_IDS array
+    int current_dataset_idx;  
     int num_datasets_completed;
-    float curriculum_progress;  // 0.0 to 1.0
+    float curriculum_progress;  
 
     float accuracy_threshold;
     float diversity_threshold;
@@ -86,16 +86,16 @@ struct AdaptiveCurriculum {
 };
 
 struct UnifiedGradientBuffer {
-    float* perception_grads;     // [num_heads × channels × head_dim]
-    float* interaction_grads;    // [num_heads × head_dim × head_dim]
-    float* value_grads;          // [num_heads × head_dim × channels]
+    float* perception_grads;     
+    float* interaction_grads;    
+    float* value_grads;          
 
-    float* pooling_weight_grads; // [num_heads × channels]
-    float* fc_weight_grads;      // [num_classes × num_features]
-    float* fc_bias_grads;        // [num_classes]
+    float* pooling_weight_grads; 
+    float* fc_weight_grads;      
+    float* fc_bias_grads;        
 
-    int has_autodiff_grads;      // Nonzero if autodiff contributed gradients this step
-    int has_backprop_grads;      // Nonzero if classification backprop contributed gradients
+    int has_autodiff_grads;      
+    int has_backprop_grads;      
 
     int perception_size;
     int interaction_size;

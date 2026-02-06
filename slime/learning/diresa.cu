@@ -9,24 +9,24 @@
 struct PoolEntry;
 
 struct DIRESAWeights {
-    int input_dim;   // HARDWARE_FEATURES_DIM or task/gen feature counts
-    int output_dim;  // DIM_HW or DIM_TASK or DIM_GEN
-    int hidden1;     // Genome-derived
-    int hidden2;     // Genome-derived
+    int input_dim;   
+    int output_dim;  
+    int hidden1;     
+    int hidden2;     
 
-    float* encoder_w1;  // [input_dim * hidden1]
-    float* encoder_b1;  // [hidden1]
-    float* encoder_w2;  // [hidden1 * hidden2]
-    float* encoder_b2;  // [hidden2]
-    float* encoder_w3;  // [hidden2 * output_dim]
-    float* encoder_b3;  // [output_dim]
+    float* encoder_w1;  
+    float* encoder_b1;  
+    float* encoder_w2;  
+    float* encoder_b2;  
+    float* encoder_w3;  
+    float* encoder_b3;  
 
-    float* decoder_w1;  // [output_dim * hidden2]
-    float* decoder_b1;  // [hidden2]
-    float* decoder_w2;  // [hidden2 * hidden1]
-    float* decoder_b2;  // [hidden1]
-    float* decoder_w3;  // [hidden1 * input_dim]
-    float* decoder_b3;  // [input_dim]
+    float* decoder_w1;  
+    float* decoder_b1;  
+    float* decoder_w2;  
+    float* decoder_b2;  
+    float* decoder_w3;  
+    float* decoder_b3;  
 
     float cov_weight;
     float learning_rate;
@@ -40,21 +40,21 @@ struct DIRESAWeights {
 };
 
 struct DIRESABatch {
-    int input_dim;   // Feature dimension (must match DIRESAWeights.input_dim)
-    int output_dim;  // Latent dimension (must match DIRESAWeights.output_dim)
-    int batch_size;  // Genome-derived
+    int input_dim;   
+    int output_dim;  
+    int batch_size;  
 
-    float* features;              // [batch_size * input_dim]
-    float* features_shuffled;     // [batch_size * input_dim]
-    int* shuffle_indices;         // [batch_size]
+    float* features;              
+    float* features_shuffled;     
+    int* shuffle_indices;         
 
-    float* latent;                // [batch_size * output_dim]
-    float* latent_shuffled;       // [batch_size * output_dim]
+    float* latent;                
+    float* latent_shuffled;       
 
-    float* reconstructed;         // [batch_size * input_dim]
+    float* reconstructed;         
 
-    float* orig_distances;        // [batch_size]
-    float* latent_distances;      // [batch_size]
+    float* orig_distances;        
+    float* latent_distances;      
 
     float recon_loss;
     float dist_loss;
@@ -178,11 +178,11 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     }
 
     if (local_tid == 0) {
-        weights->cov_weight = 0.0f;  // Annealing starts at 0
+        weights->cov_weight = 0.0f;  
         weights->learning_rate = 0.005f;
         weights->training_step = 0;
         weights->replica_id = replica_id;
-        weights->temperature = 1.0f + replica_id * 0.5f;  // [1.0, 1.5, 2.0, 2.5]
+        weights->temperature = 1.0f + replica_id * 0.5f;  
         weights->distance_exponent = entry->distance_exponent;
         weights->quality_weight = entry->quality_weight;
     }

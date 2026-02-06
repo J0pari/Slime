@@ -21,21 +21,21 @@ struct GenomeComplexityMetrics {
 
 struct ArchiveTopologyMetrics {
     int occupied_cells;
-    int frontier_cells_gained;   // New cells colonized this gen
-    int frontier_cells_lost;     // Cells that went extinct
-    int sparse_cell_count;       // Cells with density < threshold
-    float niche_entropy;         // Shannon entropy of cell occupancy
-    float novelty_gradient;      // occupied/total ratio
+    int frontier_cells_gained;   
+    int frontier_cells_lost;     
+    int sparse_cell_count;       
+    float niche_entropy;         
+    float novelty_gradient;      
 
     float elite_fitness_best;
-    float elite_fitness_mean;    // Mean fitness across archive
-    float elite_fitness_delta;   // Change from previous gen
-    float quality_floor;         // Worst occupied cell quality
-    float quality_mean;          // Mean quality threshold
+    float elite_fitness_mean;    
+    float elite_fitness_delta;   
+    float quality_floor;         
+    float quality_mean;          
     float quality_range;
 
-    float density_mean;          // Mean organisms per occupied cell
-    float density_max;           // Most crowded cell
+    float density_mean;          
+    float density_max;           
     float density_variance;
 
     float hw_axis_min, hw_axis_max, hw_axis_mean;
@@ -47,8 +47,8 @@ struct ArchiveTopologyMetrics {
     float axis_corr_task_gen;
 
     int total_population;
-    int births_since_checkpoint;   // Spawns between barriers, not "this generation"
-    int deaths_since_checkpoint;   // Culls between barriers
+    int births_since_checkpoint;   
+    int deaths_since_checkpoint;   
 
     float hash_clustering_coefficient;
 };
@@ -98,8 +98,8 @@ struct MemoryAllocationMetrics {
     size_t behavioral_pools_size;
     size_t diresa_weights_size;
     size_t autodiff_tape_size;
-    size_t device_heap_limit;        // Set at init from cudaDeviceGetLimit
-    size_t device_heap_allocated;    // Running counter of our allocations
+    size_t device_heap_limit;        
+    size_t device_heap_allocated;    
 };
 
 struct TelemetryBuffer {
@@ -214,8 +214,8 @@ __device__ void archive_topology_probe(
     VoronoiCell* voronoi_cells,
     int num_cells,
     ArchiveTopologyMetrics* metrics,
-    ArchiveTopologyMetrics* prev_metrics,  // Previous gen for deltas
-    int* prev_occupied_flags,              // Which cells were occupied last gen
+    ArchiveTopologyMetrics* prev_metrics,  
+    int* prev_occupied_flags,              
     int hw_dim, int task_dim, int gen_dim
 ) {
 
@@ -252,8 +252,8 @@ __device__ void archive_topology_probe(
             sum_density += d;
             sum_density_sq += d * d;
 
-            if (dens < 3) sparse_count++;  // Sparse = novelty target
-            if (prev_dens == 0) frontier_gained++;  // New colonization
+            if (dens < 3) sparse_count++;  
+            if (prev_dens == 0) frontier_gained++;  
             if (dens > max_density) max_density = dens;
 
             float q = voronoi_cells[i].quality_threshold;
@@ -277,7 +277,7 @@ __device__ void archive_topology_probe(
             task_min = fminf(task_min, task_mag); task_max = fmaxf(task_max, task_mag); task_sum += task_mag;
             gen_min = fminf(gen_min, gen_mag); gen_max = fmaxf(gen_max, gen_mag); gen_sum += gen_mag;
         } else if (prev_dens > 0) {
-            frontier_lost++;  // Extinction
+            frontier_lost++;  
         }
 
         if (prev_occupied_flags) prev_occupied_flags[i] = dens;

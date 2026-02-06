@@ -21,7 +21,7 @@ __host__ void compute_sha256(const void* data, size_t len, uint8_t hash[SHA256_H
     HCRYPTHASH hHash = 0;
 
     if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
-        memset(hash, 0xFF, SHA256_HASH_SIZE);  // Sentinel: all-FF = obvious failure
+        memset(hash, 0xFF, SHA256_HASH_SIZE);  
         return;
     }
 

@@ -28,7 +28,7 @@
         } \
     } while(0)
 
-#define SLIME_DEBUG_PRINT(...) printf(__VA_ARGS__)  // TESTED 2026-01-25: disabling does NOT fix hangs - NOT a printf buffer issue
+#define SLIME_DEBUG_PRINT(...) printf(__VA_ARGS__)  
 #else
 #define CUDA_LAUNCH_CHECK() ((void)0)
 #define CUDA_LAUNCH_CHECK_VAL(retval) ((void)0)
@@ -49,9 +49,9 @@
         } \
     } while(0)
 
-constexpr float MACHINE_EPS = 1.192092896e-07f;  // FLT_EPSILON
+constexpr float MACHINE_EPS = 1.192092896e-07f;  
 
-constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  // FLT_MIN
+constexpr float FLOAT_MIN_NORMAL = 1.175494351e-38f;  
 
 constexpr float EXPF_ARG_LIMIT = 88.0f;
 
@@ -127,7 +127,7 @@ constexpr int VALUE_CAPACITY = 50 * GENOME_SIZE;
 constexpr int TRACE_CAPACITY = GENOME_SIZE;
 constexpr int MAX_HISTORY_LENGTH = GENOME_SIZE;
 constexpr int MAX_DELTAS_PER_ENTRY = 128;
-constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;  // Weight deltas for Lamarckian inheritance
+constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;  
 constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY * POOL_CAPACITY_MAX;
 constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY * POOL_CAPACITY_MAX;
 constexpr int MAX_JACOBI_SWEEPS = 100;   
@@ -270,7 +270,7 @@ constexpr int CHECKPOINT_INTERVAL = TELEMETRY_DETAILED;
 
 
 
-constexpr int AGENT_SPATIAL_DIMS = 4;  // position[2] + velocity[2]
+constexpr int AGENT_SPATIAL_DIMS = 4;  
 
 constexpr int HARDWARE_FEATURES_DIM = 15;
 
@@ -897,10 +897,10 @@ struct AuditBuffer {
     float flow_lenia_affinity_mean;
     float flow_lenia_flow_magnitude_mean;
 
-    float fitness_alpha;  // task exponent
-    float fitness_beta;   // generalization gap exponent
-    float fitness_gamma;  // rank exponent
-    float fitness_delta;  // efficiency exponent
+    float fitness_alpha;  
+    float fitness_beta;   
+    float fitness_gamma;  
+    float fitness_delta;  
 
     size_t memory_gpu_allocated;
     size_t memory_gpu_free;

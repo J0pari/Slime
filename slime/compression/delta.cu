@@ -63,27 +63,43 @@ __device__ void reconstruct_from_delta(float* parent_genome, uint16_t* delta_ind
     }
 }
 
-__device__ void reconstruct_child_genome(
-    PoolEntry* entry,
+__device__ void reconstruct_genome_from_archive(
+    uint64_t parent_hash,
     GPUElite* archive,
+    int archive_size,
+    uint16_t* delta_indices,
+    float* delta_values,
+    uint16_t num_deltas,
+    uint16_t max_deltas,
     float* output_genome,
+    int genome_length,
     float* parent_genome_workspace,
     const DIRESAWeights* weights
 ) {
-    DEVICE_FATAL_IF(entry->type != ENTRY_CHILD, "reconstruct_child_genome: called on non-ENTRY_CHILD");
-    DEVICE_FATAL_IF(entry->child.parent_hash == 0, "reconstruct_child_genome: parent_hash is 0 (uninitialized child)");
+    
+    DEVICE_FATAL_IF(parent_hash == 0, "reconstruct_genome_from_archive: parent_hash is 0 (invalid)");
 
+    
+    if (parent_hash == UINT64_MAX) {
+        for (int i = 0; i < genome_length; i++) {
+            parent_genome_workspace[i] = 0.0f;
+        }
+        reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
+        return;
+    }
+
+    
     int parent_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
-        entry->child.parent_hash
+        parent_hash
     );
 
-    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_child_genome: parent evicted from archive - cannot reconstruct");
-    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_child_genome: archive latent_genome is null");
+    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
+    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
 
     diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
-    reconstruct_from_delta(parent_genome_workspace, entry->child.delta_indices, entry->child.delta_values, entry->child.num_deltas, output_genome, GENOME_SIZE);
+    reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
 }
 
 #endif

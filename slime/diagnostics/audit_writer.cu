@@ -1,9 +1,3 @@
-/**
- * Audit Writer - File output for audit buffer data
- *
- * Writes sample images, CA snapshots, and prediction CSVs.
- */
-
 #ifndef AUDIT_WRITER_CU
 #define AUDIT_WRITER_CU
 
@@ -226,4 +220,4 @@ int write_chemical_field(const char* session_dir, int gen, float* concentration,
     return 0;
 }
 
-#endif // AUDIT_WRITER_CU
+#endif 

@@ -52,10 +52,10 @@ __global__ void extract_head_gradient_magnitudes_kernel(
 }
 
 __global__ void compute_effective_rank_from_gradients_kernel(
-    float* __restrict__ gradient_magnitudes,  // [num_heads] per-head RMSE
-    float* __restrict__ effective_rank_out,   // [1] scalar output
+    float* __restrict__ gradient_magnitudes,  
+    float* __restrict__ effective_rank_out,   
     int num_heads,
-    float renyi_order_q                       // genome-derived, typically 1.0 for Shannon
+    float renyi_order_q                       
 ) {
     DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "compute_effective_rank: gradient_magnitudes is null");
     DEVICE_FATAL_IF(effective_rank_out == nullptr, "compute_effective_rank: effective_rank_out is null");
@@ -89,13 +89,13 @@ __global__ void compute_effective_rank_from_gradients_kernel(
 
     for (int h = tid; h < num_heads; h += blockDim.x) {
         float g = gradient_magnitudes[h];
-        float p = (g * g) / total_sq;  // Probability (normalized squared magnitude)
+        float p = (g * g) / total_sq;  
 
-        if (p > 1e-12f) {  // Avoid log(0)
+        if (p > 1e-12f) {  
             if (use_shannon) {
-                local_entropy -= p * logf(p);  // Shannon: -p log(p)
+                local_entropy -= p * logf(p);  
             } else {
-                local_entropy += powf(p, renyi_order_q);  // Rényi: p^q
+                local_entropy += powf(p, renyi_order_q);  
             }
         }
     }
@@ -110,7 +110,7 @@ __global__ void compute_effective_rank_from_gradients_kernel(
     if (tid == 0) {
         float entropy;
         if (use_shannon) {
-            entropy = s_entropy_sum;  // Already computed as -Σ p log(p)
+            entropy = s_entropy_sum;  
         } else {
             entropy = logf(s_entropy_sum) / (1.0f - renyi_order_q);
         }
@@ -127,14 +127,14 @@ __global__ void compute_effective_rank_from_gradients_kernel(
 }
 
 __global__ void compute_multiplicative_fitness_kernel(
-    float task_accuracy,          // From classification head output
-    float generalization_gap,     // |train_accuracy - test_accuracy|
-    float effective_rank,         // From compute_effective_rank_from_gradients_kernel
-    float hardware_efficiency,    // From trace buffer aggregation
-    float alpha,                  // task_exponent (genome-derived)
-    float beta,                   // generalization_exponent (genome-derived)
-    float gamma,                  // rank_exponent (genome-derived)
-    float delta,                  // efficiency_exponent (genome-derived)
+    float task_accuracy,          
+    float generalization_gap,     
+    float effective_rank,         
+    float hardware_efficiency,    
+    float alpha,                  
+    float beta,                   
+    float gamma,                  
+    float delta,                  
     float* __restrict__ fitness_out
 ) {
     if (threadIdx.x != 0) return;

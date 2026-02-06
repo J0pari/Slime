@@ -11,8 +11,8 @@
 #include <curand_kernel.h>
 #include <stdint.h>
 
-constexpr int GENOME_HASH_TABLE_SIZE = 16384;  // Power of 2, ~1.6x MAX_ARCHIVE_SIZE
-constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;  // 0 = empty slot (genome hashes are non-zero)
+constexpr int GENOME_HASH_TABLE_SIZE = 16384;  
+constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;  
 
 struct GPUElite {
     float* fitness;
@@ -32,16 +32,16 @@ struct GPUElite {
     int task_dim;
     int gen_dim;
 
-    half* weight_deltas;             // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
-    uint32_t* weight_delta_indices;  // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
-    uint16_t* num_weight_deltas;     // [MAX_ARCHIVE_SIZE]
+    half* weight_deltas;             
+    uint32_t* weight_delta_indices;  
+    uint16_t* num_weight_deltas;     
 
-    int* archived_num_heads;         // [MAX_ARCHIVE_SIZE]
-    int* archived_channels;          // [MAX_ARCHIVE_SIZE]
-    int* archived_head_dim;          // [MAX_ARCHIVE_SIZE]
+    int* archived_num_heads;         
+    int* archived_channels;          
+    int* archived_head_dim;          
 
-    uint64_t* hash_table_keys;       // [GENOME_HASH_TABLE_SIZE] - 0 = empty
-    int* hash_table_values;          // [GENOME_HASH_TABLE_SIZE] - archive index
+    uint64_t* hash_table_keys;       
+    int* hash_table_values;          
 };
 
 struct VoronoiCell {
@@ -66,7 +66,7 @@ __device__ int hash_table_lookup(
     const int* __restrict__ values,
     uint64_t genome_hash
 ) {
-    if (genome_hash == HASH_TABLE_EMPTY_KEY) return -1;  // Invalid key
+    if (genome_hash == HASH_TABLE_EMPTY_KEY) return -1;  
 
     int slot = hash_table_slot(genome_hash);
     int probes = 0;
@@ -74,15 +74,15 @@ __device__ int hash_table_lookup(
     while (probes < GENOME_HASH_TABLE_SIZE) {
         uint64_t key = keys[slot];
         if (key == genome_hash) {
-            return values[slot];  // Found
+            return values[slot];  
         }
         if (key == HASH_TABLE_EMPTY_KEY) {
-            return -1;  // Not found (hit empty slot)
+            return -1;  
         }
         slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
         probes++;
     }
-    return -1;  // Table full, not found
+    return -1;  
 }
 
 __device__ bool hash_table_insert(
@@ -348,7 +348,7 @@ __device__ void insert_elite_device(
         genome_hash_val
     );
     if (existing_idx >= 0) {
-        return;  // Duplicate found
+        return;  
     }
 
     int idx = atomicAdd(archive_size, 1);
@@ -441,7 +441,7 @@ __global__ void insert_elite_kernel(
         genome_hash_val
     );
     if (existing_idx >= 0) {
-        return;  // Duplicate found
+        return;  
     }
 
     int idx = atomicAdd(archive_size, 1);

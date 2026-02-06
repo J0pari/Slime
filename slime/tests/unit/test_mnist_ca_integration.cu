@@ -64,7 +64,7 @@ bool test_dataset_loading() {
 
     if (err != cudaSuccess || d_dataset == nullptr) {
         printf("  SKIP: Dataset files not available (expected in CI/test environment)\n");
-        return true;  // Not a failure, just unavailable
+        return true;  
     }
 
     Dataset h_dataset;
@@ -92,7 +92,7 @@ bool test_sample_to_ca_interpolation() {
     const DatasetDescriptor* desc = &HOST_DATASET_REGISTRY[0];
     int sample_rows = (int)desc->sample_rows;
     int sample_cols = (int)desc->sample_cols;
-    int ca_grid_size = GRID_SIZE_MIN + 8;  // Test with a typical CA grid size
+    int ca_grid_size = GRID_SIZE_MIN + 8;  
 
     printf("  Source: %dx%d → CA grid: %dx%d\n",
            sample_rows, sample_cols, ca_grid_size, ca_grid_size);
@@ -167,9 +167,9 @@ bool test_ca_channel_layout() {
     printf("\n[TEST 4] CA state channel layout for dataset injection\n");
 
 
-    constexpr int CHEM_CHANNELS = 6;      // 0-5
-    constexpr int RD_CHANNELS = 4;        // 6-9
-    constexpr int BEHAVIORAL_CHANNELS = 1; // 10
+    constexpr int CHEM_CHANNELS = 6;      
+    constexpr int RD_CHANNELS = 4;        
+    constexpr int BEHAVIORAL_CHANNELS = 1; 
     constexpr int IMAGE_CHANNEL_START = 11;
     constexpr int IMAGE_CHANNEL_END = 13;
     constexpr int RECURRENCE_CHANNEL = 14;

@@ -39,7 +39,7 @@ extern "C" __global__ void load_batch_kernel(
     Organism* organism,
     HybridTrainingMode* training_mode,
     int generation,
-    int grid_size  // Architecture grid size for bilinear interpolation
+    int grid_size  
 ) {
     int tid = threadIdx.x;
 
@@ -112,7 +112,7 @@ extern "C" __global__ void load_batch_kernel(
     __syncthreads();
 
     float* ca_out = organism->batch_ca_states_pool;
-    int channels_out = CHANNELS_MAX;  // Use max for consistent buffer layout
+    int channels_out = CHANNELS_MAX;  
     int image_channels = (int)dataset->descriptor->channels;
 
     float* chem_concentration = organism->chemical_field->concentration;
@@ -247,19 +247,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
         primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
 
-        reconstruct_genome_from_archive(
-            entry->parent_hash,
-            (GPUElite*)organism->archive,
-            organism->archive_size,
-            entry->delta_indices,
-            entry->delta_values,
-            entry->num_deltas,
-            entry->max_deltas,
-            primary_genome,
-            GENOME_SIZE,
-            primary_parent_temp,
-            organism->diresa_genome_weights
-        );
+        reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         num_classes = organism->current_dataset->descriptor->num_classes;
 
@@ -277,8 +267,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
         num_features = arch.num_heads * arch.channels;
 
-        component_grid = dim3(POOL_CAPACITY_MAX);  // One block per pool entry
-        component_block = dim3(WARP_SIZE);  // Match behavioral_update_kernel expectations
+        component_grid = dim3(POOL_CAPACITY_MAX);  
+        component_block = dim3(WARP_SIZE);  
         ca_grid = dim3(arch.grid_size / WMMA_TILE_DIM, arch.num_heads, 1);
         ca_block = dim3(WMMA_TILE_DIM, WMMA_TILE_DIM, 1);
         field_grid = dim3((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
@@ -339,7 +329,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }
         __syncthreads();
-        if (s_error_flag) return;  // All threads exit together
+        if (s_error_flag) return;  
 
         {
             ADTape* tape = &ca_state->tape;
@@ -423,7 +413,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                             }
                         }
                     }
-                    perception[h] = fmaxf(0.0f, acc);  // ReLU
+                    perception[h] = fmaxf(0.0f, acc);  
                 }
 
                 float interaction[MAX_HEAD_DIM];
@@ -469,7 +459,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                              cell_y * grid_size * channels +
                              cell_x * channels;
                 for (int c = 0; c < channels; c++) {
-                    float input_val = neighborhood[1][1][c];  // Center cell
+                    float input_val = neighborhood[1][1][c];  
                     ca_output[out_idx + c] = input_val * (1.0f - gate) + output[c] * gate;
                 }
             }
@@ -595,7 +585,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
                 organism->buffers->batch_prev_concentration[idx] = organism->batch_ca_states_pool[idx];
             }
-        }  // end Flow Lenia
+        }  
         __syncthreads();
 
         float* ca_output_grad = nullptr;
@@ -924,12 +914,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_im2col = organism->buffers->backward_ws_im2col;
             float* ws_dpregelu = organism->buffers->backward_ws_dpregelu;
 
-            int I_head_stride = num_cells * arch.head_dim;  // interaction/perception saved
+            int I_head_stride = num_cells * arch.head_dim;  
             int I_batch_stride = arch.num_heads * I_head_stride;
-            int V_head_stride = num_cells * arch.channels;  // ca_output_grad
+            int V_head_stride = num_cells * arch.channels;  
             int V_batch_stride = arch.num_heads * V_head_stride;
-            int ws_fp16_a_stride = total_samples * arch.head_dim;  // interaction_saved FP16
-            int ws_fp16_b_stride = total_samples * arch.channels;  // ca_output_grad FP16 (value) / dpregelu FP16 (interaction)
+            int ws_fp16_a_stride = total_samples * arch.head_dim;  
+            int ws_fp16_b_stride = total_samples * arch.channels;  
             int ws_dW_value_stride = arch.head_dim * arch.channels;
             int ws_W_T_value_stride = arch.channels * arch.head_dim;
             int ws_dW_interaction_stride = arch.head_dim * arch.head_dim;
@@ -1037,8 +1027,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                     int bx = tile_x * WMMA_TILE_DIM;
                     int by = tile_y * WMMA_TILE_DIM;
-                    int h = bx + local_x;  // head_dim index
-                    int c = by + local_y;  // channel index
+                    int h = bx + local_x;  
+                    int c = by + local_y;  
 
                     if (c < arch.channels && h < arch.head_dim) {
                         const half* W_head = ca_state->value_weights + head_id * arch.head_dim * arch.channels;
@@ -1064,9 +1054,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int tile_col = warpN * WMMA_TILE_DIM;
 
                     if (tile_row < total_samples && tile_col < arch.head_dim) {
-                        const half* A_head = ws_fp16_b + head_id * ws_fp16_b_stride;  // dV [samples × channels]
-                        const half* B_head = ws_W_T + head_id * ws_W_T_value_stride;  // W^T [channels × head_dim]
-                        float* C_head = ws_dI + head_id * ws_dI_stride;               // dI [samples × head_dim]
+                        const half* A_head = ws_fp16_b + head_id * ws_fp16_b_stride;  
+                        const half* B_head = ws_W_T + head_id * ws_W_T_value_stride;  
+                        float* C_head = ws_dI + head_id * ws_dI_stride;               
 
                         nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
                         nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
@@ -1279,7 +1269,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             __syncthreads();
 
 
-            int ws_dprerelu_stride = total_samples * arch.head_dim;  // matches saved activation layout
+            int ws_dprerelu_stride = total_samples * arch.head_dim;  
             {
                 int total_relu = arch.num_heads * total_samples * arch.head_dim;
                 int elements_per_head = total_samples * arch.head_dim;
@@ -1293,7 +1283,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            int ws_pooled_stride = total_samples * arch.channels;  // per head (same input pooled for all heads)
+            int ws_pooled_stride = total_samples * arch.channels;  
             {
                 int num_cells_local = arch.grid_size * arch.grid_size;
                 int total_pool = training_mode->batch_size * num_cells_local;
@@ -1351,12 +1341,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int warpM = tile_flat / dW_tiles_h;
                     int warpN = tile_flat % dW_tiles_h;
 
-                    int tile_row = warpM * WMMA_TILE_DIM;  // channels dimension
-                    int tile_col = warpN * WMMA_TILE_DIM;  // head_dim dimension
+                    int tile_row = warpM * WMMA_TILE_DIM;  
+                    int tile_col = warpN * WMMA_TILE_DIM;  
 
                     if (tile_row < arch.channels && tile_col < arch.head_dim) {
-                        const half* A_ptr = ws_fp16_a;  // pooled [total_samples × channels]
-                        const half* B_head = ws_fp16_b + head_id * ws_dprerelu_stride;  // d_prerelu [total_samples × head_dim]
+                        const half* A_ptr = ws_fp16_a;  
+                        const half* B_head = ws_fp16_b + head_id * ws_dprerelu_stride;  
                         float* C_head = ws_dW + head_id * ws_dW_perception_stride;
 
                         nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
@@ -1392,7 +1382,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            float* d_pooled_input = ws_im2col;  // reuse buffer
+            float* d_pooled_input = ws_im2col;  
             {
                 int num_cells_local = arch.grid_size * arch.grid_size;
                 int total_inputs = training_mode->batch_size * num_cells_local * arch.channels;
@@ -1492,7 +1482,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            }  // end CA backward scope
+            }  
 
             {
                 int batch_size = training_mode->batch_size;
@@ -1631,7 +1621,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
             }
-        }  // end CA backward pass
+        }  
 
         {
             int num_heads = arch.num_heads;
@@ -1805,8 +1795,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-        }  // end if (entry_idx == 0 && batch_images != nullptr)
-    }  // end if (training_mode->use_gradients)
+        }  
+    }  
 
     if (entry_idx == 0) {
         float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
@@ -1820,19 +1810,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* eid_primary_genome = &component_workspace_genomes[eid * 2 * GENOME_SIZE];
             float* eid_parent_temp = &component_workspace_genomes[eid * 2 * GENOME_SIZE + GENOME_SIZE];
 
-            reconstruct_genome_from_archive(
-                ent->parent_hash,
-                archive,
-                archive_size_val,
-                ent->delta_indices,
-                ent->delta_values,
-                ent->num_deltas,
-                ent->max_deltas,
-                eid_primary_genome,
-                GENOME_SIZE,
-                eid_parent_temp,
-                organism->diresa_genome_weights
-            );
+            reconstruct_genome_from_archive(ent->parent_hash, archive, archive_size_val,
+                ent->delta_indices, ent->delta_values, ent->num_deltas,
+                ent->max_deltas, eid_primary_genome, GENOME_SIZE, eid_parent_temp, organism->diresa_genome_weights);
 
             organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy;
             organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence;

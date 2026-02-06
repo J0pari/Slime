@@ -45,8 +45,8 @@ __device__ float get_ca_xavier_scale(
     int num_heads,
     int channels,
     int head_dim,
-    int* out_matrix,        // 0=perception, 1=interaction, 2=value, -1=out of range
-    int* out_local_idx      // index within that matrix
+    int* out_matrix,        
+    int* out_local_idx      
 ) {
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;

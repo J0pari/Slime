@@ -31,7 +31,7 @@ struct ChemicalField {
     float* sources;
     float* decay_factors;
     TemporalTube* history;
-    float cached_mean;  // Precomputed mean concentration - updated once per generation via parallel reduction
+    float cached_mean;  
 };
 
 struct BehavioralState {
@@ -169,7 +169,7 @@ __global__ void initialize_ca_from_field_kernel(
         float recurrence = 0.0f;
         for (int h = 0; h < num_heads; h++) {
             int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
-            recurrence += ca_output[output_idx];  // First element of each head's output
+            recurrence += ca_output[output_idx];  
         }
         ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
     }
@@ -782,7 +782,7 @@ __global__ void init_chemical_field_kernel(
 __global__ void reduce_concentration_mean_kernel(
     ChemicalField* field,
     int total_cells,
-    float* partial_sums  // Workspace for block-level partial sums
+    float* partial_sums  
 ) {
     extern __shared__ float sdata[];
 

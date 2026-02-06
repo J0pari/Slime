@@ -38,7 +38,7 @@ __global__ void cross_entropy_loss_kernel(
     float* __restrict__ logits,
     int* __restrict__ labels,
     float* __restrict__ loss_out,
-    float* __restrict__ gradients,  // Output: dL/d_logits [batch_size × num_classes]
+    float* __restrict__ gradients,  
     int batch_size,
     int num_classes
 ) {
@@ -94,7 +94,7 @@ __global__ void cross_entropy_label_smoothing_kernel(
     float* __restrict__ gradients,
     int batch_size,
     int num_classes,
-    float smoothing  // e.g., 0.1 means 90% on true label, 10% spread across others
+    float smoothing  
 ) {
     DEVICE_FATAL_IF(logits == nullptr, "cross_entropy_smooth: logits is null");
     DEVICE_FATAL_IF(labels == nullptr, "cross_entropy_smooth: labels is null");

@@ -1004,7 +1004,7 @@ struct DIRESAOps {
             }
         }
 
-        warp.sync();  // Warp-level sync (5 cycles vs 1000+ for cudaDeviceSynchronize)
+        warp.sync();  
     }
 
     __device__ static float compute_latent_distance_sq(

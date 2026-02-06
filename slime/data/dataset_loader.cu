@@ -22,9 +22,9 @@ enum DatasetFormat {
 };
 
 enum FeatureEncoding {
-    ENCODING_SPATIAL_2D,        // Images: (H, W, C)
-    ENCODING_SPECTRAL_AUDIO,    // Audio: (time, freq, [mag, phase, phase_vel])
-    ENCODING_TEMPORAL_1D        // Timeseries: (timesteps, features)
+    ENCODING_SPATIAL_2D,        
+    ENCODING_SPECTRAL_AUDIO,    
+    ENCODING_TEMPORAL_1D        
 };
 
 enum DatasetModality {

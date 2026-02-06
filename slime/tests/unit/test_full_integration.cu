@@ -35,7 +35,7 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMemcpy(d_test_dataset_array, &d_mnist_test, sizeof(Dataset*), cudaMemcpyHostToDevice));
 
     printf("[2/15] Allocating ComponentPool...\n");
-    constexpr int TEST_POOL_SIZE = 4;  // Small pool for fast test
+    constexpr int TEST_POOL_SIZE = 4;  
     ComponentPool pool_host;
     pool_host.capacity = TEST_POOL_SIZE;
 
