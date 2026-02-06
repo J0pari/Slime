@@ -275,28 +275,27 @@ __device__ void spawn_component_device(
     pool->entries[i].age = 0;
     pool->entries[i].alive = true;
     pool->alive_flags[i] = true;  // SoA sync
-    // Parent MUST be valid - spawn_wave_kernel always picks from qualifying_parents
+    pool->entries[i].type = ENTRY_CHILD;
     DEVICE_FATAL_IF(parent_id < 0 || parent_id >= pool->capacity, "spawn_component_device: invalid parent_id");
-    pool->entries[i].parent_idx = parent_id;
+    pool->entries[i].child.parent_idx = parent_id;
 
     float* parent_genome = workspace_parent_genome;
     float* child_genome = workspace_child_genome;
     PoolEntry* parent = &pool->entries[parent_id];
 
-    // O(1) lookup via hash table
-    parent_archive_idx = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        parent->parent_hash
-    );
-
-    use_latent = (parent_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
     rng.s0 = new_id * XORSHIFT_GOLDEN_RATIO_A;
     rng.s1 = parent_id * XORSHIFT_GOLDEN_RATIO_B;
 
-    reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size,
-        parent->delta_indices, parent->delta_values, parent->num_deltas,
-        parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
+    if (parent->type == ENTRY_ROOT) {
+        for (int j = 0; j < GENOME_SIZE; j++) {
+            parent_genome[j] = parent->root.genome[j];
+        }
+        parent_archive_idx = hash_table_lookup(archive->hash_table_keys, archive->hash_table_values, parent->genome_hash);
+    } else {
+        reconstruct_child_genome(parent, archive, parent_genome, workspace_parent_temp, diresa_genome_weights);
+        parent_archive_idx = hash_table_lookup(archive->hash_table_keys, archive->hash_table_values, parent->child.parent_hash);
+    }
+    use_latent = (parent_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
 
     params.derive_from_genome(parent->genome_hash, parent_genome);
 
@@ -326,7 +325,7 @@ __device__ void spawn_component_device(
         }
     }
 
-    pool->entries[i].parent_hash = parent->genome_hash;
+    pool->entries[i].child.parent_hash = parent->genome_hash;
     int inherit_center_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_center");
     int inherit_steep_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_steepness");
     float inherit_center = LIFECYCLE_FITNESS_INHERIT_CENTER_MIN +
@@ -342,15 +341,15 @@ __device__ void spawn_component_device(
     }
 
     pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
-    pool->entries[i].num_deltas = 0;
+    pool->entries[i].child.num_deltas = 0;
 
     compute_genome_deltas(
         child_genome,
         parent_genome,
-        pool->entries[i].delta_indices,
-        pool->entries[i].delta_values,
-        &pool->entries[i].num_deltas,
-        pool->entries[i].max_deltas,
+        pool->entries[i].child.delta_indices,
+        pool->entries[i].child.delta_values,
+        &pool->entries[i].child.num_deltas,
+        pool->entries[i].child.max_deltas,
         pool->entries[i].genome_hash
     );
 
@@ -486,21 +485,14 @@ __device__ __noinline__ float compute_genome_distance(
     GPUElite* archive,
     int archive_size
 ) {
-    // O(1) lookups via hash table
-    int idx1 = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        entry1->parent_hash
-    );
-    int idx2 = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        entry2->parent_hash
-    );
+    uint64_t hash1 = (entry1->type == ENTRY_ROOT) ? entry1->genome_hash : entry1->child.parent_hash;
+    uint64_t hash2 = (entry2->type == ENTRY_ROOT) ? entry2->genome_hash : entry2->child.parent_hash;
 
-    // Parent must exist in archive - missing parent indicates data corruption
-    DEVICE_FATAL_IF(idx1 < 0, "compute_genome_distance: entry1->parent_hash not found in archive");
-    DEVICE_FATAL_IF(idx2 < 0, "compute_genome_distance: entry2->parent_hash not found in archive");
+    int idx1 = hash_table_lookup(archive->hash_table_keys, archive->hash_table_values, hash1);
+    int idx2 = hash_table_lookup(archive->hash_table_keys, archive->hash_table_values, hash2);
+
+    DEVICE_FATAL_IF(idx1 < 0, "compute_genome_distance: entry1 hash not found in archive");
+    DEVICE_FATAL_IF(idx2 < 0, "compute_genome_distance: entry2 hash not found in archive");
 
     const float* latent1 = &archive->latent_genome[idx1 * GENOME_LATENT_DIM_MAX];
     const float* latent2 = &archive->latent_genome[idx2 * GENOME_LATENT_DIM_MAX];
@@ -756,22 +748,16 @@ __global__ void compute_pool_stats_kernel(
         int diversity_slot = derive_param_slot(genome_hash, "diversity_normalization");
         int diversity_samples_slot = derive_param_slot(genome_hash, "diversity_sample_count");
 
-        // Reconstruct full genome to extract parameters
         float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * 2];
         float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * 2 + GENOME_SIZE];
-        reconstruct_genome_from_archive(
-            pool->entries[idx].parent_hash,
-            archive,
-            archive_size,
-            pool->entries[idx].delta_indices,
-            pool->entries[idx].delta_values,
-            pool->entries[idx].num_deltas,
-            pool->entries[idx].max_deltas,
-            temp_genome,
-            GENOME_SIZE,
-            temp_parent,
-            diresa_genome_weights
-        );
+        PoolEntry* entry = &pool->entries[idx];
+        if (entry->type == ENTRY_ROOT) {
+            for (int j = 0; j < GENOME_SIZE; j++) {
+                temp_genome[j] = entry->root.genome[j];
+            }
+        } else {
+            reconstruct_child_genome(entry, archive, temp_genome, temp_parent, diresa_genome_weights);
+        }
 
         float genome_diversity_samples = temp_genome[diversity_samples_slot];
         int diversity_sample_count = 4 + (int)((genome_diversity_samples + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 28.0f);
@@ -1005,10 +991,10 @@ __global__ void find_pending_weight_inherits_kernel(
 
     PoolEntry* entry = &pool->entries[idx];
     if (entry->age != 0) return;
+    if (entry->type != ENTRY_CHILD) return;
 
-    int p = entry->parent_idx;
-    // Use SoA for coalesced alive read
-    if (p != INT_MAX && p >= 0 && p < pool->capacity && pool->alive_flags[p]) {
+    int p = entry->child.parent_idx;
+    if (p >= 0 && p < pool->capacity && pool->alive_flags[p]) {
         int slot = atomicAdd(num_pending, 1);
         child_indices[slot] = idx;
         parent_indices[slot] = p;

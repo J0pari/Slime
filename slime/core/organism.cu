@@ -1064,10 +1064,8 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                if (is_meaningful(weight_sum, 1.0f)) {
-                    behavioral_field[field_idx] = field_value / weight_sum;
-                }
-                // else: preserve existing value (temporal coherence)
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: hw weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
                 d_offset++;
             }
 
@@ -1086,10 +1084,8 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                if (is_meaningful(weight_sum, 1.0f)) {
-                    behavioral_field[field_idx] = field_value / weight_sum;
-                }
-                // else: preserve existing value (temporal coherence)
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: task weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
                 d_offset++;
             }
 
@@ -1108,10 +1104,8 @@ __global__ void behavioral_update_kernel(
                     weight_sum += weight;
                 }
                 int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-                if (is_meaningful(weight_sum, 1.0f)) {
-                    behavioral_field[field_idx] = field_value / weight_sum;
-                }
-                // else: preserve existing value (temporal coherence)
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: gen weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
                 d_offset++;
             }
         }
