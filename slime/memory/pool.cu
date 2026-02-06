@@ -4,97 +4,13 @@
 #include "../config/config.cu"
 #include "../utils/genome_params.cuh"
 #include "../utils/cuda_primitives.cuh"
+#include "../memory/genome_ops.cuh"
 #include "../memory/archive.cu"
 #include "../compression/delta.cu"
-#include "../memory/genome_ops.cuh"
 #include "../memory/parallel_compaction.cu"
 #include "../core/ca_state.cuh"
 #include <cuda_runtime.h>
 #include <cuda/atomic>
-
-struct PoolEntry {
-    int id;
-    float fitness;
-    float coherence;
-    float task_accuracy;
-    float train_accuracy;
-    float test_accuracy;
-    float task_loss;
-    float classification_stability;
-    float avg_confidence;
-    int per_class_correct[NUM_CLASSES_MAX];
-    int per_class_total[NUM_CLASSES_MAX];
-    float generalization_gap;
-    float hardware_efficiency;
-    float gradient_magnitude;
-    float effective_rank;
-    float recon_loss_hw;
-    float recon_loss_task;
-    float recon_loss_gen;
-    float recon_loss_total;
-    float behavioral_drift_rate;
-    float latent_utilization;
-    float compression_ratio;
-    float hardware_feature_correlation;
-    float hunger;
-    int age;
-    bool alive;
-    uint64_t genome_hash;
-    uint64_t parent_hash;
-    int parent_idx;  // Pool index of parent, or INT_MAX if spawned from archive/random
-    int generation;
-    uint16_t num_deltas;
-    uint16_t max_deltas;
-    uint16_t* delta_indices;
-    float* delta_values;
-    float* gradients;
-    int num_heads;
-    int channels;
-    int hidden_dim;
-    int head_dim;
-    int grid_size;
-    int num_tempering_replicas;
-    int diresa_hidden1;
-    int diresa_hidden2;
-    int diresa_batch_size;
-    float anneal_step;
-    float cov_target;
-    unsigned long long active_warps;
-    unsigned long long divergent_branches;
-    unsigned long long total_branches;
-    unsigned long long global_loads;
-    unsigned long long global_stores;
-    unsigned long long l2_transactions;
-    unsigned long long dram_transactions;
-    unsigned long long inst_executed;
-    unsigned long long inst_issued;
-    unsigned long long cycles_elapsed;
-    unsigned long long tensor_core_cycles;
-    float dist_weight;
-    float recon_weight;
-    float distance_exponent;
-    float quality_weight;
-    float fitness_rank_exponent;
-    float fitness_coherence_exponent;
-    float fitness_coupling_exponent;
-    float fitness_task_exponent;
-    float fitness_gen_exponent;
-    float fitness_efficiency_exponent;
-    float baldwin_sensitivity;
-    int coherence_window_size;
-    float renyi_q;
-
-    // Per-organism Flow Lenia parameters (derived from genome)
-    float flow_beta_A;
-    float flow_n;
-    float flow_s;
-    float flow_alpha_min;
-    float flow_alpha_max;
-    float flow_sharpness;
-    float flow_resource_dt;
-
-    MultiHeadCAState* ca_state;
-};
 
 struct ComponentPool {
     PoolEntry* entries;
@@ -704,14 +620,14 @@ __global__ void init_pool_kernel(
         rng.s1 = idx * XORSHIFT_GOLDEN_RATIO_B;
 
         if (idx == 0) printf("V:init_pool_idx0_B entries=%p\n", (void*)pool->entries);
-        pool->entries[idx].max_deltas = GENOME_SIZE;
-        if (idx == 0) printf("V:init_pool_idx0_C\n");
-        pool->entries[idx].delta_indices = &delta_indices_buffer[idx * GENOME_SIZE];
-        pool->entries[idx].delta_values = &delta_values_buffer[idx * GENOME_SIZE];
         pool->entries[idx].gradients = &gradients_buffer[idx * GENOME_SIZE];
         if (idx == 0) printf("V:init_pool_idx0_D alive_flags=%p fitness_vals=%p\n", (void*)pool->alive_flags, (void*)pool->fitness_values);
 
         if (idx < POOL_CAPACITY_MIN) {
+            // Root entries: genome stored directly
+            pool->entries[idx].type = ENTRY_ROOT;
+            pool->entries[idx].root.genome = &delta_values_buffer[idx * GENOME_SIZE];
+
             if (idx == 0) printf("V:init_pool_idx0_E\n");
             pool->entries[idx].id = idx;
             pool->entries[idx].alive = true;
@@ -719,33 +635,29 @@ __global__ void init_pool_kernel(
             pool->alive_flags[idx] = true;
             if (idx == 0) printf("V:init_pool_idx0_G\n");
             pool->entries[idx].age = 0;
-            pool->entries[idx].parent_hash = UINT64_MAX;
-            pool->entries[idx].parent_idx = INT_MAX;
-            pool->entries[idx].num_deltas = GENOME_SIZE;
             if (idx == 0) printf("V:init_pool_idx0_H\n");
 
-            float* temp_genome = pool->entries[idx].delta_values;
-            if (idx == 0) printf("V:init_pool_pre_genome_loop temp=%p\n", (void*)temp_genome);
+            float* genome = pool->entries[idx].root.genome;
+            if (idx == 0) printf("V:init_pool_pre_genome_loop genome=%p\n", (void*)genome);
             for (int i = 0; i < GENOME_SIZE; i++) {
-                temp_genome[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
-                pool->entries[idx].delta_indices[i] = i;
+                genome[i] = rng.next() * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
                 pool->entries[idx].gradients[i] = 0.0f;
             }
             if (idx == 0) printf("V:init_pool_post_genome_loop\n");
 
-            pool->entries[idx].genome_hash = gpu_sha256(temp_genome, GENOME_SIZE);
+            pool->entries[idx].genome_hash = gpu_sha256(genome, GENOME_SIZE);
             if (idx == 0) printf("V:init_pool_post_sha256\n");
 
             PoolInitParams init_params;
-            init_params.derive_from_genome(pool->entries[idx].genome_hash, temp_genome);
+            init_params.derive_from_genome(pool->entries[idx].genome_hash, genome);
             pool->entries[idx].hunger = init_params.initial_hunger;
 
-            derive_architecture(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-            derive_diresa(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-            derive_fitness_exponents(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
+            derive_architecture(pool->entries[idx].genome_hash, genome, &pool->entries[idx]);
+            derive_diresa(pool->entries[idx].genome_hash, genome, &pool->entries[idx]);
+            derive_fitness_exponents(pool->entries[idx].genome_hash, genome, &pool->entries[idx]);
 
             int init_fitness_slot = derive_param_slot(pool->entries[idx].genome_hash, "initial_fitness_prior");
-            float init_fitness_prior = fmaxf(0.01f, (temp_genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
+            float init_fitness_prior = fmaxf(0.01f, (genome[init_fitness_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE);
             pool->entries[idx].fitness = init_fitness_prior;
             pool->fitness_values[idx] = init_fitness_prior;  // SoA sync
             pool->entries[idx].coherence = init_fitness_prior;
@@ -754,6 +666,15 @@ __global__ void init_pool_kernel(
             pool->entries[idx].hardware_efficiency = NAN;  // Set by hardware profiling
             pool->entries[idx].effective_rank = NAN;  // Set by gradient backward pass
         } else {
+            // Empty slots: set up as child placeholders
+            pool->entries[idx].type = ENTRY_CHILD;
+            pool->entries[idx].child.parent_hash = 0;  // Invalid until spawned
+            pool->entries[idx].child.parent_idx = INT_MAX;
+            pool->entries[idx].child.num_deltas = 0;
+            pool->entries[idx].child.max_deltas = GENOME_SIZE;
+            pool->entries[idx].child.delta_indices = &delta_indices_buffer[idx * GENOME_SIZE];
+            pool->entries[idx].child.delta_values = &delta_values_buffer[idx * GENOME_SIZE];
+
             pool->entries[idx].id = INT_MAX;  // Poison value
             pool->entries[idx].alive = false;
             pool->alive_flags[idx] = false;  // SoA sync
@@ -766,9 +687,7 @@ __global__ void init_pool_kernel(
             pool->entries[idx].effective_rank = NAN;
             pool->entries[idx].hunger = NAN;
             pool->entries[idx].age = INT_MAX;  // Poison value
-            pool->entries[idx].parent_hash = UINT64_MAX;  // Poison value
-            pool->entries[idx].parent_idx = INT_MAX;  // Poison value
-            pool->entries[idx].num_deltas = UINT16_MAX;  // Poison value
+            pool->entries[idx].genome_hash = 0;  // Invalid until spawned
 
             for (int i = 0; i < GENOME_SIZE; i++) {
                 pool->entries[idx].gradients[i] = NAN;

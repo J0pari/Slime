@@ -5,7 +5,109 @@
 #include <cuda_runtime.h>
 
 struct GPUElite;
-struct PoolEntry;
+struct MultiHeadCAState;
+
+enum EntryType : uint8_t {
+    ENTRY_ROOT = 0,   // Genome stored directly in archive under own genome_hash
+    ENTRY_CHILD = 1   // Genome reconstructed from parent + deltas
+};
+
+struct PoolEntry {
+    EntryType type;
+    int id;
+    float fitness;
+    float coherence;
+    float task_accuracy;
+    float train_accuracy;
+    float test_accuracy;
+    float task_loss;
+    float classification_stability;
+    float avg_confidence;
+    int per_class_correct[NUM_CLASSES_MAX];
+    int per_class_total[NUM_CLASSES_MAX];
+    float generalization_gap;
+    float hardware_efficiency;
+    float gradient_magnitude;
+    float effective_rank;
+    float recon_loss_hw;
+    float recon_loss_task;
+    float recon_loss_gen;
+    float recon_loss_total;
+    float behavioral_drift_rate;
+    float latent_utilization;
+    float compression_ratio;
+    float hardware_feature_correlation;
+    float hunger;
+    int age;
+    bool alive;
+    uint64_t genome_hash;
+    int generation;
+    float* gradients;
+
+    // Genome storage differs by entry type
+    union {
+        // ENTRY_ROOT: genome stored directly
+        struct {
+            float* genome;
+        } root;
+
+        // ENTRY_CHILD: genome = parent + deltas
+        struct {
+            uint64_t parent_hash;
+            int parent_idx;
+            uint16_t num_deltas;
+            uint16_t max_deltas;
+            uint16_t* delta_indices;
+            float* delta_values;
+        } child;
+    };
+    int num_heads;
+    int channels;
+    int hidden_dim;
+    int head_dim;
+    int grid_size;
+    int num_tempering_replicas;
+    int diresa_hidden1;
+    int diresa_hidden2;
+    int diresa_batch_size;
+    float anneal_step;
+    float cov_target;
+    unsigned long long active_warps;
+    unsigned long long divergent_branches;
+    unsigned long long total_branches;
+    unsigned long long global_loads;
+    unsigned long long global_stores;
+    unsigned long long l2_transactions;
+    unsigned long long dram_transactions;
+    unsigned long long inst_executed;
+    unsigned long long inst_issued;
+    unsigned long long cycles_elapsed;
+    unsigned long long tensor_core_cycles;
+    float dist_weight;
+    float recon_weight;
+    float distance_exponent;
+    float quality_weight;
+    float fitness_rank_exponent;
+    float fitness_coherence_exponent;
+    float fitness_coupling_exponent;
+    float fitness_task_exponent;
+    float fitness_gen_exponent;
+    float fitness_efficiency_exponent;
+    float baldwin_sensitivity;
+    int coherence_window_size;
+    float renyi_q;
+
+    // Per-organism Flow Lenia parameters (derived from genome)
+    float flow_beta_A;
+    float flow_n;
+    float flow_s;
+    float flow_alpha_min;
+    float flow_alpha_max;
+    float flow_sharpness;
+    float flow_resource_dt;
+
+    MultiHeadCAState* ca_state;
+};
 
 __device__ constexpr uint64_t fnv1a_hash(const char* str) {
     uint64_t hash = 14695981039346656037ULL;

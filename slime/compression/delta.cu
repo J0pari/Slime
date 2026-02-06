@@ -4,20 +4,13 @@
 
 #include "../config/config.cu"
 #include "../utils/cuda_primitives.cuh"
+#include "../memory/genome_ops.cuh"
 #include <cuda_runtime.h>
 
 // Forward declarations for DIRESA functions (defined in diresa.cu, included by organism.cu)
 struct DIRESAWeights;
 __device__ void diresa_encode(const float* features, float* latent, const DIRESAWeights* weights);
 __device__ void diresa_decode(const float* latent, float* reconstructed, const DIRESAWeights* weights);
-
-struct DeltaGenome {
-    uint32_t parent_hash;
-    uint64_t child_genome_hash;
-    uint16_t num_deltas;
-    uint16_t* delta_indices;
-    float* delta_values;
-};
 
 __device__ void compute_genome_deltas(
     float* child_genome,
@@ -66,40 +59,35 @@ __device__ void reconstruct_from_delta(float* parent_genome, uint16_t* delta_ind
     }
     for (int i = 0; i < num_deltas; i++) {
         int idx = delta_indices[i];
-        if (idx < genome_length) {
-            output_genome[idx] += delta_values[i];
-        }
+        DEVICE_FATAL_IF(idx >= genome_length, "reconstruct_from_delta: delta index out of bounds");
+        output_genome[idx] += delta_values[i];
     }
 }
 
-__device__ void reconstruct_genome_from_archive(
-    uint64_t parent_hash,
+// Reconstruct genome for ENTRY_CHILD entries only
+// For ENTRY_ROOT, access entry->root.genome directly at call site
+__device__ void reconstruct_child_genome(
+    PoolEntry* entry,
     GPUElite* archive,
-    int archive_size,
-    uint16_t* delta_indices,
-    float* delta_values,
-    uint16_t num_deltas,
-    uint16_t max_deltas,
     float* output_genome,
-    int genome_length,
     float* parent_genome_workspace,
     const DIRESAWeights* weights
 ) {
-    // parent_hash == 0 is invalid - entries with no parent use UINT64_MAX
-    DEVICE_FATAL_IF(parent_hash == 0, "reconstruct_genome_from_archive: parent_hash is 0 (invalid)");
+    DEVICE_FATAL_IF(entry->type != ENTRY_CHILD, "reconstruct_child_genome: called on non-ENTRY_CHILD");
+    DEVICE_FATAL_IF(entry->child.parent_hash == 0, "reconstruct_child_genome: parent_hash is 0 (uninitialized child)");
 
     // O(1) lookup via hash table
     int parent_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
-        parent_hash
+        entry->child.parent_hash
     );
 
-    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
-    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
+    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_child_genome: parent evicted from archive - cannot reconstruct");
+    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_child_genome: archive latent_genome is null");
 
     diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
-    reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
+    reconstruct_from_delta(parent_genome_workspace, entry->child.delta_indices, entry->child.delta_values, entry->child.num_deltas, output_genome, GENOME_SIZE);
 }
 
 #endif
