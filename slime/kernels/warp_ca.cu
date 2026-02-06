@@ -135,32 +135,6 @@ __global__ void gpu_svd_kernel(
     }
 }
 
-__global__ void effective_rank_from_latent_kernel(
-    float* __restrict__ latent_genome,
-    float* __restrict__ rank_out,
-    int latent_dim
-) {
-    int tid = threadIdx.x;
-
-    float local_sum = 0.0f;
-    for (int i = tid; i < latent_dim; i += blockDim.x) {
-        local_sum += latent_genome[i];
-    }
-    float mean = BlockReduce<BLOCK_SIZE>::sum(local_sum) / latent_dim;
-    mean = __shfl_sync(0xffffffff, mean, 0);
-
-    float local_var = 0.0f;
-    for (int i = tid; i < latent_dim; i += blockDim.x) {
-        float diff = latent_genome[i] - mean;
-        local_var += diff * diff;
-    }
-    float variance = BlockReduce<BLOCK_SIZE>::sum(local_var) / latent_dim;
-
-    if (tid == 0 && variance >= 0.0f) {
-        *rank_out = sqrtf(variance) * latent_dim;
-    }
-}
-
 __global__ void coherence_kernel(
     float* __restrict__ prediction_errors,
     float* __restrict__ coherence_out,

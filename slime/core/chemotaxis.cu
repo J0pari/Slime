@@ -198,9 +198,10 @@ __global__ void initialize_ca_from_field_kernel(
         ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
     }
 
-    // Channel 15: Temporal retrieval - nullptr valid at gen 0 before any history snapshots
+    // Channel 15: Temporal retrieval
     if (channels > 15) {
-        ca_concentration[base_idx + 15] = (attractor_field != nullptr) ? attractor_field[cell_idx] : 0.0f;
+        DEVICE_FATAL_IF(attractor_field == nullptr, "init_chemical_field_kernel: attractor_field required for channel 15");
+        ca_concentration[base_idx + 15] = attractor_field[cell_idx];
     }
 }
 
@@ -697,11 +698,7 @@ __global__ void init_embedding_weights_kernel(float* embedding_weights, int beha
     } else {
         val = 0.01f * curand_normal(&state);
     }
-    if (isnan(val) || isinf(val)) {
-        printf("WARN [init_embedding_weights]: idx=%d row=%d col=%d val=%f is NaN/Inf, skipping\n",
-               idx, row, col, val);
-        return;
-    }
+    DEVICE_FATAL_IF(isnan(val) || isinf(val), "init_embedding_weights: NaN/Inf from curand");
     embedding_weights[idx] = val;
 }
 

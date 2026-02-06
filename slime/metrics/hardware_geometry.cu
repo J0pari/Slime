@@ -122,91 +122,43 @@ __device__ void record_memory_access(ExecutionTrace* trace, void* address, bool 
 
 __device__ void compute_hardware_geometry(ExecutionTrace* trace, HardwareGeometry* geom) {
 
-    if (trace->total_branches > 0) {
-        float divergence_rate = (float)trace->divergent_branches / trace->total_branches;
-        geom->warp_divergence_entropy = -divergence_rate * safe_log(divergence_rate)
-                                       - (1.0f - divergence_rate) * safe_log(1.0f - divergence_rate);
-        geom->warp_convergence_rate = 1.0f - divergence_rate;
-        geom->active_thread_fraction = (float)trace->active_warps / (trace->total_branches * (float)WARP_SIZE);
-    } else {
-        geom->warp_divergence_entropy = NAN;
-        geom->warp_convergence_rate = PERFECT_EFFICIENCY;
-        geom->active_thread_fraction = PERFECT_EFFICIENCY;
-    }
+    DEVICE_FATAL_IF(trace->total_branches == 0, "compute_hardware_geometry: no branches recorded");
+    float divergence_rate = (float)trace->divergent_branches / trace->total_branches;
+    geom->warp_divergence_entropy = -divergence_rate * safe_log(divergence_rate)
+                                   - (1.0f - divergence_rate) * safe_log(1.0f - divergence_rate);
+    geom->warp_convergence_rate = 1.0f - divergence_rate;
+    geom->active_thread_fraction = (float)trace->active_warps / (trace->total_branches * (float)WARP_SIZE);
 
     unsigned long long total_mem_ops = trace->global_loads + trace->global_stores;
-    if (total_mem_ops > 0) {
+    DEVICE_FATAL_IF(total_mem_ops == 0, "compute_hardware_geometry: no memory operations recorded");
+    geom->memory_coalescing_efficiency = 1.0f - fminf(1.0f, (float)trace->l2_transactions / total_mem_ops);
 
-        geom->memory_coalescing_efficiency = PERFECT_COALESCING - fminf(PERFECT_COALESCING, (float)trace->l2_transactions / total_mem_ops);
+    DEVICE_FATAL_IF(trace->l2_transactions == 0, "compute_hardware_geometry: no L2 transactions recorded");
+    geom->cache_line_utilization = 1.0f - (float)trace->dram_transactions / trace->l2_transactions;
 
-        if (trace->l2_transactions > 0) {
-            geom->cache_line_utilization = PERFECT_CACHE_UTILIZATION - (float)trace->dram_transactions / trace->l2_transactions;
-        } else {
-            geom->cache_line_utilization = PERFECT_CACHE_UTILIZATION;
-        }
+    unsigned long long shared_ops = trace->shared_loads + trace->shared_stores;
+    DEVICE_FATAL_IF(shared_ops == 0, "compute_hardware_geometry: no shared memory operations recorded");
+    geom->memory_divergence_spread = (float)trace->bank_conflicts / shared_ops;
+    geom->bank_conflict_density = geom->memory_divergence_spread;
 
-        if (trace->shared_loads + trace->shared_stores > 0) {
-            geom->memory_divergence_spread = (float)trace->bank_conflicts / (trace->shared_loads + trace->shared_stores);
-            geom->bank_conflict_density = geom->memory_divergence_spread;
-        } else {
-            geom->memory_divergence_spread = NAN;
-            geom->bank_conflict_density = NAN;
-        }
-    } else {
-        geom->memory_coalescing_efficiency = PERFECT_COALESCING;
-        geom->cache_line_utilization = PERFECT_CACHE_UTILIZATION;
-        geom->memory_divergence_spread = NAN;
-        geom->bank_conflict_density = NAN;
-    }
+    DEVICE_FATAL_IF(trace->cycles_elapsed == 0, "compute_hardware_geometry: no cycles elapsed");
+    geom->tensor_core_usage = (float)trace->tensor_core_cycles / trace->cycles_elapsed;
+    geom->tensor_memory_bandwidth = (float)(trace->global_loads + trace->global_stores) * sizeof(float) / trace->cycles_elapsed;
+    geom->instruction_throughput = (float)trace->inst_executed / trace->cycles_elapsed;
 
-    if (trace->cycles_elapsed > 0) {
-        geom->tensor_core_usage = (float)trace->tensor_core_cycles / trace->cycles_elapsed;
+    DEVICE_FATAL_IF(trace->inst_issued == 0, "compute_hardware_geometry: no instructions issued");
+    geom->pipeline_stall_fraction = 1.0f - (float)trace->inst_executed / trace->inst_issued;
 
-        geom->tensor_memory_bandwidth = (float)(trace->global_loads + trace->global_stores) * sizeof(float) / trace->cycles_elapsed;
-    } else {
-        geom->tensor_core_usage = NAN;
-        geom->tensor_memory_bandwidth = NAN;
-    }
-
-    if (trace->cycles_elapsed > 0) {
-        geom->instruction_throughput = (float)trace->inst_executed / trace->cycles_elapsed;
-
-        if (trace->inst_issued > 0) {
-            geom->pipeline_stall_fraction = 1.0f - (float)trace->inst_executed / trace->inst_issued;
-        } else {
-            geom->pipeline_stall_fraction = NAN;
-        }
-
-        float mean_occupancy = (float)trace->active_warps / max(trace->total_branches, 1ULL);
-        float variance = 0.0f;
-
-        if (trace->total_branches > 0) {
-            float divergence_rate = (float)trace->divergent_branches / trace->total_branches;
-            variance = divergence_rate * (PERFECT_EFFICIENCY - divergence_rate);
-            variance += OCCUPANCY_VARIANCE_WEIGHT * (PERFECT_EFFICIENCY - mean_occupancy);
-        }
-
-        geom->occupancy_variance = variance;
-    } else {
-        geom->instruction_throughput = NAN;
-        geom->pipeline_stall_fraction = NAN;
-        geom->occupancy_variance = NAN;
-    }
+    float mean_occupancy = (float)trace->active_warps / trace->total_branches;
+    float variance = divergence_rate * (1.0f - divergence_rate);
+    variance += OCCUPANCY_VARIANCE_WEIGHT * (1.0f - mean_occupancy);
+    geom->occupancy_variance = variance;
 
     unsigned long long total_bytes = (trace->global_loads + trace->global_stores) * 4ULL;
-    if (total_bytes > 0) {
+    geom->arithmetic_intensity = (float)trace->inst_executed / total_bytes;
 
-        geom->arithmetic_intensity = (float)trace->inst_executed / total_bytes;
-
-        if (trace->peak_bandwidth > 0.0f) {
-            geom->memory_bandwidth_saturation = trace->achieved_bandwidth / trace->peak_bandwidth;
-        } else {
-            geom->memory_bandwidth_saturation = NAN;
-        }
-    } else {
-        geom->arithmetic_intensity = NAN;
-        geom->memory_bandwidth_saturation = NAN;
-    }
+    DEVICE_FATAL_IF(trace->peak_bandwidth <= 0.0f, "compute_hardware_geometry: peak_bandwidth not set");
+    geom->memory_bandwidth_saturation = trace->achieved_bandwidth / trace->peak_bandwidth;
 }
 
 __global__ void aggregate_hardware_geometry_kernel(

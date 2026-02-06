@@ -48,26 +48,6 @@ __global__ void store_memory_kernel(
     }
 }
 
-__global__ void apply_decay_kernel(
-    TemporalTube* tube,
-    float timestep
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < tube->count) {
-        int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
-        MemoryEntry* entry = &tube->entries[entry_idx];
-
-        float age = tube->global_time - entry->timestamp;
-        entry->decay_factor = expf(-age * tube->decay_rate);
-
-        entry->decay_factor *= (1.0f + entry->importance * 0.5f);
-    }
-
-    if (idx == 0) {
-        tube->global_time += timestep;
-    }
-}
-
 __global__ void recall_memory_kernel(
     TemporalTube* tube,
     float* query,
@@ -106,84 +86,6 @@ __global__ void recall_memory_kernel(
             output[tid] = weighted_sum / weight_total;
         }
         // else: preserve existing output[tid] (no memories to recall)
-    }
-}
-
-__global__ void prune_memories_kernel(
-    TemporalTube* tube,
-    float decay_threshold
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < tube->count) {
-        int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
-        MemoryEntry* entry = &tube->entries[entry_idx];
-
-        if (entry->decay_factor < decay_threshold) {
-            entry->size = 0;
-        }
-    }
-
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int write_idx = 0;
-        for (int i = 0; i < tube->count; i++) {
-            int read_idx = (tube->head - tube->count + i + tube->capacity) % tube->capacity;
-            if (tube->entries[read_idx].size > 0) {
-                if (read_idx != write_idx) {
-                    tube->entries[write_idx] = tube->entries[read_idx];
-                }
-                write_idx = (write_idx + 1) % tube->capacity;
-            }
-        }
-        tube->count = write_idx;
-    }
-}
-
-__global__ void consolidate_memories_kernel(
-    TemporalTube* tube,
-    float similarity_threshold
-) {
-    __shared__ bool merged[MAX_MEMORY_SIZE + BANK_PAD];
-
-    int idx = threadIdx.x;
-    if (idx < tube->count) {
-        merged[idx] = false;
-    }
-    __syncthreads();
-
-    if (idx < tube->count && !merged[idx]) {
-        int entry_idx = (tube->head - tube->count + idx + tube->capacity) % tube->capacity;
-        MemoryEntry* entry = &tube->entries[entry_idx];
-
-        for (int j = idx + 1; j < tube->count; j++) {
-            if (merged[j]) continue;
-
-            int other_idx = (tube->head - tube->count + j + tube->capacity) % tube->capacity;
-            MemoryEntry* other = &tube->entries[other_idx];
-
-            float similarity = 0.0f;
-            if (entry->data && other->data) {
-                int min_size = min(entry->size, other->size);
-                // Skip this pair if no valid data, continue to check other pairs
-                if (min_size > 0) {
-                    for (int k = 0; k < min_size; k++) {
-                        similarity += entry->data[k] * other->data[k];
-                    }
-                    similarity /= sqrtf((float)min_size);
-                }
-            }
-
-            if (similarity > similarity_threshold) {
-
-                for (int k = 0; k < min(entry->size, other->size); k++) {
-                    entry->data[k] = (entry->data[k] + other->data[k]) * 0.5f;
-                }
-
-                entry->importance = fmaxf(entry->importance, other->importance);
-                entry->decay_factor = fmaxf(entry->decay_factor, other->decay_factor);
-
-                merged[j] = true;
-            }
-        }
     }
 }
 

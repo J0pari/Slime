@@ -136,34 +136,6 @@ __global__ void tensor_core_conv3x3_kernel(
     }
 }
 
-
-
-__global__ void compute_effective_rank_from_latent_tensor_kernel(
-    float* __restrict__ latent_genome,
-    float* __restrict__ effective_rank,
-    int latent_dim
-) {
-    float mean = 0.0f;
-    for (int i = 0; i < latent_dim; i++) {
-        mean += latent_genome[i];
-    }
-    mean /= latent_dim;
-
-    float variance = 0.0f;
-    for (int i = 0; i < latent_dim; i++) {
-        float diff = latent_genome[i] - mean;
-        variance += diff * diff;
-    }
-    variance /= latent_dim;
-
-    if (variance < 0.0f) {
-        printf("FATAL [effective_rank_tensor]: variance=%f\n", variance);
-        *effective_rank = 0.0f;
-        return;
-    }
-    *effective_rank = sqrtf(variance) * latent_dim;
-}
-
 __global__ void compute_coherence_tensor_kernel(
     float* __restrict__ loss_history,
     float* __restrict__ coherence,

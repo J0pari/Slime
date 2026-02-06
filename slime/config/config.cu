@@ -109,6 +109,8 @@ constexpr int CDP_PENDING_LAUNCH_COUNT = 2048;
 constexpr int CDP_STACK_SIZE = 16384;
 constexpr size_t DEVICE_MALLOC_HEAP_MB = 512;
 
+constexpr int WAVE_SIZE = 8;
+
 constexpr int MAX_KERNEL_CYCLES = 100000;
 constexpr int KERNEL_CYCLES_MIN = 1000;
 constexpr int KERNEL_CYCLES_MAX = 50000;        
@@ -526,10 +528,6 @@ constexpr int FEATURE_INTERACTION_TERM = 14;
 
 
 
-
-constexpr float PERFECT_EFFICIENCY = 1.0f;
-constexpr float PERFECT_COALESCING = 1.0f;
-constexpr float PERFECT_CACHE_UTILIZATION = 1.0f;
 
 constexpr float NORMALIZED_MIN = 0.0f;
 constexpr float NORMALIZED_MAX = 1.0f;

@@ -47,14 +47,12 @@ struct HybridTrainingMode {
     ClassificationHead* classifier;
     float learning_rate;
     float gradient_clip_norm;
-    float* adam_m_perception;
-    float* adam_v_perception;
-    float* adam_m_interaction;
-    float* adam_v_interaction;
-    float* adam_m_value;
-    float* adam_v_value;
-    float* adam_m_policy;
-    float* adam_v_policy;
+    float* adam_m;  // unified: [perception | interaction | value | policy]
+    float* adam_v;  // unified: [perception | interaction | value | policy]
+    int perception_size;
+    int interaction_size;
+    int value_size;
+    int policy_size;
     int adam_timestep;
     bool is_train_batch;
 };

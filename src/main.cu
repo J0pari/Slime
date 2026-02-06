@@ -188,6 +188,7 @@ int main() {
         return 1;
     }
     memset(h_audit, 0, sizeof(AuditBuffer));
+    h_audit->flow_lenia_mass_conservation_error = -1.0f;
     printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
            (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
 
@@ -313,35 +314,34 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.interaction_activations_saved, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "interaction_activations_saved");
     CUDA_ALLOC_CHECK(buffers_host.pre_gelu_values_saved, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "pre_gelu_values_saved");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_phase_counts, sizeof(int) * 8, "lifecycle_phase_counts");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_features_pool, sizeof(float) * BATCH_SIZE_MAX * HARDWARE_FEATURES_DIM, "gradient_features_pool");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_logits_pool, sizeof(float) * BATCH_SIZE_MAX * NUM_CLASSES_MAX, "gradient_logits_pool");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_loss_pool, sizeof(float) * BATCH_SIZE_MAX, "gradient_loss_pool");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_logit_grads_pool, sizeof(float) * BATCH_SIZE_MAX * NUM_CLASSES_MAX, "gradient_logit_grads_pool");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_magnitudes_pool, sizeof(float) * POOL_CAPACITY_MAX, "gradient_magnitudes_pool");
-    CUDA_ALLOC_CHECK(buffers_host.pooling_weights_grad, sizeof(float) * CHANNELS_MAX, "pooling_weights_grad");
-    CUDA_ALLOC_CHECK(buffers_host.fc_weights_grad, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "fc_weights_grad");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_features_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "gradient_features_pool");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_logits_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE_MAX * NUM_CLASSES_MAX, "gradient_logits_pool");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_loss_pool, sizeof(float) * POOL_CAPACITY_MAX, "gradient_loss_pool");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_logit_grads_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE_MAX * NUM_CLASSES_MAX, "gradient_logit_grads_pool");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_magnitudes_pool, sizeof(float) * POOL_CAPACITY_MAX * NUM_HEADS_MAX, "gradient_magnitudes_pool");
+    CUDA_ALLOC_CHECK(buffers_host.pooling_weights_grad, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX, "pooling_weights_grad");
+    CUDA_ALLOC_CHECK(buffers_host.fc_weights_grad, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "fc_weights_grad");
     CUDA_ALLOC_CHECK(buffers_host.fc_bias_grad, sizeof(float) * NUM_CLASSES_MAX, "fc_bias_grad");
-    CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * BATCH_SIZE_MAX * BEHAVIORAL_DIM_HW_MAX, "features_grad");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_perception_pool, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX, "adam_m_perception_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_perception_pool, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX, "adam_v_perception_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_interaction_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX, "adam_m_interaction_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_interaction_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX, "adam_v_interaction_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_value_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX, "adam_m_value_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_value_pool, sizeof(float) * NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX, "adam_v_value_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_classifier_pool, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_m_classifier_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_classifier_pool, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_v_classifier_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * CHANNELS_MAX, "adam_m_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * CHANNELS_MAX, "adam_v_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_m_fc_weights");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * BEHAVIORAL_DIM_HW_MAX, "adam_v_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "features_grad");
+    constexpr size_t ADAM_CA_TOTAL_SIZE =
+        (NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX) +      // perception
+        (NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX) +      // interaction
+        (NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX) +      // value
+        (NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX);    // policy (FC weights)
+    CUDA_ALLOC_CHECK(buffers_host.adam_m_ca_pool, sizeof(float) * ADAM_CA_TOTAL_SIZE, "adam_m_ca_pool");
+    CUDA_ALLOC_CHECK(buffers_host.adam_v_ca_pool, sizeof(float) * ADAM_CA_TOTAL_SIZE, "adam_v_ca_pool");
+    CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX, "adam_m_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX, "adam_v_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "adam_m_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "adam_v_fc_weights");
     CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_m_fc_bias");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX, "adam_v_fc_bias");
     CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_ca_states_pool");
     CUDA_ALLOC_CHECK(buffers_host.batch_ca_input_grads, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_ca_input_grads");
-    CUDA_ALLOC_CHECK(buffers_host.batched_ca_output, sizeof(float) * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "batched_ca_output");
-    CUDA_ALLOC_CHECK(buffers_host.batch_affinity_reduced, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE, "batch_affinity_reduced");
-    CUDA_ALLOC_CHECK(buffers_host.batch_flow_field, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * 2, "batch_flow_field");
-    CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_reintegration_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.batched_ca_output, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batched_ca_output");
+    CUDA_ALLOC_CHECK(buffers_host.batch_affinity_reduced, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * CA_FIELD_SIZE, "batch_affinity_reduced");
+    CUDA_ALLOC_CHECK(buffers_host.batch_flow_field, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * CA_FIELD_SIZE * 2, "batch_flow_field");
+    CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_reintegration_buffer");
     CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_prev_concentration");
     CUDA_ALLOC_CHECK(buffers_host.batch_labels_pool, sizeof(int) * BATCH_SIZE_MAX, "batch_labels_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_loss_pool, sizeof(float), "task_loss_pool");
@@ -366,9 +366,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.behavioral_features_buffer, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_MAX, "behavioral_features_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_embedding_weights, sizeof(float) * BEHAVIORAL_DIM_MAX * BEHAVIORAL_DIM_MAX, "behavioral_embedding_weights");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_reconstruction_error, sizeof(float), "behavioral_reconstruction_error");
-    CUDA_ALLOC_CHECK(buffers_host.ca_output_grad_buffer, sizeof(float) * CA_FIELD_SIZE * CHANNELS_MAX, "ca_output_grad_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.dL_dperception_buffer, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dperception_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.dL_dinteraction_buffer, sizeof(float) * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dinteraction_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.grad_concentration_buffer, sizeof(float) * CA_FIELD_SIZE, "grad_concentration_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.ca_output_grad_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "ca_output_grad_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.dL_dperception_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dperception_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.dL_dinteraction_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dinteraction_buffer");
     CUDA_ALLOC_CHECK(buffers_host.component_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "component_workspace_genomes_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "behavioral_workspace_genomes_buffer");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");

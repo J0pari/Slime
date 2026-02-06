@@ -15,9 +15,7 @@ from core import BuildArtifacts
 
 EXPECTED_KERNELS = [
     "hybrid_organism_lifecycle_kernel",
-    "organism_lifecycle_kernel",
     "component_evolution_kernel",
-    "neural_ca_update_kernel",
     "behavioral_update_kernel",
     "hierarchical_lifecycle_kernel",
     "sample_batch_kernel",

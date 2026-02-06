@@ -311,13 +311,10 @@ __global__ void finalize_and_copy_compacted_kernel(
     // Thread 0 computes new_count
     __shared__ int new_count;
     if (threadIdx.x == 0) {
-        if (old_count > 0) {
-            int last_write_idx = scan_output[old_count - 1];
-            int last_valid_flag = valid_flags[old_count - 1];
-            new_count = last_write_idx + last_valid_flag;
-        } else {
-            new_count = 0;
-        }
+        DEVICE_FATAL_IF(old_count <= 0, "stream_compaction_kernel: old_count non-positive");
+        int last_write_idx = scan_output[old_count - 1];
+        int last_valid_flag = valid_flags[old_count - 1];
+        new_count = last_write_idx + last_valid_flag;
     }
     __syncthreads();
 
@@ -469,11 +466,8 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     // Compute new_count
     if (tid == 0) {
-        if (old_count > 0) {
-            shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
-        } else {
-            shared_new_count = 0;
-        }
+        DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
+        shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
     }
 
     grid.sync();
@@ -632,11 +626,8 @@ __global__ void prune_and_compact_coop_kernel(
 
     // Compute new_count
     if (tid == 0) {
-        if (old_count > 0) {
-            shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
-        } else {
-            shared_new_count = 0;
-        }
+        DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
+        shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
     }
 
     grid.sync();
@@ -743,9 +734,352 @@ __global__ void refine_elite_coop_kernel(
     }
 }
 
-// Fused memory update using cooperative groups
-__global__ void memory_update_kernel(
+struct MemoryUpdateParams {
+    float decay_threshold;
+    float consolidation_threshold;
+    float flow_lenia_dt;
+    float fitness_trend;
+    int old_count;
+    int new_count;
+};
+
+__global__ void memory_update_params_kernel(
+    MemoryUpdateParams* params,
     TemporalTube* tubes,
+    float* fitness_history,
+    int generation,
+    float* genome,
+    float* gradients,
+    uint64_t genome_hash,
+    float ctx_metabolic,
+    float ctx_stress,
+    float ctx_morphogen,
+    float ctx_complexity,
+    float ctx_niche,
+    float ctx_learning,
+    float ctx_performance
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_kernel: tubes is null");
+    DEVICE_FATAL_IF(tubes->count <= 0, "memory_update_params_kernel: tubes->count non-positive");
+    DEVICE_FATAL_IF(generation < 1, "memory_update_params_kernel: generation < 1 - no previous data exists for fitness_trend");
+    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_kernel: fitness_history is null");
+
+    int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
+    int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
+    int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
+
+    params->decay_threshold = genome_to_param(
+        genome, gradients, decay_threshold_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
+    );
+
+    params->consolidation_threshold = genome_to_param(
+        genome, gradients, consolidation_threshold_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
+    );
+
+    params->flow_lenia_dt = genome_to_param(
+        genome, gradients, flow_dt_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
+    );
+
+    params->old_count = tubes->count;
+
+    // Ring buffer: gen % 2 gives current slot, (gen-1) % 2 gives previous
+    // Safe because generation >= 1 is enforced above
+    int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
+    int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
+    float curr_fitness = fitness_history[curr_gen_offset];
+    float prev_fitness = fitness_history[prev_gen_offset];
+    params->fitness_trend = curr_fitness - prev_fitness;
+}
+
+__global__ void memory_decay_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_decay_kernel: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_decay_kernel: old_count non-positive");
+
+    int tube_count = params->old_count;
+    int capacity = tubes->capacity;
+
+    if (tid < tube_count) {
+        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tubes->entries[entry_idx];
+        entry->decay_factor *= expf(-params->flow_lenia_dt);
+        float importance_delta = params->fitness_trend * 0.1f;
+        entry->importance = clamp(entry->importance + importance_delta, 0.0f, 1.0f);
+    }
+}
+
+__global__ void memory_prune_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_prune_kernel: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_prune_kernel: old_count non-positive");
+
+    int tube_count = params->old_count;
+    int capacity = tubes->capacity;
+
+    if (tid < tube_count) {
+        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tubes->entries[entry_idx];
+        if (entry->decay_factor < params->decay_threshold) {
+            entry->size = 0;
+        }
+    }
+}
+
+__global__ void memory_consolidate_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_consolidate_kernel: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_consolidate_kernel: old_count non-positive");
+
+    int tube_count = params->old_count;
+    int capacity = tubes->capacity;
+    float consolidation_threshold = params->consolidation_threshold;
+
+    for (int i = 0; i < tube_count; i++) {
+        int entry_i = (tubes->head - tube_count + i + capacity) % capacity;
+        MemoryEntry* mi = &tubes->entries[entry_i];
+        if (mi->size == 0) continue;
+
+        for (int j = i + 1; j < tube_count; j++) {
+            int entry_j = (tubes->head - tube_count + j + capacity) % capacity;
+            MemoryEntry* mj = &tubes->entries[entry_j];
+            if (mj->size == 0) continue;
+
+            int min_size = (mi->size < mj->size) ? mi->size : mj->size;
+            if (min_size > 0) {
+                float similarity = 0.0f;
+                for (int k = 0; k < min_size; k++) {
+                    float diff = mi->data[k] - mj->data[k];
+                    similarity += diff * diff;
+                }
+                similarity = 1.0f - sqrtf(similarity / min_size);
+
+                if (similarity > consolidation_threshold) {
+                    for (int k = 0; k < min_size; k++) {
+                        mi->data[k] = 0.5f * (mi->data[k] + mj->data[k]);
+                    }
+                    mi->decay_factor = fmaxf(mi->decay_factor, mj->decay_factor);
+                    mj->size = 0;
+                }
+            }
+        }
+    }
+}
+
+__global__ void memory_mark_valid_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params,
+    int* valid_flags
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_mark_valid_kernel: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_mark_valid_kernel: valid_flags is null");
+
+    int old_count = params->old_count;
+    int capacity = tubes->capacity;
+
+    int is_valid = 0;
+    if (tid < old_count) {
+        int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
+        MemoryEntry* entry = &tubes->entries[entry_idx];
+        is_valid = (entry->decay_factor >= params->decay_threshold && entry->size > 0) ? 1 : 0;
+    }
+    if (tid < capacity) {
+        valid_flags[tid] = is_valid;
+    }
+}
+
+__global__ void memory_scan_kernel(
+    int* valid_flags,
+    int* scan_output,
+    int* block_sums,
+    int capacity
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
+    __shared__ int warp_sums[WARP_SIZE];
+
+    int val = (tid < capacity) ? valid_flags[tid] : 0;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(val, offset);
+        if (lane >= offset) val += n;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(warp_sum, offset);
+            if (lane >= offset) warp_sum += n;
+        }
+        warp_sums[lane] = warp_sum;
+    }
+    __syncthreads();
+
+    int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
+    int inclusive_val = warp_offset + val;
+    int exclusive_val = inclusive_val - ((tid < capacity) ? valid_flags[tid] : 0);
+
+    if (tid < capacity) {
+        scan_output[tid] = exclusive_val;
+    }
+
+    if (threadIdx.x == blockDim.x - 1) {
+        block_sums[blockIdx.x] = inclusive_val;
+    }
+}
+
+__global__ void memory_scan_block_sums_kernel(
+    int* block_sums,
+    int num_blocks
+) {
+    int lane = threadIdx.x % WARP_SIZE;
+    int warp_id = threadIdx.x / WARP_SIZE;
+    __shared__ int bsum_shared[WARP_SIZE];
+
+    int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
+
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    #pragma unroll
+    for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+        int n = warp.shfl_up(bval, offset);
+        if (lane >= offset) bval += n;
+    }
+
+    if (lane == WARP_SIZE - 1) {
+        bsum_shared[warp_id] = bval;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
+        #pragma unroll
+        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+            int n = warp.shfl_up(ws, offset);
+            if (lane >= offset) ws += n;
+        }
+        bsum_shared[lane] = ws;
+    }
+    __syncthreads();
+
+    int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
+    int b_inclusive = bprefix + bval;
+    int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
+
+    if (threadIdx.x < num_blocks) {
+        block_sums[threadIdx.x] = b_exclusive;
+    }
+}
+
+__global__ void memory_add_block_offsets_kernel(
+    int* scan_output,
+    int* block_sums,
+    int capacity
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < capacity && blockIdx.x > 0) {
+        scan_output[tid] += block_sums[blockIdx.x];
+    }
+}
+
+__global__ void memory_compact_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params,
+    int* valid_flags,
+    int* scan_output,
+    MemoryEntry* temp_buffer
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_compact_kernel: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_compact_kernel: valid_flags is null");
+    DEVICE_FATAL_IF(scan_output == nullptr, "memory_compact_kernel: scan_output is null");
+    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_compact_kernel: temp_buffer is null");
+
+    int old_count = params->old_count;
+    int capacity = tubes->capacity;
+
+    if (tid < old_count && valid_flags[tid]) {
+        int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
+        int write_pos = scan_output[tid];
+        temp_buffer[write_pos] = tubes->entries[entry_idx];
+    }
+}
+
+__global__ void memory_finalize_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params,
+    int* valid_flags,
+    int* scan_output,
+    MemoryEntry* temp_buffer
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_finalize_kernel: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_finalize_kernel: valid_flags is null");
+    DEVICE_FATAL_IF(scan_output == nullptr, "memory_finalize_kernel: scan_output is null");
+
+    int old_count = params->old_count;
+    int new_count = params->new_count;
+    int capacity = tubes->capacity;
+
+    if (tid == 0) {
+        DEVICE_FATAL_IF(old_count <= 0, "memory_finalize_kernel: old_count non-positive");
+        params->new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
+    }
+}
+
+__global__ void memory_copy_back_kernel(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params,
+    MemoryEntry* temp_buffer
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_copy_back_kernel: tubes is null");
+    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_copy_back_kernel: temp_buffer is null");
+
+    int new_count = params->new_count;
+    int capacity = tubes->capacity;
+
+    if (tid < new_count) {
+        tubes->entries[tid] = temp_buffer[tid];
+    }
+
+    if (tid == 0) {
+        tubes->count = new_count;
+        tubes->head = new_count % capacity;
+    }
+}
+
+__device__ void memory_update_cdp(
+    TemporalTube* tubes,
+    MemoryUpdateParams* params,
     float* fitness_history,
     int* valid_flags,
     int* scan_output,
@@ -763,273 +1097,60 @@ __global__ void memory_update_kernel(
     float ctx_learning,
     float ctx_performance
 ) {
-    cg::grid_group grid = cg::this_grid();
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int lane = threadIdx.x % WARP_SIZE;
-    int warp_id = threadIdx.x / WARP_SIZE;
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_cdp: tubes is null");
+    DEVICE_FATAL_IF(params == nullptr, "memory_update_cdp: params is null");
+    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_cdp: fitness_history is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_update_cdp: valid_flags is null");
+    DEVICE_FATAL_IF(scan_output == nullptr, "memory_update_cdp: scan_output is null");
+    DEVICE_FATAL_IF(block_sums == nullptr, "memory_update_cdp: block_sums is null");
+    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_update_cdp: temp_buffer is null");
+    DEVICE_FATAL_IF(genome == nullptr, "memory_update_cdp: genome is null");
+    DEVICE_FATAL_IF(gradients == nullptr, "memory_update_cdp: gradients is null");
 
-    __shared__ float shared_decay_threshold;
-    __shared__ float shared_consolidation_threshold;
-    __shared__ float shared_flow_lenia_dt;
-    __shared__ float shared_fitness_trend;
-    __shared__ int shared_should_compact;
-    __shared__ int shared_old_count;
-    __shared__ int shared_new_count;
-    __shared__ int warp_sums[WARP_SIZE];
+    memory_update_params_kernel<<<1, 1>>>(
+        params, tubes, fitness_history, generation,
+        genome, gradients, genome_hash,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance
+    );
+    cudaDeviceSynchronize();
 
-    if (tubes == nullptr || tubes->count <= 0) return;
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_update_cdp: old_count non-positive after params kernel");
 
-    int tube_count = tubes->count;
+    int tube_count = params->old_count;
     int capacity = tubes->capacity;
+    int num_blocks = (tube_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int cap_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    // Thread 0 computes genome-derived parameters
-    if (tid == 0) {
-        int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
-        int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
-        int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
-        int compaction_interval_slot = derive_param_slot(genome_hash, "memory_compaction_interval");
+    memory_decay_kernel<<<num_blocks, BLOCK_SIZE>>>(tubes, params);
+    cudaDeviceSynchronize();
 
-        shared_decay_threshold = genome_to_param(
-            genome, gradients, decay_threshold_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
-        );
+    memory_prune_kernel<<<num_blocks, BLOCK_SIZE>>>(tubes, params);
+    cudaDeviceSynchronize();
 
-        shared_consolidation_threshold = genome_to_param(
-            genome, gradients, consolidation_threshold_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
-        );
+    memory_consolidate_kernel<<<1, 1>>>(tubes, params);
+    cudaDeviceSynchronize();
 
-        shared_flow_lenia_dt = genome_to_param(
-            genome, gradients, flow_dt_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
-        );
+    memory_mark_valid_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, valid_flags);
+    cudaDeviceSynchronize();
 
-        float compaction_interval_norm = genome_to_param(
-            genome, gradients, compaction_interval_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            0.0f, 1.0f
-        );
-        int compaction_interval = 1 + (int)(compaction_interval_norm * 15.0f);
-        shared_should_compact = (generation % compaction_interval == 0) ? 1 : 0;
-        shared_old_count = tube_count;
+    memory_scan_kernel<<<cap_blocks, BLOCK_SIZE>>>(valid_flags, scan_output, block_sums, capacity);
+    cudaDeviceSynchronize();
 
-        // Compute fitness trend from history (current vs previous generation)
-        int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
-        int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
-        float curr_fitness = fitness_history[curr_gen_offset];
-        float prev_fitness = (generation > 0) ? fitness_history[prev_gen_offset] : curr_fitness;
-        shared_fitness_trend = curr_fitness - prev_fitness;
-    }
+    memory_scan_block_sums_kernel<<<1, BLOCK_SIZE>>>(block_sums, cap_blocks);
+    cudaDeviceSynchronize();
 
-    grid.sync();
+    memory_add_block_offsets_kernel<<<cap_blocks, BLOCK_SIZE>>>(scan_output, block_sums, capacity);
+    cudaDeviceSynchronize();
 
-    float decay_threshold = shared_decay_threshold;
-    float consolidation_threshold = shared_consolidation_threshold;
-    float flow_lenia_dt = shared_flow_lenia_dt;
-    float fitness_trend = shared_fitness_trend;
-    int should_compact = shared_should_compact;
-    int old_count = shared_old_count;
+    memory_compact_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, valid_flags, scan_output, temp_buffer);
+    cudaDeviceSynchronize();
 
-    // Phase 1: Apply decay and modulate importance by fitness trend
-    if (tid < tube_count) {
-        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
-        MemoryEntry* entry = &tubes->entries[entry_idx];
-        entry->decay_factor *= expf(-flow_lenia_dt);
+    memory_finalize_kernel<<<1, 1>>>(tubes, params, valid_flags, scan_output, temp_buffer);
+    cudaDeviceSynchronize();
 
-        // Boost importance of memories formed during fitness improvement
-        // Positive fitness trend → increase importance; negative → decrease
-        float importance_delta = fitness_trend * 0.1f;
-        entry->importance = clamp(entry->importance + importance_delta, 0.0f, 1.0f);
-    }
-
-    grid.sync();
-
-    // Phase 2: Prune memories below threshold
-    if (tid < tube_count) {
-        int entry_idx = (tubes->head - tube_count + tid + capacity) % capacity;
-        MemoryEntry* entry = &tubes->entries[entry_idx];
-        if (entry->decay_factor < decay_threshold) {
-            entry->size = 0;
-        }
-    }
-
-    grid.sync();
-
-    // Phase 3: Consolidate similar memories (block 0 handles sequentially)
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        for (int i = 0; i < tube_count; i++) {
-            int entry_i = (tubes->head - tube_count + i + capacity) % capacity;
-            MemoryEntry* mi = &tubes->entries[entry_i];
-            if (mi->size == 0) continue;
-
-            for (int j = i + 1; j < tube_count; j++) {
-                int entry_j = (tubes->head - tube_count + j + capacity) % capacity;
-                MemoryEntry* mj = &tubes->entries[entry_j];
-                if (mj->size == 0) continue;
-
-                int min_size = (mi->size < mj->size) ? mi->size : mj->size;
-                if (min_size > 0) {
-                    float similarity = 0.0f;
-                    for (int k = 0; k < min_size; k++) {
-                        float diff = mi->data[k] - mj->data[k];
-                        similarity += diff * diff;
-                    }
-                    similarity = 1.0f - sqrtf(similarity / min_size);
-
-                    if (similarity > consolidation_threshold) {
-                        for (int k = 0; k < min_size; k++) {
-                            mi->data[k] = 0.5f * (mi->data[k] + mj->data[k]);
-                        }
-                        mi->decay_factor = fmaxf(mi->decay_factor, mj->decay_factor);
-                        mj->size = 0;
-                    }
-                }
-            }
-        }
-    }
-
-    grid.sync();
-
-    // Phase 4-7: Compaction (if needed)
-    if (should_compact && valid_flags && scan_output && temp_buffer) {
-        // Mark valid entries
-        int is_valid = 0;
-        if (tid < old_count) {
-            int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
-            MemoryEntry* entry = &tubes->entries[entry_idx];
-            is_valid = (entry->decay_factor >= decay_threshold && entry->size > 0) ? 1 : 0;
-        }
-        if (tid < capacity) {
-            valid_flags[tid] = is_valid;
-        }
-
-        grid.sync();
-
-        // Exclusive scan
-        int val = (tid < capacity) ? valid_flags[tid] : 0;
-
-        auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
-        #pragma unroll
-        for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
-            int n = warp.shfl_up(val, offset);
-            if (lane >= offset) val += n;
-        }
-
-        if (lane == WARP_SIZE - 1) {
-            warp_sums[warp_id] = val;
-        }
-        __syncthreads();
-
-        if (warp_id == 0) {
-            int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
-            #pragma unroll
-            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
-                int n = warp.shfl_up(warp_sum, offset);
-                if (lane >= offset) warp_sum += n;
-            }
-            warp_sums[lane] = warp_sum;
-        }
-        __syncthreads();
-
-        int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
-        int inclusive_val = warp_offset + val;
-        int exclusive_val = inclusive_val - ((tid < capacity) ? valid_flags[tid] : 0);
-
-        if (tid < capacity) {
-            scan_output[tid] = exclusive_val;
-        }
-
-        if (threadIdx.x == blockDim.x - 1) {
-            block_sums[blockIdx.x] = inclusive_val;
-        }
-
-        grid.sync();
-
-        // Block 0 scans block_sums
-        if (blockIdx.x == 0) {
-            __shared__ int bsum_shared[WARP_SIZE];
-            int num_blocks = gridDim.x;
-
-            int bval = (threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0;
-
-            #pragma unroll
-            for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
-                int n = warp.shfl_up(bval, offset);
-                if (lane >= offset) bval += n;
-            }
-
-            if (lane == WARP_SIZE - 1) {
-                bsum_shared[warp_id] = bval;
-            }
-            __syncthreads();
-
-            if (warp_id == 0) {
-                int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
-                #pragma unroll
-                for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
-                    int n = warp.shfl_up(ws, offset);
-                    if (lane >= offset) ws += n;
-                }
-                bsum_shared[lane] = ws;
-            }
-            __syncthreads();
-
-            int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
-            int b_inclusive = bprefix + bval;
-            int b_exclusive = b_inclusive - ((threadIdx.x < num_blocks) ? block_sums[threadIdx.x] : 0);
-
-            if (threadIdx.x < num_blocks) {
-                block_sums[threadIdx.x] = b_exclusive;
-            }
-        }
-
-        grid.sync();
-
-        if (tid < capacity && blockIdx.x > 0) {
-            scan_output[tid] += block_sums[blockIdx.x];
-        }
-
-        grid.sync();
-
-        // Compact entries
-        if (tid < old_count && valid_flags[tid]) {
-            int entry_idx = (tubes->head - old_count + tid + capacity) % capacity;
-            int write_pos = scan_output[tid];
-            temp_buffer[write_pos] = tubes->entries[entry_idx];
-        }
-
-        grid.sync();
-
-        // Compute new_count
-        if (tid == 0) {
-            if (old_count > 0) {
-                shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
-            } else {
-                shared_new_count = 0;
-            }
-        }
-
-        grid.sync();
-
-        int new_count = shared_new_count;
-
-        // Copy compacted back
-        if (tid < new_count) {
-            tubes->entries[tid] = temp_buffer[tid];
-        }
-
-        if (tid == 0) {
-            tubes->count = new_count;
-            tubes->head = new_count % capacity;
-        }
-    }
+    memory_copy_back_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, temp_buffer);
+    cudaDeviceSynchronize();
 }
 
 #endif

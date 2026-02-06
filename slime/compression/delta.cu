@@ -85,40 +85,21 @@ __device__ void reconstruct_genome_from_archive(
     float* parent_genome_workspace,
     const DIRESAWeights* weights
 ) {
-    if (parent_hash == 0) {
-        for (int i = 0; i < genome_length; i++) {
-            output_genome[i] = 0.0f;
-        }
-        for (int i = 0; i < num_deltas && i < max_deltas; i++) {
-            uint16_t idx = delta_indices[i];
-            if (idx < genome_length) {
-                output_genome[idx] = delta_values[i];
-            }
-        }
-    } else {
-        // O(1) lookup via hash table
-        int parent_idx = hash_table_lookup(
-            archive->hash_table_keys,
-            archive->hash_table_values,
-            parent_hash
-        );
+    // parent_hash == 0 is invalid - entries with no parent use UINT64_MAX
+    DEVICE_FATAL_IF(parent_hash == 0, "reconstruct_genome_from_archive: parent_hash is 0 (invalid)");
 
-        if (parent_idx >= 0 && archive->latent_genome) {
-            diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
-            reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
-        } else {
-            printf("ORPHAN [reconstruct]: parent=%llu evicted, de novo genesis\n", (unsigned long long)parent_hash);
-            curandState_t rng;
-            curand_init(parent_hash, 0, 0, &rng);
-            for (int i = 0; i < genome_length; i++) {
-                output_genome[i] = curand_normal(&rng) * 0.1f;
-            }
-            for (int i = 0; i < num_deltas && i < max_deltas; i++) {
-                uint16_t idx = delta_indices[i];
-                if (idx < genome_length) output_genome[idx] += delta_values[i];
-            }
-        }
-    }
+    // O(1) lookup via hash table
+    int parent_idx = hash_table_lookup(
+        archive->hash_table_keys,
+        archive->hash_table_values,
+        parent_hash
+    );
+
+    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
+    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
+
+    diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
+    reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
 }
 
 #endif

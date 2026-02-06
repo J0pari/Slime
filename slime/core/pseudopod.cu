@@ -17,40 +17,6 @@
 namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
-__global__ void compute_effective_rank_from_latent_kernel(
-    ComponentPool* pool,
-    float* effective_rank_history,
-    float* workspace_genomes,
-    int latent_dim,
-    int entry_idx
-) {
-    if (entry_idx >= pool->capacity) return;
-
-    PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
-
-    int tid = threadIdx.x;
-    float* latent_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
-
-    float local_sum = 0.0f;
-    for (int i = tid; i < latent_dim; i += blockDim.x) {
-        local_sum += latent_genome[i];
-    }
-    float mean = BlockReduce<BLOCK_SIZE>::sum(local_sum) / latent_dim;
-    mean = __shfl_sync(0xffffffff, mean, 0);
-
-    float local_var = 0.0f;
-    for (int i = tid; i < latent_dim; i += blockDim.x) {
-        float diff = latent_genome[i] - mean;
-        local_var += diff * diff;
-    }
-    float variance = BlockReduce<BLOCK_SIZE>::sum(local_var) / latent_dim;
-
-    if (tid == 0 && variance >= 0.0f) {
-        effective_rank_history[entry_idx] = sqrtf(variance) * latent_dim;
-    }
-}
-
 __global__ void compute_coherence_kernel(
     float* __restrict__ loss_history,
     float* __restrict__ coherence,

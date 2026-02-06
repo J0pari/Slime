@@ -22,14 +22,6 @@ struct ChemicalField;
 struct BehavioralState;
 struct TemporalTube;
 
-extern "C" __global__ void component_evolution_kernel(Organism*, ComponentPool*, GPUElite*, VoronoiCell*, int, int*, ChemicalField*, BehavioralState*, float*, float*, int, ArchitectureParams, float*);
-__global__ void neural_ca_update_kernel(Organism*, ChemicalField*, float*, float*, int, ComponentPool*, float*, float*, float*, TraceBuffer*, int);
-__global__ void update_field_from_ca_kernel(ComponentPool*, float*, int, int);
-__global__ void compute_effective_rank_from_latent_kernel(ComponentPool*, float*, float*, int, int);
-extern "C" __global__ void behavioral_update_kernel(Organism*, BehavioralState*, ChemicalField*, TemporalTube*, int, ArchitectureParams, float*);
-__global__ void memory_update_kernel(TemporalTube*, float*, int*, int*, int*, MemoryEntry*, int, float*, float*, uint64_t, float, float, float, float, float, float, float);
-__global__ void update_behavioral_embedding_kernel(BehavioralState*, float*, float*, int, float, const float*, const float*, float, float, float, float, int, int, int, int, float*, const float*, int);
-
 __global__ void zero_scalar_kernel(float* ptr) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         *ptr = 0.0f;
@@ -43,16 +35,158 @@ __global__ void zero_buffer_kernel(float* buffer, int n) {
     }
 }
 
+// Loads batch_images, batch_labels, and injects into batch_ca_states_pool
+// Runs once per generation; per-entry kernels consume this shared batch data
+extern "C" __global__ void load_batch_kernel(
+    Organism* organism,
+    HybridTrainingMode* training_mode,
+    int generation,
+    int grid_size  // Architecture grid size for bilinear interpolation
+) {
+    int tid = threadIdx.x;
+
+    DEVICE_FATAL_IF(organism == nullptr, "load_batch_kernel: organism is null");
+    DEVICE_FATAL_IF(training_mode == nullptr, "load_batch_kernel: training_mode is null");
+    DEVICE_FATAL_IF(training_mode->batch_images == nullptr, "load_batch_kernel: batch_images is null");
+    DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "load_batch_kernel: batch_labels is null");
+
+    Dataset* dataset = organism->current_dataset;
+    DEVICE_FATAL_IF(dataset == nullptr, "load_batch_kernel: dataset is null");
+    DEVICE_FATAL_IF(dataset->samples == nullptr, "load_batch_kernel: dataset samples is null");
+    DEVICE_FATAL_IF(dataset->labels == nullptr, "load_batch_kernel: dataset labels is null");
+
+    unsigned char* all_images = dataset->samples;
+    unsigned char* all_labels = dataset->labels;
+    float* batch_images_out = training_mode->batch_images;
+    int* batch_labels_out = training_mode->batch_labels;
+    int dataset_size = dataset->num_samples;
+    int batch_size = training_mode->batch_size;
+    int offset = generation * batch_size;
+    int sample_rows = dataset->descriptor->sample_rows;
+    int sample_cols = dataset->descriptor->sample_cols;
+    int sample_channels = dataset->descriptor->channels;
+    int sample_size = sample_rows * sample_cols * sample_channels;
+
+    // Thread 0 writes all batch labels
+    if (tid == 0) {
+        for (int idx = 0; idx < batch_size; idx++) {
+            int src_idx = (offset + idx) % dataset_size;
+            batch_labels_out[idx] = all_labels[src_idx];
+        }
+    }
+    __syncthreads();
+
+    // Validate dimensions - these must be correct, no silent failures
+    DEVICE_FATAL_IF(grid_size <= 0 || grid_size > 512, "load_batch_kernel: invalid grid_size");
+    DEVICE_FATAL_IF(sample_rows <= 0, "load_batch_kernel: invalid sample_rows");
+    DEVICE_FATAL_IF(sample_cols <= 0, "load_batch_kernel: invalid sample_cols");
+
+    // All threads do bilinear interpolation via thread loop
+    int total_pixels = batch_size * grid_size * grid_size;
+    for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
+        int idx = work_idx / (grid_size * grid_size);
+        int pixel_idx = work_idx % (grid_size * grid_size);
+
+        int src_idx = (offset + idx) % dataset_size;
+        int out_y = pixel_idx / grid_size;
+        int out_x = pixel_idx % grid_size;
+
+        float src_y = out_y * (float)sample_rows / grid_size;
+        float src_x = out_x * (float)sample_cols / grid_size;
+
+        int y0 = (int)src_y;
+        int x0 = (int)src_x;
+        int y1 = min(y0 + 1, sample_rows - 1);
+        int x1 = min(x0 + 1, sample_cols - 1);
+
+        float fy = src_y - y0;
+        float fx = src_x - x0;
+
+        float p00 = all_images[src_idx * sample_size + y0 * sample_cols + x0] / 255.0f;
+        float p01 = all_images[src_idx * sample_size + y0 * sample_cols + x1] / 255.0f;
+        float p10 = all_images[src_idx * sample_size + y1 * sample_cols + x0] / 255.0f;
+        float p11 = all_images[src_idx * sample_size + y1 * sample_cols + x1] / 255.0f;
+
+        float value = p00 * (1 - fx) * (1 - fy) +
+                     p01 * fx * (1 - fy) +
+                     p10 * (1 - fx) * fy +
+                     p11 * fx * fy;
+
+        batch_images_out[idx * grid_size * grid_size + pixel_idx] = value;
+    }
+    __syncthreads();
+
+    // INJECT_SAMPLE_TO_CA: inject batch into CA input buffer
+    float* ca_out = organism->batch_ca_states_pool;
+    int channels_out = CHANNELS_MAX;  // Use max for consistent buffer layout
+    int image_channels = (int)dataset->descriptor->channels;
+
+    float* chem_concentration = organism->chemical_field->concentration;
+    float* chem_gradient_x = organism->chemical_field->gradient_x;
+    float* chem_gradient_y = organism->chemical_field->gradient_y;
+    float* chem_laplacian = organism->chemical_field->laplacian;
+    float* chem_sources = organism->chemical_field->sources;
+    float* chem_decay_factors = organism->chemical_field->decay_factors;
+    float* rd_resource_density = organism->resource_density;
+    float* rd_fitness_landscape = organism->fitness_landscape;
+    float* rd_resource_gradient_x = organism->resource_gradient_x;
+    float* rd_resource_gradient_y = organism->resource_gradient_y;
+    float* behavioral_field = organism->behavioral_field_pool;
+    float* batch_images = training_mode->batch_images;
+    float* prev_concentration = organism->buffers->batch_prev_concentration;
+    float* attractor_field = organism->chemical_field->concentration;
+
+    int total_positions = batch_size * grid_size * grid_size;
+    for (int work_idx = tid; work_idx < total_positions; work_idx += blockDim.x) {
+        int batch_idx = work_idx / (grid_size * grid_size);
+        int spatial_idx = work_idx % (grid_size * grid_size);
+
+        int base_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
+
+        // Channel 0-5: ChemicalField
+        ca_out[base_idx + 0] = chem_concentration[spatial_idx];
+        ca_out[base_idx + 1] = chem_gradient_x[spatial_idx];
+        ca_out[base_idx + 2] = chem_gradient_y[spatial_idx];
+        ca_out[base_idx + 3] = chem_laplacian[spatial_idx];
+        ca_out[base_idx + 4] = chem_sources[spatial_idx];
+        ca_out[base_idx + 5] = chem_decay_factors[spatial_idx];
+
+        // Channel 6-9: RD fields
+        ca_out[base_idx + 6] = rd_resource_density[spatial_idx];
+        ca_out[base_idx + 7] = rd_fitness_landscape[spatial_idx];
+        ca_out[base_idx + 8] = rd_resource_gradient_x[spatial_idx];
+        ca_out[base_idx + 9] = rd_resource_gradient_y[spatial_idx];
+
+        // Channel 10: Behavioral field
+        ca_out[base_idx + 10] = behavioral_field[spatial_idx];
+
+        // Channel 11-13: Dataset sample
+        int img_base = batch_idx * grid_size * grid_size * image_channels;
+        ca_out[base_idx + 11] = batch_images[img_base + spatial_idx];
+        ca_out[base_idx + 12] = batch_images[img_base + ((image_channels > 1) ? grid_size * grid_size : 0) + spatial_idx];
+        ca_out[base_idx + 13] = batch_images[img_base + ((image_channels > 2) ? 2 * grid_size * grid_size : 0) + spatial_idx];
+
+        // Channel 14: Previous concentration (recurrence)
+        int prev_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
+        ca_out[base_idx + 14] = prev_concentration[prev_idx + 0];
+
+        // Channel 15: Temporal/attractor retrieval
+        ca_out[base_idx + 15] = attractor_field[spatial_idx];
+    }
+}
+
 extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     Organism* organism,
     HybridTrainingMode* training_mode,
     CAParameterMap* param_map,
     int generation,
     float* workspace_genomes,
-    AuditBuffer* audit
+    AuditBuffer* audit,
+    int wave_start
 ) {
     extern __shared__ float sdata[];
-    int entry_idx = blockIdx.x;
+    int entry_idx = wave_start + blockIdx.x;
+    int wave_position = blockIdx.x;
     int tid = threadIdx.x;
     ComponentPool* pool = organism->pool;
 
@@ -230,106 +364,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         __syncthreads();
         if (s_error_flag) return;  // All threads exit together
 
-        // ========== SAMPLE_BATCH ==========
-        // Global operation: only entry_idx==0 block processes, ALL threads participate
-        if (entry_idx == 0) {
-            Dataset* dataset = organism->current_dataset;
-            unsigned char* all_images = dataset->samples;
-            unsigned char* all_labels = dataset->labels;
-            float* batch_images_out = training_mode->batch_images;
-            int* batch_labels_out = training_mode->batch_labels;
-            int dataset_size = dataset->num_samples;
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int offset = generation * batch_size;
-            int sample_rows = dataset->descriptor->sample_rows;
-            int sample_cols = dataset->descriptor->sample_cols;
-            int sample_channels = dataset->descriptor->channels;
-            int sample_size = sample_rows * sample_cols * sample_channels;
-
-            // Thread 0 writes all batch labels (small loop)
-            if (tid == 0) {
-                for (int idx = 0; idx < batch_size; idx++) {
-                    int src_idx = (offset + idx) % dataset_size;
-                    batch_labels_out[idx] = all_labels[src_idx];
-                }
-                // DIAGNOSTIC: Print ALL 32 labels to verify dataset loading
-                if (generation == 0) {
-                    printf("[DIAG:labels] gen=%d bsz=%d all_labels=%p batch_labels=%p dsz=%d offset=%d\n",
-                           generation, batch_size, (void*)all_labels, (void*)batch_labels_out, dataset_size, offset);
-                    printf("[DIAG:labels] src[0-7]:  %d %d %d %d %d %d %d %d\n",
-                           (int)all_labels[0], (int)all_labels[1], (int)all_labels[2], (int)all_labels[3],
-                           (int)all_labels[4], (int)all_labels[5], (int)all_labels[6], (int)all_labels[7]);
-                    printf("[DIAG:labels] src[8-15]: %d %d %d %d %d %d %d %d\n",
-                           (int)all_labels[8], (int)all_labels[9], (int)all_labels[10], (int)all_labels[11],
-                           (int)all_labels[12], (int)all_labels[13], (int)all_labels[14], (int)all_labels[15]);
-                    printf("[DIAG:labels] dst[0-7]:  %d %d %d %d %d %d %d %d\n",
-                           batch_labels_out[0], batch_labels_out[1], batch_labels_out[2], batch_labels_out[3],
-                           batch_labels_out[4], batch_labels_out[5], batch_labels_out[6], batch_labels_out[7]);
-                    printf("[DIAG:labels] dst[8-15]: %d %d %d %d %d %d %d %d\n",
-                           batch_labels_out[8], batch_labels_out[9], batch_labels_out[10], batch_labels_out[11],
-                           batch_labels_out[12], batch_labels_out[13], batch_labels_out[14], batch_labels_out[15]);
-                    printf("[DIAG:labels] dst[16-23]: %d %d %d %d %d %d %d %d\n",
-                           batch_labels_out[16], batch_labels_out[17], batch_labels_out[18], batch_labels_out[19],
-                           batch_labels_out[20], batch_labels_out[21], batch_labels_out[22], batch_labels_out[23]);
-                    printf("[DIAG:labels] dst[24-31]: %d %d %d %d %d %d %d %d\n",
-                           batch_labels_out[24], batch_labels_out[25], batch_labels_out[26], batch_labels_out[27],
-                           batch_labels_out[28], batch_labels_out[29], batch_labels_out[30], batch_labels_out[31]);
-                }
-            }
-
-            // Validate dimensions before bilinear interpolation
-            if (tid == 0) {
-                if (grid_size <= 0 || grid_size > 512) {
-                    printf("ERROR: Invalid grid_size=%d at gen=%d\n", grid_size, generation);
-                }
-                if (sample_rows <= 0 || sample_cols <= 0) {
-                    printf("ERROR: Invalid sample dimensions rows=%d cols=%d at gen=%d\n", sample_rows, sample_cols, generation);
-                }
-            }
-            __syncthreads();
-
-            if (grid_size <= 0 || grid_size > 512 || sample_rows <= 0 || sample_cols <= 0) {
-                return;  // Early exit if dimensions invalid
-            }
-
-            // All threads do bilinear interpolation via thread loop
-            // Total work: batch_size × grid_size² pixels
-            int total_pixels = batch_size * grid_size * grid_size;
-            for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
-                int idx = work_idx / (grid_size * grid_size);  // batch index
-                int pixel_idx = work_idx % (grid_size * grid_size);  // pixel within sample
-
-                int src_idx = (offset + idx) % dataset_size;
-                int out_y = pixel_idx / grid_size;
-                int out_x = pixel_idx % grid_size;
-
-                float src_y = out_y * (float)sample_rows / grid_size;
-                float src_x = out_x * (float)sample_cols / grid_size;
-
-                int y0 = (int)src_y;
-                int x0 = (int)src_x;
-                int y1 = min(y0 + 1, sample_rows - 1);
-                int x1 = min(x0 + 1, sample_cols - 1);
-
-                float fy = src_y - y0;
-                float fx = src_x - x0;
-
-                float p00 = all_images[src_idx * sample_size + y0 * sample_cols + x0] / 255.0f;
-                float p01 = all_images[src_idx * sample_size + y0 * sample_cols + x1] / 255.0f;
-                float p10 = all_images[src_idx * sample_size + y1 * sample_cols + x0] / 255.0f;
-                float p11 = all_images[src_idx * sample_size + y1 * sample_cols + x1] / 255.0f;
-
-                float value = p00 * (1 - fx) * (1 - fy) +
-                             p01 * fx * (1 - fy) +
-                             p10 * (1 - fx) * fy +
-                             p11 * fx * fy;
-
-                batch_images_out[idx * grid_size * grid_size + pixel_idx] = value;
-            }
-        }
-        __syncthreads();
-
         // ========== RESET_TAPE ==========
         // Per-entry operation: ALL threads in ALL blocks participate
         {
@@ -351,76 +385,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         }
         __syncthreads();
 
-        // ========== INJECT_SAMPLE_TO_CA ==========
-        // Global operation: only entry_idx==0 block processes, ALL threads participate
-        if (entry_idx == 0) {
-            float* ca_out = organism->batch_ca_states_pool;
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int channels_out = arch.channels;
-            int image_channels = (int)organism->current_dataset->descriptor->channels;
-
-            // Source fields (shared across batches)
-            float* chem_concentration = organism->chemical_field->concentration;
-            float* chem_gradient_x = organism->chemical_field->gradient_x;
-            float* chem_gradient_y = organism->chemical_field->gradient_y;
-            float* chem_laplacian = organism->chemical_field->laplacian;
-            float* chem_sources = organism->chemical_field->sources;
-            float* chem_decay_factors = organism->chemical_field->decay_factors;
-            float* rd_resource_density = organism->resource_density;
-            float* rd_fitness_landscape = organism->fitness_landscape;
-            float* rd_resource_gradient_x = organism->resource_gradient_x;
-            float* rd_resource_gradient_y = organism->resource_gradient_y;
-            float* behavioral_field = organism->behavioral_field_pool;
-            float* batch_images = training_mode->batch_images;
-            float* prev_concentration = organism->buffers->batch_prev_concentration;
-            float* attractor_field = organism->chemical_field->concentration;
-
-            // Total work: batch_size × grid_size² spatial positions
-            int total_positions = batch_size * grid_size * grid_size;
-            for (int work_idx = tid; work_idx < total_positions; work_idx += blockDim.x) {
-                int batch_idx = work_idx / (grid_size * grid_size);
-                int spatial_idx = work_idx % (grid_size * grid_size);
-
-                int base_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
-
-                // Channel 0-5: ChemicalField (shared across batches)
-                ca_out[base_idx + 0] = chem_concentration[spatial_idx];
-                ca_out[base_idx + 1] = chem_gradient_x[spatial_idx];
-                ca_out[base_idx + 2] = chem_gradient_y[spatial_idx];
-                ca_out[base_idx + 3] = chem_laplacian[spatial_idx];
-                ca_out[base_idx + 4] = chem_sources[spatial_idx];
-                ca_out[base_idx + 5] = chem_decay_factors[spatial_idx];
-
-                // Channel 6-9: RD fields (shared across batches)
-                ca_out[base_idx + 6] = rd_resource_density[spatial_idx];
-                ca_out[base_idx + 7] = rd_fitness_landscape[spatial_idx];
-                ca_out[base_idx + 8] = rd_resource_gradient_x[spatial_idx];
-                ca_out[base_idx + 9] = rd_resource_gradient_y[spatial_idx];
-
-                // Channel 10: Behavioral field (shared across batches)
-                ca_out[base_idx + 10] = behavioral_field[spatial_idx];
-
-                // Channel 11-13: Dataset sample (per-batch, replicate channel 0 if grayscale)
-                int img_base = batch_idx * grid_size * grid_size * image_channels;
-                ca_out[base_idx + 11] = batch_images[img_base + spatial_idx];
-                ca_out[base_idx + 12] = batch_images[img_base + ((image_channels > 1) ? grid_size * grid_size : 0) + spatial_idx];
-                ca_out[base_idx + 13] = batch_images[img_base + ((image_channels > 2) ? 2 * grid_size * grid_size : 0) + spatial_idx];
-
-                // Channel 14: Previous concentration (recurrence) - channel 0 from previous step
-                int prev_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
-                ca_out[base_idx + 14] = prev_concentration[prev_idx + 0];
-
-                // Channel 15: Temporal/attractor retrieval (shared across batches)
-                ca_out[base_idx + 15] = attractor_field[spatial_idx];
-            }
-        }
-        __syncthreads();
-
         // ========== MULTI_HEAD_CA ==========
-        // Global operation: only entry_idx==0 block processes, ALL threads participate
+        // Per-entry operation: ALL entries process with wave-indexed output buffers
         // Total work: batch_size × num_heads × grid_size² cells
-        if (entry_idx == 0) {
+        {
             // Record hardware execution trace for CA forward pass
             TraceBuffer* trace_buffer = &ca_state->trace;
             if (tid == 0 && trace_buffer->traces != nullptr) {
@@ -431,7 +399,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
 
             float* ca_input = organism->batch_ca_states_pool;
-            float* ca_output = organism->buffers->batched_ca_output;
             float* perception_saved = ca_state->perception_saved;
             float* interaction_saved = ca_state->interaction_saved;
             float* pre_gelu_saved = ca_state->pre_gelu_saved;
@@ -442,6 +409,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads = arch.num_heads;
             int head_dim = arch.head_dim;
             int cells_per_grid = grid_size * grid_size;
+
+            int wave_ca_stride = batch_size * num_heads * cells_per_grid * channels;
+            float* ca_output = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
 
             // Total cells to process: batch × heads × grid²
             int total_cells = batch_size * num_heads * cells_per_grid;
@@ -554,7 +524,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         __syncthreads();
         if (s_error_flag) return;
 
-    // Flow Lenia: transport mass based on CA affinity gradients (ALL threads of ALL blocks)
+    // Flow Lenia: transport mass based on CA affinity gradients (per-entry with wave-indexed buffers)
     {
             int total_cells = arch.grid_size * arch.grid_size;
             int buffer_size = training_mode->batch_size * total_cells * arch.channels;
@@ -570,6 +540,16 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float flow_sharpness = entry->flow_sharpness;
             float flow_dt = entry->flow_resource_dt;
 
+            int wave_ca_stride = batch_size * num_heads * total_cells * channels;
+            int wave_affinity_stride = batch_size * total_cells;
+            int wave_flow_stride = batch_size * total_cells * 2;
+            int wave_reint_stride = batch_size * total_cells * channels;
+
+            float* wave_ca_output = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
+            float* wave_affinity = organism->buffers->batch_affinity_reduced + wave_position * wave_affinity_stride;
+            float* wave_flow = organism->buffers->batch_flow_field + wave_position * wave_flow_stride;
+            float* wave_reint = organism->buffers->batch_reintegration_buffer + wave_position * wave_reint_stride;
+
             // CA output layout: [batch × num_heads × grid² × channels]
             int total_affinity_work = batch_size * total_cells;
             for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
@@ -584,9 +564,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int idx = batch_idx * num_heads * total_cells * channels +
                               head * total_cells * channels +
                               cell_idx * channels + c;
-                    affinity += organism->buffers->batched_ca_output[idx];
+                    affinity += wave_ca_output[idx];
                 }
-                organism->buffers->batch_affinity_reduced[batch_idx * total_cells + cell_idx] = affinity;
+                wave_affinity[batch_idx * total_cells + cell_idx] = affinity;
             }
             __syncthreads();
 
@@ -597,11 +577,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int y = cell_idx / grid_size;
 
                 int batch_offset = batch_idx * total_cells;
-                float U_center = organism->buffers->batch_affinity_reduced[batch_offset + cell_idx];
+                float U_center = wave_affinity[batch_offset + cell_idx];
                 int x_E = min(x + 1, grid_size - 1);
                 int y_N = min(y + 1, grid_size - 1);
-                float U_E = organism->buffers->batch_affinity_reduced[batch_offset + y * grid_size + x_E];
-                float U_N = organism->buffers->batch_affinity_reduced[batch_offset + y_N * grid_size + x];
+                float U_E = wave_affinity[batch_offset + y * grid_size + x_E];
+                float U_N = wave_affinity[batch_offset + y_N * grid_size + x];
 
                 int conc_batch_offset = batch_idx * total_cells * channels;
                 float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
@@ -617,13 +597,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 );
 
                 int flow_idx = batch_idx * total_cells * 2 + cell_idx * 2;
-                organism->buffers->batch_flow_field[flow_idx + 0] = F.x;
-                organism->buffers->batch_flow_field[flow_idx + 1] = F.y;
+                wave_flow[flow_idx + 0] = F.x;
+                wave_flow[flow_idx + 1] = F.y;
             }
 
             // Clear reintegration buffer
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                organism->buffers->batch_reintegration_buffer[idx] = 0.0f;
+                wave_reint[idx] = 0.0f;
             }
             __syncthreads();
 
@@ -637,11 +617,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                 int batch_offset = batch_idx * total_cells;
                 int flow_idx = batch_offset * 2 + cell_idx * 2;
-                float Fx = organism->buffers->batch_flow_field[flow_idx + 0];
-                float Fy = organism->buffers->batch_flow_field[flow_idx + 1];
+                float Fx = wave_flow[flow_idx + 0];
+                float Fy = wave_flow[flow_idx + 1];
 
                 int conc_batch_offset = batch_idx * total_cells * channels;
-                float* batch_buffer = organism->buffers->batch_reintegration_buffer + conc_batch_offset;
+                float* batch_buffer = wave_reint + conc_batch_offset;
                 const float* batch_conc = organism->batch_ca_states_pool + conc_batch_offset;
 
                 for (int c = 0; c < channels; c++) {
@@ -658,7 +638,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // Phase 5: Copy transported mass back to concentration (all threads parallel)
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                organism->batch_ca_states_pool[idx] = organism->buffers->batch_reintegration_buffer[idx];
+                organism->batch_ca_states_pool[idx] = wave_reint[idx];
             }
             __syncthreads();
 
@@ -671,18 +651,20 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         __syncthreads();
 
         // ========== FORWARD PASS ==========
-        // Global operations: only entry_idx==0 block processes, ALL threads participate
+        // Per-entry operation: each entry processes with entry-indexed output buffers
         float* ca_output_grad = nullptr;
 
-        if (entry_idx == 0 && training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
-            float* features = organism->gradient_features_pool;
-            float* ca_out = organism->buffers->batched_ca_output;
-            float* pooling_weights = training_mode->classifier->pooling_weights;
+        if (training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
             int batch_size = training_mode->batch_size;
             int grid_size = arch.grid_size;
             int channels = arch.channels;
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
+
+            int wave_ca_stride = batch_size * num_heads_local * spatial_size * channels;
+            float* ca_out = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
+            float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
+            float* pooling_weights = training_mode->classifier->pooling_weights;
 
             // ========== SPATIAL_POOLING ==========
             // Total work: batch_size × num_features
@@ -719,18 +701,16 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 dims.derive_from_genome(entry->genome_hash, primary_genome);
                 int task_dim = dims.task_dim;
 
-                if (organism->diresa_task_weights->input_dim == num_features) {
-                    for (int b = 0; b < batch_size; b++) {
-                        diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], organism->diresa_task_weights);
-                    }
-                } else {
-                    printf("ERROR: diresa_task_weights->input_dim=%d != num_features=%d\n", organism->diresa_task_weights->input_dim, num_features);
+                DEVICE_FATAL_IF(organism->diresa_task_weights->input_dim != num_features,
+                    "hybrid_lifecycle: diresa_task_weights->input_dim mismatch with num_features");
+                for (int b = 0; b < batch_size; b++) {
+                    diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], organism->diresa_task_weights);
                 }
             }
             __syncthreads();
 
             // ========== CLASSIFICATION_HEAD ==========
-            float* logits = organism->gradient_logits_pool;
+            float* logits = organism->gradient_logits_pool + entry_idx * batch_size * num_classes;
             float* fc_weights = training_mode->classifier->fc_weights;
             float* fc_bias = training_mode->classifier->fc_bias;
 
@@ -747,14 +727,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     acc += feature_val * weight;
                 }
 
-                if (!isnan(acc) && !isinf(acc)) {
-                    logits[batch_idx * num_classes + class_idx] = acc;
-                }
+                DEVICE_FATAL_IF(isnan(acc) || isinf(acc), "hybrid_lifecycle: logit accumulator is NaN/Inf");
+                logits[batch_idx * num_classes + class_idx] = acc;
             }
             __syncthreads();
 
             // ========== ZERO_SCALAR ==========
-            float* loss_out = organism->gradient_loss_pool;
+            float* loss_out = &organism->gradient_loss_pool[entry_idx];
             if (tid == 0) {
                 *loss_out = 0.0f;
             }
@@ -762,7 +741,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             // ========== CROSS_ENTROPY_LOSS ==========
             // Process samples sequentially, each using warp 0 for reduction
-            float* logit_grads = organism->gradient_logit_grads_pool;
+            float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
             int* batch_labels = training_mode->batch_labels;
 
             // Each warp processes one sample at a time, iterate over all samples
@@ -813,6 +792,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             if (tid == 0) {
                 int correct = 0;
                 float avg_confidence = 0.0f;
+                int local_per_class_correct[NUM_CLASSES_MAX];
+                int local_per_class_total[NUM_CLASSES_MAX];
+                for (int c = 0; c < NUM_CLASSES_MAX; c++) {
+                    local_per_class_correct[c] = 0;
+                    local_per_class_total[c] = 0;
+                }
 
                 int grid_size = entry->grid_size;
 
@@ -846,6 +831,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                     bool is_correct = (pred_class == true_label);
                     if (is_correct) correct++;
+                    local_per_class_total[true_label]++;
+                    if (is_correct) local_per_class_correct[true_label]++;
 
                     // Tile batch samples within entry's exclusive spatial region
                     int tile_y = b / tiles_per_side;
@@ -883,31 +870,36 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 entry->task_accuracy = accuracy;
                 entry->avg_confidence = avg_confidence;
+                for (int c = 0; c < NUM_CLASSES_MAX; c++) {
+                    entry->per_class_correct[c] = local_per_class_correct[c];
+                    entry->per_class_total[c] = local_per_class_total[c];
+                }
             }
             __syncthreads();
         }
         __syncthreads();
 
         // ========== BACKWARD PASS ==========
-        if (entry_idx == 0 && training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
-
-            // Re-access variables for backward pass
-            float* features = organism->gradient_features_pool;
-            float* logit_grads = organism->gradient_logit_grads_pool;
-            float* fc_weights = training_mode->classifier->fc_weights;
-            float* fc_weights_grad = organism->fc_weights_grad;
-            float* fc_bias_grad = organism->fc_bias_grad;
-            float* features_grad = organism->features_grad;
-            float* pooling_weights = training_mode->classifier->pooling_weights;
-            float* pooling_weights_grad = organism->pooling_weights_grad;
-            float* ca_out = organism->buffers->batched_ca_output;
-            ca_output_grad = organism->buffers->ca_output_grad_buffer;
+        if (training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
 
             int batch_size = training_mode->batch_size;
             int grid_size = arch.grid_size;
             int channels = arch.channels;
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
+
+            int wave_ca_stride = batch_size * num_heads_local * spatial_size * channels;
+            float* ca_out = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
+            ca_output_grad = organism->buffers->ca_output_grad_buffer + wave_position * wave_ca_stride;
+
+            float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
+            float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
+            float* features_grad = organism->features_grad + entry_idx * batch_size * num_features;
+            float* fc_weights = training_mode->classifier->fc_weights;
+            float* fc_weights_grad = organism->fc_weights_grad;
+            float* fc_bias_grad = organism->fc_bias_grad;
+            float* pooling_weights = training_mode->classifier->pooling_weights;
+            float* pooling_weights_grad = organism->pooling_weights_grad;
 
             // ========== ZERO GRADIENT BUFFERS ==========
             int fc_weights_size = num_classes * num_features;
@@ -992,8 +984,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         }
 
         // ========== CA BACKWARD PASS ==========
-        // Global operation: only entry_idx==0 block processes, ALL threads participate
-        if (entry_idx == 0) {
+        // Per-entry operation with wave-indexed buffers
+        {
             // Record hardware execution trace for CA backward pass
             TraceBuffer* trace_buffer = &ca_state->trace;
             if (tid == 0 && trace_buffer->traces != nullptr) {
@@ -1003,14 +995,16 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
 
-            float* dL_dperception = organism->buffers->dL_dperception_buffer;
-            float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer;
+            int num_cells = arch.grid_size * arch.grid_size;
+            int total_samples = training_mode->batch_size * num_cells;
+            int wave_dL_stride = training_mode->batch_size * arch.num_heads * num_cells * arch.head_dim;
+
+            float* dL_dperception = organism->buffers->dL_dperception_buffer + wave_position * wave_dL_stride;
+            float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + wave_position * wave_dL_stride;
 
             {
 
             // Use preallocated workspace buffers for GEMM-based backward pass
-            int num_cells = arch.grid_size * arch.grid_size;
-            int total_samples = training_mode->batch_size * num_cells;
 
             half* ws_fp16_a = organism->buffers->backward_ws_fp16_a;
             half* ws_fp16_b = organism->buffers->backward_ws_fp16_b;
@@ -1459,7 +1453,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                                 sum += input_batch[input_idx];
                             }
                         }
-                        // Store in ws_im2col (reusing buffer, now [total_samples × channels])
+                        // Store in ws_im2col [total_samples × channels]
                         ws_im2col[out_row * arch.channels + c] = sum;
                     }
                 }
@@ -1616,18 +1610,41 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Backprop chemical field gradients to genome parameters
-            // Extract concentration gradients from channel 0 and call diffusion_reaction_backward
-            if (d_ca_input != nullptr && entry_idx == 0 && tid == 0) {
-                // Prepare concentration gradient buffer (channel 0 only)
+            if (d_ca_input != nullptr) {
                 int num_cells_local = arch.grid_size * arch.grid_size;
-                float* grad_concentration_buffer = organism->chemical_field->concentration;  // Temporary reuse
+                float* grad_conc = organism->buffers->grad_concentration_buffer;
 
-                // Note: Actual kernel launch would happen here
-                // This requires CDP or host synchronization, which is complex
-                // For now, mark as TODO: call diffusion_reaction_backward_kernel
-                // with d_ca_input channel 0 gradients to update genome gradients
-                // for diffusivity, reaction_rate, reaction_order, decay_rate slots
+                for (int cell = tid; cell < num_cells_local; cell += blockDim.x) {
+                    grad_conc[cell] = d_ca_input[cell * arch.channels];
+                }
+            }
+            __syncthreads();
+
+            if (d_ca_input != nullptr && tid == 0) {
+                dim3 diff_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
+                dim3 diff_block(16, 16);
+
+                float ctx_metabolic = entry->fitness;
+                float ctx_stress = entry->hunger;
+                float ctx_morphogen = organism->chemical_field->cached_mean;
+                float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
+                float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
+                float ctx_learning = training_mode->learning_rate;
+                float ctx_performance = entry->task_accuracy;
+
+                diffusion_reaction_backward_kernel<<<diff_grid, diff_block>>>(
+                    organism->buffers->grad_concentration_buffer,
+                    organism->chemical_field->concentration,
+                    organism->chemical_field->laplacian,
+                    entry->gradients,
+                    arch.grid_size,
+                    CHEMICAL_DIFFUSION_DT_MAX,
+                    primary_genome,
+                    entry->gradients,
+                    entry->genome_hash,
+                    ctx_metabolic, ctx_stress, ctx_morphogen,
+                    ctx_complexity, ctx_niche, ctx_learning, ctx_performance
+                );
             }
             __syncthreads();
 
@@ -1787,6 +1804,89 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }  // end CA backward pass
 
+        // ========== COMPUTE EFFECTIVE_RANK FROM GRADIENTS ==========
+        // Architecture line 688-689: gradient magnitudes → effective_rank
+        // Compute per-head gradient RMSE, then Renyi entropy to measure learning diversity
+        {
+            int num_heads = arch.num_heads;
+            int perception_per_head = arch.channels * arch.head_dim;
+            int interaction_per_head = arch.head_dim * arch.head_dim;
+            int value_per_head = arch.head_dim * arch.channels;
+            int params_per_head = perception_per_head + interaction_per_head + value_per_head;
+
+            float* grad_buf = ca_state->tape.grad_buffer;
+
+            // Compute per-head squared gradient sum using warp reduction
+            __shared__ float head_grad_sq[NUM_HEADS_MAX];
+            for (int h = 0; h < num_heads && h < NUM_HEADS_MAX; h++) {
+                float local_sq = 0.0f;
+                // Each head's gradients are spread across perception, interaction, value sections
+                int p_start = h * perception_per_head;
+                int i_start = num_heads * perception_per_head + h * interaction_per_head;
+                int v_start = num_heads * perception_per_head + num_heads * interaction_per_head + h * value_per_head;
+
+                for (int i = tid; i < perception_per_head; i += blockDim.x) {
+                    float g = grad_buf[p_start + i];
+                    local_sq += g * g;
+                }
+                for (int i = tid; i < interaction_per_head; i += blockDim.x) {
+                    float g = grad_buf[i_start + i];
+                    local_sq += g * g;
+                }
+                for (int i = tid; i < value_per_head; i += blockDim.x) {
+                    float g = grad_buf[v_start + i];
+                    local_sq += g * g;
+                }
+
+                // Block reduction
+                unsigned mask = __activemask();
+                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+                    local_sq += __shfl_down_sync(mask, local_sq, offset);
+                }
+                __shared__ float warp_sums_eff[32];
+                int lane = tid % warpSize;
+                int warp_id = tid / warpSize;
+                if (lane == 0) warp_sums_eff[warp_id] = local_sq;
+                __syncthreads();
+                if (tid < blockDim.x / warpSize) {
+                    local_sq = warp_sums_eff[tid];
+                    unsigned active = __activemask();
+                    for (int offset = (blockDim.x / warpSize) / 2; offset > 0; offset /= 2) {
+                        local_sq += __shfl_down_sync(active, local_sq, offset);
+                    }
+                }
+                if (tid == 0) {
+                    // RMSE for this head
+                    head_grad_sq[h] = sqrtf(local_sq / (float)params_per_head);
+                }
+                __syncthreads();
+            }
+
+            // Compute effective rank from gradient magnitude distribution (Renyi entropy)
+            if (tid == 0) {
+                float total_sq = 0.0f;
+                for (int h = 0; h < num_heads; h++) {
+                    total_sq += head_grad_sq[h] * head_grad_sq[h];
+                }
+
+                DEVICE_FATAL_IF(total_sq < 1e-12f, "effective_rank: zero gradient magnitude after backward pass - training catastrophically broken");
+
+                // Shannon entropy: H = -Σ p_i log(p_i) where p_i = g_i² / Σg_j²
+                float entropy = 0.0f;
+                for (int h = 0; h < num_heads; h++) {
+                    float g = head_grad_sq[h];
+                    float p = (g * g) / total_sq;
+                    if (p > 1e-12f) {
+                        entropy -= p * logf(p);
+                    }
+                }
+                // Effective rank = exp(entropy), clamped to [1, num_heads]
+                float eff_rank = expf(entropy);
+                entry->effective_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
+            }
+            __syncthreads();
+        }
+
         // ========== ADAM UPDATES ==========
         // Global operation: only entry_idx==0 block processes, ALL threads participate
         if (entry_idx == 0 && training_mode->batch_images != nullptr && training_mode->classifier != nullptr) {
@@ -1812,185 +1912,86 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float lr = training_mode->learning_rate;
             int timestep = training_mode->adam_timestep;
 
-            // Adam update for CA PERCEPTION weights (FP16) - thread loop
-            {
-                half* weights_fp16 = ca_state->perception_weights;
-                float* gradients = ca_state->tape.grad_buffer;
-                float* m = training_mode->adam_m_perception;
-                float* v = training_mode->adam_v_perception;
+            // CDP: Adam update for CA weights via canonical kernel
+            if (tid == 0) {
+                int ts = timestep + 1;
 
-                for (int idx = tid; idx < perception_params; idx += blockDim.x) {
-                    float weight = __half2float(weights_fp16[idx]);
-                    float g = gradients[idx];
+                // Perception weights
+                int blocks_p = (perception_params + 255) / 256;
+                adam_update_fp16_kernel<<<blocks_p, 256>>>(
+                    ca_state->perception_weights,
+                    ca_state->tape.grad_buffer,
+                    training_mode->adam_m,
+                    training_mode->adam_v,
+                    perception_params,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
+                // Interaction weights
+                int blocks_i = (interaction_params + 255) / 256;
+                adam_update_fp16_kernel<<<blocks_i, 256>>>(
+                    ca_state->interaction_weights,
+                    ca_state->tape.grad_buffer + perception_params,
+                    training_mode->adam_m + training_mode->perception_size,
+                    training_mode->adam_v + training_mode->perception_size,
+                    interaction_params,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
+                // Value weights
+                int blocks_v = (value_params + 255) / 256;
+                adam_update_fp16_kernel<<<blocks_v, 256>>>(
+                    ca_state->value_weights,
+                    ca_state->tape.grad_buffer + perception_params + interaction_params,
+                    training_mode->adam_m + training_mode->perception_size + training_mode->interaction_size,
+                    training_mode->adam_v + training_mode->perception_size + training_mode->interaction_size,
+                    value_params,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-                        float new_weight = weight - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights_fp16[idx] = __float2half(new_weight);
-                        }
-                    }
-                }
+                cudaDeviceSynchronize();
             }
             __syncthreads();
 
-            // Adam update for CA INTERACTION weights (FP16) - thread loop
-            {
-                half* weights_fp16 = ca_state->interaction_weights;
-                float* gradients = ca_state->tape.grad_buffer + perception_params;
-                float* m = training_mode->adam_m_interaction;
-                float* v = training_mode->adam_v_interaction;
-
-                for (int idx = tid; idx < interaction_params; idx += blockDim.x) {
-                    float weight = __half2float(weights_fp16[idx]);
-                    float g = gradients[idx];
-
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
-
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
-
-                        float new_weight = weight - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights_fp16[idx] = __float2half(new_weight);
-                        }
-                    }
-                }
-            }
-            __syncthreads();
-
-            // Adam update for CA VALUE weights (FP16) - thread loop
-            {
-                half* weights_fp16 = ca_state->value_weights;
-                float* gradients = ca_state->tape.grad_buffer + perception_params + interaction_params;
-                float* m = training_mode->adam_m_value;
-                float* v = training_mode->adam_v_value;
-
-                for (int idx = tid; idx < value_params; idx += blockDim.x) {
-                    float weight = __half2float(weights_fp16[idx]);
-                    float g = gradients[idx];
-
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
-
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
-
-                        float new_weight = weight - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights_fp16[idx] = __float2half(new_weight);
-                        }
-                    }
-                }
-            }
-            __syncthreads();
-
-            // Adam update for pooling weights (FP32) - thread loop
-            {
-                float* weights = training_mode->classifier->pooling_weights;
-                float* gradients = organism->pooling_weights_grad;
-                float* m = organism->adam_m_pooling;
-                float* v = organism->adam_v_pooling;
-                int num_params = arch.channels;
-
-                for (int idx = tid; idx < num_params; idx += blockDim.x) {
-                    float g = gradients[idx];
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
-
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
-
-                        float new_weight = weights[idx] - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights[idx] = new_weight;
-                        }
-                    }
-                }
-            }
-            __syncthreads();
-
-            // Adam update for FC weights (FP32) - thread loop
-            {
+            // CDP: Adam update for classifier weights (FP32) via canonical kernel
+            if (tid == 0) {
+                int ts = timestep + 1;
                 int fc_weights_size = num_classes * num_features;
-                float* weights = training_mode->classifier->fc_weights;
-                float* gradients = organism->fc_weights_grad;
-                float* m = organism->adam_m_fc_weights;
-                float* v = organism->adam_v_fc_weights;
 
-                for (int idx = tid; idx < fc_weights_size; idx += blockDim.x) {
-                    float g = gradients[idx];
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
+                // Pooling weights
+                int blocks_pool = (arch.channels + 255) / 256;
+                adam_update_kernel<<<blocks_pool, 256>>>(
+                    training_mode->classifier->pooling_weights,
+                    organism->pooling_weights_grad,
+                    organism->adam_m_pooling,
+                    organism->adam_v_pooling,
+                    arch.channels,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
+                // FC weights
+                int blocks_fc = (fc_weights_size + 255) / 256;
+                adam_update_kernel<<<blocks_fc, 256>>>(
+                    training_mode->classifier->fc_weights,
+                    organism->fc_weights_grad,
+                    organism->adam_m_fc_weights,
+                    organism->adam_v_fc_weights,
+                    fc_weights_size,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-                        float new_weight = weights[idx] - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights[idx] = new_weight;
-                        }
-                    }
-                }
-            }
-            __syncthreads();
+                // FC bias
+                int blocks_bias = (num_classes + 255) / 256;
+                adam_update_kernel<<<blocks_bias, 256>>>(
+                    training_mode->classifier->fc_bias,
+                    organism->fc_bias_grad,
+                    organism->adam_m_fc_bias,
+                    organism->adam_v_fc_bias,
+                    num_classes,
+                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
+                );
 
-            // Adam update for FC bias (FP32) - thread loop
-            {
-                float* weights = training_mode->classifier->fc_bias;
-                float* gradients = organism->fc_bias_grad;
-                float* m = organism->adam_m_fc_bias;
-                float* v = organism->adam_v_fc_bias;
-
-                for (int idx = tid; idx < num_classes; idx += blockDim.x) {
-                    float g = gradients[idx];
-                    if (!isnan(g) && !isinf(g)) {
-                        float g_clipped = fmaxf(-gradient_clip_norm, fminf(gradient_clip_norm, g));
-                        float m_new = adam_beta1 * m[idx] + (1.0f - adam_beta1) * g_clipped;
-                        float v_new = adam_beta2 * v[idx] + (1.0f - adam_beta2) * g_clipped * g_clipped;
-                        m[idx] = m_new;
-                        v[idx] = v_new;
-
-                        float m_hat = m_new / (1.0f - powf(adam_beta1, (float)(timestep + 1)));
-                        float v_hat = v_new / (1.0f - powf(adam_beta2, (float)(timestep + 1)));
-                        float update = lr * m_hat / (sqrtf(v_hat) + adam_epsilon);
-
-                        float new_weight = weights[idx] - update;
-                        if (!isnan(new_weight) && !isinf(new_weight)) {
-                            weights[idx] = new_weight;
-                        }
-                    }
-                }
+                cudaDeviceSynchronize();
             }
             __syncthreads();
 
@@ -2000,36 +2001,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Extract head gradient magnitudes - thread loop
-            float* gradient_magnitudes = organism->gradient_magnitudes_pool;
-            {
-                ADTape* tape = &ca_state->tape;
-                for (int head = tid; head < arch.num_heads; head += blockDim.x) {
-                    int offset = param_map->head_param_offsets[head];
-                    int count = param_map->head_param_counts[head];
-                    float sum = 0.0f;
-                    for (int i = 0; i < count; i++) {
-                        float g = tape->grad_buffer[offset + i];
-                        sum += g * g;
-                    }
-                    gradient_magnitudes[head] = sqrtf(sum / (float)count);
-                }
-            }
-            __syncthreads();
-
-            // Compute gradient fitness - thread loop
-            {
-                for (int idx = tid; idx < POOL_CAPACITY_MAX; idx += blockDim.x) {
-                    float grad_mag = gradient_magnitudes[idx % arch.num_heads];
-                    float coherence = organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + idx];
-                    float fitness = organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + idx];
-
-                    float grad_fitness = training_mode->gradient_fitness_weight * grad_mag;
-                    float coh_fitness = training_mode->coherence_fitness_weight * coherence;
-                    organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + idx] = fitness + grad_fitness + coh_fitness;
-                }
-            }
-            __syncthreads();
         }  // end if (entry_idx == 0 && batch_images != nullptr)
     }  // end if (training_mode->use_gradients)
 
@@ -2039,10 +2010,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
         GPUElite* archive = organism->archive;
         int archive_size_val = organism->archive_size;
-
-        float current_task_accuracy = organism->telemetry->task_performance.accuracy;
-        float train_acc = organism->telemetry->task_performance.train_accuracy;
-        float test_acc = organism->telemetry->task_performance.test_accuracy;
 
         // Phase 1: Per-entry independent work (genome reconstruction, metrics, hardware efficiency)
         // Each thread handles multiple entries via grid-stride loop
@@ -2068,13 +2035,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 organism->diresa_genome_weights
             );
 
-            // Task accuracy and generalization gap
-            if (!isnan(current_task_accuracy)) {
-                ent->task_accuracy = current_task_accuracy;
-            }
-            ent->generalization_gap = fabsf(train_acc - test_acc);
-
-            // History updates
+            // History updates (task_accuracy computed per-entry during training, not copied from global telemetry)
             organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy;
             organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence;
         }
@@ -2141,6 +2102,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 if (!pool->alive_flags[eid]) continue;
 
                 float prev_task_accuracy = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
+                float current_task_accuracy = pool->entries[eid].task_accuracy;
                 float learning_success = current_task_accuracy - prev_task_accuracy;
 
                 if (is_meaningful(learning_success, 1.0f)) {
@@ -2159,295 +2121,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
         }
         __syncthreads();
+    }
 
-        // ========== NEURAL CA UPDATE ==========
-        // Only when NOT using gradients (non-training path)
-        if (!training_mode->use_gradients) {
-            float* nca_workspace_genomes = organism->buffers->organism_workspace_genomes;
-            int warp_id = tid / WARP_SIZE;
-            int lane_id = tid % WARP_SIZE;
-            int num_warps = blockDim.x / WARP_SIZE;
-
-            // Process each alive entry sequentially (warp cooperates on WMMA for each)
-            for (int eid = 0; eid < pool->capacity; eid++) {
-                if (!pool->alive_flags[eid]) continue;
-
-                PoolEntry* ent = &pool->entries[eid];
-                MultiHeadCAState* ent_ca_state = ent->ca_state;
-                ArchitectureParams ent_arch = get_arch_from_pool(pool, eid);
-
-                int grid_size = ent->grid_size;
-                int num_cells = grid_size * grid_size;
-                int channels = ent_arch.channels;
-                int num_heads = ent_arch.num_heads;
-                int head_dim = ent_arch.head_dim;
-
-                if (channels <= 0 || num_heads <= 0 || head_dim <= 0) continue;
-
-                // Convert CA concentration to FP16 workspace (thread loop)
-                {
-                    int total = num_cells * channels;
-                    for (int idx = tid; idx < total; idx += blockDim.x) {
-                        ent_ca_state->fp16_workspace[idx] = __float2half(ent_ca_state->ca_concentration[idx]);
-                    }
-                }
-                __syncthreads();
-
-                half* fp16_workspace = ent_ca_state->fp16_workspace;
-                float* fp32_workspace = ent_ca_state->fp32_workspace;
-                half* perception_weights = ent_ca_state->perception_weights;
-                half* interaction_weights = ent_ca_state->interaction_weights;
-                half* value_weights = ent_ca_state->value_weights;
-                float* ca_output_fp32 = ent_ca_state->ca_output;
-
-                // Multi-head CA: Perception → ReLU → Interaction → GELU → Value
-                for (int head = 0; head < num_heads; head++) {
-                    int weight_offset = head * channels * head_dim;
-                    int head_size = num_cells * head_dim;
-
-                    // Perception GEMM: [num_cells × channels] @ [channels × head_dim] → [num_cells × head_dim]
-                    // Warp-level WMMA tile iteration
-                    {
-                        int tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int total_tiles = tiles_M * tiles_N;
-
-                        for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                            int tile_m = tile_idx / tiles_N;
-                            int tile_n = tile_idx % tiles_N;
-                            int tile_row = tile_m * WMMA_TILE_DIM;
-                            int tile_col = tile_n * WMMA_TILE_DIM;
-
-                            if (tile_row < num_cells && tile_col < head_dim) {
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                                nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                                for (int k = 0; k < channels; k += WMMA_TILE_DIM) {
-                                    if (k + WMMA_TILE_DIM <= channels) {
-                                        nvcuda::wmma::load_matrix_sync(a_frag, fp16_workspace + tile_row * channels + k, channels);
-                                        nvcuda::wmma::load_matrix_sync(b_frag, perception_weights + weight_offset + k * head_dim + tile_col, head_dim);
-                                        nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                                    }
-                                }
-                                int output_offset = head * num_cells * head_dim;
-                                nvcuda::wmma::store_matrix_sync(fp32_workspace + output_offset + tile_row * head_dim + tile_col, c_frag, head_dim, nvcuda::wmma::mem_row_major);
-                            }
-                        }
-                    }
-                    __syncthreads();
-
-                    // ReLU activation (thread loop)
-                    {
-                        float* head_data = fp32_workspace + head * num_cells * head_dim;
-                        for (int idx = tid; idx < head_size; idx += blockDim.x) {
-                            head_data[idx] = fmaxf(0.0f, head_data[idx]);
-                        }
-                    }
-                    __syncthreads();
-
-                    // Convert perception output to FP16 for interaction (thread loop)
-                    half* interaction_input = fp16_workspace + num_cells * channels;
-                    {
-                        float* head_data = fp32_workspace + head * num_cells * head_dim;
-                        for (int idx = tid; idx < head_size; idx += blockDim.x) {
-                            interaction_input[idx] = __float2half(head_data[idx]);
-                        }
-                    }
-                    __syncthreads();
-
-                    // Interaction GEMM: [num_cells × head_dim] @ [head_dim × head_dim] → [num_cells × head_dim]
-                    float* interaction_output = fp32_workspace + num_heads * num_cells * head_dim;
-                    {
-                        int tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int total_tiles = tiles_M * tiles_N;
-
-                        for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                            int tile_m = tile_idx / tiles_N;
-                            int tile_n = tile_idx % tiles_N;
-                            int tile_row = tile_m * WMMA_TILE_DIM;
-                            int tile_col = tile_n * WMMA_TILE_DIM;
-
-                            if (tile_row < num_cells && tile_col < head_dim) {
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> b_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                                nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                                for (int k = 0; k < head_dim; k += WMMA_TILE_DIM) {
-                                    if (k + WMMA_TILE_DIM <= head_dim) {
-                                        nvcuda::wmma::load_matrix_sync(a_frag, interaction_input + tile_row * head_dim + k, head_dim);
-                                        nvcuda::wmma::load_matrix_sync(b_frag, interaction_weights + head * head_dim * head_dim + k * head_dim + tile_col, head_dim);
-                                        nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                                    }
-                                }
-                                nvcuda::wmma::store_matrix_sync(interaction_output + tile_row * head_dim + tile_col, c_frag, head_dim, nvcuda::wmma::mem_row_major);
-                            }
-                        }
-                    }
-                    __syncthreads();
-
-                    // GELU activation (thread loop)
-                    {
-                        for (int idx = tid; idx < head_size; idx += blockDim.x) {
-                            float x = interaction_output[idx];
-                            interaction_output[idx] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
-                        }
-                    }
-                    __syncthreads();
-
-                    // Convert interaction output to FP16 for value projection (thread loop)
-                    half* value_input = interaction_input;
-                    {
-                        for (int idx = tid; idx < head_size; idx += blockDim.x) {
-                            value_input[idx] = __float2half(interaction_output[idx]);
-                        }
-                    }
-                    __syncthreads();
-
-                    // Value projection GEMM: [num_cells × head_dim] @ [head_dim × channels] → [num_cells × channels]
-                    float* head_output = ca_output_fp32 + head * num_cells * channels;
-                    {
-                        int tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int tiles_N = (channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                        int total_tiles = tiles_M * tiles_N;
-
-                        for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                            int tile_m = tile_idx / tiles_N;
-                            int tile_n = tile_idx % tiles_N;
-                            int tile_row = tile_m * WMMA_TILE_DIM;
-                            int tile_col = tile_n * WMMA_TILE_DIM;
-
-                            if (tile_row < num_cells && tile_col < channels) {
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> b_frag;
-                                nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                                nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                                for (int k = 0; k < head_dim; k += WMMA_TILE_DIM) {
-                                    if (k + WMMA_TILE_DIM <= head_dim) {
-                                        nvcuda::wmma::load_matrix_sync(a_frag, value_input + tile_row * head_dim + k, head_dim);
-                                        nvcuda::wmma::load_matrix_sync(b_frag, value_weights + head * head_dim * channels + k * channels + tile_col, channels);
-                                        nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                                    }
-                                }
-                                nvcuda::wmma::store_matrix_sync(head_output + tile_row * channels + tile_col, c_frag, channels, nvcuda::wmma::mem_row_major);
-                            }
-                        }
-                    }
-                    __syncthreads();
-                }  // end head loop
-
-                // Reduce affinity across heads for each cell
-                {
-                    int total_elements = num_heads * head_dim;
-                    for (int cell_idx = 0; cell_idx < num_cells; cell_idx++) {
-                        float affinity = 0.0f;
-                        for (int i = tid; i < total_elements; i += blockDim.x) {
-                            int h = i / head_dim;
-                            int d = i % head_dim;
-                            int idx = h * num_cells * head_dim + cell_idx * head_dim + d;
-                            affinity += fp32_workspace[idx];
-                        }
-                        // Warp reduction
-                        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-                            affinity += __shfl_down_sync(0xffffffff, affinity, offset);
-                        }
-                        if (lane_id == 0) {
-                            atomicAdd(&ent_ca_state->affinity_reduced[cell_idx], affinity);
-                        }
-                    }
-                }
-                __syncthreads();
-
-                // Compute flow field from affinity and concentration
-                {
-                    float* affinity = ent_ca_state->affinity_reduced;
-                    float* concentration = ent_ca_state->ca_concentration;
-                    float* flow_field = ent_ca_state->flow_field;
-
-                    for (int cell_idx = tid; cell_idx < num_cells; cell_idx += blockDim.x) {
-                        int x = cell_idx % grid_size;
-                        int y = cell_idx / grid_size;
-
-                        float U_center = affinity[cell_idx];
-                        int x_E = min(x + 1, grid_size - 1);
-                        int y_N = min(y + 1, grid_size - 1);
-                        float U_E = affinity[y * grid_size + x_E];
-                        float U_N = affinity[y_N * grid_size + x];
-
-                        float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
-                        for (int c = 0; c < channels; c++) {
-                            A_sum_center += concentration[cell_idx * channels + c];
-                            A_sum_E += concentration[(y * grid_size + x_E) * channels + c];
-                            A_sum_N += concentration[(y_N * grid_size + x) * channels + c];
-                        }
-
-                        float2 F = FlowLeniaOps::compute_flow_differentiable(
-                            U_center, U_E, U_N, A_sum_center, A_sum_E, A_sum_N,
-                            ent->flow_beta_A, ent->flow_n,
-                            ent->flow_alpha_min, ent->flow_alpha_max, ent->flow_sharpness
-                        );
-
-                        flow_field[cell_idx * 2 + 0] = F.x;
-                        flow_field[cell_idx * 2 + 1] = F.y;
-                    }
-                }
-                __syncthreads();
-
-                // Clear reintegration buffer
-                {
-                    int buffer_size = num_cells * channels;
-                    float* reint_buf = ent_ca_state->reintegration_buffer;
-                    for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                        reint_buf[idx] = 0.0f;
-                    }
-                }
-                __syncthreads();
-
-                // Redistribute mass via flow field transport
-                {
-                    float* flow_field = ent_ca_state->flow_field;
-                    float* concentration = ent_ca_state->ca_concentration;
-                    float* buffer = ent_ca_state->reintegration_buffer;
-                    float dt = ent->flow_resource_dt;
-
-                    for (int source_idx = 0; source_idx < num_cells; source_idx++) {
-                        int source_x = source_idx % grid_size;
-                        int source_y = source_idx / grid_size;
-                        float Fx = flow_field[source_idx * 2 + 0];
-                        float Fy = flow_field[source_idx * 2 + 1];
-
-                        for (int c = tid; c < channels; c += blockDim.x) {
-                            float source_mass = concentration[source_idx * channels + c];
-                            FlowLeniaOps::bilinear_transport_forward(
-                                source_mass, (float)source_x, (float)source_y,
-                                Fx, Fy, dt, grid_size, buffer, c, channels
-                            );
-                        }
-                    }
-                }
-                __syncthreads();
-
-                // Copy reintegration buffer back to concentration
-                {
-                    int buffer_size = num_cells * channels;
-                    float* conc = ent_ca_state->ca_concentration;
-                    float* reint_buf = ent_ca_state->reintegration_buffer;
-                    for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                        conc[idx] = reint_buf[idx];
-                    }
-                }
-                __syncthreads();
-
-            }  // end entry loop
-        }  // end if (!use_gradients)
-    }  // end if (entry_idx == 0)
-
-    // PER-ENTRY operations - each block handles its own entry in parallel (thread loops)
-    // REMOVED: spam prints at 2178/2180 - all 256 threads were printing, causing massive slowdown
     if (training_mode->use_gradients) {
 
         // update_field_from_ca - thread loop
@@ -2485,50 +2160,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         if (tid == 0) {
             float* temp_latent = primary_parent_temp;
             diresa_encode(primary_genome, temp_latent, &organism->diresa_genome_weights[0]);
-        }
-        __syncthreads();
-
-        // compute_effective_rank_from_latent - thread loop with block reduction
-        {
-            float* latent_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
-
-            // Compute mean via block reduction
-            float local_sum = 0.0f;
-            for (int i = tid; i < GENOME_LATENT_DIM_MAX; i += blockDim.x) {
-                local_sum += latent_genome[i];
-            }
-            sdata[tid] = local_sum;
-            __syncthreads();
-
-            for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-                if (tid < s) {
-                    sdata[tid] += sdata[tid + s];
-                }
-                __syncthreads();
-            }
-            float mean = sdata[0] / (float)GENOME_LATENT_DIM_MAX;
-            __syncthreads();
-
-            // Compute variance via block reduction
-            float local_var = 0.0f;
-            for (int i = tid; i < GENOME_LATENT_DIM_MAX; i += blockDim.x) {
-                float diff = latent_genome[i] - mean;
-                local_var += diff * diff;
-            }
-            sdata[tid] = local_var;
-            __syncthreads();
-
-            for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-                if (tid < s) {
-                    sdata[tid] += sdata[tid + s];
-                }
-                __syncthreads();
-            }
-            float variance = sdata[0] / (float)GENOME_LATENT_DIM_MAX;
-
-            if (tid == 0 && variance >= 0.0f) {
-                organism->effective_rank_history[entry_idx] = sqrtf(variance) * (float)GENOME_LATENT_DIM_MAX;
-            }
         }
         __syncthreads();
     }
@@ -2658,154 +2289,64 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         __syncthreads();
     }
 
-    // Memory update - thread loops
-    if (entry_idx == 0) {
-        TemporalTube* tubes = organism->chemical_field->history;
+    // === SYNC BATCH CA → ENTRY CA STATE (closes training→archive loop) ===
+    // Training operates on batch buffers. Archive/fitness/telemetry read entry state.
+    // Without this copy, the eight loops are severed - archive sees zeros, fitness meaningless.
+    if (entry_idx == 0 && organism->batch_ca_states_pool) {
+        int grid_size_sync = arch.grid_size;
+        int channels_sync = arch.channels;
+        int spatial = grid_size_sync * grid_size_sync;
+        int copy_size = spatial * channels_sync;
+        int pool_cap = organism->pool->capacity;
+        int batch_sz = training_mode->batch_size;
 
-        // Skip if no tubes or empty
-        if (tubes != nullptr && tubes->count > 0) {
-            uint64_t mem_genome_hash = entry->genome_hash;
-            float ctx_metabolic = entry->fitness;
-            float ctx_stress = entry->hunger;
-            float ctx_morphogen = local_ca_mean;
-            float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
-            float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
-            float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
-            float ctx_performance = organism->telemetry->task_performance.accuracy;
-
-            // Derive genome parameters
-            int decay_threshold_slot = derive_param_slot(mem_genome_hash, "memory_decay_threshold");
-            int flow_dt_slot = derive_param_slot(mem_genome_hash, "memory_flow_lenia_dt");
-
-            float decay_threshold = genome_to_param(
-                primary_genome, entry->gradients, decay_threshold_slot,
-                ctx_metabolic, ctx_stress, ctx_morphogen,
-                ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-                DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
-            );
-
-            float flow_lenia_dt = genome_to_param(
-                primary_genome, entry->gradients, flow_dt_slot,
-                ctx_metabolic, ctx_stress, ctx_morphogen,
-                ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-                FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
-            );
-
-            int tube_count = tubes->count;
-
-            // apply_decay - thread loop
-            {
-                for (int idx = tid; idx < tube_count; idx += blockDim.x) {
-                    int entry_idx_tube = (tubes->head - tube_count + idx + tubes->capacity) % tubes->capacity;
-                    MemoryEntry* mem_entry = &tubes->entries[entry_idx_tube];
-
-                    float age = tubes->global_time - mem_entry->timestamp;
-                    mem_entry->decay_factor = expf(-age * tubes->decay_rate);
-                    mem_entry->decay_factor *= (1.0f + mem_entry->importance * 0.5f);
-                }
-                if (tid == 0) {
-                    tubes->global_time += flow_lenia_dt;
-                }
-            }
-            __syncthreads();
-
-            // prune_memories - parallel mark and parallel stream compaction
-            {
-                __shared__ MemoryEntry compact_buffer[BLOCK_SIZE];
-                __shared__ int total_kept;
-
-                // Phase 1: Mark entries and compute keep predicate
-                int keep = 0;
-                int read_idx = -1;
-                if (tid < tube_count) {
-                    read_idx = (tubes->head - tube_count + tid + tubes->capacity) % tubes->capacity;
-                    MemoryEntry* mem_entry = &tubes->entries[read_idx];
-                    if (mem_entry->decay_factor < decay_threshold) {
-                        mem_entry->size = 0;
-                    }
-                    keep = (mem_entry->size > 0) ? 1 : 0;
-                }
-                __syncthreads();
-
-                // Phase 2: Parallel prefix sum for write indices
-                int write_idx = BlockScan<BLOCK_SIZE>::compact_index(keep, total_kept);
-
-                // Phase 3: Parallel gather to shared buffer
-                if (write_idx >= 0 && read_idx >= 0) {
-                    compact_buffer[write_idx] = tubes->entries[read_idx];
-                }
-                __syncthreads();
-
-                // Phase 4: Parallel scatter back to tube
-                if (tid < total_kept) {
-                    tubes->entries[tid] = compact_buffer[tid];
-                }
-                if (tid == 0) {
-                    tubes->count = total_kept;
-                    tubes->head = total_kept % tubes->capacity;
-                }
-            }
-            __syncthreads();
-        }
-        // === SYNC BATCH CA → ENTRY CA STATE (closes training→archive loop) ===
-        // Training operates on batch buffers. Archive/fitness/telemetry read entry state.
-        // Without this copy, the eight loops are severed - archive sees zeros, fitness meaningless.
-        if (entry_idx == 0 && organism->batch_ca_states_pool) {
-            int grid_size_sync = arch.grid_size;
-            int channels_sync = arch.channels;
-            int spatial = grid_size_sync * grid_size_sync;
-            int copy_size = spatial * channels_sync;
-            int pool_cap = organism->pool->capacity;
-            int batch_sz = training_mode->batch_size;
-
-            // Copy batch samples back to corresponding entry CA states
-            // This connects: training CA output → entry state → archive insertion → fitness
-            for (int e = 0; e < pool_cap && e < batch_sz; e++) {
-                PoolEntry* ent = &organism->pool->entries[e];
-                if (ent->alive && ent->ca_state && ent->ca_state->ca_concentration) {
-                    int src_offset = e * copy_size;
-                    for (int idx = tid; idx < copy_size; idx += blockDim.x) {
-                        ent->ca_state->ca_concentration[idx] = organism->batch_ca_states_pool[src_offset + idx];
-                    }
+        // Copy batch samples back to corresponding entry CA states
+        // This connects: training CA output → entry state → archive insertion → fitness
+        for (int e = 0; e < pool_cap && e < batch_sz; e++) {
+            PoolEntry* ent = &organism->pool->entries[e];
+            if (ent->alive && ent->ca_state && ent->ca_state->ca_concentration) {
+                int src_offset = e * copy_size;
+                for (int idx = tid; idx < copy_size; idx += blockDim.x) {
+                    ent->ca_state->ca_concentration[idx] = organism->batch_ca_states_pool[src_offset + idx];
                 }
             }
         }
-        __syncthreads();
+    }
+    __syncthreads();
 
-        // === POPULATE AUDIT BUFFER ===
-        // Signal host with comprehensive telemetry from all 47+ system components
-        if (tid == 0 && audit != nullptr && training_mode->batch_images != nullptr) {
-            run_telemetry_probes(organism, generation);
-            float* logits = organism->gradient_logits_pool;
-            int* labels = training_mode->batch_labels;
-            float* batch_images = training_mode->batch_images;
-            int batch_size = training_mode->batch_size;
-            int num_classes = organism->current_dataset->descriptor->num_classes;
-            float* ca_concentration = ca_state->ca_concentration;  // Now contains actual training CA
-            int grid_size = entry->grid_size;
-            float train_acc = organism->telemetry->task_performance.train_accuracy;
-            float test_acc = organism->telemetry->task_performance.test_accuracy;
+    // === POPULATE AUDIT BUFFER ===
+    // Signal host with comprehensive telemetry from all 47+ system components
+    if (tid == 0 && audit != nullptr && training_mode->batch_images != nullptr) {
+        run_telemetry_probes(organism, generation);
+        float* logits = organism->gradient_logits_pool;
+        int* labels = training_mode->batch_labels;
+        float* batch_images = training_mode->batch_images;
+        int batch_size = training_mode->batch_size;
+        int num_classes = organism->current_dataset->descriptor->num_classes;
+        float* ca_concentration = ca_state->ca_concentration;
+        int grid_size = entry->grid_size;
+        float train_acc = organism->telemetry->task_performance.train_accuracy;
+        float test_acc = organism->telemetry->task_performance.test_accuracy;
 
-            populate_audit_buffer(
-                audit,
-                generation,
-                logits,
-                labels,
-                batch_images,
-                batch_size,
-                num_classes,
-                ca_concentration,
-                grid_size,
-                train_acc,
-                test_acc,
-                organism->telemetry,
-                organism->pool,
-                organism->chemical_field,
-                ca_state,
-                organism->hardware_geom
-            );
-        }
-    }  // end if (entry_idx == 0)
+        populate_audit_buffer(
+            audit,
+            generation,
+            logits,
+            labels,
+            batch_images,
+            batch_size,
+            num_classes,
+            ca_concentration,
+            grid_size,
+            train_acc,
+            test_acc,
+            organism->telemetry,
+            organism->pool,
+            organism->chemical_field,
+            ca_state,
+            organism->hardware_geom
+        );
+    }
 }
 
 

@@ -362,9 +362,6 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             grad_mag += grad * grad;
         }
         local_state.gradient_history[tid][0] = sqrtf(grad_mag / 100.0f);
-    } else {
-        local_state.local_fitness[tid] = 0.0f;
-        local_state.local_coherence[tid] = 0.0f;
     }
     __syncthreads();
 
@@ -409,7 +406,7 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     __shared__ int block_active_count;
 
     int threads_in_block = min((int)blockDim.x, pool->alive_indices_count - block_id * blockDim.x);
-    if (threads_in_block < 0) threads_in_block = 0;
+    DEVICE_FATAL_IF(threads_in_block <= 0, "hierarchical_lifecycle_kernel: block has no valid threads");
 
     float total_fitness = BlockReduce<BLOCK_SIZE>::sum(my_fitness);
     float total_coherence = BlockReduce<BLOCK_SIZE>::sum(my_coherence);

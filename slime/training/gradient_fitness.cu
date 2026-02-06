@@ -9,6 +9,9 @@
 
 namespace cg = cooperative_groups;
 
+// Extract per-head gradient RMSE from autodiff tape
+// Architecture line 688: "extract_head_gradient_magnitudes_kernel (per-head ∂L/∂W norms)"
+// Launched with <<<num_heads, blockDim>>> - one block per head
 __global__ void extract_head_gradient_magnitudes_kernel(
     ADTape* __restrict__ tape,
     int* __restrict__ param_start_indices,
@@ -24,25 +27,23 @@ __global__ void extract_head_gradient_magnitudes_kernel(
     DEVICE_FATAL_IF(num_heads <= 0, "extract_head_gradient_magnitudes: num_heads must be positive");
 
     int head_id = blockIdx.x;
-
     if (head_id >= num_heads) return;
 
     int start_idx = param_start_indices[head_id];
     int count = param_counts[head_id];
 
     DEVICE_FATAL_IF(start_idx < 0, "extract_head_gradient_magnitudes: negative start_idx");
-    DEVICE_FATAL_IF(count < 0, "extract_head_gradient_magnitudes: negative count");
+    DEVICE_FATAL_IF(count <= 0, "extract_head_gradient_magnitudes: non-positive count");
     DEVICE_FATAL_IF(start_idx + count > tape->value_capacity, "extract_head_gradient_magnitudes: param range exceeds tape capacity");
 
     float local_sum = 0.0f;
-
     for (int i = threadIdx.x; i < count; i += blockDim.x) {
-        int param_idx = start_idx + i;
-        float grad = tape->grad_buffer[param_idx];
+        float grad = tape->grad_buffer[start_idx + i];
         DEVICE_FATAL_IF(isnan(grad), "extract_head_gradient_magnitudes: gradient is NaN");
         local_sum += grad * grad;
     }
 
+    // Warp reduction
     unsigned mask = __activemask();
     #pragma unroll
     for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
@@ -50,82 +51,166 @@ __global__ void extract_head_gradient_magnitudes_kernel(
     }
 
     if (threadIdx.x == 0) {
-        gradient_magnitudes[head_id] = sqrtf(local_sum);
+        // RMSE: sqrt(sum_of_squares / count) for scale-invariant magnitude
+        gradient_magnitudes[head_id] = sqrtf(local_sum / (float)count);
     }
 }
 
-__global__ void compute_gradient_fitness_kernel(
-    float* __restrict__ gradient_magnitudes,
-    float* __restrict__ coherence_values,
-    float* __restrict__ fitness_out,
+// Compute effective rank from gradient magnitude distribution via Rényi entropy
+// Architecture line 434: "effective_rank: exp(Rényi_entropy(singular_values))"
+// Architecture line 689: "compute_effective_rank_kernel (gradient magnitudes → effective_rank)"
+//
+// Rényi entropy H_q = (1/(1-q)) × log(Σ p_i^q) where p_i = g_i² / Σg_j²
+// Effective rank = exp(H_q)
+// For q→1, this becomes Shannon entropy: H = -Σ p_i log(p_i), exp(H) = effective rank
+//
+// This measures how evenly distributed learning is across heads:
+// - All heads equal gradient: effective_rank = num_heads (max diversity)
+// - One head dominates: effective_rank → 1 (collapsed)
+__global__ void compute_effective_rank_from_gradients_kernel(
+    float* __restrict__ gradient_magnitudes,  // [num_heads] per-head RMSE
+    float* __restrict__ effective_rank_out,   // [1] scalar output
     int num_heads,
-    float gradient_weight,
-    float coherence_weight
+    float renyi_order_q                       // genome-derived, typically 1.0 for Shannon
 ) {
-    DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "compute_gradient_fitness: gradient_magnitudes is null");
-    DEVICE_FATAL_IF(coherence_values == nullptr, "compute_gradient_fitness: coherence_values is null");
-    DEVICE_FATAL_IF(fitness_out == nullptr, "compute_gradient_fitness: fitness_out is null");
-    DEVICE_FATAL_IF(num_heads <= 0, "compute_gradient_fitness: num_heads must be positive");
+    DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "compute_effective_rank: gradient_magnitudes is null");
+    DEVICE_FATAL_IF(effective_rank_out == nullptr, "compute_effective_rank: effective_rank_out is null");
+    DEVICE_FATAL_IF(num_heads <= 0, "compute_effective_rank: num_heads must be positive");
 
-    int head_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
 
-    if (head_id >= num_heads) return;
-
-    float grad_mag = gradient_magnitudes[head_id];
-    float coherence = coherence_values[head_id];
-    DEVICE_FATAL_IF(isnan(grad_mag), "compute_gradient_fitness: gradient_magnitude is NaN");
-    DEVICE_FATAL_IF(isnan(coherence), "compute_gradient_fitness: coherence is NaN");
-
-    __shared__ float mean_grad;
-    __shared__ float std_grad;
-
-    if (threadIdx.x == 0) {
-        float sum = 0.0f;
-        for (int i = 0; i < num_heads; i++) {
-            sum += gradient_magnitudes[i];
-        }
-        mean_grad = sum / num_heads;
-
-        float var = 0.0f;
-        for (int i = 0; i < num_heads; i++) {
-            float diff = gradient_magnitudes[i] - mean_grad;
-            var += diff * diff;
-        }
-        std_grad = sqrtf(var / num_heads);
+    // Step 1: Compute total squared magnitude for normalization
+    __shared__ float s_total_sq;
+    float local_sq = 0.0f;
+    for (int h = tid; h < num_heads; h += blockDim.x) {
+        float g = gradient_magnitudes[h];
+        local_sq += g * g;
     }
+
+    // Block reduction for total
+    unsigned mask = __activemask();
+    #pragma unroll
+    for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
+        local_sq += __shfl_down_sync(mask, local_sq, offset);
+    }
+    if (tid == 0) s_total_sq = local_sq;
     __syncthreads();
 
-    // z-score: when std=0 all values are identical, z-score is 0 by definition
-    float grad_fitness = is_meaningful(std_grad, 1.0f) ? (grad_mag - mean_grad) / std_grad : 0.0f;
+    float total_sq = s_total_sq;
 
-    fitness_out[head_id] = gradient_weight * fmaxf(0.0f, grad_fitness) +
-                          coherence_weight * coherence;
+    DEVICE_FATAL_IF(total_sq < 1e-12f, "compute_effective_rank: zero gradient magnitude - no learning signal");
+
+    // Step 2: Compute Rényi entropy sum
+    // For q ≈ 1 (Shannon), we use: H = -Σ p_i log(p_i)
+    // For q ≠ 1: H_q = (1/(1-q)) × log(Σ p_i^q)
+    __shared__ float s_entropy_sum;
+    float local_entropy = 0.0f;
+
+    bool use_shannon = fabsf(renyi_order_q - 1.0f) < 0.01f;
+
+    for (int h = tid; h < num_heads; h += blockDim.x) {
+        float g = gradient_magnitudes[h];
+        float p = (g * g) / total_sq;  // Probability (normalized squared magnitude)
+
+        if (p > 1e-12f) {  // Avoid log(0)
+            if (use_shannon) {
+                local_entropy -= p * logf(p);  // Shannon: -p log(p)
+            } else {
+                local_entropy += powf(p, renyi_order_q);  // Rényi: p^q
+            }
+        }
+    }
+
+    // Block reduction
+    #pragma unroll
+    for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
+        local_entropy += __shfl_down_sync(mask, local_entropy, offset);
+    }
+    if (tid == 0) s_entropy_sum = local_entropy;
+    __syncthreads();
+
+    // Step 3: Compute effective rank = exp(entropy)
+    if (tid == 0) {
+        float entropy;
+        if (use_shannon) {
+            entropy = s_entropy_sum;  // Already computed as -Σ p log(p)
+        } else {
+            // Rényi: H_q = (1/(1-q)) × log(Σ p^q)
+            entropy = logf(s_entropy_sum) / (1.0f - renyi_order_q);
+        }
+
+        float eff_rank = expf(entropy);
+
+        // Clamp to valid range [1, num_heads]
+        eff_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
+
+        DEVICE_FATAL_IF(isnan(eff_rank), "compute_effective_rank: result is NaN");
+        DEVICE_FATAL_IF(isinf(eff_rank), "compute_effective_rank: result is Inf");
+
+        effective_rank_out[0] = eff_rank;
+    }
 }
 
+// Compute multiplicative fitness per architecture line 423:
+// fitness = task_accuracy^α × (1 - generalization_gap)^β × effective_rank^γ × hardware_efficiency^δ
+//
+// This is called PER-ENTRY (each entry computes its own fitness from its own metrics)
+__global__ void compute_multiplicative_fitness_kernel(
+    float task_accuracy,          // From classification head output
+    float generalization_gap,     // |train_accuracy - test_accuracy|
+    float effective_rank,         // From compute_effective_rank_from_gradients_kernel
+    float hardware_efficiency,    // From trace buffer aggregation
+    float alpha,                  // task_exponent (genome-derived)
+    float beta,                   // generalization_exponent (genome-derived)
+    float gamma,                  // rank_exponent (genome-derived)
+    float delta,                  // efficiency_exponent (genome-derived)
+    float* __restrict__ fitness_out
+) {
+    if (threadIdx.x != 0) return;
+
+    DEVICE_FATAL_IF(fitness_out == nullptr, "compute_multiplicative_fitness: fitness_out is null");
+    DEVICE_FATAL_IF(task_accuracy < 0.0f || task_accuracy > 1.0f, "compute_multiplicative_fitness: task_accuracy out of range");
+    DEVICE_FATAL_IF(generalization_gap < 0.0f || generalization_gap > 1.0f, "compute_multiplicative_fitness: gen_gap out of range");
+    DEVICE_FATAL_IF(effective_rank < 1.0f, "compute_multiplicative_fitness: effective_rank below 1");
+    DEVICE_FATAL_IF(hardware_efficiency <= 0.0f, "compute_multiplicative_fitness: hw_efficiency non-positive");
+
+    // Multiplicative fitness formula from architecture.md line 423
+    float fitness = powf(task_accuracy + 1e-6f, alpha) *
+                    powf(1.0f - generalization_gap + 1e-6f, beta) *
+                    powf(effective_rank, gamma) *
+                    powf(hardware_efficiency + 1e-6f, delta);
+
+    DEVICE_FATAL_IF(isnan(fitness), "compute_multiplicative_fitness: fitness is NaN");
+    DEVICE_FATAL_IF(isinf(fitness), "compute_multiplicative_fitness: fitness is Inf");
+
+    fitness_out[0] = fitness;
+}
+
+// Update fitness EMA for temporal smoothing
 __global__ void update_fitness_ema_kernel(
     float* __restrict__ current_fitness,
     float* __restrict__ fitness_ema,
-    int num_heads,
+    int num_entries,
     float alpha
 ) {
     DEVICE_FATAL_IF(current_fitness == nullptr, "update_fitness_ema: current_fitness is null");
     DEVICE_FATAL_IF(fitness_ema == nullptr, "update_fitness_ema: fitness_ema is null");
-    DEVICE_FATAL_IF(num_heads <= 0, "update_fitness_ema: num_heads must be positive");
+    DEVICE_FATAL_IF(num_entries <= 0, "update_fitness_ema: num_entries must be positive");
     DEVICE_FATAL_IF(alpha < 0.0f || alpha > 1.0f, "update_fitness_ema: alpha must be in [0,1]");
 
-    int head_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_entries) return;
 
-    if (head_id >= num_heads) return;
-
-    float curr = current_fitness[head_id];
-    float prev_ema = fitness_ema[head_id];
+    float curr = current_fitness[idx];
+    float prev_ema = fitness_ema[idx];
 
     DEVICE_FATAL_IF(isnan(curr), "update_fitness_ema: current_fitness is NaN");
     DEVICE_FATAL_IF(isnan(prev_ema), "update_fitness_ema: prev_ema is NaN");
 
-    fitness_ema[head_id] = alpha * curr + (1.0f - alpha) * prev_ema;
+    fitness_ema[idx] = alpha * curr + (1.0f - alpha) * prev_ema;
 }
 
+// Compute relative fitness via local competition (k-nearest neighbors in behavioral space)
 __global__ void compute_relative_fitness_kernel(
     float* __restrict__ absolute_fitness,
     float* __restrict__ behavioral_coords,
@@ -137,12 +222,11 @@ __global__ void compute_relative_fitness_kernel(
     DEVICE_FATAL_IF(absolute_fitness == nullptr, "compute_relative_fitness: absolute_fitness is null");
     DEVICE_FATAL_IF(behavioral_coords == nullptr, "compute_relative_fitness: behavioral_coords is null");
     DEVICE_FATAL_IF(relative_fitness == nullptr, "compute_relative_fitness: relative_fitness is null");
-    DEVICE_FATAL_IF(num_components <= 0, "compute_relative_fitness: num_components must be positive");
+    DEVICE_FATAL_IF(num_components < 2, "compute_relative_fitness: need at least 2 components for relative fitness");
     DEVICE_FATAL_IF(behavioral_dim <= 0, "compute_relative_fitness: behavioral_dim must be positive");
     DEVICE_FATAL_IF(k_neighbors <= 0 || k_neighbors > 5, "compute_relative_fitness: k_neighbors must be in [1,5]");
 
     int comp_id = blockIdx.x * blockDim.x + threadIdx.x;
-
     if (comp_id >= num_components) return;
 
     float distances[5];
@@ -153,6 +237,7 @@ __global__ void compute_relative_fitness_kernel(
         neighbor_ids[i] = -1;
     }
 
+    // Find k-nearest neighbors in behavioral space
     for (int other = 0; other < num_components; other++) {
         if (other == comp_id) continue;
 
@@ -166,7 +251,7 @@ __global__ void compute_relative_fitness_kernel(
         float dist = sqrtf(dist_sq);
         for (int i = 0; i < k_neighbors; i++) {
             if (dist < distances[i]) {
-
+                // Insert and shift
                 for (int j = k_neighbors - 1; j > i; j--) {
                     distances[j] = distances[j-1];
                     neighbor_ids[j] = neighbor_ids[j-1];
@@ -178,13 +263,17 @@ __global__ void compute_relative_fitness_kernel(
         }
     }
 
+    // Compute local fitness statistics
     float neighbor_mean = 0.0f;
+    int valid_neighbors = 0;
     for (int i = 0; i < k_neighbors; i++) {
         if (neighbor_ids[i] >= 0) {
             neighbor_mean += absolute_fitness[neighbor_ids[i]];
+            valid_neighbors++;
         }
     }
-    neighbor_mean /= k_neighbors;
+    DEVICE_FATAL_IF(valid_neighbors <= 0, "compute_relative_fitness: no valid neighbors found");
+    neighbor_mean /= valid_neighbors;
 
     float neighbor_var = 0.0f;
     for (int i = 0; i < k_neighbors; i++) {
@@ -193,11 +282,11 @@ __global__ void compute_relative_fitness_kernel(
             neighbor_var += diff * diff;
         }
     }
-    float neighbor_std = sqrtf(neighbor_var / k_neighbors);
+    float neighbor_std = sqrtf(neighbor_var / valid_neighbors);
 
     float my_fitness = absolute_fitness[comp_id];
-    // z-score: when std=0 all neighbors have identical fitness, z-score is 0
-    relative_fitness[comp_id] = is_meaningful(neighbor_std, 1.0f) ? (my_fitness - neighbor_mean) / neighbor_std : 0.0f;
+    relative_fitness[comp_id] = is_meaningful(neighbor_std, 1.0f) ?
+        (my_fitness - neighbor_mean) / neighbor_std : NAN;
 }
 
 #endif
