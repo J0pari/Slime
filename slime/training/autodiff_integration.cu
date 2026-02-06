@@ -259,7 +259,6 @@ __global__ void apply_ca_gradients_kernel(
     if ((param_ptr_fp16 != nullptr || param_ptr_fp32 != nullptr) && tape_idx >= 0 && tape_idx < tape->current_value_idx) {
         float grad = tape->grad_buffer[tape_idx];
 
-        // FATAL on NaN/inf gradients - indicates autodiff tape corruption
         DEVICE_FATAL_IF(isnan(grad), "apply_ca_gradients: gradient is NaN - autodiff tape corrupted");
         DEVICE_FATAL_IF(isinf(grad), "apply_ca_gradients: gradient is Inf - autodiff tape corrupted");
 
@@ -269,10 +268,8 @@ __global__ void apply_ca_gradients_kernel(
 
         if (is_fp16 && param_ptr_fp16 != nullptr) {
             float val = __half2float(*param_ptr_fp16);
-            // FATAL on NaN weights - indicates weight corruption
             DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight is NaN before update - data corrupted");
             val -= learning_rate * grad;
-            // FATAL on NaN/inf after update - indicates numerical instability
             DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight became NaN after update");
             DEVICE_FATAL_IF(isinf(val), "apply_ca_gradients: weight became Inf after update");
             *param_ptr_fp16 = __float2half(val);
@@ -392,7 +389,6 @@ __global__ void relu_backward_kernel(
     }
 }
 
-// F009: Route autodiff tape gradients to unified gradient buffer
 __global__ void route_autodiff_to_unified_kernel(
     ADTape* __restrict__ tape,
     CAParameterMap* __restrict__ param_map,
@@ -455,7 +451,6 @@ __global__ void route_autodiff_to_unified_kernel(
     }
 }
 
-// F010: Route classification backprop gradients to unified buffer
 __global__ void route_classification_to_unified_kernel(
     float* __restrict__ pooling_grads_in,
     float* __restrict__ fc_weight_grads_in,
@@ -466,7 +461,6 @@ __global__ void route_classification_to_unified_kernel(
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Route pooling weight gradients
     if (idx < num_features) {
         float grad = pooling_grads_in[idx];
         DEVICE_FATAL_IF(isnan(grad), "route_classification: pooling grad is NaN");
@@ -474,7 +468,6 @@ __global__ void route_classification_to_unified_kernel(
         pooling_grads_in[idx] = 0.0f;
     }
 
-    // Route FC weight gradients
     if (idx < num_classes * num_features) {
         float grad = fc_weight_grads_in[idx];
         DEVICE_FATAL_IF(isnan(grad), "route_classification: fc_weight grad is NaN");
@@ -482,7 +475,6 @@ __global__ void route_classification_to_unified_kernel(
         fc_weight_grads_in[idx] = 0.0f;
     }
 
-    // Route FC bias gradients
     if (idx < num_classes) {
         float grad = fc_bias_grads_in[idx];
         DEVICE_FATAL_IF(isnan(grad), "route_classification: fc_bias grad is NaN");

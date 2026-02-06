@@ -44,14 +44,11 @@ struct PoolEntry {
     int generation;
     float* gradients;
 
-    // Genome storage differs by entry type
     union {
-        // ENTRY_ROOT: genome stored directly
         struct {
             float* genome;
         } root;
 
-        // ENTRY_CHILD: genome = parent + deltas
         struct {
             uint64_t parent_hash;
             int parent_idx;
@@ -97,7 +94,6 @@ struct PoolEntry {
     int coherence_window_size;
     float renyi_q;
 
-    // Per-organism Flow Lenia parameters (derived from genome)
     float flow_beta_A;
     float flow_n;
     float flow_s;
@@ -157,8 +153,6 @@ struct BehavioralDimensions {
     int task_dim;
     int gen_dim;
 
-    // Must be called with genome reconstructed via reconstruct_genome_from_archive()
-    // Architectural enforcement: genomes only exist after decompression
     __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome) {
         int hw_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_hw");
         int task_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_task");

@@ -16,11 +16,9 @@
         } \
     } while(0)
 
-// Minimal integration test covering all major subsystems
 bool test_full_lifecycle_iteration() {
     printf("\n=== FULL INTEGRATION TEST: One Complete Lifecycle Iteration ===\n");
 
-    // 1. DATASET LOADING
     printf("[1/15] Loading MNIST training dataset...\n");
     Dataset* d_mnist_train;
     TEST_CHECK(load_dataset_from_registry(0, true, &d_mnist_train));
@@ -36,7 +34,6 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&d_test_dataset_array, sizeof(Dataset*)));
     TEST_CHECK(cudaMemcpy(d_test_dataset_array, &d_mnist_test, sizeof(Dataset*), cudaMemcpyHostToDevice));
 
-    // 2. POOL ALLOCATION
     printf("[2/15] Allocating ComponentPool...\n");
     constexpr int TEST_POOL_SIZE = 4;  // Small pool for fast test
     ComponentPool pool_host;
@@ -47,7 +44,6 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&pool_host.alive_flags, sizeof(bool) * TEST_POOL_SIZE));
     TEST_CHECK(cudaMalloc(&pool_host.alive_indices, sizeof(int) * TEST_POOL_SIZE));
 
-    // Delta buffers for init_pool_kernel
     uint16_t* delta_indices_buffer;
     float* delta_values_buffer;
     float* gradients_buffer;
@@ -59,7 +55,6 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&d_pool, sizeof(ComponentPool)));
     TEST_CHECK(cudaMemcpy(d_pool, &pool_host, sizeof(ComponentPool), cudaMemcpyHostToDevice));
 
-    // 3. ARCHIVE ALLOCATION (GPUElite SoA)
     printf("[3/15] Allocating GPUElite archive...\n");
     GPUElite archive_host;
     archive_host.hw_dim = BEHAVIORAL_DIM_HW;
@@ -92,7 +87,6 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&d_archive, sizeof(GPUElite)));
     TEST_CHECK(cudaMemcpy(d_archive, &archive_host, sizeof(GPUElite), cudaMemcpyHostToDevice));
 
-    // 4. VORONOI CELLS ALLOCATION
     printf("[4/15] Allocating VoronoiCell array...\n");
     constexpr int TEST_NUM_CELLS = 8;
     VoronoiCell* voronoi_cells_host = (VoronoiCell*)malloc(sizeof(VoronoiCell) * TEST_NUM_CELLS);
@@ -113,7 +107,6 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&d_voronoi_cells, sizeof(VoronoiCell) * TEST_NUM_CELLS));
     TEST_CHECK(cudaMemcpy(d_voronoi_cells, voronoi_cells_host, sizeof(VoronoiCell) * TEST_NUM_CELLS, cudaMemcpyHostToDevice));
 
-    // 5. TELEMETRY ALLOCATION
     printf("[5/15] Allocating TelemetryBuffer...\n");
     TelemetryBuffer telemetry_host;
     memset(&telemetry_host, 0, sizeof(TelemetryBuffer));
@@ -122,13 +115,11 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&d_telemetry, sizeof(TelemetryBuffer)));
     TEST_CHECK(cudaMemcpy(d_telemetry, &telemetry_host, sizeof(TelemetryBuffer), cudaMemcpyHostToDevice));
 
-    // 6. AUDIT BUFFER ALLOCATION
     printf("[6/15] Allocating AuditBuffer...\n");
     AuditBuffer* d_audit;
     TEST_CHECK(cudaMalloc(&d_audit, sizeof(AuditBuffer)));
     TEST_CHECK(cudaMemset(d_audit, 0, sizeof(AuditBuffer)));
 
-    // 7. INITIALIZE POOL WITH RANDOM GENOMES
     printf("[7/15] Initializing pool with random genomes...\n");
     dim3 pool_grid((TEST_POOL_SIZE + 255) / 256);
     dim3 pool_block(256);
@@ -138,7 +129,6 @@ bool test_full_lifecycle_iteration() {
     );
     TEST_CHECK(cudaDeviceSynchronize());
 
-    // 8. INITIALIZE ARCHIVE HASH TABLE
     printf("[8/15] Initializing archive hash table...\n");
     dim3 hash_grid((GENOME_HASH_TABLE_SIZE + 255) / 256);
     init_hash_table_kernel<<<hash_grid, 256>>>(
@@ -148,7 +138,6 @@ bool test_full_lifecycle_iteration() {
     );
     TEST_CHECK(cudaDeviceSynchronize());
 
-    // 9. INITIALIZE VORONOI CELLS
     printf("[9/15] Initializing Voronoi cells...\n");
     init_voronoi_cells_kernel<<<1, TEST_NUM_CELLS>>>(
         d_voronoi_cells,
@@ -160,7 +149,6 @@ bool test_full_lifecycle_iteration() {
     );
     TEST_CHECK(cudaDeviceSynchronize());
 
-    // 10. VERIFY POOL INITIALIZATION
     printf("[10/15] Verifying pool initialization...\n");
     ComponentPool pool_verify;
     TEST_CHECK(cudaMemcpy(&pool_verify, d_pool, sizeof(ComponentPool), cudaMemcpyDeviceToHost));
@@ -172,7 +160,6 @@ bool test_full_lifecycle_iteration() {
     }
     printf("    ✓ Pool capacity: %d\n", pool_verify.capacity);
 
-    // 11. VERIFY POOL FITNESS VALUES
     printf("[11/15] Verifying pool fitness values...\n");
     float* h_fitness = new float[TEST_POOL_SIZE];
     TEST_CHECK(cudaMemcpy(h_fitness, pool_host.fitness_values, sizeof(float) * TEST_POOL_SIZE, cudaMemcpyDeviceToHost));
@@ -186,13 +173,11 @@ bool test_full_lifecycle_iteration() {
             fitness_sum += h_fitness[i];
         }
     }
-    // Initial slots beyond POOL_CAPACITY_MIN may have NaN (expected for empty slots)
     printf("    ✓ Pool fitness: %d valid values, avg=%.6f\n",
            TEST_POOL_SIZE - fitness_nan_count,
            (TEST_POOL_SIZE - fitness_nan_count > 0) ? fitness_sum / (TEST_POOL_SIZE - fitness_nan_count) : 0.0f);
     delete[] h_fitness;
 
-    // 12. VERIFY ALIVE FLAGS
     printf("[12/15] Verifying alive flags...\n");
     bool* h_alive = new bool[TEST_POOL_SIZE];
     TEST_CHECK(cudaMemcpy(h_alive, pool_host.alive_flags, sizeof(bool) * TEST_POOL_SIZE, cudaMemcpyDeviceToHost));
@@ -204,7 +189,6 @@ bool test_full_lifecycle_iteration() {
     printf("    ✓ Alive flags: %d/%d alive\n", alive_count, TEST_POOL_SIZE);
     delete[] h_alive;
 
-    // 13. VERIFY HASH TABLE
     printf("[13/15] Verifying hash table initialization...\n");
     uint64_t* h_hash_keys = new uint64_t[16];
     TEST_CHECK(cudaMemcpy(h_hash_keys, archive_host.hash_table_keys, sizeof(uint64_t) * 16, cudaMemcpyDeviceToHost));
@@ -221,7 +205,6 @@ bool test_full_lifecycle_iteration() {
     printf("    ✓ Hash table: first 16 slots empty (correctly initialized)\n");
     delete[] h_hash_keys;
 
-    // 14. VERIFY VORONOI CELLS
     printf("[14/15] Verifying Voronoi cell initialization...\n");
     VoronoiCell* h_cells = new VoronoiCell[TEST_NUM_CELLS];
     TEST_CHECK(cudaMemcpy(h_cells, d_voronoi_cells, sizeof(VoronoiCell) * TEST_NUM_CELLS, cudaMemcpyDeviceToHost));
@@ -235,7 +218,6 @@ bool test_full_lifecycle_iteration() {
     printf("    ✓ Voronoi cells: %d/%d valid\n", valid_cells, TEST_NUM_CELLS);
     delete[] h_cells;
 
-    // 15. CLEANUP
     printf("[15/15] Cleaning up...\n");
     cudaFree(pool_host.entries);
     cudaFree(pool_host.fitness_values);

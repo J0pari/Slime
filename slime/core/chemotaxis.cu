@@ -103,39 +103,25 @@ __global__ void update_field_from_ca_kernel(
     int cell_idx = y * grid_size + x;
     float* ca_concentration = entry->ca_state->ca_concentration;
 
-    // CA concentration layout: [grid² × channels], read channel 0 for chemical field
     float val = ca_concentration[cell_idx * channels + 0];
     if (isfinite(val)) {
         atomicAdd(&chemical_concentration[cell_idx], val);
     }
 }
 
-// Initialize per-entry CA state from shared chemical field and RD fields
-// This is the reverse of update_field_from_ca_kernel - completing the bidirectional stigmergy loop
-// Channel layout matches inject_sample_to_ca_kernel:
-// 0-5: ChemicalField (concentration, gradients, laplacian, sources, decay)
-// 6-9: RDField (resource_density, fitness_landscape, resource gradients)
-// 10: BehavioralField
-// 11-13: Dataset samples (zeroed for evolutionary path - training encodes patterns in chemical field)
-// 14: Previous CA output (recurrence)
-// 15: Temporal retrieval
 __global__ void initialize_ca_from_field_kernel(
     ComponentPool* __restrict__ pool,
-    // ChemicalField components (channels 0-5)
     const float* __restrict__ chem_concentration,
     const float* __restrict__ chem_gradient_x,
     const float* __restrict__ chem_gradient_y,
     const float* __restrict__ chem_laplacian,
     const float* __restrict__ chem_sources,
     const float* __restrict__ chem_decay_factors,
-    // RDField components (channels 6-9)
     const float* __restrict__ rd_resource_density,
     const float* __restrict__ rd_fitness_landscape,
     const float* __restrict__ rd_resource_gradient_x,
     const float* __restrict__ rd_resource_gradient_y,
-    // BehavioralField (channel 10)
     const float* __restrict__ behavioral_field,
-    // Temporal retrieval (channel 15)
     const float* __restrict__ attractor_field,
     int max_grid_size,
     int entry_idx
@@ -156,7 +142,6 @@ __global__ void initialize_ca_from_field_kernel(
     float* ca_concentration = entry->ca_state->ca_concentration;
     int base_idx = cell_idx * channels;
 
-    // Channel 0-5: ChemicalField
     ca_concentration[base_idx + 0] = chem_concentration[cell_idx];
     ca_concentration[base_idx + 1] = chem_gradient_x[cell_idx];
     ca_concentration[base_idx + 2] = chem_gradient_y[cell_idx];
@@ -165,29 +150,20 @@ __global__ void initialize_ca_from_field_kernel(
     DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
     ca_concentration[base_idx + 5] = chem_decay_factors[cell_idx];
 
-    // Channel 6-9: RDField
     ca_concentration[base_idx + 6] = rd_resource_density[cell_idx];
     ca_concentration[base_idx + 7] = rd_fitness_landscape[cell_idx];
     ca_concentration[base_idx + 8] = rd_resource_gradient_x[cell_idx];
     ca_concentration[base_idx + 9] = rd_resource_gradient_y[cell_idx];
 
-    // Channel 10: BehavioralField
     ca_concentration[base_idx + 10] = behavioral_field[cell_idx];
 
-    // Channel 11-13: Dataset samples - NOT present in evolutionary path
-    // The training encodes dataset patterns into chemical field, which we read above
-    // Setting to zero is intentional - these channels are for training only
     if (channels > 11) ca_concentration[base_idx + 11] = 0.0f;
     if (channels > 12) ca_concentration[base_idx + 12] = 0.0f;
     if (channels > 13) ca_concentration[base_idx + 13] = 0.0f;
 
-    // Channel 14: Previous CA output (recurrence) - read from ca_output channel 0
     if (channels > 14) {
-        // Use previous iteration's CA output for recurrence
-        // ca_output is allocated as part of ca_state (organism.cu:2927), so if ca_state exists, ca_output exists
         float* ca_output = entry->ca_state->ca_output;
         DEVICE_FATAL_IF(ca_output == nullptr, "ca_output null but ca_state exists");
-        // ca_output layout: [num_heads × grid² × head_dim], sum across heads for recurrence
         int num_heads = entry->num_heads;
         int head_dim = entry->head_dim;
         float recurrence = 0.0f;
@@ -198,7 +174,6 @@ __global__ void initialize_ca_from_field_kernel(
         ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
     }
 
-    // Channel 15: Temporal retrieval
     if (channels > 15) {
         DEVICE_FATAL_IF(attractor_field == nullptr, "init_chemical_field_kernel: attractor_field required for channel 15");
         ca_concentration[base_idx + 15] = attractor_field[cell_idx];
@@ -604,7 +579,6 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
     float context_metabolic = agent->sensitivity;
     float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] +
                                  agent->velocity[1] * agent->velocity[1]);
-    // Sample morphogen from chemical field at agent position
     int cx = (int)(agent->position[0] * grid_size) % grid_size;
     int cy = (int)(agent->position[1] * grid_size) % grid_size;
     float context_morphogen = chemical_concentration[cy * grid_size + cx];
@@ -652,14 +626,12 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
         features[BASE_FEATURES_COUNT + k] = magnitude * amplitude_weight;
     }
 
-    // Project features to behavioral space through learned embedding and update coords
     for (int d = 0; d < behavioral_dim; d++) {
         float reconstruction = 0.0f;
         for (int f = 0; f < behavioral_dim; f++) {
             reconstruction += features[f] * embedding_weights[f * behavioral_dim + d];
         }
 
-        // Determine which coord array this dimension belongs to
         float* target_coord;
         int local_idx;
         if (d < hw_dim) {
@@ -673,11 +645,9 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
             local_idx = d - hw_dim - task_dim;
         }
 
-        // Update coord with gradient descent
         float error = reconstruction - target_coord[local_idx];
         target_coord[local_idx] += learning_rate * error;
 
-        // Accumulate reconstruction error
         atomicAdd(reconstruction_error, error * error);
     }
 }
@@ -809,7 +779,6 @@ __global__ void init_chemical_field_kernel(
     }
 }
 
-// Parallel reduction to compute mean concentration - updates chemical_field->cached_mean
 __global__ void reduce_concentration_mean_kernel(
     ChemicalField* field,
     int total_cells,
@@ -820,7 +789,6 @@ __global__ void reduce_concentration_mean_kernel(
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Each thread loads and accumulates multiple elements (grid-stride loop)
     float sum = 0.0f;
     for (int i = idx; i < total_cells; i += blockDim.x * gridDim.x) {
         sum += field->concentration[i];
@@ -828,13 +796,11 @@ __global__ void reduce_concentration_mean_kernel(
     sdata[tid] = sum;
     __syncthreads();
 
-    // Block-level reduction
     for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
 
-    // Warp-level reduction (no sync needed within warp)
     if (tid < 32) {
         volatile float* vdata = sdata;
         vdata[tid] += vdata[tid + 32];
@@ -845,13 +811,11 @@ __global__ void reduce_concentration_mean_kernel(
         vdata[tid] += vdata[tid + 1];
     }
 
-    // First thread writes block result
     if (tid == 0) {
         partial_sums[blockIdx.x] = sdata[0];
     }
 }
 
-// Final reduction of partial sums and write to cached_mean
 __global__ void finalize_concentration_mean_kernel(
     ChemicalField* field,
     float* partial_sums,
@@ -967,7 +931,6 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         if (is_meaningful(weight_sum, 1.0f)) {
             behavioral_field[field_idx] = field_value / weight_sum;
         }
-        // else: preserve existing value (temporal coherence)
         d_offset++;
     }
 
@@ -994,7 +957,6 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         if (is_meaningful(weight_sum, 1.0f)) {
             behavioral_field[field_idx] = field_value / weight_sum;
         }
-        // else: preserve existing value (temporal coherence)
         d_offset++;
     }
 
@@ -1021,7 +983,6 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
         if (is_meaningful(weight_sum, 1.0f)) {
             behavioral_field[field_idx] = field_value / weight_sum;
         }
-        // else: preserve existing value (temporal coherence)
         d_offset++;
     }
 }
@@ -1132,7 +1093,6 @@ extern "C" __global__ void resource_flow_kernel(
     float grad_rho_x, grad_rho_y, lap_rho, rho_center;
     Stencils::all_operators(grad_rho_x, grad_rho_y, lap_rho, rho_center, resource_density, x, y, grid_size, 1);
 
-    // Store gradients for CA channel injection
     resource_gradient_x[idx] = grad_rho_x;
     resource_gradient_y[idx] = grad_rho_y;
 
@@ -1153,7 +1113,6 @@ extern "C" __global__ void update_fitness_landscape_kernel(
 ) {
     int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (entry_idx >= pool->capacity) return;
-    // Use SoA for coalesced alive read
     if (!pool->alive_flags[entry_idx]) return;
 
     float px = agents[entry_idx].position[0];
@@ -1162,7 +1121,6 @@ extern "C" __global__ void update_fitness_landscape_kernel(
     int gy = min((int)(py * grid_size), grid_size - 1);
     int idx = gy * grid_size + gx;
 
-    // Use SoA for coalesced fitness read
     atomicAdd(&fitness_landscape[idx], pool->fitness_values[entry_idx]);
 }
 

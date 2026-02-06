@@ -11,8 +11,6 @@
 
 namespace cg = cooperative_groups;
 
-// Input layout: [batch × num_heads × grid² × channels]
-// Output layout: [batch × (num_heads × channels)]
 __global__ void spatial_pooling_kernel(
     float* __restrict__ ca_output,
     float* __restrict__ pooling_weights,
@@ -34,7 +32,6 @@ __global__ void spatial_pooling_kernel(
     float sum = 0.0f;
     int spatial_size = grid_size * grid_size;
 
-    // CA output layout: [batch × num_heads × grid² × channels]
     int batch_stride = num_heads * spatial_size * channels;
     int head_stride = spatial_size * channels;
 
@@ -49,7 +46,6 @@ __global__ void spatial_pooling_kernel(
     float weight = ldg_float(&pooling_weights[feature_idx]);
     float weighted = avg * weight;
 
-    // FATAL on NaN/inf - indicates upstream CA output or weight corruption
     DEVICE_FATAL_IF(isnan(weighted), "spatial_pooling: weighted result is NaN - CA output or weights corrupted");
     DEVICE_FATAL_IF(isinf(weighted), "spatial_pooling: weighted result is Inf - CA output or weights corrupted");
 
@@ -70,12 +66,10 @@ __global__ void classification_head_kernel(
 
     if (batch_idx >= batch_size || class_idx >= num_classes) return;
 
-    // FATAL on null pointers - caller must provide valid buffers
     DEVICE_FATAL_IF(features == nullptr, "classification_head: features is null");
     DEVICE_FATAL_IF(fc_weights == nullptr, "classification_head: fc_weights is null");
     DEVICE_FATAL_IF(fc_bias == nullptr, "classification_head: fc_bias is null");
 
-    // FATAL on NaN in first element - indicates data corruption
     if (batch_idx == 0 && class_idx == 0) {
         DEVICE_FATAL_IF(isnan(features[0]), "classification_head: features[0] is NaN - data corrupted");
         DEVICE_FATAL_IF(isnan(fc_weights[0]), "classification_head: fc_weights[0] is NaN - weights corrupted");
@@ -84,7 +78,6 @@ __global__ void classification_head_kernel(
 
     __shared__ float dot_products[NUM_CLASSES_MAX];
 
-    // Use texture cache for read-only weight/feature access
     float acc = ldg_float(&fc_bias[class_idx]);
 
     for (int feat = 0; feat < num_features; feat++) {
@@ -99,7 +92,6 @@ __global__ void classification_head_kernel(
     __syncthreads();
 
     if (class_idx < num_classes) {
-        // FATAL on NaN/inf logits - indicates computation error
         DEVICE_FATAL_IF(isnan(dot_products[class_idx]), "classification_head: logit is NaN - computation corrupted");
         DEVICE_FATAL_IF(isinf(dot_products[class_idx]), "classification_head: logit is Inf - computation corrupted");
         logits[batch_idx * num_classes + class_idx] = dot_products[class_idx];
@@ -161,7 +153,6 @@ __global__ void accuracy_kernel(
     }
 }
 
-// Warp-optimized cross-entropy for classification pipeline
 __global__ void classification_cross_entropy_kernel(
     float* __restrict__ logits,
     int* __restrict__ labels,
@@ -227,7 +218,6 @@ __global__ void classification_head_backward_kernel(
 
     if (batch_idx >= batch_size || class_idx >= num_classes) return;
 
-    // Use texture cache for read-only gradient input
     float logit_grad = ldg_float(&logit_grads[batch_idx * num_classes + class_idx]);
 
     if (class_idx < num_classes) {
@@ -242,8 +232,6 @@ __global__ void classification_head_backward_kernel(
     }
 }
 
-// Input grad layout: [batch × (num_heads × channels)]
-// CA output layout: [batch × num_heads × grid² × channels]
 __global__ void spatial_pooling_backward_kernel(
     float* __restrict__ features_grad,
     float* __restrict__ ca_output,
@@ -266,13 +254,11 @@ __global__ void spatial_pooling_backward_kernel(
 
     float feat_grad = ldg_float(&features_grad[batch_idx * num_features + feature_idx]);
 
-    // FATAL on NaN/inf gradients - indicates upstream backprop error
     DEVICE_FATAL_IF(isnan(feat_grad), "spatial_pooling_backward: features_grad is NaN - backprop corrupted");
     DEVICE_FATAL_IF(isinf(feat_grad), "spatial_pooling_backward: features_grad is Inf - backprop corrupted");
 
     int spatial_size = grid_size * grid_size;
 
-    // CA output layout: [batch × num_heads × grid² × channels]
     int batch_stride = num_heads * spatial_size * channels;
     int head_stride = spatial_size * channels;
 

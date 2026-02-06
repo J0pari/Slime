@@ -32,7 +32,6 @@ struct LocalOrganismState {
         if (idx >= SECTION_SIZE) return;
 
         organism_indices[idx] = idx;
-        // Use SoA for coalesced fitness read
         local_fitness[idx] = pool->fitness_values[idx];
         local_coherence[idx] = pool->entries[idx].coherence;
 
@@ -426,11 +425,9 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     int block_leader_actual = pool->alive_indices[block_leader_compact];
     uint64_t block_genome_hash = pool->entries[block_leader_actual].genome_hash;
 
-    // block_genome already reconstructed at line 384 when tid=0 processed its entry
     float* block_genome = &workspace_genomes[block_leader_compact * GENOME_SIZE * 2];
     const float* block_gradients = pool->entries[block_leader_actual].gradients;
 
-    // Block collective context
     float block_ctx_metabolic = block_avg_fitness;
     float block_ctx_stress = block_avg_stress;
     float block_ctx_morphogen = block_avg_morphogen;
@@ -483,7 +480,6 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
             for (int i = 0; i < threads_in_block; i++) {
                 int ci = block_id * blockDim.x + i;
                 int ai = pool->alive_indices[ci];
-                // Use SoA for coalesced fitness read
                 if (pool->fitness_values[ai] < worst_fitness) {
                     worst_fitness = pool->fitness_values[ai];
                     worst_tid = i;

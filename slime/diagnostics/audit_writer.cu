@@ -8,14 +8,11 @@
 #define AUDIT_WRITER_CU
 
 #include "../config/config.cu"
-// Forward declare stbi_write_png - implementation in report_generator.cu
 extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 
-// Write sample images as PNG files
-// Returns 0 on success, 1 on failure
 int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
     int img_size = audit->grid_size * audit->grid_size;
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
@@ -29,8 +26,6 @@ int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-// Write CA state snapshot as PNG file
-// Returns 0 on success, 1 on failure
 int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
     int ca_size = audit->grid_size * audit->grid_size;
     unsigned char* pixels = (unsigned char*)malloc(ca_size);
@@ -50,7 +45,6 @@ int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
     }
     char png_path[256];
     snprintf(png_path, sizeof(png_path), "%s", path);
-    // Replace .pgm with .png
     char* ext = strstr(png_path, ".pgm");
     if (ext) { strcpy(ext, ".png"); }
     if (!stbi_write_png(png_path, audit->grid_size, audit->grid_size, 1, pixels, audit->grid_size)) {
@@ -62,8 +56,6 @@ int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-// Write predictions CSV
-// Returns 0 on success, 1 on failure
 int write_predictions_csv(const char* path, int gen, AuditBuffer* audit) {
     FILE* f = fopen(path, "w");
     if (!f) {
@@ -91,7 +83,6 @@ int write_predictions_csv(const char* path, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-// Append paths to manifest file
 void append_to_manifest(const char* manifest_path, const char* predictions_path,
                         const char* ca_path, double elapsed_sec) {
     FILE* mf = fopen(manifest_path, "r");
@@ -109,8 +100,6 @@ void append_to_manifest(const char* manifest_path, const char* predictions_path,
     }
 }
 
-// Write generation metrics CSV
-// Rows = generations, Columns = MAP-Elites metrics
 int write_generation_summary(const char* session_dir, int gen, AuditBuffer* audit) {
     char path[256];
     snprintf(path, sizeof(path), "%s/metrics.csv", session_dir);
@@ -120,58 +109,33 @@ int write_generation_summary(const char* session_dir, int gen, AuditBuffer* audi
 
     if (gen == 0) {
         fprintf(f,
-            // Basic
             "gen,accuracy,loss,train_acc,test_acc,gen_gap,"
-            // Pool
             "pool_alive,pool_capacity,"
-            // Coverage dynamics
             "occupied_cells,frontier_gained,frontier_lost,sparse_cells,niche_entropy,novelty_gradient,"
-            // Quality dynamics
             "fitness_best,fitness_mean,fitness_delta,quality_floor,quality_mean,quality_range,"
-            // Density
             "density_mean,density_max,density_var,"
-            // 3-axis spread (hw)
             "hw_min,hw_max,hw_mean,"
-            // 3-axis spread (task)
             "task_min,task_max,task_mean,"
-            // 3-axis spread (gen)
             "gen_min,gen_max,gen_mean,"
-            // Population flow
             "total_pop,births,deaths,"
-            // DIRESA fidelity
             "diresa_loss_hw,diresa_loss_task,diresa_loss_gen,diresa_loss_total,diresa_drift,diresa_utilization,"
-            // Genome complexity
             "unique_hashes,hash_entropy,avg_deltas,"
-            // Raw counts
             "correct,batch_size\n");
     }
 
     fprintf(f,
-        // Basic
         "%d,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        // Pool
         "%d,%d,"
-        // Coverage dynamics
         "%d,%d,%d,%d,%.6f,%.6f,"
-        // Quality dynamics
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        // Density
         "%.6f,%.6f,%.6f,"
-        // 3-axis spread (hw)
         "%.6f,%.6f,%.6f,"
-        // 3-axis spread (task)
         "%.6f,%.6f,%.6f,"
-        // 3-axis spread (gen)
         "%.6f,%.6f,%.6f,"
-        // Population flow
         "%d,%d,%d,"
-        // DIRESA fidelity
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        // Genome complexity
         "%d,%.6f,%.6f,"
-        // Raw counts
         "%d,%d\n",
-        // Values
         gen, audit->accuracy, audit->loss, audit->train_accuracy, audit->test_accuracy, audit->generalization_gap,
         audit->pool_alive_count, audit->pool_capacity,
         audit->archive_occupied_cells, audit->frontier_cells_gained, audit->frontier_cells_lost, audit->sparse_cell_count, audit->niche_entropy, audit->novelty_gradient,
@@ -189,7 +153,6 @@ int write_generation_summary(const char* session_dir, int gen, AuditBuffer* audi
     return 0;
 }
 
-// Write pool state CSV (uses host-accessible AuditBuffer snapshots)
 int write_pool_state(const char* session_dir, int gen, AuditBuffer* audit) {
     if (!audit) return 1;
 
@@ -215,7 +178,6 @@ int write_pool_state(const char* session_dir, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-// Write per-class accuracy CSV
 int write_class_accuracy(const char* session_dir, int gen, float* per_class_correct,
                          float* per_class_total, int num_classes) {
     char path[256];
@@ -244,7 +206,6 @@ int write_class_accuracy(const char* session_dir, int gen, float* per_class_corr
     return 0;
 }
 
-// Write chemical field snapshot
 int write_chemical_field(const char* session_dir, int gen, float* concentration, int grid_size) {
     if (!concentration) return 1;
 

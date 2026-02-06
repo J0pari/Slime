@@ -81,11 +81,9 @@ __global__ void recall_memory_kernel(
             }
         }
 
-        // Temporal coherence: if no memories contribute, preserve existing output value
         if (weight_total > 0.0f) {
             output[tid] = weighted_sum / weight_total;
         }
-        // else: preserve existing output[tid] (no memories to recall)
     }
 }
 
@@ -99,7 +97,6 @@ __global__ void init_tube_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < capacity) {
-        // Wire data immediately - never leave entries with null data
         tube->entries[idx].data = &data_buffer[idx * entry_size];
         tube->entries[idx].size = entry_size;
         tube->entries[idx].timestamp = 0.0f;

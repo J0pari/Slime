@@ -65,7 +65,6 @@ __global__ void init_trace_buffer_kernel(TraceBuffer* buffer, int capacity) {
         buffer->current_idx = 0;
     }
     
-    // Initialize all trace entries to zero
     if (tid < capacity) {
         ExecutionTrace* trace = &buffer->traces[tid];
         trace->active_warps = 0;

@@ -11,7 +11,6 @@ __device__ void set_parent_ids(GPUElite* archive, int elite_idx, uint32_t parent
 }
 
 __device__ int find_parent_by_hash(GPUElite* archive, int archive_size, uint64_t parent_hash) {
-    // O(1) lookup via hash table
     return hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,

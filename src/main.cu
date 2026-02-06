@@ -91,7 +91,6 @@ int main() {
     }
     printf("[H9] %d train+test dataset pairs loaded\n", NUM_ACTIVE_DATASETS); fflush(stdout);
 
-    // Allocate device array of dataset pointers (train)
     Dataset** d_dataset_array;
     cudaError_t malloc_err = cudaMalloc(&d_dataset_array, sizeof(Dataset*) * NUM_ACTIVE_DATASETS);
     if (malloc_err != cudaSuccess) {
@@ -100,7 +99,6 @@ int main() {
     }
     cudaMemcpy(d_dataset_array, d_datasets, sizeof(Dataset*) * NUM_ACTIVE_DATASETS, cudaMemcpyHostToDevice);
 
-    // Allocate device array of dataset pointers (test)
     Dataset** d_test_dataset_array;
     malloc_err = cudaMalloc(&d_test_dataset_array, sizeof(Dataset*) * NUM_ACTIVE_DATASETS);
     if (malloc_err != cudaSuccess) {
@@ -342,7 +340,6 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.total_loss_pool, sizeof(float), "total_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.training_mode, sizeof(HybridTrainingMode), "training_mode");
     CUDA_ALLOC_CHECK(buffers_host.classifier, sizeof(ClassificationHead), "classifier");
-    // Classifier input_dim = num_heads * channels (from spatial pooling of CA output)
     constexpr int CLASSIFIER_INPUT_DIM_MAX = NUM_HEADS_MAX * CHANNELS_MAX;
     CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (CLASSIFIER_INPUT_DIM_MAX + (CLASSIFIER_INPUT_DIM_MAX * NUM_CLASSES_MAX) + NUM_CLASSES_MAX), "classifier_workspace");
     CUDA_ALLOC_CHECK(buffers_host.curriculum, sizeof(AdaptiveCurriculum), "curriculum");
@@ -365,7 +362,6 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
-    // Backward pass workspace buffers (sized for BACKWARD_CHUNK_SAMPLES)
     CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_a, BACKWARD_WS_FP16_A_SIZE, "backward_ws_fp16_a");
     CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_b, BACKWARD_WS_FP16_B_SIZE, "backward_ws_fp16_b");
     CUDA_ALLOC_CHECK(buffers_host.backward_ws_dW, BACKWARD_WS_DW_SIZE, "backward_ws_dW");
@@ -395,7 +391,6 @@ int main() {
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
 
-    // Host only reads audit buffer, never writes - kernel runs autonomously
     while (true) {
         std::atomic_thread_fence(std::memory_order_acquire);
 
@@ -411,36 +406,30 @@ int main() {
                        gen, h_audit->batch_size, h_audit->accuracy, h_audit->loss,
                        h_audit->correct_count, h_audit->batch_size, elapsed_sec);
 
-                // Write sample images using audit_writer
                 if (write_sample_images(session_dir, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_sample_images failed\n");
                 }
 
-                // Write CA snapshot
                 char ca_path[256];
                 snprintf(ca_path, sizeof(ca_path), "%s/ca_states/gen%04d.pgm", session_dir, gen);
                 if (write_ca_snapshot(ca_path, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_ca_snapshot failed\n");
                 }
 
-                // Write predictions CSV
                 char predictions_path[256];
                 snprintf(predictions_path, sizeof(predictions_path), "%s/predictions_gen%04d.csv", session_dir, gen);
                 if (write_predictions_csv(predictions_path, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_predictions_csv failed\n");
                 }
 
-                // Write generation summary to metrics.csv
                 if (write_generation_summary(session_dir, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_generation_summary failed\n");
                 }
 
-                // Write pool state
                 if (write_pool_state(session_dir, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_pool_state failed\n");
                 }
 
-                // Append to manifest
                 append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);
             }
         }

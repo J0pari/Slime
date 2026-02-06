@@ -89,12 +89,10 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
     entry->generation = archive->generation[elite_idx];
 
-    // Reset gradients - fresh autodiff accumulation
     for (int g = 0; g < GENOME_SIZE; g++) {
         entry->gradients[g] = 0.0f;
     }
 
-    // Derive architecture from reconstructed genome
     derive_architecture(entry->genome_hash, elite_genome, entry);
     derive_diresa(entry->genome_hash, elite_genome, entry);
     derive_fitness_exponents(entry->genome_hash, elite_genome, entry);
@@ -116,7 +114,6 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
         }
     }
 
-    // Mark for batch weight restoration via restore_elite_weights_kernel + apply_weight_deltas_kernel
     entry->ca_state->tape.needs_weight_restore = 1;
     entry->ca_state->tape.restore_elite_idx = elite_idx;
 }

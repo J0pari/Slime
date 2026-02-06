@@ -7,18 +7,13 @@
 #include <curand_kernel.h>
 
 struct PoolEntry;
-// DIRESA: Distance-Regularized Siamese Twin Autoencoder
-// Paper: https://arxiv.org/abs/2404.18314
-// Purpose: Compress behavioral features while preserving distance ordering for QD archive
 
 struct DIRESAWeights {
-    // Dimensions (makes struct reusable for hw/task/gen paths)
     int input_dim;   // HARDWARE_FEATURES_DIM or task/gen feature counts
     int output_dim;  // DIM_HW or DIM_TASK or DIM_GEN
     int hidden1;     // Genome-derived
     int hidden2;     // Genome-derived
 
-    // Encoder pointers
     float* encoder_w1;  // [input_dim * hidden1]
     float* encoder_b1;  // [hidden1]
     float* encoder_w2;  // [hidden1 * hidden2]
@@ -26,7 +21,6 @@ struct DIRESAWeights {
     float* encoder_w3;  // [hidden2 * output_dim]
     float* encoder_b3;  // [output_dim]
 
-    // Decoder pointers
     float* decoder_w1;  // [output_dim * hidden2]
     float* decoder_b1;  // [hidden2]
     float* decoder_w2;  // [hidden2 * hidden1]
@@ -34,49 +28,39 @@ struct DIRESAWeights {
     float* decoder_w3;  // [hidden1 * input_dim]
     float* decoder_b3;  // [input_dim]
 
-    // Training state
     float cov_weight;
     float learning_rate;
     uint32_t training_step;
 
-    // Parallel tempering
     float temperature;
     int replica_id;
 
-    // Critical exponent for power-law distance scaling
     float distance_exponent;
     float quality_weight;
 };
 
 struct DIRESABatch {
-    // Dimensions
     int input_dim;   // Feature dimension (must match DIRESAWeights.input_dim)
     int output_dim;  // Latent dimension (must match DIRESAWeights.output_dim)
     int batch_size;  // Genome-derived
 
-    // Input features
     float* features;              // [batch_size * input_dim]
     float* features_shuffled;     // [batch_size * input_dim]
     int* shuffle_indices;         // [batch_size]
 
-    // Latent representations
     float* latent;                // [batch_size * output_dim]
     float* latent_shuffled;       // [batch_size * output_dim]
 
-    // Reconstructions
     float* reconstructed;         // [batch_size * input_dim]
 
-    // Distance pairs
     float* orig_distances;        // [batch_size]
     float* latent_distances;      // [batch_size]
 
-    // Loss values
     float recon_loss;
     float dist_loss;
     float cov_loss;
 };
 
-// Xavier initialization
 __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed) {
     int replica_id = blockIdx.x;
     int local_tid = threadIdx.x;
@@ -145,7 +129,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     int in_dim = weights->input_dim;
     int out_dim = weights->output_dim;
 
-    // Encoder layer 1
     if (local_tid < in_dim * hidden1) {
         float scale = sqrtf(2.0f / (in_dim + hidden1));
         weights->encoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_enc1", local_tid) * scale;
@@ -154,7 +137,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
         weights->encoder_b1[local_tid] = 0.0f;
     }
 
-    // Encoder layer 2
     if (local_tid < hidden1 * hidden2) {
         float scale = sqrtf(2.0f / (hidden1 + hidden2));
         weights->encoder_w2[local_tid] = validated_curand_normal(&state, "diresa_init_enc2", local_tid) * scale;
@@ -163,7 +145,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
         weights->encoder_b2[local_tid] = 0.0f;
     }
 
-    // Encoder layer 3
     if (local_tid < hidden2 * out_dim) {
         float scale = sqrtf(2.0f / (hidden2 + out_dim));
         weights->encoder_w3[local_tid] = validated_curand_normal(&state, "diresa_init_enc3", local_tid) * scale;
@@ -172,7 +153,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
         weights->encoder_b3[local_tid] = 0.0f;
     }
 
-    // Decoder mirrors encoder
     if (local_tid < out_dim * hidden2) {
         float scale = sqrtf(2.0f / (out_dim + hidden2));
         weights->decoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_dec1", local_tid) * scale;
@@ -197,7 +177,6 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
         weights->decoder_b3[local_tid] = 0.0f;
     }
 
-    // Initialize training state
     if (local_tid == 0) {
         weights->cov_weight = 0.0f;  // Annealing starts at 0
         weights->learning_rate = 0.005f;
@@ -209,17 +188,14 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     }
 }
 
-// ReLU activation
 __device__ inline float relu(float x) {
     return fmaxf(0.0f, x);
 }
 
-// Encoder forward pass (shared weights for Siamese twins)
 __device__ void diresa_encode(const float* features, float* latent, const DIRESAWeights* weights) {
     float hidden1[DIRESA_HIDDEN1_MAX];
     float hidden2[DIRESA_HIDDEN2_MAX];
 
-    // Layer 1: input_dim -> HIDDEN1
     for (int i = 0; i < weights->hidden1; i++) {
         float sum = weights->encoder_b1[i];
         for (int j = 0; j < weights->input_dim; j++) {
@@ -228,7 +204,6 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         hidden1[i] = relu(sum);
     }
 
-    // Layer 2: HIDDEN1 -> HIDDEN2
     for (int i = 0; i < weights->hidden2; i++) {
         float sum = weights->encoder_b2[i];
         for (int j = 0; j < weights->hidden1; j++) {
@@ -237,7 +212,6 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         hidden2[i] = relu(sum);
     }
 
-    // Layer 3: HIDDEN2 -> output_dim (linear output, vectorized with float4)
     int vec_output_dim = weights->output_dim / 4;
     int remainder_dim = weights->output_dim % 4;
 
@@ -260,7 +234,6 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         reinterpret_cast<float4*>(latent)[i] = sum4;
     }
 
-    // Handle remainder if output_dim not divisible by 4
     for (int i = vec_output_dim * 4; i < weights->output_dim; i++) {
         float sum = weights->encoder_b3[i];
         for (int j = 0; j < weights->hidden2; j++) {
@@ -276,7 +249,6 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
     float hidden1_grad[DIRESA_HIDDEN1_MAX];
     float hidden2_grad[DIRESA_HIDDEN2_MAX];
 
-    // Recompute forward pass to get activations
     for (int i = 0; i < weights->hidden1; i++) {
         float sum = weights->encoder_b1[i];
         for (int j = 0; j < weights->input_dim; j++) {
@@ -293,7 +265,6 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         hidden2[i] = relu(sum);
     }
 
-    // Backward pass Layer 3: latent_grad → hidden2_grad
     for (int i = 0; i < weights->hidden2; i++) {
         hidden2_grad[i] = 0.0f;
     }
@@ -305,7 +276,6 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         }
     }
 
-    // Backward pass Layer 2: hidden2_grad → hidden1_grad (with ReLU)
     for (int i = 0; i < weights->hidden1; i++) {
         hidden1_grad[i] = 0.0f;
     }
@@ -317,7 +287,6 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         }
     }
 
-    // Backward pass Layer 1: hidden1_grad → features_grad (with ReLU)
     for (int i = 0; i < weights->input_dim; i++) {
         features_grad[i] = 0.0f;
     }
@@ -330,18 +299,14 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
     }
 }
 
-// Decoder forward pass
 __device__ void diresa_decode(const float* latent, float* reconstructed, const DIRESAWeights* weights) {
     float hidden1[DIRESA_HIDDEN2_MAX];
     float hidden2[DIRESA_HIDDEN1_MAX];
 
-    // Layer 1: output_dim -> HIDDEN2 (vectorized latent reads with float4)
-    // Vectorize latent reads: 128 elements -> 32 float4 loads
     int vec_output_dim = weights->output_dim / 4;
     for (int i = 0; i < weights->hidden2; i++) {
         float sum = weights->decoder_b1[i];
 
-        // Vectorized accumulation
         for (int j = 0; j < vec_output_dim; j++) {
             float4 latent4 = reinterpret_cast<const float4*>(latent)[j];
             sum += latent4.x * weights->decoder_w1[(j * 4 + 0) * weights->hidden2 + i];
@@ -350,7 +315,6 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
             sum += latent4.w * weights->decoder_w1[(j * 4 + 3) * weights->hidden2 + i];
         }
 
-        // Handle remainder
         for (int j = vec_output_dim * 4; j < weights->output_dim; j++) {
             sum += latent[j] * weights->decoder_w1[j * weights->hidden2 + i];
         }
@@ -358,7 +322,6 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
         hidden1[i] = relu(sum);
     }
 
-    // Layer 2: HIDDEN2 -> HIDDEN1
     for (int i = 0; i < weights->hidden1; i++) {
         float sum = weights->decoder_b2[i];
         for (int j = 0; j < weights->hidden2; j++) {
@@ -367,7 +330,6 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
         hidden2[i] = relu(sum);
     }
 
-    // Layer 3: HIDDEN1 -> input_dim (linear output)
     for (int i = 0; i < weights->input_dim; i++) {
         float sum = weights->decoder_b3[i];
         for (int j = 0; j < weights->hidden1; j++) {
@@ -377,7 +339,6 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
     }
 }
 
-// Siamese twin forward pass: encode both original and shuffled inputs
 __global__ void diresa_forward_kernel(DIRESABatch* batch, const DIRESAWeights* weights) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
@@ -398,7 +359,6 @@ __global__ void diresa_forward_kernel(DIRESABatch* batch, const DIRESAWeights* w
     CooperativeSync::sync_warp();
 }
 
-// Distance layer: compute ||x - x'|| and ||z - z'|| for correlation loss
 __global__ void diresa_distance_kernel(DIRESABatch* batch) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
@@ -410,7 +370,6 @@ __global__ void diresa_distance_kernel(DIRESABatch* batch) {
     const float* latent_i = batch->latent + tid * batch->output_dim;
     const float* latent_j = batch->latent + shuffled_idx * batch->output_dim;
 
-    // Compute original space distance: ||x_i - x_j||
     float orig_dist_sq = 0.0f;
     for (int k = 0; k < batch->input_dim; k++) {
         float diff = features_i[k] - features_j[k];
@@ -418,12 +377,10 @@ __global__ void diresa_distance_kernel(DIRESABatch* batch) {
     }
     batch->orig_distances[tid] = sqrtf(orig_dist_sq);
 
-    // Compute latent space distance using DIRESAOps (vectorized warp-reduce, 128 -> 32 float4 loads)
     float latent_dist_sq = DIRESAOps::compute_latent_distance_sq(latent_i, latent_j, batch->output_dim);
     batch->latent_distances[tid] = sqrtf(latent_dist_sq);
 }
 
-// Loss computation: 3 components (reconstruction, distance correlation, covariance)
 __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weights) {
     __shared__ float shared_recon[256];
     __shared__ float shared_orig_mean[1];
@@ -435,7 +392,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
     int tid = threadIdx.x;
     int sample_idx = blockIdx.x * blockDim.x + tid;
 
-    // 1. Reconstruction Loss: MSE between original and reconstructed
     float local_recon = 0.0f;
     if (sample_idx < batch->batch_size) {
         const float* orig = batch->features + sample_idx * batch->input_dim;
@@ -449,7 +405,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
     shared_recon[tid] = local_recon;
     __syncthreads();
 
-    // Reduce reconstruction loss
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             shared_recon[tid] += shared_recon[tid + stride];
@@ -460,12 +415,9 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         atomicAdd(&batch->recon_loss, shared_recon[0] / batch->batch_size);
     }
 
-    // 2. Power-Law Distance Scaling: d_latent ∝ d_orig^α
-    // Fit in log-log space, generalization of Pearson correlation to power-law regime
     if (blockIdx.x == 0) {
         float target_alpha = weights->distance_exponent;
 
-        // Compute mean of log(original distances) - parallel with tid 0
         if (tid == 0) {
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
@@ -478,7 +430,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         }
         __syncthreads();
 
-        // Compute variance of log(original distances)
         if (tid == 0) {
             float sum_sq = 0.0f;
             float mean = shared_orig_mean[0];
@@ -492,7 +443,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             shared_orig_var[0] = sum_sq / batch->batch_size;
         }
 
-        // Compute mean of log(latent distances) - parallel with tid 1
         if (tid == 1) {
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
@@ -505,7 +455,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         }
         __syncthreads();
 
-        // Compute variance and log-log covariance (slope = power-law exponent) - PARALLEL
         float latent_mean = shared_latent_mean[0];
         float orig_mean = shared_orig_mean[0];
 
@@ -526,7 +475,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         shared_cov_sum[0] = 0.0f;
         __syncthreads();
 
-        // Reduce variance
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 shared_recon[tid] += shared_recon[tid + stride];
@@ -537,7 +485,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             shared_latent_var[0] = shared_recon[0] / batch->batch_size;
         }
 
-        // Reduce covariance
         shared_recon[tid] = local_cov;
         __syncthreads();
 
@@ -568,12 +515,9 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
         }
     }
 
-    // 3. Covariance Loss: L_cov = 1/(L*(L-1)) * Σ(i≠j) cov²(i,j)(Z)
-    // Forces latent components to be statistically independent
     if (blockIdx.x == 0 && tid == 0) {
         float latent_means[BEHAVIORAL_DIM_MAX] = {0};
 
-        // Compute means per latent dimension
         for (int dim = 0; dim < batch->output_dim; dim++) {
             float sum = 0.0f;
             for (int i = 0; i < batch->batch_size; i++) {
@@ -582,7 +526,6 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             latent_means[dim] = sum / batch->batch_size;
         }
 
-        // Compute off-diagonal covariance terms
         float cov_sum = 0.0f;
         for (int i = 0; i < batch->output_dim; i++) {
             for (int j = i + 1; j < batch->output_dim; j++) {
@@ -597,25 +540,21 @@ __global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weig
             }
         }
 
-        // Normalize by number of off-diagonal terms
         int num_pairs = batch->output_dim * (batch->output_dim - 1) / 2;
         batch->cov_loss = cov_sum / num_pairs;
     }
 }
 
-// Annealing logic: gradually increase covariance weight
 __device__ void update_annealing(DIRESAWeights* weights, float cov_loss, PoolEntry* entry) {
     if (cov_loss > entry->cov_target && weights->cov_weight < 10.0f) {
         weights->cov_weight += entry->anneal_step;
     }
 }
 
-// Parallel tempering: replica exchange based on energy difference
 __global__ void replica_exchange_kernel(DIRESAWeights* replicas, DIRESABatch* batches, PoolEntry* entry, curandState* rand_states) {
     int tid = threadIdx.x;
     if (tid >= entry->num_tempering_replicas - 1) return;
 
-    // Try to swap replica i with replica i+1
     int i = tid;
     int j = tid + 1;
 
@@ -630,13 +569,11 @@ __global__ void replica_exchange_kernel(DIRESAWeights* replicas, DIRESABatch* ba
     float beta_i = 1.0f / replicas[i].temperature;
     float beta_j = 1.0f / replicas[j].temperature;
 
-    // Metropolis acceptance criterion
     float delta = (beta_j - beta_i) * (E_i - E_j);
     float accept_prob = fminf(1.0f, expf(delta));
 
     float rand = validated_curand_uniform(&rand_states[tid], "replica_exchange", tid);
     if (rand < accept_prob) {
-        // Swap temperatures (not weights - we want to explore same landscape)
         float temp_swap = replicas[i].temperature;
         replicas[i].temperature = replicas[j].temperature;
         replicas[j].temperature = temp_swap;

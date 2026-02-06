@@ -20,7 +20,6 @@ struct GenomeComplexityMetrics {
 };
 
 struct ArchiveTopologyMetrics {
-    // Coverage dynamics
     int occupied_cells;
     int frontier_cells_gained;   // New cells colonized this gen
     int frontier_cells_lost;     // Cells that went extinct
@@ -28,7 +27,6 @@ struct ArchiveTopologyMetrics {
     float niche_entropy;         // Shannon entropy of cell occupancy
     float novelty_gradient;      // occupied/total ratio
 
-    // Quality dynamics  
     float elite_fitness_best;
     float elite_fitness_mean;    // Mean fitness across archive
     float elite_fitness_delta;   // Change from previous gen
@@ -36,27 +34,22 @@ struct ArchiveTopologyMetrics {
     float quality_mean;          // Mean quality threshold
     float quality_range;
 
-    // Density distribution
     float density_mean;          // Mean organisms per occupied cell
     float density_max;           // Most crowded cell
     float density_variance;
 
-    // 3-axis behavioral spread
     float hw_axis_min, hw_axis_max, hw_axis_mean;
     float task_axis_min, task_axis_max, task_axis_mean;
     float gen_axis_min, gen_axis_max, gen_axis_mean;
 
-    // Axis correlations
     float axis_corr_hw_task;
     float axis_corr_hw_gen;
     float axis_corr_task_gen;
 
-    // Population flow (measured at checkpoint boundaries, not global time)
     int total_population;
     int births_since_checkpoint;   // Spawns between barriers, not "this generation"
     int deaths_since_checkpoint;   // Culls between barriers
 
-    // Legacy
     float hash_clustering_coefficient;
 };
 
@@ -194,7 +187,6 @@ __device__ void genome_complexity_probe(
 
     int display_count = 0;
     for (int i = 0; i < capacity && display_count < 10; i++) {
-        // Use SoA for coalesced alive read
         if (!pool->alive_flags[i]) continue;
         PoolEntry* e = &pool->entries[i];
         display_count++;
@@ -230,7 +222,6 @@ __device__ void archive_topology_probe(
     DEVICE_FATAL_IF(archive_size == 0, "archive_topology_probe: archive_size is 0");
     DEVICE_FATAL_IF(num_cells == 0, "archive_topology_probe: num_cells is 0");
 
-    // Coverage and population
     int occupied = 0;
     int sparse_count = 0;
     int frontier_gained = 0;
@@ -240,14 +231,12 @@ __device__ void archive_topology_probe(
     float sum_density_sq = 0.0f;
     int max_density = 0;
 
-    // Quality
     float min_quality = 1e10f;
     float max_quality = -1e10f;
     float sum_quality = 0.0f;
     float best_fitness = -1e10f;
     float sum_fitness = 0.0f;
 
-    // 3-axis spread (using centroid L2 norms as proxy)
     float hw_min = 1e10f, hw_max = -1e10f, hw_sum = 0.0f;
     float task_min = 1e10f, task_max = -1e10f, task_sum = 0.0f;
     float gen_min = 1e10f, gen_max = -1e10f, gen_sum = 0.0f;
@@ -272,7 +261,6 @@ __device__ void archive_topology_probe(
             max_quality = fmaxf(max_quality, q);
             sum_quality += q;
 
-            // Compute centroid magnitudes for axis spread
             float hw_mag = 0.0f, task_mag = 0.0f, gen_mag = 0.0f;
             for (int d = 0; d < hw_dim && voronoi_cells[i].hw_centroid; d++) {
                 hw_mag += voronoi_cells[i].hw_centroid[d] * voronoi_cells[i].hw_centroid[d];
@@ -292,20 +280,17 @@ __device__ void archive_topology_probe(
             frontier_lost++;  // Extinction
         }
 
-        // Update prev flags for next generation
         if (prev_occupied_flags) prev_occupied_flags[i] = dens;
     }
 
     DEVICE_FATAL_IF(occupied <= 0, "archive_topology_probe: no occupied cells after scan");
 
-    // Find best and mean elite fitness (SoA layout: archive->fitness[i])
     for (int i = 0; i < archive_size; i++) {
         float f = archive->fitness[i];
         if (f > best_fitness) best_fitness = f;
         sum_fitness += f;
     }
 
-    // Niche entropy (Shannon entropy of density distribution)
     float entropy = 0.0f;
     if (total_pop > 0) {
         for (int i = 0; i < num_cells; i++) {
@@ -316,7 +301,6 @@ __device__ void archive_topology_probe(
         }
     }
 
-    // Coverage dynamics
     metrics->occupied_cells = occupied;
     metrics->frontier_cells_gained = frontier_gained;
     metrics->frontier_cells_lost = frontier_lost;
@@ -347,7 +331,6 @@ __device__ void archive_topology_probe(
     metrics->gen_axis_max = gen_max;
     metrics->gen_axis_mean = gen_sum / occupied;
 
-    // Axis correlations - Pearson correlation between centroid magnitudes
     float sum_hw_task = 0.0f, sum_hw_gen = 0.0f, sum_task_gen = 0.0f;
     float sum_hw_sq = 0.0f, sum_task_sq = 0.0f, sum_gen_sq = 0.0f;
     int corr_n = 0;
@@ -552,13 +535,10 @@ __device__ void populate_audit_buffer(
     MultiHeadCAState* ca_state,
     HardwareGeometry* hardware_geom
 ) {
-    // V: entry probe - all inputs
     printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
            generation, (void*)logits, (void*)labels, (void*)batch_images,
            batch_size, num_classes, (void*)ca_concentration, grid_size);
 
-    // GPU-native: just overwrite buffer, host polls asynchronously
-    // No waiting, no handshakes - GPU runs at full speed
     audit->ready = 0;
     __threadfence_system();
 
@@ -671,11 +651,9 @@ __device__ void populate_audit_buffer(
     }
     printf("V:audit_cp6 pool_done\n");
 
-    // Copy telemetry metrics (existing computed values)
     DEVICE_FATAL_IF(telemetry == nullptr, "populate_audit_buffer: telemetry is null");
     DEVICE_FATAL_IF(!telemetry->valid, "populate_audit_buffer: telemetry not valid");
 
-    // Coverage dynamics
     audit->archive_occupied_cells = telemetry->archive_topology.occupied_cells;
     audit->frontier_cells_gained = telemetry->archive_topology.frontier_cells_gained;
     audit->frontier_cells_lost = telemetry->archive_topology.frontier_cells_lost;
@@ -683,7 +661,6 @@ __device__ void populate_audit_buffer(
     audit->niche_entropy = telemetry->archive_topology.niche_entropy;
     audit->novelty_gradient = telemetry->archive_topology.novelty_gradient;
 
-    // Quality dynamics
     audit->elite_fitness_best = telemetry->archive_topology.elite_fitness_best;
     audit->elite_fitness_mean = telemetry->archive_topology.elite_fitness_mean;
     audit->elite_fitness_delta = telemetry->archive_topology.elite_fitness_delta;
@@ -691,12 +668,10 @@ __device__ void populate_audit_buffer(
     audit->quality_mean = telemetry->archive_topology.quality_mean;
     audit->quality_range = telemetry->archive_topology.quality_range;
 
-    // Density distribution
     audit->density_mean = telemetry->archive_topology.density_mean;
     audit->density_max = telemetry->archive_topology.density_max;
     audit->density_variance = telemetry->archive_topology.density_variance;
 
-    // 3-axis behavioral spread
     audit->hw_axis_min = telemetry->archive_topology.hw_axis_min;
     audit->hw_axis_max = telemetry->archive_topology.hw_axis_max;
     audit->hw_axis_mean = telemetry->archive_topology.hw_axis_mean;
@@ -711,7 +686,6 @@ __device__ void populate_audit_buffer(
     audit->births_this_gen = telemetry->archive_topology.births_since_checkpoint;
     audit->deaths_this_gen = telemetry->archive_topology.deaths_since_checkpoint;
 
-    // DIRESA metrics
     audit->diresa_recon_loss_hw = telemetry->diresa_evolution.recon_loss_hw;
     audit->diresa_recon_loss_task = telemetry->diresa_evolution.recon_loss_task;
     audit->diresa_recon_loss_gen = telemetry->diresa_evolution.recon_loss_gen;
@@ -719,7 +693,6 @@ __device__ void populate_audit_buffer(
     audit->diresa_behavioral_drift = telemetry->diresa_evolution.behavioral_drift_rate;
     audit->diresa_latent_utilization = telemetry->diresa_evolution.latent_utilization;
 
-    // Genome complexity
     audit->genome_unique_hashes = telemetry->genome_complexity.unique_hashes;
     audit->genome_hash_entropy = telemetry->genome_complexity.hash_entropy;
     audit->genome_avg_deltas = telemetry->genome_complexity.avg_deltas_per_genome;
@@ -729,20 +702,17 @@ __device__ void populate_audit_buffer(
         audit->per_class_total[c] = (float)telemetry->task_performance.per_class_total[c];
     }
 
-    // === AXIS CORRELATIONS ===
     audit->axis_corr_hw_task = telemetry->archive_topology.axis_corr_hw_task;
     audit->axis_corr_hw_gen = telemetry->archive_topology.axis_corr_hw_gen;
     audit->axis_corr_task_gen = telemetry->archive_topology.axis_corr_task_gen;
     audit->hash_clustering_coefficient = telemetry->archive_topology.hash_clustering_coefficient;
 
-    // === MEMORY ALLOCATION ===
     audit->memory_gpu_allocated = telemetry->memory_allocation.total_gpu_allocated;
     audit->memory_gpu_free = telemetry->memory_allocation.total_gpu_free;
     audit->memory_ca_state_size = telemetry->memory_allocation.ca_state_size;
     audit->memory_chemical_field_size = telemetry->memory_allocation.chemical_field_size;
     audit->memory_archive_size = telemetry->memory_allocation.archive_pools_size;
 
-    // === FITNESS EXPONENTS (from entry 0) ===
     DEVICE_FATAL_IF(pool == nullptr, "populate_audit_buffer: pool is null");
     DEVICE_FATAL_IF(!pool->entries[0].alive, "populate_audit_buffer: pool entry 0 not alive");
     PoolEntry* e0 = &pool->entries[0];
@@ -751,7 +721,6 @@ __device__ void populate_audit_buffer(
     audit->fitness_gamma = e0->fitness_rank_exponent;
     audit->fitness_delta = e0->fitness_efficiency_exponent;
 
-    // Hardware geometry metrics
     DEVICE_FATAL_IF(hardware_geom == nullptr, "populate_audit_buffer: hardware_geom is null");
     audit->hw_warp_divergence_entropy = hardware_geom->warp_divergence_entropy;
     audit->hw_warp_convergence_rate = hardware_geom->warp_convergence_rate;
@@ -764,7 +733,6 @@ __device__ void populate_audit_buffer(
     audit->hw_arithmetic_intensity = hardware_geom->arithmetic_intensity;
     audit->hw_memory_bandwidth_saturation = hardware_geom->memory_bandwidth_saturation;
 
-    // Chemical field metrics
     DEVICE_FATAL_IF(chemical_field == nullptr, "populate_audit_buffer: chemical_field is null");
     DEVICE_FATAL_IF(chemical_field->concentration == nullptr, "populate_audit_buffer: chemical_field concentration is null");
     DEVICE_FATAL_IF(chemical_field->gradient_x == nullptr, "populate_audit_buffer: chemical_field gradient_x is null");
@@ -792,7 +760,6 @@ __device__ void populate_audit_buffer(
     audit->chemical_source_activity = source_sum / total_cells;
     audit->chemical_decay_rate_mean = decay_sum / total_cells;
 
-    // Flow-Lenia metrics from ca_state
     DEVICE_FATAL_IF(ca_state == nullptr, "populate_audit_buffer: ca_state is null");
     DEVICE_FATAL_IF(pool->entries[0].channels <= 0, "populate_audit_buffer: pool entry 0 channels <= 0");
     DEVICE_FATAL_IF(ca_state->ca_concentration == nullptr, "populate_audit_buffer: ca_concentration is null");
@@ -822,12 +789,10 @@ __device__ void populate_audit_buffer(
     audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
     audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
 
-    // Signal data ready (must be last, after all writes complete)
     __threadfence_system();
     audit->ready = 1;
     __threadfence_system();
 
-    // V: exit probe - buffer state after fill
     printf("V:audit_done gen=%d correct=%d/%d acc=%.4f loss=%.4f train=%.4f test=%.4f pool=%d/%d\n",
            generation, audit->correct_count, batch_size, audit->accuracy, audit->loss,
            train_accuracy, test_accuracy, audit->pool_alive_count, audit->pool_capacity);

@@ -22,7 +22,6 @@ __global__ void adam_update_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_params) return;
 
-    // FATAL on null pointers - caller must provide valid buffers
     DEVICE_FATAL_IF(weights == nullptr, "adam_update: weights is null");
     DEVICE_FATAL_IF(gradients == nullptr, "adam_update: gradients is null");
     DEVICE_FATAL_IF(m == nullptr, "adam_update: m is null");
@@ -30,7 +29,6 @@ __global__ void adam_update_kernel(
 
     float g = gradients[idx];
 
-    // FATAL on NaN/inf gradients - indicates upstream computation error
     DEVICE_FATAL_IF(isnan(g), "adam_update: gradient is NaN - upstream computation corrupted");
     DEVICE_FATAL_IF(isinf(g), "adam_update: gradient is Inf - upstream computation corrupted");
 
@@ -72,7 +70,6 @@ __global__ void adam_update_fp16_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_params) return;
 
-    // FATAL on null pointers - caller must provide valid buffers
     DEVICE_FATAL_IF(weights_fp16 == nullptr, "adam_update_fp16: weights_fp16 is null");
     DEVICE_FATAL_IF(gradients == nullptr, "adam_update_fp16: gradients is null");
     DEVICE_FATAL_IF(m == nullptr, "adam_update_fp16: m is null");
@@ -81,7 +78,6 @@ __global__ void adam_update_fp16_kernel(
     float weight = __half2float(weights_fp16[idx]);
     float g = gradients[idx];
 
-    // FATAL on NaN/inf - indicates upstream computation error
     DEVICE_FATAL_IF(isnan(g), "adam_update_fp16: gradient is NaN - upstream computation corrupted");
     DEVICE_FATAL_IF(isinf(g), "adam_update_fp16: gradient is Inf - upstream computation corrupted");
     DEVICE_FATAL_IF(isnan(weight), "adam_update_fp16: weight is NaN - data corrupted");
@@ -109,10 +105,8 @@ __global__ void adam_update_fp16_kernel(
     gradients[idx] = 0.0f;
 }
 
-// Forward declare UnifiedGradientBuffer from training_types.cu
 struct UnifiedGradientBuffer;
 
-// Apply unified gradient buffer through Adam to FP16 CA weights
 __global__ void adam_apply_unified_ca_grads_kernel(
     UnifiedGradientBuffer* __restrict__ grad_buf,
     half* __restrict__ perception_weights,
@@ -184,7 +178,6 @@ __global__ void adam_apply_unified_ca_grads_kernel(
     *weight_ptr = __float2half(weight);
 }
 
-// Apply unified gradient buffer through Adam to FP32 classification head weights
 __global__ void adam_apply_unified_classifier_grads_kernel(
     UnifiedGradientBuffer* __restrict__ grad_buf,
     float* __restrict__ pooling_weights,

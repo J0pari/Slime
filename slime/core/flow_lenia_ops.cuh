@@ -54,8 +54,6 @@ struct FlowLeniaOps {
         );
     }
 
-    // Differentiable bilinear splatting: splats mass to 4 nearest cells
-    // Returns weights for the 4 corners: (x0,y0), (x1,y0), (x0,y1), (x1,y1)
     __device__ static void bilinear_splat_weights(
         float cx, float cy,
         int grid_size,
@@ -70,23 +68,17 @@ struct FlowLeniaOps {
         float fx = cx - (float)*x0;
         float fy = cy - (float)*y0;
 
-        // Bilinear weights (sum to 1.0)
         *w00 = (1.0f - fx) * (1.0f - fy);
         *w10 = fx * (1.0f - fy);
         *w01 = (1.0f - fx) * fy;
         *w11 = fx * fy;
 
-        // Clamp to grid bounds
         *x0 = max(0, min(*x0, grid_size - 1));
         *y0 = max(0, min(*y0, grid_size - 1));
         *x1 = max(0, min(*x1, grid_size - 1));
         *y1 = max(0, min(*y1, grid_size - 1));
     }
 
-    // Differentiable flow transport: moves mass using bilinear splatting
-    // Forward: new_mass[target] += source_mass * bilinear_weight
-    // Backward: d_source_mass += d_new_mass * bilinear_weight
-    //           d_flow += d_new_mass * source_mass * d_weight/d_flow
     __device__ static void bilinear_transport_forward(
         float source_mass,
         float source_x, float source_y,
@@ -116,8 +108,6 @@ struct FlowLeniaOps {
         atomicAdd(&target_buffer[idx11], source_mass * w11);
     }
 
-    // Backward pass for bilinear transport
-    // Computes gradients w.r.t. source mass and flow field
     __device__ static void bilinear_transport_backward(
         float source_mass,
         float source_x, float source_y,
@@ -142,13 +132,11 @@ struct FlowLeniaOps {
         float fx = displaced_x - (float)x0;
         float fy = displaced_y - (float)y0;
 
-        // Weights
         float w00 = (1.0f - fx) * (1.0f - fy);
         float w10 = fx * (1.0f - fy);
         float w01 = (1.0f - fx) * fy;
         float w11 = fx * fy;
 
-        // Clamp indices for reading gradients
         int cx0 = max(0, min(x0, grid_size - 1));
         int cy0 = max(0, min(y0, grid_size - 1));
         int cx1 = max(0, min(x1, grid_size - 1));
@@ -164,28 +152,19 @@ struct FlowLeniaOps {
         float g01 = target_grad[idx01];
         float g11 = target_grad[idx11];
 
-        // Gradient w.r.t. source mass: sum of (weight * target_grad)
         *d_source_mass = w00 * g00 + w10 * g10 + w01 * g01 + w11 * g11;
 
-        // Gradient w.r.t. displaced position (chain rule through weights)
-        // dw00/dfx = -(1-fy), dw00/dfy = -(1-fx)
-        // dw10/dfx = (1-fy),  dw10/dfy = -fx
-        // dw01/dfx = -fy,     dw01/dfy = (1-fx)
-        // dw11/dfx = fy,      dw11/dfy = fx
         float d_fx = source_mass * (-(1.0f - fy) * g00 + (1.0f - fy) * g10 - fy * g01 + fy * g11);
         float d_fy = source_mass * (-(1.0f - fx) * g00 - fx * g10 + (1.0f - fx) * g01 + fx * g11);
 
-        // Gradient w.r.t. flow: d_displaced/d_flow = dt
         *d_flow_x = dt * d_fx;
         *d_flow_y = dt * d_fy;
     }
 
-    // Soft clamp for differentiable alpha computation (replaces hard clamp)
     __device__ static float soft_clamp(float x, float min_val, float max_val, float sharpness) {
         float range = max_val - min_val;
         float safe_range = fmaxf(fabsf(range), safe_epsilon(range));
         float scaled = (x - min_val) / safe_range;
-        // sharpness already bounded by FLOW_LENIA_SHARPNESS_MAX in config
         float exp_arg = -sharpness * (scaled - CENTERED_DIFFERENCE_SCALE);
         exp_arg = fmaxf(fminf(exp_arg, EXPF_ARG_LIMIT), -EXPF_ARG_LIMIT);
         float sigmoid_val = 1.0f / (1.0f + expf(exp_arg));
@@ -230,14 +209,12 @@ struct FlowLeniaOps {
         float* d_beta_A,
         float* d_n
     ) {
-        // Recompute forward values needed for backward
         float ratio = A_sum_center / fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
         float safe_ratio = fmaxf(ratio, safe_epsilon(ratio));
         float safe_n = fmaxf(fabsf(n), safe_epsilon(n));
 
         float alpha_unclamped = powf(safe_ratio, safe_n);
 
-        // Soft clamp gradient
         float range = alpha_max - alpha_min;
         float safe_range = fmaxf(fabsf(range), safe_epsilon(range));
         float scaled = (alpha_unclamped - alpha_min) / safe_range;
@@ -254,29 +231,18 @@ struct FlowLeniaOps {
         float grad_A_x = (A_sum_E - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
         float grad_A_y = (A_sum_N - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
 
-        // Flow output: F = (1 - alpha) * grad_U - alpha * grad_A
-        // d_flow_x/d_alpha = -grad_U_x - grad_A_x
-        // d_flow_y/d_alpha = -grad_U_y - grad_A_y
         float d_alpha_x = d_flow_x * (-grad_U_x - grad_A_x);
         float d_alpha_y = d_flow_y * (-grad_U_y - grad_A_y);
         float d_alpha = d_alpha_x + d_alpha_y;
 
-        // Chain through soft_clamp
         float d_alpha_unclamped = d_alpha * range * d_sigmoid;
 
-        // alpha_unclamped = safe_ratio^safe_n
-        // d_alpha_unclamped/d_ratio = safe_n * safe_ratio^(safe_n - 1)
-        // d_alpha_unclamped/d_n = safe_ratio^safe_n * ln(safe_ratio)
         float d_ratio = d_alpha_unclamped * safe_n * powf(safe_ratio, safe_n - 1.0f);
         float d_n_local = d_alpha_unclamped * alpha_unclamped * logf(safe_ratio);
 
-        // ratio = A_sum_center / beta_A
-        // d_ratio/d_beta_A = -A_sum_center / beta_A^2
         float beta_A_safe = fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
         *d_beta_A = d_ratio * (-A_sum_center / (beta_A_safe * beta_A_safe));
 
-        // safe_n = max(|n|, epsilon)
-        // Gradient only flows if n != 0
         *d_n = (fabsf(n) > safe_epsilon(n)) ? d_n_local : 0.0f;
     }
 };

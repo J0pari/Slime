@@ -19,17 +19,13 @@ struct ComponentPool {
     cuda::atomic<int, cuda::thread_scope_system> total_culled;
     int capacity;
 
-    // Compact index array - maps [0, alive_count) to actual entry indices
-    // Built by compact_alive_indices_kernel before kernels that need dense iteration
     int* alive_indices;
     int alive_indices_count;  // Snapshot of active_count at compaction time
 
-    // SoA hot fields for coalesced access in iteration kernels
     bool* alive_flags;      // [capacity] - mirrors entries[i].alive
     float* fitness_values;  // [capacity] - mirrors entries[i].fitness
 };
 
-// Extract ArchitectureParams from a pool entry
 __device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* pool, int idx) {
     ArchitectureParams arch;
     arch.num_heads = pool->entries[idx].num_heads;
@@ -37,13 +33,11 @@ __device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* 
     arch.hidden_dim = pool->entries[idx].hidden_dim;
     arch.head_dim = pool->entries[idx].head_dim;
     arch.grid_size = pool->entries[idx].grid_size;
-    // Gate center derived from coherence: low coherence → conservative, high → aggressive
     float coherence = fminf(fmaxf(pool->entries[idx].coherence, 0.0f), 1.0f);
     arch.ca_gate_center = 2.0f - 1.5f * coherence;
     return arch;
 }
 
-// DIRESA autoencoder - needs PoolEntry definition above
 #include "../learning/diresa.cu"
 
 __global__ void init_rng_states_kernel(curandState* states, int count, unsigned long seed) {
@@ -53,18 +47,14 @@ __global__ void init_rng_states_kernel(curandState* states, int count, unsigned 
     }
 }
 
-// Step 1: Mark alive entries into flags array
 __global__ void mark_alive_kernel(ComponentPool* pool, int* flags) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < pool->capacity) {
-        // Use SoA for coalesced alive read
         flags[idx] = pool->alive_flags[idx] ? 1 : 0;
     }
 }
 
-// Step 2: Use existing exclusive_scan_kernel from parallel_compaction.cu
 
-// Step 3: Scatter indices based on scan results
 __global__ void scatter_alive_indices_kernel(
     ComponentPool* pool, int* flags, int* scan_results
 ) {
@@ -74,7 +64,6 @@ __global__ void scatter_alive_indices_kernel(
     }
 }
 
-// Step 4: Finalize count
 __global__ void finalize_alive_count_kernel(
     ComponentPool* pool, int* flags, int* scan_results, int capacity
 ) {
@@ -90,13 +79,11 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     int head_dim_slot = derive_param_slot(genome_hash, "arch_head_dim");
     int grid_size_slot = derive_param_slot(genome_hash, "arch_grid_size");
 
-    // FATAL on invalid slots - upstream must provide valid genome hash
     DEVICE_FATAL_IF(num_heads_slot < 0 || num_heads_slot >= GENOME_SIZE, "arch_num_heads slot out of bounds");
     DEVICE_FATAL_IF(channels_slot < 0 || channels_slot >= GENOME_SIZE, "arch_channels slot out of bounds");
     DEVICE_FATAL_IF(head_dim_slot < 0 || head_dim_slot >= GENOME_SIZE, "arch_head_dim slot out of bounds");
     DEVICE_FATAL_IF(grid_size_slot < 0 || grid_size_slot >= GENOME_SIZE, "arch_grid_size slot out of bounds");
 
-    // FATAL on NaN genome values - upstream must provide valid genome data
     DEVICE_FATAL_IF(isnan(genome[num_heads_slot]), "arch_num_heads genome value is NaN");
     DEVICE_FATAL_IF(isnan(genome[channels_slot]), "arch_channels genome value is NaN");
     DEVICE_FATAL_IF(isnan(genome[head_dim_slot]), "arch_head_dim genome value is NaN");
@@ -117,7 +104,6 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     entry->grid_size = (int)fmaxf((float)GRID_SIZE_MIN, fminf((float)GRID_SIZE_MAX, GRID_SIZE_MIN + grid_size_norm * (GRID_SIZE_MAX - GRID_SIZE_MIN)));
     entry->hidden_dim = entry->num_heads * entry->head_dim;
 
-    // FATAL on invalid derived dimensions - computation logic error
     DEVICE_FATAL_IF(entry->num_heads <= 0, "derived num_heads <= 0");
     DEVICE_FATAL_IF(entry->head_dim <= 0, "derived head_dim <= 0");
     DEVICE_FATAL_IF(entry->channels <= 0, "derived channels <= 0");
@@ -258,7 +244,6 @@ __device__ void spawn_component_device(
     }
 
     for (int i = 0; i < pool->capacity; i++) {
-        // Atomically claim slot using id field (INT_MAX means unclaimed)
         if (pool->entries[i].id == INT_MAX) {
             int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);  // -2 = claiming
             if (old_id == INT_MAX) {
@@ -389,7 +374,6 @@ __global__ void cull_weak_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        // Use SoA for coalesced alive/fitness reads
         if (pool->alive_flags[idx] && pool->fitness_values[idx] < threshold) {
             pool->entries[idx].alive = false;
             pool->alive_flags[idx] = false;  // SoA sync
@@ -406,7 +390,6 @@ __global__ void cull_hungry_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        // Use SoA for coalesced alive read
         if (pool->alive_flags[idx] && pool->entries[idx].hunger > hunger_threshold) {
             pool->entries[idx].alive = false;
             pool->alive_flags[idx] = false;  // SoA sync
@@ -419,7 +402,6 @@ __global__ void cull_hungry_kernel(
 __global__ void age_components_kernel(ComponentPool* pool) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Use SoA for coalesced alive read
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         pool->entries[idx].age++;
     }
@@ -428,7 +410,6 @@ __global__ void age_components_kernel(ComponentPool* pool) {
 __global__ void update_hunger_kernel(ComponentPool* pool) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Use SoA for coalesced alive read
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         pool->entries[idx].hunger = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence);
     }
@@ -470,7 +451,6 @@ __global__ void select_top_k_kernel(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < k && tid < pool->capacity) {
-        // Use SoA for coalesced alive read
         if (pool->alive_flags[tid]) {
             selected_indices[tid] = tid;
         } else {
@@ -520,7 +500,6 @@ __global__ void diversity_selection_kernel(
     int capacity = pool->capacity;
 
     float my_distance = -1.0f;
-    // Use SoA for coalesced alive reads
     if (idx < capacity && pool->alive_flags[idx]) {
         float sum_dist = 0.0f;
         int count = 0;
@@ -616,7 +595,6 @@ __global__ void init_pool_kernel(
         if (idx == 0) printf("V:init_pool_idx0_D alive_flags=%p fitness_vals=%p\n", (void*)pool->alive_flags, (void*)pool->fitness_values);
 
         if (idx < POOL_CAPACITY_MIN) {
-            // Root entries: genome stored directly
             pool->entries[idx].type = ENTRY_ROOT;
             pool->entries[idx].root.genome = &delta_values_buffer[idx * GENOME_SIZE];
 
@@ -658,7 +636,6 @@ __global__ void init_pool_kernel(
             pool->entries[idx].hardware_efficiency = NAN;  // Set by hardware profiling
             pool->entries[idx].effective_rank = NAN;  // Set by gradient backward pass
         } else {
-            // Empty slots: set up as child placeholders
             pool->entries[idx].type = ENTRY_CHILD;
             pool->entries[idx].child.parent_hash = 0;  // Invalid until spawned
             pool->entries[idx].child.parent_idx = INT_MAX;
@@ -714,7 +691,6 @@ __global__ void compute_pool_stats_kernel(
     float local_coherence = 0.0f;
     float local_age = 0.0f;
 
-    // Use SoA for coalesced alive/fitness reads
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         local_fitness = pool->fitness_values[idx];
         local_coherence = pool->entries[idx].coherence;
@@ -731,7 +707,6 @@ __global__ void compute_pool_stats_kernel(
         atomicAdd(avg_age, total_age);
     }
 
-    // Use SoA for coalesced alive read
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         float diversity = 0.0f;
 
@@ -764,7 +739,6 @@ __global__ void compute_pool_stats_kernel(
 
         for (int i = 0; i < diversity_sample_count; i++) {
             int other_idx = (int)(rng.next() * pool->capacity) % pool->capacity;
-            // Use SoA for coalesced alive read
             if (other_idx != idx && pool->alive_flags[other_idx]) {
                 diversity += compute_genome_distance(
                     &pool->entries[idx],
@@ -789,7 +763,6 @@ __global__ void compute_pool_stats_kernel(
     }
 }
 
-// Fused pool compaction using cooperative groups with multi-block scan
 __global__ void compact_pool_alive_indices_kernel(
     ComponentPool* pool,
     int* flags,
@@ -805,7 +778,6 @@ __global__ void compact_pool_alive_indices_kernel(
     __shared__ int warp_sums[WARP_SIZE];
     __shared__ int alive_count;
 
-    // Phase 1: Mark alive entries
     int is_alive = 0;
     if (tid < capacity) {
         is_alive = pool->alive_flags[tid] ? 1 : 0;
@@ -814,7 +786,6 @@ __global__ void compact_pool_alive_indices_kernel(
 
     grid.sync();
 
-    // Phase 2: Warp-level inclusive scan within each block
     int val = (tid < capacity) ? flags[tid] : 0;
 
     auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
@@ -848,14 +819,12 @@ __global__ void compact_pool_alive_indices_kernel(
         scan_workspace[tid] = exclusive_val;
     }
 
-    // Store block sum into recursive workspace for inter-block prefix
     if (threadIdx.x == blockDim.x - 1) {
         scan_recursive_workspace[blockIdx.x] = inclusive_val;
     }
 
     grid.sync();
 
-    // Phase 3: Block 0 scans the block sums in recursive workspace
     if (blockIdx.x == 0) {
         __shared__ int bsum_shared[WARP_SIZE];
         int num_blocks = gridDim.x;
@@ -895,20 +864,17 @@ __global__ void compact_pool_alive_indices_kernel(
 
     grid.sync();
 
-    // Phase 4: Add block prefix from recursive workspace to get global exclusive scan
     if (tid < capacity && blockIdx.x > 0) {
         scan_workspace[tid] += scan_recursive_workspace[blockIdx.x];
     }
 
     grid.sync();
 
-    // Phase 5: Scatter alive indices using scan results
     if (tid < capacity && flags[tid]) {
         int write_pos = scan_workspace[tid];
         pool->alive_indices[write_pos] = tid;
     }
 
-    // Phase 6: Compute alive count from final scan value
     if (tid == 0) {
         if (capacity > 0) {
             alive_count = scan_workspace[capacity - 1] + flags[capacity - 1];
@@ -930,7 +896,6 @@ __global__ void collect_pool_task_accuracies_kernel(
 ) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    // Sparse iteration: dead entries skip, caller reads only alive_indices
     if (tid >= pool->capacity) return;
     if (!pool->alive_flags[tid]) return;
 
@@ -952,7 +917,6 @@ __global__ void inherit_ca_weights_kernel(
     PoolEntry* child = &pool->entries[child_idx];
     PoolEntry* parent = &pool->entries[parent_idx];
 
-    // Use SoA for coalesced alive reads
     if (!pool->alive_flags[child_idx] || !pool->alive_flags[parent_idx]) return;
     if (!child->ca_state || !parent->ca_state) return;
 
@@ -986,7 +950,6 @@ __global__ void find_pending_weight_inherits_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= pool->capacity) return;
 
-    // Use SoA for coalesced alive read
     if (!pool->alive_flags[idx]) return;
 
     PoolEntry* entry = &pool->entries[idx];

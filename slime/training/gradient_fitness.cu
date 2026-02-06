@@ -9,9 +9,6 @@
 
 namespace cg = cooperative_groups;
 
-// Extract per-head gradient RMSE from autodiff tape
-// Architecture line 688: "extract_head_gradient_magnitudes_kernel (per-head ∂L/∂W norms)"
-// Launched with <<<num_heads, blockDim>>> - one block per head
 __global__ void extract_head_gradient_magnitudes_kernel(
     ADTape* __restrict__ tape,
     int* __restrict__ param_start_indices,
@@ -43,7 +40,6 @@ __global__ void extract_head_gradient_magnitudes_kernel(
         local_sum += grad * grad;
     }
 
-    // Warp reduction
     unsigned mask = __activemask();
     #pragma unroll
     for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
@@ -51,22 +47,10 @@ __global__ void extract_head_gradient_magnitudes_kernel(
     }
 
     if (threadIdx.x == 0) {
-        // RMSE: sqrt(sum_of_squares / count) for scale-invariant magnitude
         gradient_magnitudes[head_id] = sqrtf(local_sum / (float)count);
     }
 }
 
-// Compute effective rank from gradient magnitude distribution via Rényi entropy
-// Architecture line 434: "effective_rank: exp(Rényi_entropy(singular_values))"
-// Architecture line 689: "compute_effective_rank_kernel (gradient magnitudes → effective_rank)"
-//
-// Rényi entropy H_q = (1/(1-q)) × log(Σ p_i^q) where p_i = g_i² / Σg_j²
-// Effective rank = exp(H_q)
-// For q→1, this becomes Shannon entropy: H = -Σ p_i log(p_i), exp(H) = effective rank
-//
-// This measures how evenly distributed learning is across heads:
-// - All heads equal gradient: effective_rank = num_heads (max diversity)
-// - One head dominates: effective_rank → 1 (collapsed)
 __global__ void compute_effective_rank_from_gradients_kernel(
     float* __restrict__ gradient_magnitudes,  // [num_heads] per-head RMSE
     float* __restrict__ effective_rank_out,   // [1] scalar output
@@ -79,7 +63,6 @@ __global__ void compute_effective_rank_from_gradients_kernel(
 
     int tid = threadIdx.x;
 
-    // Step 1: Compute total squared magnitude for normalization
     __shared__ float s_total_sq;
     float local_sq = 0.0f;
     for (int h = tid; h < num_heads; h += blockDim.x) {
@@ -87,7 +70,6 @@ __global__ void compute_effective_rank_from_gradients_kernel(
         local_sq += g * g;
     }
 
-    // Block reduction for total
     unsigned mask = __activemask();
     #pragma unroll
     for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
@@ -100,9 +82,6 @@ __global__ void compute_effective_rank_from_gradients_kernel(
 
     DEVICE_FATAL_IF(total_sq < 1e-12f, "compute_effective_rank: zero gradient magnitude - no learning signal");
 
-    // Step 2: Compute Rényi entropy sum
-    // For q ≈ 1 (Shannon), we use: H = -Σ p_i log(p_i)
-    // For q ≠ 1: H_q = (1/(1-q)) × log(Σ p_i^q)
     __shared__ float s_entropy_sum;
     float local_entropy = 0.0f;
 
@@ -121,7 +100,6 @@ __global__ void compute_effective_rank_from_gradients_kernel(
         }
     }
 
-    // Block reduction
     #pragma unroll
     for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
         local_entropy += __shfl_down_sync(mask, local_entropy, offset);
@@ -129,19 +107,16 @@ __global__ void compute_effective_rank_from_gradients_kernel(
     if (tid == 0) s_entropy_sum = local_entropy;
     __syncthreads();
 
-    // Step 3: Compute effective rank = exp(entropy)
     if (tid == 0) {
         float entropy;
         if (use_shannon) {
             entropy = s_entropy_sum;  // Already computed as -Σ p log(p)
         } else {
-            // Rényi: H_q = (1/(1-q)) × log(Σ p^q)
             entropy = logf(s_entropy_sum) / (1.0f - renyi_order_q);
         }
 
         float eff_rank = expf(entropy);
 
-        // Clamp to valid range [1, num_heads]
         eff_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
 
         DEVICE_FATAL_IF(isnan(eff_rank), "compute_effective_rank: result is NaN");
@@ -151,10 +126,6 @@ __global__ void compute_effective_rank_from_gradients_kernel(
     }
 }
 
-// Compute multiplicative fitness per architecture line 423:
-// fitness = task_accuracy^α × (1 - generalization_gap)^β × effective_rank^γ × hardware_efficiency^δ
-//
-// This is called PER-ENTRY (each entry computes its own fitness from its own metrics)
 __global__ void compute_multiplicative_fitness_kernel(
     float task_accuracy,          // From classification head output
     float generalization_gap,     // |train_accuracy - test_accuracy|
@@ -174,7 +145,6 @@ __global__ void compute_multiplicative_fitness_kernel(
     DEVICE_FATAL_IF(effective_rank < 1.0f, "compute_multiplicative_fitness: effective_rank below 1");
     DEVICE_FATAL_IF(hardware_efficiency <= 0.0f, "compute_multiplicative_fitness: hw_efficiency non-positive");
 
-    // Multiplicative fitness formula from architecture.md line 423
     float fitness = powf(task_accuracy + 1e-6f, alpha) *
                     powf(1.0f - generalization_gap + 1e-6f, beta) *
                     powf(effective_rank, gamma) *
@@ -186,7 +156,6 @@ __global__ void compute_multiplicative_fitness_kernel(
     fitness_out[0] = fitness;
 }
 
-// Update fitness EMA for temporal smoothing
 __global__ void update_fitness_ema_kernel(
     float* __restrict__ current_fitness,
     float* __restrict__ fitness_ema,
@@ -210,7 +179,6 @@ __global__ void update_fitness_ema_kernel(
     fitness_ema[idx] = alpha * curr + (1.0f - alpha) * prev_ema;
 }
 
-// Compute relative fitness via local competition (k-nearest neighbors in behavioral space)
 __global__ void compute_relative_fitness_kernel(
     float* __restrict__ absolute_fitness,
     float* __restrict__ behavioral_coords,
@@ -237,7 +205,6 @@ __global__ void compute_relative_fitness_kernel(
         neighbor_ids[i] = -1;
     }
 
-    // Find k-nearest neighbors in behavioral space
     for (int other = 0; other < num_components; other++) {
         if (other == comp_id) continue;
 
@@ -251,7 +218,6 @@ __global__ void compute_relative_fitness_kernel(
         float dist = sqrtf(dist_sq);
         for (int i = 0; i < k_neighbors; i++) {
             if (dist < distances[i]) {
-                // Insert and shift
                 for (int j = k_neighbors - 1; j > i; j--) {
                     distances[j] = distances[j-1];
                     neighbor_ids[j] = neighbor_ids[j-1];
@@ -263,7 +229,6 @@ __global__ void compute_relative_fitness_kernel(
         }
     }
 
-    // Compute local fitness statistics
     float neighbor_mean = 0.0f;
     int valid_neighbors = 0;
     for (int i = 0; i < k_neighbors; i++) {

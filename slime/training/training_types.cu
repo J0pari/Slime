@@ -6,7 +6,6 @@
 #include "../utils/genome_params.cuh"
 #include <curand_kernel.h>
 
-// Forward declaration to avoid circular dependency
 struct DatasetDescriptor;
 
 struct ClassificationHead {
@@ -81,29 +80,23 @@ struct AdaptiveCurriculum {
     int num_datasets_completed;
     float curriculum_progress;  // 0.0 to 1.0
 
-    // Thresholds for dataset activation (genome-derived per organism)
     float accuracy_threshold;
     float diversity_threshold;
     float min_generations_threshold;
 };
 
-// Unified gradient buffer: collects gradients from all sources for optimizer consumption
 struct UnifiedGradientBuffer {
-    // CA weight gradients (FP32 for accumulation, applied to FP16 weights)
     float* perception_grads;     // [num_heads × channels × head_dim]
     float* interaction_grads;    // [num_heads × head_dim × head_dim]
     float* value_grads;          // [num_heads × head_dim × channels]
 
-    // Classification head gradients
     float* pooling_weight_grads; // [num_heads × channels]
     float* fc_weight_grads;      // [num_classes × num_features]
     float* fc_bias_grads;        // [num_classes]
 
-    // Gradient source tracking
     int has_autodiff_grads;      // Nonzero if autodiff contributed gradients this step
     int has_backprop_grads;      // Nonzero if classification backprop contributed gradients
 
-    // Dimensions for validation
     int perception_size;
     int interaction_size;
     int value_size;
@@ -211,7 +204,6 @@ __global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_siz
         mode->gradient_clip_norm = 1.0f;
         mode->adam_timestep = 1;
 
-        // Use preallocated buffers instead of device cudaMalloc
         mode->batch_images = batch_images;
         mode->batch_labels = batch_labels;
     }
@@ -281,7 +273,6 @@ __global__ void init_curriculum_kernel(
     float ctx_performance
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Initialize all dataset stats
         for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
             curriculum->stats[i].dataset_id = ACTIVE_DATASET_IDS[i];
             curriculum->stats[i].population_mean_accuracy = 0.0f;
@@ -292,13 +283,11 @@ __global__ void init_curriculum_kernel(
             curriculum->stats[i].activation_threshold_met = false;
         }
 
-        // Start with first dataset in active list
         curriculum->current_dataset_idx = 0;
         curriculum->num_datasets_completed = 0;
         curriculum->curriculum_progress = 0.0f;
         curriculum->stats[0].activation_threshold_met = true;
 
-        // Genome-derive curriculum thresholds using full context
         int acc_slot = derive_param_slot(genome_hash, "curriculum_accuracy_threshold");
         int div_slot = derive_param_slot(genome_hash, "curriculum_diversity_threshold");
         int gen_slot = derive_param_slot(genome_hash, "curriculum_min_generations");
@@ -340,7 +329,6 @@ __global__ void update_curriculum_kernel(
 
         current_stats->num_generations_trained = generation;
 
-        // Compute population mean and best accuracy
         float sum_acc = 0.0f;
         float best_acc = 0.0f;
         for (int i = 0; i < pool_size; i++) {
@@ -351,7 +339,6 @@ __global__ void update_curriculum_kernel(
         current_stats->population_mean_accuracy = sum_acc / pool_size;
         current_stats->population_best_accuracy = best_acc;
 
-        // Compute accuracy variance
         float var_sum = 0.0f;
         for (int i = 0; i < pool_size; i++) {
             float diff = pool_task_accuracies[i] - current_stats->population_mean_accuracy;
@@ -359,7 +346,6 @@ __global__ void update_curriculum_kernel(
         }
         current_stats->population_accuracy_variance = var_sum / pool_size;
 
-        // Compute niche diversity (Shannon entropy of Voronoi occupancy)
         float total_organisms = (float)pool_size;
         float entropy = 0.0f;
         for (int i = 0; i < num_voronoi_cells; i++) {
@@ -374,12 +360,10 @@ __global__ void update_curriculum_kernel(
         float log_cells = logf((float)num_voronoi_cells);
         current_stats->niche_diversity = entropy / log_cells;
 
-        // Check if thresholds met for current dataset
         bool acc_met = current_stats->population_mean_accuracy >= curriculum->accuracy_threshold;
         bool div_met = current_stats->niche_diversity >= curriculum->diversity_threshold;
         bool gen_met = generation >= (int)curriculum->min_generations_threshold;
 
-        // If all thresholds met, progress to next dataset in active list
         if (acc_met && div_met && gen_met && curriculum->current_dataset_idx < NUM_ACTIVE_DATASETS - 1) {
             curriculum->num_datasets_completed++;
             curriculum->current_dataset_idx++;

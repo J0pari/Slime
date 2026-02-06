@@ -29,7 +29,6 @@ __global__ void mark_valid_entries_kernel(
     }
 }
 
-// Single-block inclusive scan (building block for multi-block)
 __device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
     __shared__ int warp_sums[WARP_SIZE];
 
@@ -64,7 +63,6 @@ __device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
     }
 }
 
-// Phase 1: Each block does local inclusive scan, stores block total
 __global__ void scan_phase1_kernel(
     int* input,
     int* output,
@@ -112,13 +110,11 @@ __global__ void scan_phase1_kernel(
         output[tid] = exclusive_val;
     }
 
-    // Last thread in block stores block total
     if (threadIdx.x == blockDim.x - 1) {
         block_sums[blockIdx.x] = inclusive_val;
     }
 }
 
-// Phase 3: Add block prefix to each element
 __global__ void scan_phase3_kernel(
     int* output,
     int* block_prefixes,
@@ -130,8 +126,6 @@ __global__ void scan_phase3_kernel(
     }
 }
 
-// Single-kernel exclusive scan using Hillis-Steele algorithm
-// Handles arrays up to MAX_MEMORY_SIZE using shared memory
 __global__ void exclusive_scan_single_kernel(
     int* input,
     int* output,
@@ -139,13 +133,11 @@ __global__ void exclusive_scan_single_kernel(
 ) {
     __shared__ int temp[MAX_MEMORY_SIZE + BANK_PAD];
 
-    // Load input to shared memory (all threads participate)
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         temp[i] = input[i];
     }
     __syncthreads();
 
-    // Hillis-Steele inclusive scan
     for (int stride = 1; stride < N; stride *= 2) {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
             int val = temp[i];
@@ -158,14 +150,11 @@ __global__ void exclusive_scan_single_kernel(
         }
     }
 
-    // Convert to exclusive scan (shift right, first element = 0)
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         output[i] = (i == 0) ? 0 : temp[i - 1];
     }
 }
 
-// Multi-block exclusive scan using cooperative groups
-// workspace: block_sums array of size gridDim.x
 __global__ void exclusive_scan_coop_kernel(
     int* input,
     int* output,
@@ -218,7 +207,6 @@ __global__ void exclusive_scan_coop_kernel(
 
     grid.sync();
 
-    // Phase 2: block 0 scans block_sums
     if (blockIdx.x == 0) {
         __shared__ int bsum_shared[WARP_SIZE];
         int num_blocks = gridDim.x;
@@ -258,7 +246,6 @@ __global__ void exclusive_scan_coop_kernel(
 
     grid.sync();
 
-    // Phase 3: add block prefix
     if (tid < N && blockIdx.x > 0) {
         output[tid] += block_sums[blockIdx.x];
     }
@@ -300,7 +287,6 @@ __global__ void copy_compacted_kernel(
     }
 }
 
-// Computes new_count from scan results and copies compacted entries back to tube
 __global__ void finalize_and_copy_compacted_kernel(
     TemporalTube* tube,
     int* valid_flags,
@@ -308,7 +294,6 @@ __global__ void finalize_and_copy_compacted_kernel(
     MemoryEntry* temp_buffer,
     int old_count
 ) {
-    // Thread 0 computes new_count
     __shared__ int new_count;
     if (threadIdx.x == 0) {
         DEVICE_FATAL_IF(old_count <= 0, "stream_compaction_kernel: old_count non-positive");
@@ -318,20 +303,17 @@ __global__ void finalize_and_copy_compacted_kernel(
     }
     __syncthreads();
 
-    // All threads copy compacted entries
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < new_count) {
         tube->entries[idx] = temp_buffer[idx];
     }
 
-    // Thread 0 updates tube metadata
     if (idx == 0) {
         tube->count = new_count;
         tube->head = new_count % tube->capacity;
     }
 }
 
-// Fused compaction using cooperative groups
 __global__ void compact_memory_tubes_coop_kernel(
     TemporalTube* tube,
     int* valid_flags,
@@ -357,7 +339,6 @@ __global__ void compact_memory_tubes_coop_kernel(
     int old_count = tube->count;
     int capacity = tube->capacity;
 
-    // Phase 1: Mark valid entries
     if (tid < capacity) {
         int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -368,7 +349,6 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     grid.sync();
 
-    // Phase 2: Exclusive scan (inline from exclusive_scan_coop_kernel logic)
     int val = (tid < capacity) ? valid_flags[tid] : 0;
 
     auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
@@ -408,7 +388,6 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     grid.sync();
 
-    // Block 0 scans block_sums
     if (blockIdx.x == 0) {
         __shared__ int bsum_shared[WARP_SIZE];
         int num_blocks = gridDim.x;
@@ -448,14 +427,12 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     grid.sync();
 
-    // Add block prefix
     if (tid < capacity && blockIdx.x > 0) {
         scan_output[tid] += block_sums[blockIdx.x];
     }
 
     grid.sync();
 
-    // Phase 3: Compact entries
     if (tid < old_count && valid_flags[tid]) {
         int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
         int write_pos = scan_output[tid];
@@ -464,7 +441,6 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     grid.sync();
 
-    // Compute new_count
     if (tid == 0) {
         DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
         shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
@@ -474,7 +450,6 @@ __global__ void compact_memory_tubes_coop_kernel(
 
     int new_count = shared_new_count;
 
-    // Phase 4: Copy compacted back
     if (tid < new_count) {
         tube->entries[tid] = temp_buffer[tid];
     }
@@ -485,7 +460,6 @@ __global__ void compact_memory_tubes_coop_kernel(
     }
 }
 
-// Fused prune and compact using cooperative groups
 __global__ void prune_and_compact_coop_kernel(
     TemporalTube* tube,
     int* valid_flags,
@@ -505,7 +479,6 @@ __global__ void prune_and_compact_coop_kernel(
     __shared__ int shared_new_count;
     __shared__ int warp_sums[WARP_SIZE];
 
-    // Phase 1: Prune entries below threshold
     if (tid < old_count) {
         int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
         MemoryEntry* entry = &tube->entries[entry_idx];
@@ -516,7 +489,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     grid.sync();
 
-    // Phase 2: Mark valid entries
     int is_valid = 0;
     if (tid < old_count) {
         int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
@@ -529,7 +501,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     grid.sync();
 
-    // Phase 3: Exclusive scan
     int val = (tid < capacity) ? valid_flags[tid] : 0;
 
     auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
@@ -569,7 +540,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     grid.sync();
 
-    // Block 0 scans block_sums
     if (blockIdx.x == 0) {
         __shared__ int bsum_shared[WARP_SIZE];
         int num_blocks = gridDim.x;
@@ -615,7 +585,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     grid.sync();
 
-    // Phase 4: Compact entries
     if (tid < old_count && valid_flags[tid]) {
         int entry_idx = (tube->head - old_count + tid + capacity) % capacity;
         int write_pos = scan_output[tid];
@@ -624,7 +593,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     grid.sync();
 
-    // Compute new_count
     if (tid == 0) {
         DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
         shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
@@ -634,7 +602,6 @@ __global__ void prune_and_compact_coop_kernel(
 
     int new_count = shared_new_count;
 
-    // Phase 5: Copy compacted back
     if (tid < new_count) {
         tube->entries[tid] = temp_buffer[tid];
     }
@@ -645,8 +612,6 @@ __global__ void prune_and_compact_coop_kernel(
     }
 }
 
-// Fused elite refinement using cooperative groups
-// Tape must be pre-populated with forward pass data from upstream
 __global__ void refine_elite_coop_kernel(
     GPUElite* elite,
     ADTape* tape,
@@ -659,9 +624,7 @@ __global__ void refine_elite_coop_kernel(
 
     float* latent = &elite->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX];
 
-    // Backward pass (single block handles sequential op traversal)
     if (blockIdx.x == 0) {
-        // Seed gradient at output
         if (tape->current_size > 0 && threadIdx.x == 0) {
             int output_idx = tape->entries[tape->current_size - 1].output_idx;
             tape->grad_buffer[output_idx] = 1.0f;
@@ -723,7 +686,6 @@ __global__ void refine_elite_coop_kernel(
 
     grid.sync();
 
-    // Apply gradients with clipping
     if (tid < GENOME_LATENT_DIM_MAX) {
         float grad = tape->grad_buffer[tid];
         float grad_norm = fabsf(grad);
@@ -793,8 +755,6 @@ __global__ void memory_update_params_kernel(
 
     params->old_count = tubes->count;
 
-    // Ring buffer: gen % 2 gives current slot, (gen-1) % 2 gives previous
-    // Safe because generation >= 1 is enforced above
     int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
     int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
     float curr_fitness = fitness_history[curr_gen_offset];

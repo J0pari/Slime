@@ -59,7 +59,6 @@ __global__ void tensor_core_conv3x3_kernel(
         }
     }
 
-    // Warp-level reduction for mass_before using tile ops
     mass_before = WarpReduce<WARP_SIZE>::sum(mass_before);
 
     __syncthreads();
@@ -100,35 +99,28 @@ __global__ void tensor_core_conv3x3_kernel(
         }
     }
 
-    // Warp-level reduction for mass_after using tile ops
     mass_after = WarpReduce<WARP_SIZE>::sum(mass_after);
 
-    // Use warpId to coordinate multi-warp convergence check via ballot primitives
     int mass_conserved = approx_equal(mass_after, mass_before);
     unsigned int ballot = WarpReduce<WARP_SIZE>::ballot(mass_conserved);
 
-    // Store per-warp ballot results in shared memory indexed by warpId
     __shared__ unsigned int warp_ballots[256 / WARP_SIZE];
     if (laneId == 0) {
         warp_ballots[warpId] = ballot;
     }
     __syncthreads();
 
-    // Check if ALL warps achieved mass conservation (all bits set)
     int all_converged = WarpReduce<WARP_SIZE>::all(
         (threadIdx.x < (blockDim.x / WARP_SIZE)) ?
         (warp_ballots[threadIdx.x] == 0xFFFFFFFF) : 1
     );
 
-    // Only apply normalization if mass conservation converged globally
     if (all_converged && laneId == 0 && is_meaningful(mass_after, mass_before)) {
         float scale = mass_before / mass_after;
 
-        // Broadcast scale to all lanes in warp using cooperative groups
         auto tile = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
         scale = tile.shfl(scale, 0);
 
-        // Apply mass-conserving normalization
         if (laneId < channels) {
             int idx = tile_y * grid_size * channels + tile_x * channels + laneId;
             output[idx] *= scale;

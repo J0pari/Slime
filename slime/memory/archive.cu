@@ -32,19 +32,14 @@ struct GPUElite {
     int task_dim;
     int gen_dim;
 
-    // LAMARCKIAN: Weight delta storage (mirrors genome delta pattern)
-    // Weights = Xavier(genome_hash) + deltas
-    // Deltas stored as flat index into concatenated [perception|interaction|value] space
     half* weight_deltas;             // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
     uint32_t* weight_delta_indices;  // [MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE]
     uint16_t* num_weight_deltas;     // [MAX_ARCHIVE_SIZE]
 
-    // Architecture snapshot for weight reconstruction (derived from genome at archive time)
     int* archived_num_heads;         // [MAX_ARCHIVE_SIZE]
     int* archived_channels;          // [MAX_ARCHIVE_SIZE]
     int* archived_head_dim;          // [MAX_ARCHIVE_SIZE]
 
-    // Hash table for O(1) genome_hash -> archive_idx lookup (open addressing)
     uint64_t* hash_table_keys;       // [GENOME_HASH_TABLE_SIZE] - 0 = empty
     int* hash_table_values;          // [GENOME_HASH_TABLE_SIZE] - archive index
 };
@@ -61,11 +56,8 @@ struct VoronoiCell {
     float quality_threshold;
 };
 
-// Hash table operations for O(1) genome_hash -> archive_idx lookup
-// Uses open addressing with linear probing
 
 __device__ __forceinline__ int hash_table_slot(uint64_t genome_hash) {
-    // Fibonacci hashing for better distribution
     return (int)((genome_hash * 11400714819323198485ULL) >> 50) & (GENOME_HASH_TABLE_SIZE - 1);
 }
 
@@ -87,7 +79,6 @@ __device__ int hash_table_lookup(
         if (key == HASH_TABLE_EMPTY_KEY) {
             return -1;  // Not found (hit empty slot)
         }
-        // Linear probing
         slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
         probes++;
     }
@@ -133,8 +124,6 @@ __device__ void hash_table_remove(
 
     while (probes < GENOME_HASH_TABLE_SIZE) {
         if (keys[slot] == genome_hash) {
-            // Found - mark as deleted (tombstone would need separate handling,
-            // but for our use case we rebuild on archive compaction)
             keys[slot] = HASH_TABLE_EMPTY_KEY;
             values[slot] = -1;
             return;
@@ -353,7 +342,6 @@ __device__ void insert_elite_device(
     VoronoiCell* __restrict__ cells,
     int num_cells
 ) {
-    // O(1) duplicate check via hash table
     int existing_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -369,7 +357,6 @@ __device__ void insert_elite_device(
         return;
     }
 
-    // Insert into hash table for future O(1) lookups
     bool inserted = hash_table_insert(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -377,7 +364,6 @@ __device__ void insert_elite_device(
         idx
     );
     if (!inserted) {
-        // Hash table full or race condition duplicate - revert
         atomicSub(archive_size, 1);
         return;
     }
@@ -447,10 +433,8 @@ __global__ void insert_elite_kernel(
     VoronoiCell* __restrict__ cells,
     int num_cells
 ) {
-    // Only thread 0 performs the insertion
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    // O(1) duplicate check via hash table
     int existing_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -466,7 +450,6 @@ __global__ void insert_elite_kernel(
         return;
     }
 
-    // Insert into hash table for future O(1) lookups
     bool inserted = hash_table_insert(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -593,7 +576,6 @@ __global__ void init_voronoi_cells_kernel(
     }
 }
 
-// Streaming genome element reconstruction - implementation here requires GPUElite definition
 
 __global__ void compute_voronoi_occupancy_kernel(
     VoronoiCell* voronoi_cells,
@@ -607,7 +589,6 @@ __global__ void compute_voronoi_occupancy_kernel(
     }
 }
 
-// From pseudopod.cu
 __device__ float get_ca_xavier_scale(
     int flat_idx, int num_heads, int channels, int head_dim,
     int* out_matrix, int* out_local_idx
@@ -774,7 +755,6 @@ __global__ void apply_weight_deltas_kernel(
     }
 }
 
-// Archive-Tube integration: store elite behavioral features in temporal memory
 __global__ void archive_to_tube_kernel(
     const GPUElite* __restrict__ archive,
     int elite_idx,
@@ -800,7 +780,6 @@ __global__ void archive_to_tube_kernel(
     DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "archive_to_tube: entry data buffer is null");
     DEVICE_FATAL_IF(tube->entries[idx].size < total_dim, "archive_to_tube: entry size too small for behavioral dims");
 
-    // Pack behavioral coordinates: [hw | task | gen]
     int offset = 0;
     for (int d = 0; d < hw_dim; d++) {
         tube->entries[idx].data[offset++] = archive->hw_coords[elite_idx * hw_dim + d];
@@ -823,7 +802,6 @@ __global__ void archive_to_tube_kernel(
     }
 }
 
-// Tube-Archive integration: find closest archived elite to tube recall result
 __global__ void tube_to_archive_query_kernel(
     const GPUElite* __restrict__ archive,
     int archive_size,
@@ -849,18 +827,15 @@ __global__ void tube_to_archive_query_kernel(
     for (int i = tid; i < archive_size; i += num_threads) {
         float dist_sq = 0.0f;
 
-        // Compare hw coords
         int offset = 0;
         for (int d = 0; d < hw_dim; d++) {
             float diff = archive->hw_coords[i * hw_dim + d] - tube_recall[offset++];
             dist_sq += diff * diff;
         }
-        // Compare task coords
         for (int d = 0; d < task_dim; d++) {
             float diff = archive->task_coords[i * task_dim + d] - tube_recall[offset++];
             dist_sq += diff * diff;
         }
-        // Compare gen coords
         for (int d = 0; d < gen_dim; d++) {
             float diff = archive->gen_coords[i * gen_dim + d] - tube_recall[offset++];
             dist_sq += diff * diff;
@@ -872,7 +847,6 @@ __global__ void tube_to_archive_query_kernel(
         }
     }
 
-    // Warp reduction for best
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         float other_dist = __shfl_down_sync(0xffffffff, local_best_dist, offset);
         int other_idx = __shfl_down_sync(0xffffffff, local_best_idx, offset);
@@ -882,9 +856,7 @@ __global__ void tube_to_archive_query_kernel(
         }
     }
 
-    // Lane 0 of each warp atomically updates global best
     if ((threadIdx.x & (WARP_SIZE - 1)) == 0) {
-        // Simple atomic min pattern using CAS
         float old_dist = *best_distance;
         while (local_best_dist < old_dist) {
             float assumed = old_dist;

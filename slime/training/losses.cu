@@ -34,8 +34,6 @@ __global__ void mse_loss_kernel(
     atomicAdd(loss_out, squared_error / (float)(batch_size * dim));
 }
 
-// Cross-entropy loss with numerically stable softmax
-// logits: [batch_size × num_classes], labels: [batch_size] (class indices)
 __global__ void cross_entropy_loss_kernel(
     float* __restrict__ logits,
     int* __restrict__ labels,
@@ -58,7 +56,6 @@ __global__ void cross_entropy_loss_kernel(
 
     float* sample_logits = &logits[sample * num_classes];
 
-    // Numerically stable softmax: subtract max before exp
     float max_logit = sample_logits[0];
     for (int c = 1; c < num_classes; c++) {
         float val = sample_logits[c];
@@ -90,7 +87,6 @@ __global__ void cross_entropy_loss_kernel(
     }
 }
 
-// Cross-entropy with label smoothing
 __global__ void cross_entropy_label_smoothing_kernel(
     float* __restrict__ logits,
     int* __restrict__ labels,
@@ -113,7 +109,6 @@ __global__ void cross_entropy_label_smoothing_kernel(
 
     float* sample_logits = &logits[sample * num_classes];
 
-    // Numerically stable softmax
     float max_logit = sample_logits[0];
     for (int c = 1; c < num_classes; c++) {
         if (sample_logits[c] > max_logit) max_logit = sample_logits[c];
@@ -126,7 +121,6 @@ __global__ void cross_entropy_label_smoothing_kernel(
 
     float log_sum_exp = max_logit + logf(sum_exp);
 
-    // Smoothed target: (1-smoothing) on true label, smoothing/(num_classes) on all
     float true_weight = 1.0f - smoothing;
     float smooth_weight = smoothing / (float)num_classes;
 

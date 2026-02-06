@@ -9,48 +9,32 @@
 
 struct PoolEntry;
 
-// =============================================================================
-// UNIFIED EPSILON SYSTEM
-// One mechanism for all numerical stability needs. Context emerges from data.
-// Uses MACHINE_EPS, FLOAT_MIN_NORMAL, EXPF_ARG_LIMIT from config.cu
-// =============================================================================
 
-// Context-driven epsilon: scales with the magnitude of the reference value
-// Use this for ALL numerical stability (divisions, logs, sqrt, powers, etc.)
 __host__ __device__ __forceinline__ float safe_epsilon(float reference_scale) {
-    // Epsilon proportional to magnitude, but never smaller than minimum normal
     return fmaxf(MACHINE_EPS * fabsf(reference_scale), FLOAT_MIN_NORMAL);
 }
 
-// For threshold checks: "is this value meaningfully non-zero?"
-// Uses reference to determine what "meaningful" means in context
 __device__ __forceinline__ bool is_meaningful(float value, float reference_scale) {
     return fabsf(value) > safe_epsilon(reference_scale);
 }
 
-// For conservation checks: "are these values equal within numerical precision?"
 __device__ __forceinline__ bool approx_equal(float a, float b) {
     float scale = fmaxf(fabsf(a), fabsf(b));
     return fabsf(a - b) <= safe_epsilon(scale);
 }
 
-// Safe division: prevents div-by-zero using context-appropriate epsilon
 __device__ __forceinline__ float safe_div(float numerator, float denominator) {
     return numerator / (denominator + safe_epsilon(denominator));
 }
 
-// Safe log: prevents log(0) using context-appropriate epsilon
 __device__ __forceinline__ float safe_log(float x) {
     return logf(fmaxf(x, safe_epsilon(1.0f)));
 }
 
-// Safe sqrt denominator: for 1/sqrt(x) patterns
 __device__ __forceinline__ float safe_sqrt_denom(float x) {
     return sqrtf(x) + safe_epsilon(x);
 }
 
-// Average field values in neighborhood around idx-derived position
-// Returns NaN on invalid input - let it propagate and reveal integration failures
 __device__ __forceinline__ float sample_neighborhood(
     const float* field, int idx, int grid_size, int radius = 1
 ) {
@@ -78,7 +62,6 @@ __device__ __forceinline__ float sample_neighborhood(
     return sum / n;
 }
 
-// Validated curand wrappers - FATAL on NaN/Inf
 __device__ __forceinline__ float validated_curand_normal(curandState* state, const char* caller, int idx) {
     float val = curand_normal(state);
     if (isnan(val) || isinf(val)) {
@@ -259,8 +242,6 @@ __global__ void convert_weights_to_fp32(
     }
 }
 
-// Strided FP32->FP16: copies batch_size slices of slice_size elements each
-// Source has src_stride between slices (for multi-head interleaved layout), dest is contiguous
 __global__ void convert_fp32_to_fp16_strided(
     const float* __restrict__ src, half* __restrict__ dst,
     int batch_size, int slice_size, int src_stride
@@ -276,7 +257,6 @@ __global__ void convert_fp32_to_fp16_strided(
     dst[idx] = __float2half(src[src_idx]);
 }
 
-// Strided memcpy: copies from contiguous source to strided dest (for multi-head layout)
 __global__ void memcpy_to_strided(
     const float* __restrict__ src, float* __restrict__ dst,
     int batch_size, int slice_size, int dst_stride
@@ -626,21 +606,16 @@ struct BlockReduce {
 
 template<int BLOCK_SIZE, int WARP_SIZE = 32>
 struct BlockScan {
-    // Exclusive prefix sum - returns (exclusive_sum, total)
-    // Each thread gets sum of all elements before it
     __device__ static int exclusive_sum(int val, int& total) {
         __shared__ int warp_sums[BLOCK_SIZE / WARP_SIZE];
         int lane = threadIdx.x % WARP_SIZE;
         int wid = threadIdx.x / WARP_SIZE;
 
-        // Warp-level inclusive scan
         int inclusive = warp_scan_int(val);
 
-        // Store warp totals
         if (lane == WARP_SIZE - 1) warp_sums[wid] = inclusive;
         __syncthreads();
 
-        // First warp scans the warp sums
         if (wid == 0) {
             int warp_val = (lane < BLOCK_SIZE / WARP_SIZE) ? warp_sums[lane] : 0;
             int warp_inclusive = warp_scan_int(warp_val);
@@ -648,18 +623,14 @@ struct BlockScan {
         }
         __syncthreads();
 
-        // Add prefix from previous warps, convert inclusive to exclusive
         int warp_prefix = (wid > 0) ? warp_sums[wid - 1] : 0;
         int exclusive = inclusive - val + warp_prefix;
 
-        // Total is last warp's sum
         total = warp_sums[BLOCK_SIZE / WARP_SIZE - 1];
 
         return exclusive;
     }
 
-    // Stream compaction: returns write index for each thread, -1 if predicate false
-    // total_kept receives count of elements kept
     __device__ static int compact_index(int predicate, int& total_kept) {
         int exclusive = exclusive_sum(predicate, total_kept);
         return predicate ? exclusive : -1;
@@ -939,12 +910,10 @@ struct Occupancy {
 
 #include <mma.h>
 
-// WMMA tensor core operations for sm_70+ (Volta/Turing/Ampere/Hopper)
 #if __CUDA_ARCH__ >= 700
 
 template<int M, int N, int K>
 struct TensorCoreMatmul {
-    // FP16 matrix multiply: C[M×N] = A[M×K] × B[K×N]
     __device__ static void multiply_accumulate(
         half* C,
         const half* A,
@@ -967,7 +936,6 @@ struct TensorCoreMatmul {
         store_matrix_sync(C, c_frag, ldc, mem_row_major);
     }
 
-    // Batched multiply for large matrices
     __device__ static void multiply_tiled(
         half* C,
         const half* A,
@@ -999,9 +967,7 @@ struct TensorCoreMatmul {
 };
 #endif
 
-// DIRESA-specific optimizations using tile_ops primitives
 struct DIRESAOps {
-    // Vectorized latent space encode (128 elements = 32 float4 loads)
     __device__ static void encode_latent_vectorized(
         const float* features,
         float* latent,
@@ -1015,7 +981,6 @@ struct DIRESAOps {
             ((float4*)latent)[tid] = feat4;
         }
 
-        // Handle remainder
         int remainder_start = vec_count * 4;
         if (tid == 0 && remainder_start < latent_dim) {
             for (int i = remainder_start; i < latent_dim; i++) {
@@ -1024,7 +989,6 @@ struct DIRESAOps {
         }
     }
 
-    // Warp-synchronous latent decode (128D latent = 4 per thread × 32 threads)
     __device__ static void decode_latent_warp(
         const float* latent,
         float* output,
@@ -1033,7 +997,6 @@ struct DIRESAOps {
         auto warp = cg::tiled_partition<32>(cg::this_thread_block());
         int lane = warp.thread_rank();
 
-        // Each thread handles 4 latent elements
         for (int i = lane * 4; i < latent_dim; i += 128) {
             if (i + 3 < latent_dim) {
                 float4 lat4 = ldg_float4((const float4*)&latent[i]);
@@ -1044,7 +1007,6 @@ struct DIRESAOps {
         warp.sync();  // Warp-level sync (5 cycles vs 1000+ for cudaDeviceSynchronize)
     }
 
-    // Warp-reduce for distance computation
     __device__ static float compute_latent_distance_sq(
         const float* latent1,
         const float* latent2,
@@ -1053,7 +1015,6 @@ struct DIRESAOps {
         int lane = threadIdx.x % WARP_SIZE;
         float local_sum = 0.0f;
 
-        // Each thread computes 4 squared differences
         for (int i = lane * 4; i < latent_dim; i += WARP_SIZE * 4) {
             float4 l1 = ldg_float4((const float4*)&latent1[i]);
             float4 l2 = ldg_float4((const float4*)&latent2[i]);
@@ -1072,7 +1033,6 @@ struct DIRESAOps {
         return warp_reduce_sum(local_sum);
     }
 
-    // Convert genome batch to FP16 for tensor cores
     __device__ static void batch_convert_fp32_to_fp16(
         const float* input,
         half* output,
@@ -1080,7 +1040,6 @@ struct DIRESAOps {
     ) {
         int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-        // Vectorized conversion: 4 floats at a time
         if (tid * 4 < count) {
             float4 in4 = ldg_float4((const float4*)&input[tid * 4]);
             output[tid * 4 + 0] = __float2half(in4.x);
@@ -1091,30 +1050,23 @@ struct DIRESAOps {
     }
 };
 
-// Safe size computation (prevents integer overflow in dataset size calculations)
-// Used in DATASET_REGISTRY_INIT to compute train_size_bytes and test_size_bytes
 struct SafeSize {
-    // 2D grayscale: samples × rows × cols (MNIST, Fashion-MNIST, ChestX-ray)
     static constexpr size_t vision_2d(int samples, int rows, int cols) {
         return static_cast<size_t>(samples) * rows * cols;
     }
 
-    // 3D color: samples × rows × cols × channels (CIFAR-10, PathMNIST, RetinaMNIST)
     static constexpr size_t vision_3d(int samples, int rows, int cols, int channels) {
         return static_cast<size_t>(samples) * rows * cols * channels;
     }
 
-    // Audio spectral: samples × time × mels × channels × sizeof(float) (ESC-50, Speech-Commands, UrbanSound8K)
     static constexpr size_t audio_spectral(int samples, int time, int mels, int channels) {
         return static_cast<size_t>(samples) * time * mels * channels * sizeof(float);
     }
 
-    // Timeseries multi-feature: samples × timesteps × features × sizeof(float) (UCI-HAR, OPPORTUNITY)
     static constexpr size_t timeseries_multi(int samples, int timesteps, int features) {
         return static_cast<size_t>(samples) * timesteps * features * sizeof(float);
     }
 
-    // Timeseries single: samples × timesteps × sizeof(float) (MIT-BIH-ECG)
     static constexpr size_t timeseries_single(int samples, int timesteps) {
         return static_cast<size_t>(samples) * timesteps * sizeof(float);
     }

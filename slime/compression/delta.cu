@@ -7,7 +7,6 @@
 #include "../memory/genome_ops.cuh"
 #include <cuda_runtime.h>
 
-// Forward declarations for DIRESA functions (defined in diresa.cu, included by organism.cu)
 struct DIRESAWeights;
 __device__ void diresa_encode(const float* features, float* latent, const DIRESAWeights* weights);
 __device__ void diresa_decode(const float* latent, float* reconstructed, const DIRESAWeights* weights);
@@ -64,8 +63,6 @@ __device__ void reconstruct_from_delta(float* parent_genome, uint16_t* delta_ind
     }
 }
 
-// Reconstruct genome for ENTRY_CHILD entries only
-// For ENTRY_ROOT, access entry->root.genome directly at call site
 __device__ void reconstruct_child_genome(
     PoolEntry* entry,
     GPUElite* archive,
@@ -76,7 +73,6 @@ __device__ void reconstruct_child_genome(
     DEVICE_FATAL_IF(entry->type != ENTRY_CHILD, "reconstruct_child_genome: called on non-ENTRY_CHILD");
     DEVICE_FATAL_IF(entry->child.parent_hash == 0, "reconstruct_child_genome: parent_hash is 0 (uninitialized child)");
 
-    // O(1) lookup via hash table
     int parent_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,

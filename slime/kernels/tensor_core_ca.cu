@@ -208,7 +208,6 @@ __global__ void multi_head_ca_tensor_kernel(
     int weight_offset = head * arch.channels * arch.head_dim;
     int output_offset = head * num_cells * arch.head_dim;
 
-    // Perception: input[num_cells × channels] × weights[channels × head_dim]
     for (int out_idx = tid; out_idx < perception_size; out_idx += block_threads) {
         int cell = out_idx / arch.head_dim;
         int dim = out_idx % arch.head_dim;
@@ -221,20 +220,17 @@ __global__ void multi_head_ca_tensor_kernel(
     }
     __syncthreads();
 
-    // ReLU
     for (int i = tid; i < perception_size; i += block_threads) {
         fp32_workspace[output_offset + i] = fmaxf(0.0f, fp32_workspace[output_offset + i]);
     }
     __syncthreads();
 
-    // FP32 → FP16
     half* interaction_input = fp16_workspace + num_cells * arch.channels;
     for (int i = tid; i < perception_size; i += block_threads) {
         interaction_input[i] = __float2half(fp32_workspace[output_offset + i]);
     }
     __syncthreads();
 
-    // Interaction: input[num_cells × head_dim] × weights[head_dim × head_dim]
     float* interaction_output = fp32_workspace + arch.num_heads * num_cells * arch.head_dim;
     int interaction_weight_offset = head * arch.head_dim * arch.head_dim;
     for (int out_idx = tid; out_idx < perception_size; out_idx += block_threads) {
@@ -249,21 +245,18 @@ __global__ void multi_head_ca_tensor_kernel(
     }
     __syncthreads();
 
-    // GELU
     for (int i = tid; i < perception_size; i += block_threads) {
         float x = interaction_output[i];
         interaction_output[i] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
     }
     __syncthreads();
 
-    // FP32 → FP16
     half* value_input = interaction_input;
     for (int i = tid; i < perception_size; i += block_threads) {
         value_input[i] = __float2half(interaction_output[i]);
     }
     __syncthreads();
 
-    // Value: input[num_cells × head_dim] × weights[head_dim × channels]
     float* head_output = ca_output_fp32 + head * num_cells * arch.channels;
     int value_weight_offset = head * arch.head_dim * arch.channels;
     int value_output_size = num_cells * arch.channels;
