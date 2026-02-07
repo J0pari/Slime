@@ -312,10 +312,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.fc_bias_grad, sizeof(float) * NUM_CLASSES_MAX, "fc_bias_grad");
     CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE_MAX * NUM_HEADS_MAX * CHANNELS_MAX, "features_grad");
     constexpr size_t ADAM_CA_TOTAL_SIZE =
-        (NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX) +      // perception
-        (NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX) +      // interaction
-        (NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX) +      // value
-        (NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX);    // policy (FC weights)
+        (NUM_HEADS_MAX * CHANNELS_MAX * HEAD_DIM_MAX) +
+        (NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_DIM_MAX) +
+        (NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX) +
+        (NUM_CLASSES_MAX * NUM_HEADS_MAX * CHANNELS_MAX);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_ca_pool, sizeof(float) * ADAM_CA_TOTAL_SIZE, "adam_m_ca_pool");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_ca_pool, sizeof(float) * ADAM_CA_TOTAL_SIZE, "adam_v_ca_pool");
     CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * NUM_HEADS_MAX * CHANNELS_MAX, "adam_m_pooling");

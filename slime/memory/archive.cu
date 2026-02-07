@@ -401,7 +401,6 @@ __device__ void insert_elite_device(
         archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
     }
 
-    // Store latent genome for reconstruction
     DEVICE_FATAL_IF(latent_genome_new == nullptr, "insert_elite_device: latent_genome_new is null");
     DEVICE_FATAL_IF(archive->latent_genome == nullptr, "insert_elite_device: archive latent_genome buffer is null");
     for (int l = 0; l < GENOME_LATENT_DIM_MAX; l++) {

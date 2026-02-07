@@ -519,10 +519,8 @@ __global__ void selection_kernel(
     uint32_t parent_id_1 = 0;
 
     if (entry->parent_hash == UINT64_MAX) {
-        // Bootstrap entry: no parent in archive, this is a progenitor
         parent_id_0 = 0;
     } else {
-        // Normal entry: look up the PARENT's hash (not this entry's hash)
         int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
         DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
         parent_id_0 = parent_idx;
@@ -551,7 +549,6 @@ __global__ void selection_kernel(
         latent_genome
     );
 
-    // After bootstrap entry is inserted, update parent_hash to self so future spawns can find it
     if (entry->parent_hash == UINT64_MAX) {
         entry->parent_hash = entry->genome_hash;
     }
@@ -1782,7 +1779,6 @@ __global__ void init_organism_phase2_kernel(
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa failed");
 
-        // Seed initial pool entries into the archive as progenitors
         printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, num_classes);
         int seed_blocks = (POOL_CAPACITY_MIN + BLOCK_SIZE - 1) / BLOCK_SIZE;
         seed_archive_from_pool_kernel<<<seed_blocks, BLOCK_SIZE>>>(
@@ -2200,7 +2196,6 @@ __global__ void persistent_evolution_kernel(
     while (true) {
         ArchitectureParams arch_p1 = get_arch_from_pool(organism->pool, 0);
 
-        // training
         printf("V:TRAIN_start gen=%d\n", organism->generation);
         load_batch_kernel<<<WAVE_SIZE, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size);
         cudaError_t err_load = cudaGetLastError();
@@ -2242,7 +2237,6 @@ __global__ void persistent_evolution_kernel(
         DEVICE_FATAL_IF(err != cudaSuccess, "hw_aggregate failed");
         printf("V:TRAIN_done gen=%d\n", organism->generation);
 
-        // phase 1: selection, archive, spawn
         int reduction_blocks = organism->reduction_num_blocks;
         int total_cells = organism->reduction_total_cells;
         reduce_concentration_mean_kernel<<<reduction_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(

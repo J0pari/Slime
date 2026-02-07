@@ -92,7 +92,6 @@ __device__ __forceinline__ float safe_sqrt_denom(float x) {
     return sqrtf(x) + safe_epsilon(x);
 }
 
-// Canonical activation functions - use ONLY these, never inline the computation
 __device__ __forceinline__ float activation_relu(float x) {
     return fmaxf(0.0f, x);
 }
@@ -101,7 +100,6 @@ __device__ __forceinline__ float activation_gelu(float x) {
     return GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
 }
 
-// Canonical genome-to-unit conversion - use when you need raw [0,1] normalized value without context
 __device__ __forceinline__ float genome_slot_to_unit(const float* genome, int slot) {
     return (genome[slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
 }
@@ -1344,7 +1342,6 @@ __global__ void batched_accumulate_weight_grads_kernel(
     grad_buffer[dst_idx] = dW[src_idx];
 }
 
-// GELU backward: [head, contiguous_elements] layout (simple case)
 __global__ void batched_gelu_backward_kernel(
     const float* __restrict__ dL_dI,
     const float* __restrict__ pre_gelu,

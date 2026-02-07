@@ -173,13 +173,11 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(total_positions <= 0 || total_positions > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch: total_positions OOB");
     if (tid == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
 
-    // Split into per-batch-sample passes to avoid TDR timeout
     for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
         for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
             int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
             int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
 
-            // Copy prev_concentration channels
             ca_out[base_idx + 0] = prev_concentration[prev_idx + 0];
             ca_out[base_idx + 1] = prev_concentration[prev_idx + 1];
             ca_out[base_idx + 2] = prev_concentration[prev_idx + 2];
@@ -192,7 +190,6 @@ extern "C" __global__ void load_batch_kernel(
             ca_out[base_idx + 9] = prev_concentration[prev_idx + 9];
             ca_out[base_idx + 10] = prev_concentration[prev_idx + 10];
 
-            // Image channels - coalesced access pattern
             int img_base = batch_idx * batch_stride * 3;
             ca_out[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
             ca_out[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
@@ -201,7 +198,7 @@ extern "C" __global__ void load_batch_kernel(
             ca_out[base_idx + 14] = prev_concentration[prev_idx + 14];
             ca_out[base_idx + 15] = prev_concentration[prev_idx + 15];
         }
-        __syncthreads();  // Yield between batch samples
+        __syncthreads();
     }
     if (tid == 0) printf("V:L3_loop_done\n");
 }
@@ -955,7 +952,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             {
 
 
-            // Per-block workspace offsets for WAVE_SIZE concurrent blocks
             half* ws_fp16_a = organism->buffers->backward_ws_fp16_a + wave_position * (BACKWARD_WS_FP16_A_BLOCK / sizeof(half));
             half* ws_fp16_b = organism->buffers->backward_ws_fp16_b + wave_position * (BACKWARD_WS_FP16_B_BLOCK / sizeof(half));
             float* ws_dW = organism->buffers->backward_ws_dW + wave_position * (BACKWARD_WS_DW_BLOCK / sizeof(float));
@@ -964,7 +960,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_im2col = organism->buffers->backward_ws_im2col + wave_position * (BACKWARD_WS_IM2COL_BLOCK / sizeof(float));
             float* ws_dpregelu = organism->buffers->backward_ws_dpregelu + wave_position * (BACKWARD_WS_DPREGELU_BLOCK / sizeof(float));
 
-            // Wave-offset pointers for saved activations
             constexpr int bwd_wave_saved_stride = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
             float* perception_saved = ca_state->perception_saved + wave_position * bwd_wave_saved_stride;
             float* interaction_saved = ca_state->interaction_saved + wave_position * bwd_wave_saved_stride;
@@ -1151,19 +1146,15 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             int ws_dpregelu_stride = total_samples * arch.head_dim;
 
-            // GELU backward with correct [batch, head, local] source indexing
             {
                 int total_gelu = arch.num_heads * total_samples * arch.head_dim;
                 int elements_per_head = total_samples * arch.head_dim;
                 for (int idx = tid; idx < total_gelu; idx += blockDim.x) {
                     int head_id = idx / elements_per_head;
                     int remainder = idx % elements_per_head;
-                    // Decompose remainder into batch and within-batch indices
                     int batch_id = remainder / I_head_stride;
                     int within_batch = remainder % I_head_stride;
-                    // Source: [batch, head, local] layout
                     int src_idx = batch_id * I_batch_stride + head_id * I_head_stride + within_batch;
-                    // Dest: [head, flat] layout
                     int dst_idx = head_id * ws_dpregelu_stride + remainder;
 
                     float x = pre_gelu_saved[src_idx];
