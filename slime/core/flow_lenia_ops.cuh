@@ -37,6 +37,10 @@ struct FlowLeniaOps {
         float beta_A,
         float n
     ) {
+        DEVICE_VALIDATE_FINITE(U_center);
+        DEVICE_VALIDATE_FINITE(A_sum_center);
+        DEVICE_VALIDATE_POSITIVE_DEFINITE(fabsf(beta_A) + safe_epsilon(1.0f));
+
         float ratio = A_sum_center / fmaxf(fabsf(beta_A), safe_epsilon(beta_A));
         float safe_ratio = fmaxf(ratio, safe_epsilon(ratio));
         float safe_n = fmaxf(fabsf(n), safe_epsilon(n));
@@ -48,35 +52,12 @@ struct FlowLeniaOps {
         float grad_A_x = (A_sum_E - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
         float grad_A_y = (A_sum_N - A_sum_center) * CENTERED_DIFFERENCE_SCALE;
 
-        return make_float2(
-            (1.0f - alpha) * grad_U_x - alpha * grad_A_x,
-            (1.0f - alpha) * grad_U_y - alpha * grad_A_y
-        );
-    }
+        float flow_x = (1.0f - alpha) * grad_U_x - alpha * grad_A_x;
+        float flow_y = (1.0f - alpha) * grad_U_y - alpha * grad_A_y;
 
-    __device__ static void bilinear_splat_weights(
-        float cx, float cy,
-        int grid_size,
-        int* x0, int* y0, int* x1, int* y1,
-        float* w00, float* w10, float* w01, float* w11
-    ) {
-        *x0 = (int)floorf(cx);
-        *y0 = (int)floorf(cy);
-        *x1 = *x0 + 1;
-        *y1 = *y0 + 1;
+        DEVICE_VALIDATE_FLOW_LENIA(A_sum_center, flow_x, flow_y);
 
-        float fx = cx - (float)*x0;
-        float fy = cy - (float)*y0;
-
-        *w00 = (1.0f - fx) * (1.0f - fy);
-        *w10 = fx * (1.0f - fy);
-        *w01 = (1.0f - fx) * fy;
-        *w11 = fx * fy;
-
-        *x0 = max(0, min(*x0, grid_size - 1));
-        *y0 = max(0, min(*y0, grid_size - 1));
-        *x1 = max(0, min(*x1, grid_size - 1));
-        *y1 = max(0, min(*y1, grid_size - 1));
+        return make_float2(flow_x, flow_y);
     }
 
     __device__ static void bilinear_transport_forward(
@@ -92,20 +73,27 @@ struct FlowLeniaOps {
         float displaced_x = source_x + dt * flow_x;
         float displaced_y = source_y + dt * flow_y;
 
-        int x0, y0, x1, y1;
-        float w00, w10, w01, w11;
-        bilinear_splat_weights(displaced_x, displaced_y, grid_size,
-                               &x0, &y0, &x1, &y1, &w00, &w10, &w01, &w11);
+        int x0 = (int)floorf(displaced_x);
+        int y0 = (int)floorf(displaced_y);
+        float tx = displaced_x - (float)x0;
+        float ty = displaced_y - (float)y0;
 
-        int idx00 = (y0 * grid_size + x0) * channels + channel_offset;
-        int idx10 = (y0 * grid_size + x1) * channels + channel_offset;
-        int idx01 = (y1 * grid_size + x0) * channels + channel_offset;
-        int idx11 = (y1 * grid_size + x1) * channels + channel_offset;
+        float4 w = Interpolation::bilinear_weights(tx, ty);
 
-        atomicAdd(&target_buffer[idx00], source_mass * w00);
-        atomicAdd(&target_buffer[idx10], source_mass * w10);
-        atomicAdd(&target_buffer[idx01], source_mass * w01);
-        atomicAdd(&target_buffer[idx11], source_mass * w11);
+        int cx0 = max(0, min(x0, grid_size - 1));
+        int cy0 = max(0, min(y0, grid_size - 1));
+        int cx1 = max(0, min(x0 + 1, grid_size - 1));
+        int cy1 = max(0, min(y0 + 1, grid_size - 1));
+
+        int idx_tl = (cy0 * grid_size + cx0) * channels + channel_offset;
+        int idx_tr = (cy0 * grid_size + cx1) * channels + channel_offset;
+        int idx_bl = (cy1 * grid_size + cx0) * channels + channel_offset;
+        int idx_br = (cy1 * grid_size + cx1) * channels + channel_offset;
+
+        atomicAdd(&target_buffer[idx_tl], source_mass * w.x);
+        atomicAdd(&target_buffer[idx_tr], source_mass * w.y);
+        atomicAdd(&target_buffer[idx_bl], source_mass * w.z);
+        atomicAdd(&target_buffer[idx_br], source_mass * w.w);
     }
 
     __device__ static void bilinear_transport_backward(
@@ -126,39 +114,35 @@ struct FlowLeniaOps {
 
         int x0 = (int)floorf(displaced_x);
         int y0 = (int)floorf(displaced_y);
-        int x1 = x0 + 1;
-        int y1 = y0 + 1;
+        float tx = displaced_x - (float)x0;
+        float ty = displaced_y - (float)y0;
 
-        float fx = displaced_x - (float)x0;
-        float fy = displaced_y - (float)y0;
-
-        float w00 = (1.0f - fx) * (1.0f - fy);
-        float w10 = fx * (1.0f - fy);
-        float w01 = (1.0f - fx) * fy;
-        float w11 = fx * fy;
+        float4 w = Interpolation::bilinear_weights(tx, ty);
+        float4 dw_dtx, dw_dty;
+        Interpolation::bilinear_weight_grads(tx, ty, &dw_dtx, &dw_dty);
 
         int cx0 = max(0, min(x0, grid_size - 1));
         int cy0 = max(0, min(y0, grid_size - 1));
-        int cx1 = max(0, min(x1, grid_size - 1));
-        int cy1 = max(0, min(y1, grid_size - 1));
+        int cx1 = max(0, min(x0 + 1, grid_size - 1));
+        int cy1 = max(0, min(y0 + 1, grid_size - 1));
 
-        int idx00 = (cy0 * grid_size + cx0) * channels + channel_offset;
-        int idx10 = (cy0 * grid_size + cx1) * channels + channel_offset;
-        int idx01 = (cy1 * grid_size + cx0) * channels + channel_offset;
-        int idx11 = (cy1 * grid_size + cx1) * channels + channel_offset;
+        int idx_tl = (cy0 * grid_size + cx0) * channels + channel_offset;
+        int idx_tr = (cy0 * grid_size + cx1) * channels + channel_offset;
+        int idx_bl = (cy1 * grid_size + cx0) * channels + channel_offset;
+        int idx_br = (cy1 * grid_size + cx1) * channels + channel_offset;
 
-        float g00 = target_grad[idx00];
-        float g10 = target_grad[idx10];
-        float g01 = target_grad[idx01];
-        float g11 = target_grad[idx11];
+        float g_tl = target_grad[idx_tl];
+        float g_tr = target_grad[idx_tr];
+        float g_bl = target_grad[idx_bl];
+        float g_br = target_grad[idx_br];
 
-        *d_source_mass = w00 * g00 + w10 * g10 + w01 * g01 + w11 * g11;
+        *d_source_mass = w.x * g_tl + w.y * g_tr + w.z * g_bl + w.w * g_br;
 
-        float d_fx = source_mass * (-(1.0f - fy) * g00 + (1.0f - fy) * g10 - fy * g01 + fy * g11);
-        float d_fy = source_mass * (-(1.0f - fx) * g00 - fx * g10 + (1.0f - fx) * g01 + fx * g11);
+        float d_tx = source_mass * (dw_dtx.x * g_tl + dw_dtx.y * g_tr + dw_dtx.z * g_bl + dw_dtx.w * g_br);
+        float d_ty = source_mass * (dw_dty.x * g_tl + dw_dty.y * g_tr + dw_dty.z * g_bl + dw_dty.w * g_br);
 
-        *d_flow_x = dt * d_fx;
-        *d_flow_y = dt * d_fy;
+        *d_flow_x = dt * d_tx;
+        *d_flow_y = dt * d_ty;
     }
 
     __device__ static float soft_clamp(float x, float min_val, float max_val, float sharpness) {

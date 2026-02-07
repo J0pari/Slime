@@ -39,9 +39,14 @@ extern "C" __global__ void load_batch_kernel(
     Organism* organism,
     HybridTrainingMode* training_mode,
     int generation,
-    int grid_size  
+    int grid_size
 ) {
     int tid = threadIdx.x;
+
+    if (tid == 0) {
+        printf("V:load_batch_entry gen=%d grid=%d org=%p tm=%p\n", generation, grid_size, (void*)organism, (void*)training_mode);
+    }
+    __syncthreads();
 
     DEVICE_FATAL_IF(organism == nullptr, "load_batch_kernel: organism is null");
     DEVICE_FATAL_IF(training_mode == nullptr, "load_batch_kernel: training_mode is null");
@@ -52,37 +57,59 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(dataset == nullptr, "load_batch_kernel: dataset is null");
     DEVICE_FATAL_IF(dataset->samples == nullptr, "load_batch_kernel: dataset samples is null");
     DEVICE_FATAL_IF(dataset->labels == nullptr, "load_batch_kernel: dataset labels is null");
+    DEVICE_FATAL_IF(dataset->descriptor == nullptr, "load_batch_kernel: dataset descriptor is null");
+    int dataset_size = dataset->num_samples;
+    int batch_size = training_mode->batch_size;
+    DEVICE_FATAL_IF(dataset_size <= 0 || dataset_size > DATASET_SIZE_MAX, "load_batch_kernel: dataset num_samples invalid");
+    DEVICE_FATAL_IF(batch_size <= 0 || batch_size > BATCH_SIZE_MAX, "load_batch_kernel: batch_size invalid");
+    DEVICE_FATAL_IF(grid_size <= 0 || grid_size > GRID_SIZE_MAX, "load_batch_kernel: grid_size invalid");
+    DEVICE_FATAL_IF(generation < 0, "load_batch_kernel: generation negative");
+
+    int sample_rows = dataset->descriptor->sample_rows;
+    int sample_cols = dataset->descriptor->sample_cols;
+    int sample_channels = dataset->descriptor->channels;
+    DEVICE_FATAL_IF(sample_rows <= 0 || sample_rows > SAMPLE_DIM_MAX, "load_batch_kernel: sample_rows invalid");
+    DEVICE_FATAL_IF(sample_cols <= 0 || sample_cols > SAMPLE_DIM_MAX, "load_batch_kernel: sample_cols invalid");
+    DEVICE_FATAL_IF(sample_channels <= 0 || sample_channels > CHANNELS_MAX, "load_batch_kernel: sample_channels invalid");
+
+    int sample_size = sample_rows * sample_cols * sample_channels;
+    int batch_stride = grid_size * grid_size;
+    int total_pixels = batch_size * batch_stride;
+    int offset = (generation % ((dataset_size + batch_size - 1) / batch_size)) * batch_size;
+
+    DEVICE_FATAL_IF(sample_size <= 0 || sample_size > SAMPLE_DIM_MAX * SAMPLE_DIM_MAX * CHANNELS_MAX, "load_batch_kernel: sample_size overflow");
+    DEVICE_FATAL_IF(batch_stride <= 0 || batch_stride > CA_FIELD_SIZE, "load_batch_kernel: batch_stride overflow");
+    DEVICE_FATAL_IF(total_pixels <= 0 || total_pixels > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch_kernel: total_pixels overflow");
+    DEVICE_FATAL_IF(offset < 0, "load_batch_kernel: offset overflow");
 
     unsigned char* all_images = dataset->samples;
     unsigned char* all_labels = dataset->labels;
     float* batch_images_out = training_mode->batch_images;
     int* batch_labels_out = training_mode->batch_labels;
-    int dataset_size = dataset->num_samples;
-    int batch_size = training_mode->batch_size;
-    int offset = generation * batch_size;
-    int sample_rows = dataset->descriptor->sample_rows;
-    int sample_cols = dataset->descriptor->sample_cols;
-    int sample_channels = dataset->descriptor->channels;
-    int sample_size = sample_rows * sample_cols * sample_channels;
 
+    if (tid == 0) printf("V:L1_pre\n");
     if (tid == 0) {
         for (int idx = 0; idx < batch_size; idx++) {
             int src_idx = (offset + idx) % dataset_size;
+            DEVICE_FATAL_IF(src_idx < 0 || src_idx >= dataset_size, "load_batch: label src_idx OOB");
+            DEVICE_FATAL_IF(idx < 0 || idx >= BATCH_SIZE_MAX, "load_batch: label idx OOB");
             batch_labels_out[idx] = all_labels[src_idx];
         }
     }
+    if (tid == 0) printf("V:L1_post\n");
     __syncthreads();
 
-    DEVICE_FATAL_IF(grid_size <= 0 || grid_size > 512, "load_batch_kernel: invalid grid_size");
-    DEVICE_FATAL_IF(sample_rows <= 0, "load_batch_kernel: invalid sample_rows");
-    DEVICE_FATAL_IF(sample_cols <= 0, "load_batch_kernel: invalid sample_cols");
-
-    int total_pixels = batch_size * grid_size * grid_size;
+    if (tid == 0) printf("V:L2_pre\n");
     for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
-        int idx = work_idx / (grid_size * grid_size);
-        int pixel_idx = work_idx % (grid_size * grid_size);
+        int idx = work_idx / batch_stride;
+        int pixel_idx = work_idx % batch_stride;
+
+        DEVICE_FATAL_IF(idx < 0 || idx >= batch_size, "load_batch: img idx OOB");
+        DEVICE_FATAL_IF(pixel_idx < 0 || pixel_idx >= batch_stride, "load_batch: img pixel_idx OOB");
 
         int src_idx = (offset + idx) % dataset_size;
+        DEVICE_FATAL_IF(src_idx < 0 || src_idx >= dataset_size, "load_batch: img src_idx OOB");
+
         int out_y = pixel_idx / grid_size;
         int out_x = pixel_idx % grid_size;
 
@@ -94,73 +121,104 @@ extern "C" __global__ void load_batch_kernel(
         int y1 = min(y0 + 1, sample_rows - 1);
         int x1 = min(x0 + 1, sample_cols - 1);
 
+        DEVICE_FATAL_IF(y0 < 0 || y0 >= sample_rows, "load_batch: y0 OOB");
+        DEVICE_FATAL_IF(x0 < 0 || x0 >= sample_cols, "load_batch: x0 OOB");
+        DEVICE_FATAL_IF(y1 < 0 || y1 >= sample_rows, "load_batch: y1 OOB");
+        DEVICE_FATAL_IF(x1 < 0 || x1 >= sample_cols, "load_batch: x1 OOB");
+
         float fy = src_y - y0;
         float fx = src_x - x0;
 
-        float p00 = all_images[src_idx * sample_size + y0 * sample_cols + x0] / 255.0f;
-        float p01 = all_images[src_idx * sample_size + y0 * sample_cols + x1] / 255.0f;
-        float p10 = all_images[src_idx * sample_size + y1 * sample_cols + x0] / 255.0f;
-        float p11 = all_images[src_idx * sample_size + y1 * sample_cols + x1] / 255.0f;
+        int out_idx_base = idx * batch_stride * 3;
+        DEVICE_FATAL_IF(out_idx_base < 0 || out_idx_base + 2 * batch_stride + pixel_idx >= BATCH_SIZE_MAX * CA_FIELD_SIZE * 3, "load_batch: batch_images_out OOB");
 
-        float value = p00 * (1 - fx) * (1 - fy) +
-                     p01 * fx * (1 - fy) +
-                     p10 * (1 - fx) * fy +
-                     p11 * fx * fy;
+        if (sample_channels >= 3) {
+            for (int c = 0; c < 3; c++) {
+                int channel_offset = c * sample_rows * sample_cols;
+                int img_idx = src_idx * sample_size + channel_offset;
+                DEVICE_FATAL_IF(img_idx + y1 * sample_cols + x1 >= dataset_size * sample_size, "load_batch: all_images OOB");
+                float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
+                float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
+                float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
+                float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
+                batch_images_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+            }
+        } else {
+            int img_idx = src_idx * sample_size;
+            DEVICE_FATAL_IF(img_idx + y1 * sample_cols + x1 >= dataset_size * sample_size, "load_batch: all_images gray OOB");
+            float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
+            float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
+            float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
+            float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
+            float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
+            batch_images_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
+            batch_images_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
+            batch_images_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
+        }
+    }
+    if (tid == 0) printf("V:L2_post\n");
+    __syncthreads();
 
-        batch_images_out[idx * grid_size * grid_size + pixel_idx] = value;
+    if (tid == 0) printf("V:L3_pre\n");
+    DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "load_batch: batch_ca_states_pool null");
+    DEVICE_FATAL_IF(organism->buffers == nullptr, "load_batch: buffers null");
+    DEVICE_FATAL_IF(organism->buffers->batch_prev_concentration == nullptr, "load_batch: batch_prev_concentration null");
+    if (tid == 0) printf("V:L3_checks_done\n");
+
+    float* ca_out = organism->batch_ca_states_pool;
+    int channels_out = CHANNELS_MAX;
+    float* batch_images = training_mode->batch_images;
+    float* prev_concentration = organism->buffers->batch_prev_concentration;
+
+    if (tid == 0) {
+        printf("V:L3_ptrs ca=%p prev=%p img=%p\n", (void*)ca_out, (void*)prev_concentration, (void*)batch_images);
+        // Test read/write at index 0
+        float test_prev = prev_concentration[0];
+        float test_img = batch_images[0];
+        ca_out[0] = test_prev;
+        printf("V:L3_rw prev[0]=%f img[0]=%f ca_write_ok\n", test_prev, test_img);
+        // Test at a high index
+        int hi = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX - 1;
+        ca_out[hi] = prev_concentration[hi];
+        printf("V:L3_hi idx=%d ok\n", hi);
     }
     __syncthreads();
 
-    float* ca_out = organism->batch_ca_states_pool;
-    int channels_out = CHANNELS_MAX;  
-    int image_channels = (int)dataset->descriptor->channels;
+    int total_positions = batch_size * batch_stride;
+    DEVICE_FATAL_IF(total_positions <= 0 || total_positions > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch: total_positions OOB");
+    if (tid == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
 
-    float* chem_concentration = organism->chemical_field->concentration;
-    float* chem_gradient_x = organism->chemical_field->gradient_x;
-    float* chem_gradient_y = organism->chemical_field->gradient_y;
-    float* chem_laplacian = organism->chemical_field->laplacian;
-    float* chem_sources = organism->chemical_field->sources;
-    float* chem_decay_factors = organism->chemical_field->decay_factors;
-    float* rd_resource_density = organism->resource_density;
-    float* rd_fitness_landscape = organism->fitness_landscape;
-    float* rd_resource_gradient_x = organism->resource_gradient_x;
-    float* rd_resource_gradient_y = organism->resource_gradient_y;
-    float* behavioral_field = organism->behavioral_field_pool;
-    float* batch_images = training_mode->batch_images;
-    float* prev_concentration = organism->buffers->batch_prev_concentration;
-    float* attractor_field = organism->chemical_field->concentration;
+    // Split into per-batch-sample passes to avoid TDR timeout
+    for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
+        for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
+            int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
+            int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
 
-    int total_positions = batch_size * grid_size * grid_size;
-    for (int work_idx = tid; work_idx < total_positions; work_idx += blockDim.x) {
-        int batch_idx = work_idx / (grid_size * grid_size);
-        int spatial_idx = work_idx % (grid_size * grid_size);
+            // Copy prev_concentration channels
+            ca_out[base_idx + 0] = prev_concentration[prev_idx + 0];
+            ca_out[base_idx + 1] = prev_concentration[prev_idx + 1];
+            ca_out[base_idx + 2] = prev_concentration[prev_idx + 2];
+            ca_out[base_idx + 3] = prev_concentration[prev_idx + 3];
+            ca_out[base_idx + 4] = prev_concentration[prev_idx + 4];
+            ca_out[base_idx + 5] = prev_concentration[prev_idx + 5];
+            ca_out[base_idx + 6] = prev_concentration[prev_idx + 6];
+            ca_out[base_idx + 7] = prev_concentration[prev_idx + 7];
+            ca_out[base_idx + 8] = prev_concentration[prev_idx + 8];
+            ca_out[base_idx + 9] = prev_concentration[prev_idx + 9];
+            ca_out[base_idx + 10] = prev_concentration[prev_idx + 10];
 
-        int base_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
+            // Image channels - coalesced access pattern
+            int img_base = batch_idx * batch_stride * 3;
+            ca_out[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
+            ca_out[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
+            ca_out[base_idx + 13] = batch_images[img_base + 2 * batch_stride + spatial_idx];
 
-        ca_out[base_idx + 0] = chem_concentration[spatial_idx];
-        ca_out[base_idx + 1] = chem_gradient_x[spatial_idx];
-        ca_out[base_idx + 2] = chem_gradient_y[spatial_idx];
-        ca_out[base_idx + 3] = chem_laplacian[spatial_idx];
-        ca_out[base_idx + 4] = chem_sources[spatial_idx];
-        ca_out[base_idx + 5] = chem_decay_factors[spatial_idx];
-
-        ca_out[base_idx + 6] = rd_resource_density[spatial_idx];
-        ca_out[base_idx + 7] = rd_fitness_landscape[spatial_idx];
-        ca_out[base_idx + 8] = rd_resource_gradient_x[spatial_idx];
-        ca_out[base_idx + 9] = rd_resource_gradient_y[spatial_idx];
-
-        ca_out[base_idx + 10] = behavioral_field[spatial_idx];
-
-        int img_base = batch_idx * grid_size * grid_size * image_channels;
-        ca_out[base_idx + 11] = batch_images[img_base + spatial_idx];
-        ca_out[base_idx + 12] = batch_images[img_base + ((image_channels > 1) ? grid_size * grid_size : 0) + spatial_idx];
-        ca_out[base_idx + 13] = batch_images[img_base + ((image_channels > 2) ? 2 * grid_size * grid_size : 0) + spatial_idx];
-
-        int prev_idx = batch_idx * grid_size * grid_size * channels_out + spatial_idx * channels_out;
-        ca_out[base_idx + 14] = prev_concentration[prev_idx + 0];
-
-        ca_out[base_idx + 15] = attractor_field[spatial_idx];
+            ca_out[base_idx + 14] = prev_concentration[prev_idx + 14];
+            ca_out[base_idx + 15] = prev_concentration[prev_idx + 15];
+        }
+        __syncthreads();  // Yield between batch samples
     }
+    if (tid == 0) printf("V:L3_loop_done\n");
 }
 
 extern "C" __global__ void hybrid_organism_lifecycle_kernel(
@@ -254,7 +312,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         num_classes = organism->current_dataset->descriptor->num_classes;
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome);
+        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
         behavioral_dim = dims.total();
 
         arch.num_heads = entry->num_heads;
@@ -311,25 +369,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
     if (s_use_gradients) {
         if (tid == 0) {
-            if (organism == nullptr || ca_state == nullptr ||
-                training_mode == nullptr || param_map == nullptr) {
-                printf("!E:hybrid null_check org=%p ca_state=%p tm=%p pm=%p\n",
-                       (void*)organism,
-                       (void*)ca_state,
-                       (void*)training_mode,
-                       (void*)param_map);
-                s_error_flag = 1;
-            }
-
-            if (!s_error_flag && (training_mode->batch_images == nullptr || training_mode->batch_labels == nullptr)) {
-                printf("!E:hybrid batch_buffers_null images=%p labels=%p\n",
-                       (void*)training_mode->batch_images,
-                       (void*)training_mode->batch_labels);
-                s_error_flag = 1;
-            }
+            DEVICE_FATAL_IF(organism == nullptr, "hybrid: organism is null");
+            DEVICE_FATAL_IF(ca_state == nullptr, "hybrid: ca_state is null");
+            DEVICE_FATAL_IF(training_mode == nullptr, "hybrid: training_mode is null");
+            DEVICE_FATAL_IF(param_map == nullptr, "hybrid: param_map is null");
+            DEVICE_FATAL_IF(training_mode->batch_images == nullptr, "hybrid: batch_images is null");
+            DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "hybrid: batch_labels is null");
         }
-        __syncthreads();
-        if (s_error_flag) return;  
+        __syncthreads();  
 
         {
             ADTape* tape = &ca_state->tape;
@@ -585,7 +632,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
                 organism->buffers->batch_prev_concentration[idx] = organism->batch_ca_states_pool[idx];
             }
-        }  
+        }
         __syncthreads();
 
         float* ca_output_grad = nullptr;
@@ -631,7 +678,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             if (tid == 0) {
                 BehavioralDimensions dims;
-                dims.derive_from_genome(entry->genome_hash, primary_genome);
+                dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
                 int task_dim = dims.task_dim;
 
                 DEVICE_FATAL_IF(organism->diresa_task_weights->input_dim != num_features,
@@ -1813,6 +1860,30 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             reconstruct_genome_from_archive(ent->parent_hash, archive, archive_size_val,
                 ent->delta_indices, ent->delta_values, ent->num_deltas,
                 ent->max_deltas, eid_primary_genome, GENOME_SIZE, eid_parent_temp, organism->diresa_genome_weights);
+
+            ent->generalization_gap = fabsf(ent->train_accuracy - ent->test_accuracy);
+
+            DEVICE_FATAL_IF(ent->cycles_elapsed == 0, "cycles_elapsed is 0 - no execution data");
+            DEVICE_FATAL_IF(ent->total_branches == 0, "total_branches is 0 - no branch data");
+
+            float ipc = (float)ent->inst_executed / (float)ent->cycles_elapsed;
+            float tensor_util = (float)ent->tensor_core_cycles / (float)ent->cycles_elapsed;
+            float branch_efficiency = (float)(ent->total_branches - ent->divergent_branches) / (float)ent->total_branches;
+            ent->hardware_efficiency = ipc * tensor_util * branch_efficiency;
+
+            DEVICE_FATAL_IF(generation == 0, "coherence requires previous generation");
+            float prev_acc = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
+            ent->coherence = ent->task_accuracy - prev_acc;
+
+            DEVICE_VALIDATE_FINITE(ent->task_accuracy);
+            DEVICE_VALIDATE_FINITE(ent->coherence);
+            DEVICE_VALIDATE_FINITE(ent->hardware_efficiency);
+            DEVICE_VALIDATE_FINITE(ent->generalization_gap);
+            DEVICE_VALIDATE_PROBABILITY(ent->task_accuracy);
+            DEVICE_VALIDATE_HW_COUNTER(ent->cycles_elapsed, 1ULL, 0xFFFFFFFFFFFFULL);
+            DEVICE_VALIDATE_HW_COUNTER(ent->inst_executed, 1ULL, 0xFFFFFFFFFFFFULL);
+            DEVICE_VALIDATE_HW_COUNTER(ent->tensor_core_cycles, 0ULL, ent->cycles_elapsed);
+            device_validate_fitness_components(pool->fitness_values[eid], ent->coherence, ent->effective_rank, "pool_entry_fitness");
 
             organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy;
             organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence;

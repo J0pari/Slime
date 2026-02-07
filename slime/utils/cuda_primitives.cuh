@@ -6,8 +6,65 @@
 #include <cuda/atomic>
 #include <curand_kernel.h>
 #include "../config/config.cu"
+#include "../debug/param_validator.cu"
 
 struct PoolEntry;
+
+#ifdef __CUDA_ARCH__
+#define VALIDATE_WARP_UNIFORM(val, name) device_validate_warp_uniform(val, name)
+#define VALIDATE_COALESCED(ptr, stride, name) device_validate_coalesced_access(ptr, stride, name)
+#define VALIDATE_PROBABILITY(val, name) device_validate_probability(val, name)
+#define VALIDATE_NORMALIZED(val, name) device_validate_normalized(val, name)
+#define VALIDATE_POSITIVE_DEFINITE(val, name) device_validate_positive_definite(val, name)
+#define VALIDATE_TENSOR_LAYOUT(ptr, rows, cols, name) device_validate_tensor_layout(ptr, rows, cols, name)
+#define VALIDATE_GRADIENT_MAGNITUDE(grad, max_norm, name) device_validate_gradient_magnitude(grad, max_norm, name)
+#define VALIDATE_MEMORY_ALIGNMENT(ptr, alignment, name) device_validate_memory_alignment(ptr, alignment, name)
+#define VALIDATE_SHARED_MEMORY_BOUNDS(offset, max_size, name) device_validate_shared_memory_bounds(offset, max_size, name)
+#define VALIDATE_GRID_COORDINATES(x, y, grid_size, name) device_validate_grid_coordinates(x, y, grid_size, name)
+#define VALIDATE_BEHAVIORAL_DIMENSION(idx, name) device_validate_behavioral_dimension(idx, name)
+#define VALIDATE_ARCHIVE_INDEX(idx, archive_size, name) device_validate_archive_index(idx, archive_size, name)
+#define VALIDATE_GENOME_SLOT(slot, name) device_validate_genome_slot(slot, name)
+#define VALIDATE_HARDWARE_COUNTER(val, min_plausible, max_plausible, name) device_validate_hardware_counter(val, min_plausible, max_plausible, name)
+#define VALIDATE_FITNESS_COMPONENTS(fitness, coherence, rank, name) device_validate_fitness_components(fitness, coherence, rank, name)
+#define VALIDATE_WARP_DIVERGENCE_ACCEPTABLE(ballot_mask, max_divergent_lanes, name) device_validate_warp_divergence_acceptable(ballot_mask, max_divergent_lanes, name)
+#define VALIDATE_CAUSALITY_CHAIN(cur_gen, dep_gen, cur_name, dep_name) device_validate_causality_chain(cur_gen, dep_gen, cur_name, dep_name)
+#define VALIDATE_DATA_FLOW_ORIGIN(ptr, from_loader, name) device_validate_data_flow_origin(ptr, from_loader, name)
+#define VALIDATE_EPIGENETIC_BOUNDS(val, gmin, gmax, name) device_validate_epigenetic_bounds(val, gmin, gmax, name)
+#define VALIDATE_TENSOR_CORE_ALIGNMENT(ptr, m, n, k, name) device_validate_tensor_core_alignment(ptr, m, n, k, name)
+#define VALIDATE_FLOW_LENIA_STATE(conc, vx, vy, name) device_validate_flow_lenia_state(conc, vx, vy, name)
+#define VALIDATE_PTR(ptr, name) device_validate_ptr(ptr, name)
+#define VALIDATE_RANGE(val, min_val, max_val, name) device_validate_range(val, min_val, max_val, name)
+#define VALIDATE_FINITE(val, name) device_validate_finite(val, name)
+#define VALIDATE_GRID_BOUNDS(idx, size, name) device_validate_grid_bounds(idx, size, name)
+#define VALIDATE_CAPACITY(count, cap, count_name, cap_name) device_validate_capacity(count, cap, count_name, cap_name)
+#else
+#define VALIDATE_WARP_UNIFORM(val, name) ((void)0)
+#define VALIDATE_COALESCED(ptr, stride, name) ((void)0)
+#define VALIDATE_PROBABILITY(val, name) ((void)0)
+#define VALIDATE_NORMALIZED(val, name) ((void)0)
+#define VALIDATE_POSITIVE_DEFINITE(val, name) ((void)0)
+#define VALIDATE_TENSOR_LAYOUT(ptr, rows, cols, name) ((void)0)
+#define VALIDATE_GRADIENT_MAGNITUDE(grad, max_norm, name) ((void)0)
+#define VALIDATE_MEMORY_ALIGNMENT(ptr, alignment, name) ((void)0)
+#define VALIDATE_SHARED_MEMORY_BOUNDS(offset, max_size, name) ((void)0)
+#define VALIDATE_GRID_COORDINATES(x, y, grid_size, name) ((void)0)
+#define VALIDATE_BEHAVIORAL_DIMENSION(idx, name) ((void)0)
+#define VALIDATE_ARCHIVE_INDEX(idx, archive_size, name) ((void)0)
+#define VALIDATE_GENOME_SLOT(slot, name) ((void)0)
+#define VALIDATE_HARDWARE_COUNTER(val, min_plausible, max_plausible, name) ((void)0)
+#define VALIDATE_FITNESS_COMPONENTS(fitness, coherence, rank, name) ((void)0)
+#define VALIDATE_WARP_DIVERGENCE_ACCEPTABLE(ballot_mask, max_divergent_lanes, name) ((void)0)
+#define VALIDATE_CAUSALITY_CHAIN(cur_gen, dep_gen, cur_name, dep_name) ((void)0)
+#define VALIDATE_DATA_FLOW_ORIGIN(ptr, from_loader, name) ((void)0)
+#define VALIDATE_EPIGENETIC_BOUNDS(val, gmin, gmax, name) ((void)0)
+#define VALIDATE_TENSOR_CORE_ALIGNMENT(ptr, m, n, k, name) ((void)0)
+#define VALIDATE_FLOW_LENIA_STATE(conc, vx, vy, name) ((void)0)
+#define VALIDATE_PTR(ptr, name) ((void)0)
+#define VALIDATE_RANGE(val, min_val, max_val, name) ((void)0)
+#define VALIDATE_FINITE(val, name) ((void)0)
+#define VALIDATE_GRID_BOUNDS(idx, size, name) ((void)0)
+#define VALIDATE_CAPACITY(count, cap, count_name, cap_name) ((void)0)
+#endif
 
 
 __host__ __device__ __forceinline__ float safe_epsilon(float reference_scale) {
@@ -732,10 +789,39 @@ struct Interpolation {
         );
     }
 
-    __device__ static float bilinear(float v00, float v10, float v01, float v11, float tx, float ty) {
-        float v0 = linear(v00, v10, tx);
-        float v1 = linear(v01, v11, tx);
-        return linear(v0, v1, ty);
+    __device__ static float bilinear(float tl, float tr, float bl, float br, float tx, float ty) {
+        float top = linear(tl, tr, tx);
+        float bot = linear(bl, br, tx);
+        return linear(top, bot, ty);
+    }
+
+    __device__ static float bilinear_grad_x(float tl, float tr, float bl, float br, float ty) {
+        return linear(tr - tl, br - bl, ty);
+    }
+
+    __device__ static float bilinear_grad_y(float tl, float tr, float bl, float br, float tx) {
+        return linear(bl - tl, br - tr, tx);
+    }
+
+    __device__ static float3 bilinear_with_grad(float tl, float tr, float bl, float br, float tx, float ty) {
+        return make_float3(
+            bilinear(tl, tr, bl, br, tx, ty),
+            bilinear_grad_x(tl, tr, bl, br, ty),
+            bilinear_grad_y(tl, tr, bl, br, tx)
+        );
+    }
+
+    __device__ static float4 bilinear_weights(float tx, float ty) {
+        float omtx = 1.0f - tx;
+        float omty = 1.0f - ty;
+        return make_float4(omtx * omty, tx * omty, omtx * ty, tx * ty);
+    }
+
+    __device__ static void bilinear_weight_grads(float tx, float ty, float4* dw_dtx, float4* dw_dty) {
+        float omtx = 1.0f - tx;
+        float omty = 1.0f - ty;
+        *dw_dtx = make_float4(-omty, omty, -ty, ty);
+        *dw_dty = make_float4(-omtx, -tx, omtx, tx);
     }
 
     __device__ static float trilinear(

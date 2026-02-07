@@ -272,106 +272,6 @@ __device__ int hilbert_xy_to_index(int x, int y, int order) {
     return index;
 }
 
-__global__ void unified_sample_to_ca_kernel(
-    const DatasetDescriptor* dataset,
-    unsigned char* raw_samples,
-    unsigned char* labels,
-    int sample_idx,
-    float* ca_grid,
-    int ca_grid_size,
-    int ca_channels
-) {
-    int ca_x = blockIdx.x * blockDim.x + threadIdx.x;
-    int ca_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (ca_x >= ca_grid_size || ca_y >= ca_grid_size) return;
-
-    int sample_offset = sample_idx * dataset->sample_rows * dataset->sample_cols * dataset->channels;
-
-    if (dataset->encoding == ENCODING_SPATIAL_2D) {
-        if (dataset->use_multi_resolution && dataset->sample_rows > ca_grid_size * 2) {
-            int hilbert_idx = hilbert_xy_to_index(ca_x, ca_y, dataset->hilbert_order);
-            int stride = (dataset->sample_rows / ca_grid_size);
-            int src_x, src_y;
-            hilbert_index_to_xy(hilbert_idx * stride, dataset->hilbert_order, &src_x, &src_y);
-
-            src_x = min(src_x, (int)(dataset->sample_cols - 1));
-            src_y = min(src_y, (int)(dataset->sample_rows - 1));
-
-            for (int c = 0; c < min(ca_channels, (int)dataset->channels); c++) {
-                int src_idx = sample_offset + (src_y * dataset->sample_cols + src_x) * dataset->channels + c;
-                float value = raw_samples[src_idx];
-                if (dataset->bit_depth == 16) {
-                    unsigned short* samples_16 = (unsigned short*)raw_samples;
-                    value = samples_16[src_idx / 2] / 65535.0f;
-                }
-                else {
-                    value = value / 255.0f;
-                }
-                int ca_idx = (ca_y * ca_grid_size + ca_x) * ca_channels + c;
-                ca_grid[ca_idx] = value * 2.0f - 1.0f;
-            }
-        } else {
-            float scale_x = (float)dataset->sample_cols / ca_grid_size;
-            float scale_y = (float)dataset->sample_rows / ca_grid_size;
-            float src_x = ca_x * scale_x;
-            float src_y = ca_y * scale_y;
-
-            int x0 = (int)src_x;
-            int y0 = (int)src_y;
-            int x1 = min(x0 + 1, (int)(dataset->sample_cols - 1));
-            int y1 = min(y0 + 1, (int)(dataset->sample_rows - 1));
-
-            float fx = src_x - x0;
-            float fy = src_y - y0;
-
-            for (int c = 0; c < min(ca_channels, (int)dataset->channels); c++) {
-                float v00 = raw_samples[sample_offset + (y0 * dataset->sample_cols + x0) * dataset->channels + c] / 255.0f;
-                float v01 = raw_samples[sample_offset + (y0 * dataset->sample_cols + x1) * dataset->channels + c] / 255.0f;
-                float v10 = raw_samples[sample_offset + (y1 * dataset->sample_cols + x0) * dataset->channels + c] / 255.0f;
-                float v11 = raw_samples[sample_offset + (y1 * dataset->sample_cols + x1) * dataset->channels + c] / 255.0f;
-
-                float interpolated = (1 - fx) * (1 - fy) * v00 +
-                                    fx * (1 - fy) * v01 +
-                                    (1 - fx) * fy * v10 +
-                                    fx * fy * v11;
-
-                int ca_idx = (ca_y * ca_grid_size + ca_x) * ca_channels + c;
-                ca_grid[ca_idx] = interpolated * 2.0f - 1.0f;
-            }
-        }
-    }
-    else if (dataset->encoding == ENCODING_SPECTRAL_AUDIO) {
-        float* spec_samples = (float*)raw_samples;
-        int time_stride = dataset->sample_rows / ca_grid_size;
-        int freq_stride = dataset->sample_cols / ca_grid_size;
-
-        int src_time = ca_y * time_stride;
-        int src_freq = ca_x * freq_stride;
-
-        for (int c = 0; c < min(ca_channels, 3); c++) {
-            int src_idx = sample_offset / sizeof(float) +
-                         (src_time * dataset->sample_cols + src_freq) * 3 + c;
-            float value = spec_samples[src_idx];
-            int ca_idx = (ca_y * ca_grid_size + ca_x) * ca_channels + c;
-            ca_grid[ca_idx] = tanhf(value);
-        }
-    }
-    else if (dataset->encoding == ENCODING_TEMPORAL_1D) {
-        float* ts_samples = (float*)raw_samples;
-        int time_idx = (ca_y * ca_grid_size + ca_x) * dataset->sample_rows / (ca_grid_size * ca_grid_size);
-
-        if (time_idx < dataset->sample_rows) {
-            for (int c = 0; c < min(ca_channels, (int)dataset->sample_cols); c++) {
-                int src_idx = sample_offset / sizeof(float) + time_idx * dataset->sample_cols + c;
-                float value = ts_samples[src_idx];
-                int ca_idx = (ca_y * ca_grid_size + ca_x) * ca_channels + c;
-                ca_grid[ca_idx] = tanhf(value * 0.1f);
-            }
-        }
-    }
-}
-
 __global__ void apply_window_kernel(
     const float* waveform,
     float* windowed,
@@ -518,17 +418,17 @@ extern "C" __global__ void sample_batch_kernel(
     int tid = threadIdx.x;
     int pixels_per_thread = (grid_size * grid_size + blockDim.x - 1) / blockDim.x;
 
+    int sample_rows = dataset->descriptor->sample_rows;
+    int sample_cols = dataset->descriptor->sample_cols;
+    int src_channels = dataset->descriptor->channels;
+    int sample_size = sample_rows * sample_cols * src_channels;
+
     for (int p = 0; p < pixels_per_thread; p++) {
         int pixel_idx = tid * pixels_per_thread + p;
         if (pixel_idx >= grid_size * grid_size) break;
 
         int out_y = pixel_idx / grid_size;
         int out_x = pixel_idx % grid_size;
-
-        int sample_rows = dataset->descriptor->sample_rows;
-        int sample_cols = dataset->descriptor->sample_cols;
-        int channels = dataset->descriptor->channels;
-        int sample_size = sample_rows * sample_cols * channels;
 
         float src_y = out_y * (float)sample_rows / grid_size;
         float src_x = out_x * (float)sample_cols / grid_size;
@@ -541,17 +441,27 @@ extern "C" __global__ void sample_batch_kernel(
         float fy = src_y - y0;
         float fx = src_x - x0;
 
-        float p00 = all_images[src_idx * sample_size + y0 * sample_cols + x0] / (float)UINT8_MAX;
-        float p01 = all_images[src_idx * sample_size + y0 * sample_cols + x1] / (float)UINT8_MAX;
-        float p10 = all_images[src_idx * sample_size + y1 * sample_cols + x0] / (float)UINT8_MAX;
-        float p11 = all_images[src_idx * sample_size + y1 * sample_cols + x1] / (float)UINT8_MAX;
+        int batch_stride = grid_size * grid_size;
 
-        float value = p00 * (1 - fx) * (1 - fy) +
-                     p01 * fx * (1 - fy) +
-                     p10 * (1 - fx) * fy +
-                     p11 * fx * fy;
-
-        batch_images[idx * grid_size * grid_size + pixel_idx] = value;
+        if (src_channels >= 3) {
+            for (int c = 0; c < 3; c++) {
+                int channel_offset = c * sample_rows * sample_cols;
+                float tl = all_images[src_idx * sample_size + channel_offset + y0 * sample_cols + x0] / (float)UINT8_MAX;
+                float tr = all_images[src_idx * sample_size + channel_offset + y0 * sample_cols + x1] / (float)UINT8_MAX;
+                float bl = all_images[src_idx * sample_size + channel_offset + y1 * sample_cols + x0] / (float)UINT8_MAX;
+                float br = all_images[src_idx * sample_size + channel_offset + y1 * sample_cols + x1] / (float)UINT8_MAX;
+                batch_images[idx * batch_stride * 3 + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+            }
+        } else {
+            float tl = all_images[src_idx * sample_size + y0 * sample_cols + x0] / (float)UINT8_MAX;
+            float tr = all_images[src_idx * sample_size + y0 * sample_cols + x1] / (float)UINT8_MAX;
+            float bl = all_images[src_idx * sample_size + y1 * sample_cols + x0] / (float)UINT8_MAX;
+            float br = all_images[src_idx * sample_size + y1 * sample_cols + x1] / (float)UINT8_MAX;
+            float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
+            batch_images[idx * batch_stride * 3 + 0 * batch_stride + pixel_idx] = vg.x;
+            batch_images[idx * batch_stride * 3 + 1 * batch_stride + pixel_idx] = vg.y;
+            batch_images[idx * batch_stride * 3 + 2 * batch_stride + pixel_idx] = vg.z;
+        }
     }
 }
 
@@ -607,10 +517,11 @@ __global__ void inject_sample_to_ca_kernel(
 
     ca_state[base_idx + 10] = behavioral_field[spatial_idx];
 
-    int img_base = batch_idx * grid_size * grid_size * image_channels;
-    ca_state[base_idx + 11] = batch_images[img_base + spatial_idx];
-    ca_state[base_idx + 12] = batch_images[img_base + ((image_channels > 1) ? grid_size * grid_size : 0) + spatial_idx];
-    ca_state[base_idx + 13] = batch_images[img_base + ((image_channels > 2) ? 2 * grid_size * grid_size : 0) + spatial_idx];
+    int batch_stride = grid_size * grid_size;
+    int img_base = batch_idx * batch_stride * 3;
+    ca_state[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
+    ca_state[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
+    ca_state[base_idx + 13] = batch_images[img_base + 2 * batch_stride + spatial_idx];
 
     int prev_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
     ca_state[base_idx + 14] = prev_concentration[prev_idx + 0];

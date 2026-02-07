@@ -57,9 +57,13 @@ struct TraceBuffer {
     int current_idx;
 };
 
+__global__ void reset_trace_buffer_kernel(TraceBuffer* buffer) {
+    buffer->current_idx = 0;
+}
+
 __global__ void init_trace_buffer_kernel(TraceBuffer* buffer, int capacity) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (tid == 0) {
         buffer->capacity = capacity;
         buffer->current_idx = 0;

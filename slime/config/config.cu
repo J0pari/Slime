@@ -127,7 +127,8 @@ constexpr int VALUE_CAPACITY = 50 * GENOME_SIZE;
 constexpr int TRACE_CAPACITY = GENOME_SIZE;
 constexpr int MAX_HISTORY_LENGTH = GENOME_SIZE;
 constexpr int MAX_DELTAS_PER_ENTRY = 128;
-constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;  
+constexpr int MAX_WEIGHT_DELTAS_PER_ELITE = 512;
+constexpr float DELTA_THRESHOLD_BASE_MAX = 0.01f;
 constexpr int MAX_TAPE_SIZE = TAPE_CAPACITY * POOL_CAPACITY_MAX;
 constexpr int MAX_TAPE_VALUES = VALUE_CAPACITY * POOL_CAPACITY_MAX;
 constexpr int MAX_JACOBI_SWEEPS = 100;   
@@ -667,6 +668,7 @@ constexpr int HEAD_DIM_MIN = HEAD_DIM_TILES_MIN * WMMA_TILE_DIM;
 constexpr int HEAD_DIM_MAX = HEAD_DIM_TILES_MAX * WMMA_TILE_DIM;
 constexpr int CHANNELS_MIN = CHANNELS_OCTETS_MIN * WMMA_ALIGNMENT;
 constexpr int CHANNELS_MAX = CHANNELS_OCTETS_MAX * WMMA_ALIGNMENT;
+constexpr int CA_INPUT_CHANNELS = 3;
 constexpr int HIDDEN_DIM_MIN = HEAD_DIM_MIN;
 constexpr int HIDDEN_DIM_MAX = NUM_HEADS_MAX * HEAD_DIM_MAX;
 constexpr int GRID_SIZE_MIN = 64;
@@ -692,6 +694,7 @@ constexpr int CA_WEIGHTS_PER_ENTRY_STRIDE = CA_PERCEPTION_WEIGHT_SIZE + CA_INTER
 
 constexpr int BATCH_SIZE_MIN = 8;
 constexpr int BATCH_SIZE_MAX = 32;
+constexpr int DATASET_SIZE_MAX = OPPORTUNITY_TRAIN_SAMPLES;
 
 constexpr int SAVED_ACTIVATION_SIZE = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
 
@@ -795,6 +798,10 @@ constexpr float ARCHIVE_ACCEPTANCE_NOVELTY_WEIGHT = 0.5f;
 constexpr float ARCHIVE_ACCEPTANCE_QUALITY_WEIGHT = 0.5f;
 
 constexpr int AUDIT_SAMPLE_COUNT = 8;
+constexpr int STATE_EXPORT_AGENT_COUNT = 32;
+constexpr int STATE_EXPORT_VORONOI_COUNT = 16;
+constexpr int STATE_EXPORT_ARCHIVE_COUNT = 16;
+constexpr int STATE_EXPORT_CHEM_SIZE = 16;
 
 struct AuditBuffer {
     volatile int ready;
@@ -907,6 +914,40 @@ struct AuditBuffer {
     size_t memory_ca_state_size;
     size_t memory_chemical_field_size;
     size_t memory_archive_size;
+
+    int state_agent_count;
+    float state_agent_pos_x[STATE_EXPORT_AGENT_COUNT];
+    float state_agent_pos_y[STATE_EXPORT_AGENT_COUNT];
+    float state_agent_vel_x[STATE_EXPORT_AGENT_COUNT];
+    float state_agent_vel_y[STATE_EXPORT_AGENT_COUNT];
+    float state_agent_exploration[STATE_EXPORT_AGENT_COUNT];
+    float state_agent_sensitivity[STATE_EXPORT_AGENT_COUNT];
+
+    int state_voronoi_count;
+    int state_voronoi_density[STATE_EXPORT_VORONOI_COUNT];
+    float state_voronoi_radius[STATE_EXPORT_VORONOI_COUNT];
+    float state_voronoi_hw_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_HW_MAX];
+    float state_voronoi_task_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_TASK_MAX];
+    float state_voronoi_gen_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_GEN_MAX];
+    int state_voronoi_best_elite_idx[STATE_EXPORT_VORONOI_COUNT];
+
+    int state_archive_count;
+    float state_archive_fitness[STATE_EXPORT_ARCHIVE_COUNT];
+    float state_archive_coherence[STATE_EXPORT_ARCHIVE_COUNT];
+    float state_archive_effective_rank[STATE_EXPORT_ARCHIVE_COUNT];
+    uint16_t state_archive_generation[STATE_EXPORT_ARCHIVE_COUNT];
+    uint64_t state_archive_genome_hash[STATE_EXPORT_ARCHIVE_COUNT];
+    uint32_t state_archive_parent_id_0[STATE_EXPORT_ARCHIVE_COUNT];
+    uint32_t state_archive_parent_id_1[STATE_EXPORT_ARCHIVE_COUNT];
+    float state_archive_hw_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_HW_MAX];
+    float state_archive_task_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_TASK_MAX];
+    float state_archive_gen_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_GEN_MAX];
+    float state_archive_hardware_features[STATE_EXPORT_ARCHIVE_COUNT * HARDWARE_FEATURES_DIM];
+
+    float state_chemical_sample[STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE];
+
+    int pool_total_spawned;
+    int pool_total_culled;
 };
 
 #endif

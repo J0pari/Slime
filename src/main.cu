@@ -332,6 +332,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_reintegration_buffer");
     CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX, "batch_prev_concentration");
     CUDA_ALLOC_CHECK(buffers_host.batch_labels_pool, sizeof(int) * BATCH_SIZE_MAX, "batch_labels_pool");
+    CUDA_ALLOC_CHECK(buffers_host.batch_images_pool, sizeof(float) * BATCH_SIZE_MAX * CA_FIELD_SIZE * 3, "batch_images_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_loss_pool, sizeof(float), "task_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.reg_loss_pool, sizeof(float), "reg_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.rank_loss_pool, sizeof(float), "rank_loss_pool");
@@ -388,6 +389,14 @@ int main() {
 
     printf("[H31] Kernel launched, polling audit buffer\n"); fflush(stdout);
 
+    char state_json_path[256];
+    snprintf(state_json_path, sizeof(state_json_path), "%s/state.jsonl", session_dir);
+    FILE* state_json_file = fopen(state_json_path, "w");
+    if (!state_json_file) {
+        fprintf(stderr, "FATAL: could not open state.jsonl for writing\n");
+        return 1;
+    }
+
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
 
@@ -428,6 +437,10 @@ int main() {
 
                 if (write_pool_state(session_dir, gen, h_audit) != 0) {
                     fprintf(stderr, "FATAL: write_pool_state failed\n");
+                }
+
+                if (write_state_json(state_json_file, elapsed_sec, h_audit) != 0) {
+                    fprintf(stderr, "FATAL: write_state_json failed\n");
                 }
 
                 append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);

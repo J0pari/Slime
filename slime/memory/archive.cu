@@ -340,7 +340,8 @@ __device__ void insert_elite_device(
     float* per_class_accuracy_new,
     int num_classes,
     VoronoiCell* __restrict__ cells,
-    int num_cells
+    int num_cells,
+    float* latent_genome_new
 ) {
     int existing_idx = hash_table_lookup(
         archive->hash_table_keys,
@@ -400,101 +401,11 @@ __device__ void insert_elite_device(
         archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
     }
 
-    float min_dist = 1e9f;
-    int closest_cell = 0;
-    for (int c = 0; c < num_cells; c++) {
-        float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
-        if (dist_sq < min_dist) {
-            min_dist = dist_sq;
-            closest_cell = c;
-        }
-    }
-
-    atomicAdd(&cells[closest_cell].density, 1);
-    cells[closest_cell].best_elite_idx = idx;
-}
-
-__global__ void insert_elite_kernel(
-    GPUElite* __restrict__ archive,
-    int* __restrict__ archive_size,
-    float fitness_val,
-    float coherence_val,
-    float effective_rank_val,
-    uint64_t genome_hash_val,
-    uint32_t parent_id_0,
-    uint32_t parent_id_1,
-    uint16_t generation_val,
-    float* hw_coords_new,
-    float* task_coords_new,
-    float* gen_coords_new,
-    float task_performance_val,
-    float* per_class_accuracy_new,
-    int num_classes,
-    VoronoiCell* __restrict__ cells,
-    int num_cells
-) {
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-
-    int existing_idx = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        genome_hash_val
-    );
-    if (existing_idx >= 0) {
-        return;  
-    }
-
-    int idx = atomicAdd(archive_size, 1);
-    if (idx >= MAX_ARCHIVE_SIZE) {
-        atomicSub(archive_size, 1);
-        return;
-    }
-
-    bool inserted = hash_table_insert(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        genome_hash_val,
-        idx
-    );
-    if (!inserted) {
-        atomicSub(archive_size, 1);
-        return;
-    }
-
-    int hw_dim = archive->hw_dim;
-    int task_dim = archive->task_dim;
-    int gen_dim = archive->gen_dim;
-
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "insert_elite_kernel: gen_dim invalid");
-    DEVICE_FATAL_IF(num_classes <= 0 || num_classes > NUM_CLASSES_MAX, "insert_elite_kernel: num_classes invalid");
-
-    archive->fitness[idx] = fitness_val;
-    archive->coherence[idx] = coherence_val;
-    archive->effective_rank[idx] = effective_rank_val;
-    archive->genome_hash[idx] = genome_hash_val;
-    archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
-    archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
-    archive->generation[idx] = generation_val;
-
-    int hw_base = idx * hw_dim;
-    int task_base = idx * task_dim;
-    int gen_base = idx * gen_dim;
-
-    for (int d = 0; d < hw_dim; d++) {
-        archive->hw_coords[hw_base + d] = hw_coords_new[d];
-    }
-    for (int d = 0; d < task_dim; d++) {
-        archive->task_coords[task_base + d] = task_coords_new[d];
-    }
-    for (int d = 0; d < gen_dim; d++) {
-        archive->gen_coords[gen_base + d] = gen_coords_new[d];
-    }
-
-    archive->task_performance[idx] = task_performance_val;
-    for (int c = 0; c < num_classes; c++) {
-        archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
+    // Store latent genome for reconstruction
+    DEVICE_FATAL_IF(latent_genome_new == nullptr, "insert_elite_device: latent_genome_new is null");
+    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "insert_elite_device: archive latent_genome buffer is null");
+    for (int l = 0; l < GENOME_LATENT_DIM_MAX; l++) {
+        archive->latent_genome[idx * GENOME_LATENT_DIM_MAX + l] = latent_genome_new[l];
     }
 
     float min_dist = 1e9f;
@@ -605,6 +516,7 @@ __global__ void store_elite_weight_deltas_kernel(
     int head_dim,
     uint64_t genome_hash,
     const float* genome,
+    const float* epigenetic,
     int* num_deltas_out
 ) {
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
@@ -628,7 +540,11 @@ __global__ void store_elite_weight_deltas_kernel(
     }
 
     int delta_threshold_slot = derive_param_slot(genome_hash, "weight_delta_threshold");
-    float delta_threshold = (genome[delta_threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+    int delta_threshold_min_slot = derive_param_slot(genome_hash, "weight_delta_threshold_min");
+    int delta_threshold_max_slot = derive_param_slot(genome_hash, "weight_delta_threshold_max");
+    float delta_threshold_min = (genome[delta_threshold_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * DELTA_THRESHOLD_BASE_MAX;
+    float delta_threshold_max = delta_threshold_min + (genome[delta_threshold_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (DELTA_THRESHOLD_BASE_MAX - delta_threshold_min);
+    float delta_threshold = genome_to_bootstrap_param(genome, epigenetic, delta_threshold_slot, delta_threshold_min, delta_threshold_max);
 
     curandState_t rand_state;
     curand_init(genome_hash, flat_idx, 0, &rand_state);

@@ -50,7 +50,7 @@ struct BehavioralState {
     int organism_id;
 };
 
-__device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome) {
+__device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome, const float* gradients) {
     TemporalTube* history = field->history;
 
     int next_head = (history->head + 1) % history->capacity;
@@ -65,10 +65,19 @@ __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, fl
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
         int decay_slot = derive_param_slot(genome_hash, "memory_decay_factor");
         int importance_slot = derive_param_slot(genome_hash, "memory_importance");
+        int decay_min_slot = derive_param_slot(genome_hash, "memory_decay_factor_min");
+        int decay_max_slot = derive_param_slot(genome_hash, "memory_decay_factor_max");
+        int importance_min_slot = derive_param_slot(genome_hash, "memory_importance_min");
+        int importance_max_slot = derive_param_slot(genome_hash, "memory_importance_max");
+
+        float decay_min = (genome[decay_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float decay_max = decay_min + (genome[decay_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - decay_min);
+        float importance_min = (genome[importance_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float importance_max = importance_min + (genome[importance_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - importance_min);
 
         history->entries[next_head].timestamp = global_time;
-        history->entries[next_head].decay_factor = (genome[decay_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        history->entries[next_head].importance = (genome[importance_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        history->entries[next_head].decay_factor = genome_to_bootstrap_param(genome, gradients, decay_slot, decay_min, decay_max);
+        history->entries[next_head].importance = genome_to_bootstrap_param(genome, gradients, importance_slot, importance_min, importance_max);
 
         history->head = next_head;
         if (history->count < history->capacity) {
@@ -78,8 +87,8 @@ __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, fl
     }
 }
 
-__global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome) {
-    store_chemical_snapshot(field, field_size, global_time, genome_hash, genome);
+__global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome, const float* gradients) {
+    store_chemical_snapshot(field, field_size, global_time, genome_hash, genome, gradients);
 }
 
 __global__ void update_field_from_ca_kernel(
@@ -694,14 +703,32 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
 
     BehavioralState* agent = &agents[agent_id];
 
-    float ctx_metabolic = (genome[slots.ctx_metabolic] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float ctx_stress = (genome[slots.ctx_stress] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float ctx_morphogen = (genome[slots.ctx_morphogen] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+    InitContext ctx;
+    ctx.derive_from_genome(genome_hash, genome, epigenetic);
 
-    float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, AGENT_EMBEDDING_SCALE_BASE_MIN, AGENT_EMBEDDING_SCALE_BASE_MAX);
-    float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, INIT_EXPLORATION_BASE_MIN, INIT_EXPLORATION_BASE_MAX);
-    float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, INIT_SENSITIVITY_BASE_MIN, INIT_SENSITIVITY_BASE_MAX);
-    float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, CHEMOTAXIS_LEVY_ALPHA_MIN, CHEMOTAXIS_LEVY_ALPHA_MAX);
+    int embedding_scale_min_slot = derive_param_slot(genome_hash, "agent_embedding_scale_min");
+    int embedding_scale_max_slot = derive_param_slot(genome_hash, "agent_embedding_scale_max");
+    float embedding_scale_min = (genome[embedding_scale_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * AGENT_EMBEDDING_SCALE_BASE_MAX;
+    float embedding_scale_max = embedding_scale_min + (genome[embedding_scale_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (AGENT_EMBEDDING_SCALE_BASE_MAX - embedding_scale_min);
+
+    float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, embedding_scale_min, embedding_scale_max);
+    int exploration_min_slot = derive_param_slot(genome_hash, "init_exploration_min");
+    int exploration_max_slot = derive_param_slot(genome_hash, "init_exploration_max");
+    float exploration_min = (genome[exploration_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * INIT_EXPLORATION_BASE_MAX;
+    float exploration_max = exploration_min + (genome[exploration_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (INIT_EXPLORATION_BASE_MAX - exploration_min);
+    float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, exploration_min, exploration_max);
+
+    int sensitivity_min_slot = derive_param_slot(genome_hash, "init_sensitivity_min");
+    int sensitivity_max_slot = derive_param_slot(genome_hash, "init_sensitivity_max");
+    float sensitivity_min = (genome[sensitivity_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * INIT_SENSITIVITY_BASE_MAX;
+    float sensitivity_max = sensitivity_min + (genome[sensitivity_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (INIT_SENSITIVITY_BASE_MAX - sensitivity_min);
+    float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, sensitivity_min, sensitivity_max);
+
+    int levy_alpha_min_slot = derive_param_slot(genome_hash, "levy_alpha_min");
+    int levy_alpha_max_slot = derive_param_slot(genome_hash, "levy_alpha_max");
+    float levy_alpha_min = (genome[levy_alpha_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * CHEMOTAXIS_LEVY_ALPHA_MAX;
+    float levy_alpha_max = levy_alpha_min + (genome[levy_alpha_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (CHEMOTAXIS_LEVY_ALPHA_MAX - levy_alpha_min);
+    float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, levy_alpha_min, levy_alpha_max);
 
     agent->position[0] = rng.next();
     agent->position[1] = rng.next();
@@ -764,7 +791,7 @@ __global__ void init_chemical_field_kernel(
     ChemotaxisParams params;
     params.derive_from_genome_hash(genome_hash);
     InitContext ctx;
-    ctx.derive_from_genome(genome_hash, genome);
+    ctx.derive_from_genome(genome_hash, genome, gradients);
     float chemical_decay = params.get_chemical_decay(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
     field->concentration[idx] = 0.0f;
@@ -898,7 +925,7 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
     params.derive_from_genome_hash(genome_hash);
 
     InitContext ctx;
-    ctx.derive_from_genome(genome_hash, genome);
+    ctx.derive_from_genome(genome_hash, genome, gradients);
 
     float behavioral_field_sigma = params.get_behavioral_field_sigma(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
@@ -993,6 +1020,7 @@ __global__ void init_resource_fields_kernel(
     int grid_size,
     unsigned int seed,
     float* genome,
+    const float* epigenetic,
     uint64_t genome_hash
 ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1004,12 +1032,18 @@ __global__ void init_resource_fields_kernel(
     curand_init(seed, idx, 0, &state);
 
     int resource_init_slot = derive_param_slot(genome_hash, "resource_density_initial");
-    float resource_init_norm = (genome[resource_init_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float resource_init = RESOURCE_INIT_MIN + resource_init_norm * (RESOURCE_INIT_MAX - RESOURCE_INIT_MIN);
+    int resource_init_min_slot = derive_param_slot(genome_hash, "resource_density_initial_min");
+    int resource_init_max_slot = derive_param_slot(genome_hash, "resource_density_initial_max");
+    float resource_init_min = (genome[resource_init_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * RESOURCE_INIT_MAX;
+    float resource_init_max = resource_init_min + (genome[resource_init_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (RESOURCE_INIT_MAX - resource_init_min);
+    float resource_init = genome_to_bootstrap_param(genome, epigenetic, resource_init_slot, resource_init_min, resource_init_max);
 
     int resource_noise_slot = derive_param_slot(genome_hash, "resource_density_noise");
-    float resource_noise_norm = (genome[resource_noise_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float resource_noise = RESOURCE_NOISE_MIN + resource_noise_norm * (RESOURCE_NOISE_MAX - RESOURCE_NOISE_MIN);
+    int resource_noise_min_slot = derive_param_slot(genome_hash, "resource_density_noise_min");
+    int resource_noise_max_slot = derive_param_slot(genome_hash, "resource_density_noise_max");
+    float resource_noise_min = (genome[resource_noise_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * RESOURCE_NOISE_MAX;
+    float resource_noise_max = resource_noise_min + (genome[resource_noise_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (RESOURCE_NOISE_MAX - resource_noise_min);
+    float resource_noise = genome_to_bootstrap_param(genome, epigenetic, resource_noise_slot, resource_noise_min, resource_noise_max);
 
     float rand_val = validated_curand_uniform(&state, "init_resource_fields", idx);
     resource_density[idx] = resource_init + resource_noise * (rand_val - CENTERED_DIFFERENCE_SCALE);
@@ -1020,6 +1054,7 @@ __global__ void init_resource_fields_kernel(
 __global__ void initialize_chemical_field_kernel(
     float* __restrict__ chemical_field,
     const float* __restrict__ genome,
+    const float* __restrict__ epigenetic,
     int grid_size,
     unsigned int seed,
     uint64_t genome_hash
@@ -1035,25 +1070,34 @@ __global__ void initialize_chemical_field_kernel(
     curand_init(seed, idx, 0, &state);
 
     int base_slot = derive_param_slot(genome_hash, "chem_init_base_value");
-    float base_norm = (genome[base_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float base_value = CHEM_INIT_BASE_MIN + base_norm * (CHEM_INIT_BASE_MAX - CHEM_INIT_BASE_MIN);
+    int base_min_slot = derive_param_slot(genome_hash, "chem_init_base_value_min");
+    int base_max_slot = derive_param_slot(genome_hash, "chem_init_base_value_max");
+    float base_min = (genome[base_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * CHEM_INIT_BASE_MAX;
+    float base_max = base_min + (genome[base_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (CHEM_INIT_BASE_MAX - base_min);
+    float base_value = genome_to_bootstrap_param(genome, epigenetic, base_slot, base_min, base_max);
 
     int influence_slot = derive_param_slot(genome_hash, "chem_init_genome_influence");
-    float influence_norm = (genome[influence_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float influence_scale = CHEM_INIT_GENOME_INFLUENCE_MIN + influence_norm * (CHEM_INIT_GENOME_INFLUENCE_MAX - CHEM_INIT_GENOME_INFLUENCE_MIN);
+    int influence_min_slot = derive_param_slot(genome_hash, "chem_init_genome_influence_min");
+    int influence_max_slot = derive_param_slot(genome_hash, "chem_init_genome_influence_max");
+    float influence_min = (genome[influence_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * CHEM_INIT_GENOME_INFLUENCE_MAX;
+    float influence_max = influence_min + (genome[influence_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (CHEM_INIT_GENOME_INFLUENCE_MAX - influence_min);
+    float influence_scale = genome_to_bootstrap_param(genome, epigenetic, influence_slot, influence_min, influence_max);
 
     int genome_idx = (x + y * grid_size) % GENOME_SIZE;
     float genome_influence = genome[genome_idx] * influence_scale;
 
     int noise_slot = derive_param_slot(genome_hash, "chem_init_noise_scale");
-    float noise_norm = (genome[noise_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float noise_scale = CHEM_INIT_NOISE_MIN + noise_norm * (CHEM_INIT_NOISE_MAX - CHEM_INIT_NOISE_MIN);
+    int noise_min_slot = derive_param_slot(genome_hash, "chem_init_noise_scale_min");
+    int noise_max_slot = derive_param_slot(genome_hash, "chem_init_noise_scale_max");
+    float noise_min = (genome[noise_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * CHEM_INIT_NOISE_MAX;
+    float noise_max = noise_min + (genome[noise_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (CHEM_INIT_NOISE_MAX - noise_min);
+    float noise_scale = genome_to_bootstrap_param(genome, epigenetic, noise_slot, noise_min, noise_max);
 
     float rand_val = validated_curand_uniform(&state, "initialize_chemical_field", idx);
-    float noise = (rand_val - 0.5f) * noise_scale;
+    float noise = (rand_val - CENTERED_DIFFERENCE_SCALE) * noise_scale;
 
     chemical_field[idx] = base_value + genome_influence + noise;
-    chemical_field[idx] = clamp(chemical_field[idx], 0.0f, 1.0f);
+    chemical_field[idx] = clamp(chemical_field[idx], NORMALIZED_MIN, NORMALIZED_MAX);
 }
 
 extern "C" __global__ void resource_flow_kernel(

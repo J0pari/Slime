@@ -143,6 +143,7 @@ struct OrganismPreallocatedBuffers {
     float* batch_ca_states_pool;
     float* batch_ca_input_grads;
     int* batch_labels_pool;
+    float* batch_images_pool;
     float* task_loss_pool;
     float* reg_loss_pool;
     float* rank_loss_pool;
@@ -417,9 +418,8 @@ __global__ void component_evolution_kernel(
     cudaError_t err;
 
     float current_task_accuracy = organism->telemetry->task_performance.accuracy;
-    if (!isnan(current_task_accuracy)) {
-        pool->entries[tid].task_accuracy = current_task_accuracy;
-    }
+    DEVICE_FATAL_IF(isnan(current_task_accuracy), "component_evolution: task_accuracy is NaN");
+    pool->entries[tid].task_accuracy = current_task_accuracy;
     pool->entries[tid].generalization_gap = fabsf(organism->telemetry->task_performance.train_accuracy - organism->telemetry->task_performance.test_accuracy);
 
     if (tid == 0) {
@@ -515,10 +515,18 @@ __global__ void selection_kernel(
 
     float* entry_genome = organism_genome;
 
-    int parent_idx = find_parent_by_hash(archive, *archive_size, entry->genome_hash);
-    DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
-    uint32_t parent_id_0 = parent_idx;
+    uint32_t parent_id_0;
     uint32_t parent_id_1 = 0;
+
+    if (entry->parent_hash == UINT64_MAX) {
+        // Bootstrap entry: no parent in archive, this is a progenitor
+        parent_id_0 = 0;
+    } else {
+        // Normal entry: look up the PARENT's hash (not this entry's hash)
+        int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
+        DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
+        parent_id_0 = parent_idx;
+    }
 
     DEVICE_FATAL_IF(entry->coherence <= 0.0f, "organism: entry coherence <= 0");
 
@@ -528,7 +536,7 @@ __global__ void selection_kernel(
         entry->fitness,
         entry->coherence,
         entry->fitness / entry->coherence,
-        gpu_sha256(entry_genome, GENOME_SIZE),
+        entry->genome_hash,
         parent_id_0,
         parent_id_1,
         organism->generation,
@@ -539,8 +547,14 @@ __global__ void selection_kernel(
         &archive->per_class_accuracy[entry_idx * NUM_CLASSES_MAX],
         NUM_CLASSES_MAX,
         voronoi_cells,
-        num_cells
+        num_cells,
+        latent_genome
     );
+
+    // After bootstrap entry is inserted, update parent_hash to self so future spawns can find it
+    if (entry->parent_hash == UINT64_MAX) {
+        entry->parent_hash = entry->genome_hash;
+    }
 }
 
 __global__ void spawn_wave_kernel(
@@ -776,32 +790,31 @@ __global__ void archive_driven_lifecycle_kernel(
     }
 
     if (should_cull || !entry->alive) {
-        if (archive_size > 0) {
-            if (should_cull) {
-                Atomics::increment_int(pool->total_culled);
-                Atomics::decrement_int(pool->active_count);
-            }
-
-            float* thread_workspace = &workspace_genomes[idx * (2 * GENOME_SIZE + POOL_CAPACITY_MAX)];
-            replace_from_archive_device(
-                pool,
-                archive,
-                archive_size,
-                voronoi_cells,
-                num_cells,
-                behavioral_agents,
-                idx,
-                organism->generation * pool->capacity + idx,
-                organism->telemetry->genome_complexity.hash_entropy,
-                organism->telemetry->archive_topology.novelty_gradient,
-                organism->telemetry->diresa_evolution.behavioral_drift_rate,
-                organism->telemetry->task_performance.accuracy,
-                thread_workspace,
-                diresa_genome_weights
-            );
-
-            Atomics::increment_int(pool->active_count);
+        DEVICE_FATAL_IF(archive_size <= 0, "archive_driven_lifecycle: archive empty when replacement needed");
+        if (should_cull) {
+            Atomics::increment_int(pool->total_culled);
+            Atomics::decrement_int(pool->active_count);
         }
+
+        float* thread_workspace = &workspace_genomes[idx * (2 * GENOME_SIZE + POOL_CAPACITY_MAX)];
+        replace_from_archive_device(
+            pool,
+            archive,
+            archive_size,
+            voronoi_cells,
+            num_cells,
+            behavioral_agents,
+            idx,
+            organism->generation * pool->capacity + idx,
+            organism->telemetry->genome_complexity.hash_entropy,
+            organism->telemetry->archive_topology.novelty_gradient,
+            organism->telemetry->diresa_evolution.behavioral_drift_rate,
+            organism->telemetry->task_performance.accuracy,
+            thread_workspace,
+            diresa_genome_weights
+        );
+
+        Atomics::increment_int(pool->active_count);
     }
 }
 
@@ -971,7 +984,7 @@ __global__ void behavioral_update_kernel(
     float ctx_morphogen = chemical_field->cached_mean;
 
     BehavioralDimensions dims;
-    dims.derive_from_genome(genome_hash, primary_genome);
+    dims.derive_from_genome(genome_hash, primary_genome, gradients);
 
     if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", organism->generation, entry_idx);
 
@@ -989,7 +1002,7 @@ __global__ void behavioral_update_kernel(
         chem_params.derive_from_genome_hash(genome_hash);
 
         InitContext init_ctx;
-        init_ctx.derive_from_genome(genome_hash, primary_genome);
+        init_ctx.derive_from_genome(genome_hash, primary_genome, entry->gradients);
 
         float behavioral_field_sigma = chem_params.get_behavioral_field_sigma(primary_genome, entry->gradients, init_ctx.metabolic, init_ctx.stress, init_ctx.morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
 
@@ -1103,9 +1116,8 @@ __global__ void behavioral_update_kernel(
             float new_val = my_state + warp_ca_growth_rate * growth;
             float new_total = WarpReduce<WARP_SIZE>::sum(new_val);
 
-            if (is_meaningful(new_total, total_mass)) {
-                new_val *= total_mass / new_total;
-            }
+            DEVICE_FATAL_IF(!is_meaningful(new_total, total_mass), "behavioral_update: mass conservation failed - new_total not meaningful");
+            new_val *= total_mass / new_total;
 
             behavioral_gradients_pool[tile_y * width + tile_x] = new_val;
         }
@@ -1265,10 +1277,11 @@ __global__ void behavioral_update_kernel(
             tube->entries[idx].importance = importance;
             tube->entries[idx].decay_factor = 1.0f;
 
-            if (d_memory_data && memory_entry_size > 0 && tube->entries[idx].data) {
-                for (int i = 0; i < memory_entry_size; i++) {
-                    tube->entries[idx].data[i] = d_memory_data[i];
-                }
+            DEVICE_FATAL_IF(d_memory_data == nullptr, "behavioral_update: d_memory_data is null");
+            DEVICE_FATAL_IF(memory_entry_size <= 0, "behavioral_update: memory_entry_size <= 0");
+            DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "behavioral_update: tube entry data is null");
+            for (int i = 0; i < memory_entry_size; i++) {
+                tube->entries[idx].data[i] = d_memory_data[i];
             }
 
             tube->head = (tube->head + 1) % tube->capacity;
@@ -1342,7 +1355,7 @@ __global__ void init_behavioral_dimensions_kernel(
             entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome);
+        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
 
         organism->archive->hw_dim = dims.hw_dim;
         organism->archive->task_dim = dims.task_dim;
@@ -1428,7 +1441,7 @@ __global__ void init_organism_kernel(
         init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(organism->pool, pool_capacity, delta_indices_buffer, delta_values_buffer, gradients_buffer);
         err = cudaGetLastError();
         printf("V:init_org_post_pool err=%d\n", (int)err);
-        if (err != cudaSuccess) { return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init_pool_kernel launch failed");
     }
 }
 
@@ -1462,6 +1475,15 @@ __global__ void init_organism_phase2_kernel(
         cudaError_t err;
         printf("V:p2_enter seed=%u\n", seed);
 
+        organism->diresa_hw_weights = buffers->diresa_hw_weights;
+        organism->diresa_task_weights = buffers->diresa_task_weights;
+        organism->diresa_gen_weights = buffers->diresa_gen_weights;
+        organism->diresa_genome_weights = buffers->diresa_genome_weights;
+        organism->diresa_hw_weight_pool = buffers->diresa_hw_weight_pool;
+        organism->diresa_task_weight_pool = buffers->diresa_task_weight_pool;
+        organism->diresa_gen_weight_pool = buffers->diresa_gen_weight_pool;
+        organism->diresa_genome_weight_pool = buffers->diresa_genome_weight_pool;
+
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
         PoolEntry* entry = &organism->pool->entries[0];
@@ -1471,7 +1493,7 @@ __global__ void init_organism_phase2_kernel(
             entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome);
+        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
 
         organism->archive->hw_dim = dims.hw_dim;
         organism->archive->task_dim = dims.task_dim;
@@ -1488,10 +1510,7 @@ __global__ void init_organism_phase2_kernel(
             dims.gen_dim
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 wire_behavioral err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 wire_behavioral failed");
 
         organism->archive->fitness = buffers->archive_fitness;
         organism->archive->coherence = buffers->archive_coherence;
@@ -1518,10 +1537,7 @@ __global__ void init_organism_phase2_kernel(
         printf("V:p2_sync1_pre ht_blocks=%d\n", ht_blocks);
         err = cudaDeviceSynchronize();
         printf("V:p2_sync1_post err=%d\n", (int)err);
-        if (err != cudaSuccess) {
-            printf("!E:init2 hash_table_sync err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 hash_table_sync failed");
 
         int pool_capacity = organism->pool->capacity;
 
@@ -1545,10 +1561,7 @@ __global__ void init_organism_phase2_kernel(
             dims.gen_dim
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 voronoi_pointers err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 voronoi_pointers failed");
 
         int voronoi_blocks = (organism->num_voronoi_cells + 255) / 256;
         init_voronoi_cells_kernel<<<voronoi_blocks, 256>>>(
@@ -1560,10 +1573,7 @@ __global__ void init_organism_phase2_kernel(
             seed + 555555
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 voronoi_cells err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 voronoi_cells failed");
         int default_decay_rate_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "memory_default_decay_rate");
         float default_decay_rate_norm = (primary_genome[default_decay_rate_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
@@ -1577,7 +1587,7 @@ __global__ void init_organism_phase2_kernel(
 
         size_t heap_limit;
         err = cudaDeviceGetLimit(&heap_limit, cudaLimitMallocHeapSize);
-        if (err != cudaSuccess) { printf("!E:init2 heap_limit err=%d\n", (int)err); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 heap_limit failed");
         organism->telemetry->memory_allocation.device_heap_limit = heap_limit;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
@@ -1596,10 +1606,7 @@ __global__ void init_organism_phase2_kernel(
             field_size
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 init_tube err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 init_tube failed");
 
         int perception_size = arch.num_heads * arch.channels * arch.head_dim;
         int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
@@ -1690,6 +1697,7 @@ __global__ void init_organism_phase2_kernel(
             arch.grid_size,
             seed * RNG_SEED_MULTIPLIER,
             primary_genome,
+            organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash
         );
         printf("V:p2_sync2_pre grid_size=%d\n", arch.grid_size);
@@ -1729,11 +1737,6 @@ __global__ void init_organism_phase2_kernel(
         size_t diresa_size = diresa_struct_size * num_replicas;
         size_t diresa_mb = diresa_size / BYTES_PER_MB;
 
-        organism->diresa_hw_weights = buffers->diresa_hw_weights;
-        organism->diresa_task_weights = buffers->diresa_task_weights;
-        organism->diresa_gen_weights = buffers->diresa_gen_weights;
-        organism->diresa_genome_weights = buffers->diresa_genome_weights;
-
         size_t hw_stride = HARDWARE_FEATURES_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                            DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                            DIRESA_HIDDEN2_MAX * dims.hw_dim + dims.hw_dim +
@@ -1763,11 +1766,6 @@ __global__ void init_organism_phase2_kernel(
                                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                                DIRESA_HIDDEN1_MAX * GENOME_SIZE + GENOME_SIZE;
 
-        organism->diresa_hw_weight_pool = buffers->diresa_hw_weight_pool;
-        organism->diresa_task_weight_pool = buffers->diresa_task_weight_pool;
-        organism->diresa_gen_weight_pool = buffers->diresa_gen_weight_pool;
-        organism->diresa_genome_weight_pool = buffers->diresa_genome_weight_pool;
-
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_hw_weights, organism->diresa_hw_weight_pool, hw_stride,
             HARDWARE_FEATURES_DIM, dims.hw_dim, first_entry, seed + 999999);
@@ -1782,10 +1780,32 @@ __global__ void init_organism_phase2_kernel(
             GENOME_SIZE, GENOME_LATENT_DIM_MAX, first_entry, seed + 666666);
 
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 diresa err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa failed");
+
+        // Seed initial pool entries into the archive as progenitors
+        printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, num_classes);
+        int seed_blocks = (POOL_CAPACITY_MIN + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        seed_archive_from_pool_kernel<<<seed_blocks, BLOCK_SIZE>>>(
+            organism->archive,
+            &organism->archive_size,
+            organism->pool,
+            pool_capacity,
+            organism->voronoi_cells,
+            organism->num_voronoi_cells,
+            organism->diresa_genome_weights,
+            workspace_genomes,
+            dims.hw_dim,
+            dims.task_dim,
+            dims.gen_dim,
+            num_classes
+        );
+        err = cudaGetLastError();
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 seed_archive failed");
+        printf("V:p2_sync_seed_archive_pre\n");
+        err = cudaDeviceSynchronize();
+        printf("V:p2_sync_seed_archive_post err=%d archive_size=%d\n", (int)err, organism->archive_size);
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 seed_archive sync failed");
+        DEVICE_FATAL_IF(organism->archive_size <= 0, "init2 seed_archive failed to seed any entries");
 
         organism->latent_genome_pool = buffers->latent_genome_pool;
 
@@ -1860,7 +1880,7 @@ __global__ void init_organism_phase2_kernel(
         organism->total_loss_pool = buffers->total_loss_pool;
 
         organism->training_mode = buffers->training_mode;
-        init_training_mode_kernel<<<1, 1>>>(organism->training_mode, organism->pool->entries[0].grid_size, buffers->batch_ca_states_pool, buffers->batch_labels_pool);
+        init_training_mode_kernel<<<1, 1>>>(organism->training_mode, organism->pool->entries[0].grid_size, buffers->batch_images_pool, buffers->batch_labels_pool);
 
         organism->classifier = buffers->classifier;
 
@@ -1870,8 +1890,11 @@ __global__ void init_organism_phase2_kernel(
         int max_classifier_size = max(classifier_input_dim, max(classifier_input_dim * num_classes, num_classes));
         int classifier_blocks = (max_classifier_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
         init_classifier_kernel<<<classifier_blocks, BLOCK_SIZE>>>(organism->classifier, classifier_input_dim, num_classes, seed + 777777, classifier_workspace);
+        cudaDeviceSynchronize();
 
         organism->training_mode->classifier = organism->classifier;
+        organism->training_mode->batch_images = buffers->batch_images_pool;
+        organism->training_mode->batch_labels = buffers->batch_labels_pool;
 
         organism->training_mode->adam_m = organism->adam_m_ca_pool;
         organism->training_mode->adam_v = organism->adam_v_ca_pool;
@@ -1892,16 +1915,10 @@ __global__ void init_organism_phase2_kernel(
         organism->current_test_dataset = test_dataset_array[0];
 
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 pre_dataset err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 pre_dataset failed");
 
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 dataset err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 dataset failed");
 
         BehavioralInitSlots behavioral_slots;
         behavioral_slots.agent_embedding_scale = derive_param_slot(organism->pool->entries[0].genome_hash, "chemotaxis_agent_embedding_scale");
@@ -1924,20 +1941,14 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy, dims.hw_dim, dims.task_dim, dims.gen_dim);
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 behavioral_state err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 behavioral_state failed");
 
         int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
         int total_weights = behavioral_dim * behavioral_dim;
         int embedding_blocks = (total_weights + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
         init_embedding_weights_kernel<<<embedding_blocks, BLOCK_SIZE>>>(buffers->behavioral_embedding_weights, behavioral_dim, seed + 1);
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 embedding_weights err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 embedding_weights failed");
 
         dim3 chem_grid((arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM, (arch.grid_size + (WMMA_TILE_DIM - 1)) / WMMA_TILE_DIM);
         dim3 chem_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
@@ -1953,10 +1964,7 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->task_performance.accuracy
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 chemical_field err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 chemical_field failed");
         printf("V:p2_sync4_pre chem_field\n");
         err = cudaDeviceSynchronize();
         printf("V:p2_sync4_post err=%d\n", (int)err);
@@ -1975,10 +1983,7 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->task_performance.accuracy
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 chem_sources err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 chem_sources failed");
         printf("V:p2_sync5_pre chem_sources\n");
         err = cudaDeviceSynchronize();
         printf("V:p2_sync5_post err=%d\n", (int)err);
@@ -2016,17 +2021,11 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->task_performance.accuracy
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 voronoi_state err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 voronoi_state failed");
 
-        store_chemical_snapshot_kernel<<<chem_grid, chem_block>>>(organism->chemical_field, field_size, (float)organism->generation, organism->pool->entries[0].genome_hash, primary_genome);
+        store_chemical_snapshot_kernel<<<chem_grid, chem_block>>>(organism->chemical_field, field_size, (float)organism->generation, organism->pool->entries[0].genome_hash, primary_genome, organism->pool->entries[0].gradients);
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 chem_snapshot err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 chem_snapshot failed");
 
         init_curriculum_kernel<<<1, 1>>>(
             organism->curriculum,
@@ -2042,10 +2041,7 @@ __global__ void init_organism_phase2_kernel(
             organism->telemetry->task_performance.accuracy
         );
         err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            printf("!E:init2 curriculum err=%d\n", (int)err);
-            return;
-        }
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 curriculum failed");
 
         int fitness_coherence_size = 2 * POOL_CAPACITY_MAX;
         int effective_rank_size = 2;
@@ -2095,19 +2091,14 @@ __global__ void check_convergence_kernel(
         float coherence_min = (genome[coherence_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
         float coherence_max = (genome[coherence_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
 
-        int conv_ctx_metabolic_slot = derive_param_slot(genome_hash, "convergence_ctx_metabolic");
-        int conv_ctx_stress_slot = derive_param_slot(genome_hash, "convergence_ctx_stress");
-        int conv_ctx_morphogen_slot = derive_param_slot(genome_hash, "convergence_ctx_morphogen");
-
-        float conv_ctx_metabolic = (genome[conv_ctx_metabolic_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float conv_ctx_stress = (genome[conv_ctx_stress_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float conv_ctx_morphogen = (genome[conv_ctx_morphogen_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        InitContext conv_ctx;
+        conv_ctx.derive_from_genome(genome_hash, genome, organism->pool->entries[0].gradients);
 
         float fitness_threshold = genome_to_param(
             genome,
             organism->pool->entries[0].gradients,
             fitness_conv_slot,
-            conv_ctx_metabolic, conv_ctx_stress, conv_ctx_morphogen,
+            conv_ctx.metabolic, conv_ctx.stress, conv_ctx.morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -2119,7 +2110,7 @@ __global__ void check_convergence_kernel(
             genome,
             organism->pool->entries[0].gradients,
             coherence_conv_slot,
-            conv_ctx_metabolic, conv_ctx_stress, conv_ctx_morphogen,
+            conv_ctx.metabolic, conv_ctx.stress, conv_ctx.morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -2164,28 +2155,16 @@ __global__ void persistent_evolution_kernel(
     int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, test_dataset_array, pool_capacity, organism_workspace_genomes, buffers);
     err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("!E:init1 err=%d\n", (int)err);
-        return;
-    }
+    DEVICE_FATAL_IF(err != cudaSuccess, "init1 failed");
     err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("!E:init1_sync err=%d\n", (int)err);
-        return;
-    }
+    DEVICE_FATAL_IF(err != cudaSuccess, "init1_sync failed");
     printf("V:init1 org=%p pool=%p\n", (void*)organism, (void*)organism->pool);
 
     init_organism_phase2_kernel<<<1, 1>>>(organism, dataset_array, test_dataset_array, seed, organism_workspace_genomes, buffers);
     err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("!E:init2 err=%d\n", (int)err);
-        return;
-    }
+    DEVICE_FATAL_IF(err != cudaSuccess, "init2 failed");
     err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("!E:init2_sync err=%d\n", (int)err);
-        return;
-    }
+    DEVICE_FATAL_IF(err != cudaSuccess, "init2_sync failed");
     printf("V:init2 training_mode=%p dataset=%p test_dataset=%p\n",
            (void*)organism->training_mode, (void*)organism->current_dataset,
            (void*)organism->current_test_dataset);
@@ -2203,6 +2182,51 @@ __global__ void persistent_evolution_kernel(
     int capacity = organism->pool->capacity;
 
     while (true) {
+        ArchitectureParams arch_p1 = get_arch_from_pool(organism->pool, 0);
+
+        // training
+        printf("V:TRAIN_start gen=%d\n", organism->generation);
+        load_batch_kernel<<<1, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size);
+        cudaError_t err_load = cudaGetLastError();
+        if (err_load != cudaSuccess) {
+            printf("!E:load_batch_launch gen=%d err=%d\n", organism->generation, (int)err_load);
+            return;
+        }
+        cudaDeviceSynchronize();
+        printf("V:TRAIN_load_done\n");
+
+        reset_trace_buffer_kernel<<<1, 1>>>(organism->trace_buffer);
+        cudaDeviceSynchronize();
+        printf("V:TRAIN_reset_done\n");
+
+        int num_waves = (capacity + WAVE_SIZE - 1) / WAVE_SIZE;
+        for (int wave = 0; wave < num_waves; wave++) {
+            int wave_start = wave * WAVE_SIZE;
+            int wave_blocks = min(WAVE_SIZE, capacity - wave_start);
+            hybrid_organism_lifecycle_kernel<<<wave_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
+                organism, organism->training_mode, organism->param_map, organism->generation,
+                organism_workspace_genomes, audit, wave_start);
+            cudaError_t err_wave = cudaGetLastError();
+            if (err_wave != cudaSuccess) {
+                printf("!E:hybrid_wave_launch gen=%d wave=%d err=%d\n", organism->generation, wave, (int)err_wave);
+                return;
+            }
+            cudaDeviceSynchronize();
+        }
+
+        cudaError_t err_train = cudaGetLastError();
+        if (err_train != cudaSuccess) {
+            printf("!E:hybrid_train_final gen=%d err=%d\n", organism->generation, (int)err_train);
+            return;
+        }
+
+        aggregate_hardware_geometry_kernel<<<1, BLOCK_SIZE>>>(organism->trace_buffer, organism->hardware_geom);
+        cudaDeviceSynchronize();
+        err = cudaGetLastError();
+        DEVICE_FATAL_IF(err != cudaSuccess, "hw_aggregate failed");
+        printf("V:TRAIN_done gen=%d\n", organism->generation);
+
+        // phase 1: selection, archive, spawn
         int reduction_blocks = organism->reduction_num_blocks;
         int total_cells = organism->reduction_total_cells;
         reduce_concentration_mean_kernel<<<reduction_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
@@ -2212,12 +2236,6 @@ __global__ void persistent_evolution_kernel(
 
         printf("V:P1_start tick=%llu cap=%d\n", tick, capacity);
 
-        aggregate_hardware_geometry_kernel<<<1, BLOCK_SIZE>>>(organism->trace_buffer, organism->hardware_geom);
-        cudaDeviceSynchronize();
-        err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_hw gen=%d\n", organism->generation); return; }
-        printf("V:P1_hw gen=%d\n", organism->generation);
-
         int selection_blocks = (capacity + WARP_SIZE - 1) / WARP_SIZE;
         selection_kernel<<<selection_blocks, WARP_SIZE>>>(
             organism, organism->pool, organism->archive, organism->voronoi_cells,
@@ -2225,7 +2243,7 @@ __global__ void persistent_evolution_kernel(
             organism->behavioral_agents, organism->generation, organism_workspace_genomes);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_sel gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_sel failed");
         printf("V:P1_sel gen=%d\n", organism->generation);
 
         int behavioral_dim = organism->archive->hw_dim + organism->archive->task_dim + organism->archive->gen_dim;
@@ -2248,12 +2266,11 @@ __global__ void persistent_evolution_kernel(
         );
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_voronoi gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_voronoi failed");
         printf("V:P1_voronoi gen=%d\n", organism->generation);
 
         dim3 component_grid((POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE);
         dim3 component_block(BLOCK_SIZE);
-        ArchitectureParams arch_p1 = get_arch_from_pool(organism->pool, 0);
         component_evolution_kernel<<<component_grid, component_block>>>(
             organism, organism->pool, organism->archive, organism->voronoi_cells,
             organism->num_voronoi_cells, &organism->archive_size, organism->chemical_field,
@@ -2261,14 +2278,14 @@ __global__ void persistent_evolution_kernel(
             organism->generation, arch_p1, organism_workspace_genomes);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_comp gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_comp failed");
         printf("V:P1_comp gen=%d\n", organism->generation);
 
         int fitness_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
         compute_fitness_from_diresa_kernel<<<fitness_blocks, BLOCK_SIZE>>>(organism->pool);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_fitness gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_fitness failed");
         printf("V:P1_fitness gen=%d\n", organism->generation);
 
         printf("V:P1_A gen=%d\n", organism->generation);
@@ -2282,7 +2299,7 @@ __global__ void persistent_evolution_kernel(
             spawn_wave_kernel<<<1, BLOCK_SIZE>>>(organism, organism->pool, spawn_prob, organism->generation, spawn_workspace);
             cudaDeviceSynchronize();
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_spawn gen=%d err=%d\n", organism->generation, (int)err); return; }
+            DEVICE_FATAL_IF(err != cudaSuccess, "P1_spawn failed");
             printf("V:P1_spawn gen=%d\n", organism->generation);
         } else {
             printf("V:P1_E gen=%d spawn_skipped\n", organism->generation);
@@ -2297,7 +2314,7 @@ __global__ void persistent_evolution_kernel(
             organism_workspace_genomes, organism->diresa_genome_weights);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_lifecycle gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_lifecycle failed");
         printf("V:P1_lifecycle gen=%d\n", organism->generation);
 
         if (organism->generation >= 1) {
@@ -2322,7 +2339,7 @@ __global__ void persistent_evolution_kernel(
                 organism->telemetry->task_performance.accuracy
             );
             err = cudaGetLastError();
-            if (err != cudaSuccess) { printf("!E:P1_memory_update gen=%d\n", organism->generation); return; }
+            DEVICE_FATAL_IF(err != cudaSuccess, "P1_memory_update failed");
         }
 
         dim3 field_grid((arch_p1.grid_size + 15) / 16, (arch_p1.grid_size + 15) / 16);
@@ -2340,13 +2357,13 @@ __global__ void persistent_evolution_kernel(
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
             organism->telemetry->task_performance.accuracy);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_diff gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_diff failed");
 
         store_chemical_snapshot_kernel<<<field_grid, field_block>>>(
             organism->chemical_field, arch_p1.grid_size * arch_p1.grid_size,
-            (float)organism->generation, organism->pool->entries[0].genome_hash, organism_workspace_genomes);
+            (float)organism->generation, organism->pool->entries[0].genome_hash, organism_workspace_genomes, organism->pool->entries[0].gradients);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P1_snap gen=%d\n", organism->generation); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P1_snap failed");
 
         cudaDeviceSynchronize();  
         printf("V:P1_done gen=%d\n", organism->generation);
@@ -2357,10 +2374,9 @@ __global__ void persistent_evolution_kernel(
                              (arch_p1.grid_size + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM);
         dim3 init_field_block(WMMA_TILE_DIM, WMMA_TILE_DIM);
 
-        int history_idx = organism->chemical_field->history->count > 0
-            ? (organism->chemical_field->history->head + organism->chemical_field->history->count - 1)
-              % organism->chemical_field->history->capacity
-            : 0;
+        DEVICE_FATAL_IF(organism->chemical_field->history->count <= 0, "persistent_evolution: chemical history empty");
+        int history_idx = (organism->chemical_field->history->head + organism->chemical_field->history->count - 1)
+              % organism->chemical_field->history->capacity;
         float* attractor_field = organism->chemical_field->history->entries[history_idx].data;
 
         for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
@@ -2383,7 +2399,7 @@ __global__ void persistent_evolution_kernel(
             );
         }
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P2_init_ca gen=%d err=%d\n", organism->generation, (int)err); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P2_init_ca failed");
         cudaDeviceSynchronize();
         printf("V:P2_init_ca gen=%d\n", organism->generation);
 
@@ -2396,7 +2412,7 @@ __global__ void persistent_evolution_kernel(
             );
         }
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P2_update_field gen=%d err=%d\n", organism->generation, (int)err); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P2_update_field failed");
 
         cudaDeviceSynchronize();  
         printf("V:P2_done gen=%d\n", organism->generation);
@@ -2406,54 +2422,13 @@ __global__ void persistent_evolution_kernel(
             organism, organism->behavioral_agents, organism->chemical_field,
             organism->chemical_field->history, organism->generation, arch_p1, organism_workspace_genomes);
         err = cudaGetLastError();
-        if (err != cudaSuccess) { printf("!E:P3_beh gen=%d err=%d\n", organism->generation, (int)err); return; }
+        DEVICE_FATAL_IF(err != cudaSuccess, "P3_beh failed");
 
-        cudaDeviceSynchronize();  
+        cudaDeviceSynchronize();
         printf("V:P3_done gen=%d\n", organism->generation);
 
-
-        load_batch_kernel<<<1, BLOCK_SIZE>>>(
-            organism,
-            organism->training_mode,
-            organism->generation,
-            arch_p1.grid_size
-        );
-        cudaError_t err_load = cudaGetLastError();
-        if (err_load != cudaSuccess) {
-            printf("!E:load_batch_launch gen=%d err=%d\n", organism->generation, (int)err_load);
-            return;
-        }
-        cudaDeviceSynchronize();
-
-        int num_waves = (capacity + WAVE_SIZE - 1) / WAVE_SIZE;
-        for (int wave = 0; wave < num_waves; wave++) {
-            int wave_start = wave * WAVE_SIZE;
-            int wave_blocks = min(WAVE_SIZE, capacity - wave_start);
-
-            hybrid_organism_lifecycle_kernel<<<wave_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
-                organism,
-                organism->training_mode,
-                organism->param_map,
-                organism->generation,
-                organism_workspace_genomes,
-                audit,
-                wave_start
-            );
-            cudaError_t err_wave = cudaGetLastError();
-            if (err_wave != cudaSuccess) {
-                printf("!E:hybrid_wave_launch gen=%d wave=%d err=%d\n", organism->generation, wave, (int)err_wave);
-                return;
-            }
-            cudaDeviceSynchronize();
-        }
-
-        cudaError_t err_train = cudaGetLastError();
-        if (err_train != cudaSuccess) {
-            printf("!E:hybrid_train_final gen=%d err=%d\n", organism->generation, (int)err_train);
-            return;
-        }
-
         organism->generation++;
+        tick++;
     }
 }
 

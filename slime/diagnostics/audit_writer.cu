@@ -220,4 +220,93 @@ int write_chemical_field(const char* session_dir, int gen, float* concentration,
     return 0;
 }
 
-#endif 
+int write_state_json(FILE* json_file, double elapsed_time, AuditBuffer* audit) {
+    if (!json_file || !audit) return 1;
+
+    fprintf(json_file, "{\"gen\":%d,\"elapsed\":%.2f,", audit->generation, elapsed_time);
+
+    fprintf(json_file, "\"chemical\":{\"concentration\":[");
+    for (int i = 0; i < STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE; i++) {
+        fprintf(json_file, "%.4f", audit->state_chemical_sample[i]);
+        if (i < STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE - 1) fprintf(json_file, ",");
+    }
+    fprintf(json_file, "],\"size\":%d},", STATE_EXPORT_CHEM_SIZE);
+
+    fprintf(json_file, "\"agents\":[");
+    for (int i = 0; i < audit->state_agent_count && i < STATE_EXPORT_AGENT_COUNT; i++) {
+        fprintf(json_file, "{\"pos\":[%.3f,%.3f],\"vel\":[%.3f,%.3f],\"exploration\":%.3f,\"sensitivity\":%.3f}",
+                audit->state_agent_pos_x[i], audit->state_agent_pos_y[i],
+                audit->state_agent_vel_x[i], audit->state_agent_vel_y[i],
+                audit->state_agent_exploration[i], audit->state_agent_sensitivity[i]);
+        if (i < audit->state_agent_count - 1 && i < STATE_EXPORT_AGENT_COUNT - 1) fprintf(json_file, ",");
+    }
+    fprintf(json_file, "],");
+
+    fprintf(json_file, "\"voronoi\":[");
+    for (int i = 0; i < audit->state_voronoi_count && i < STATE_EXPORT_VORONOI_COUNT; i++) {
+        fprintf(json_file, "{\"density\":%d,\"radius\":%.3f,\"best_elite\":%d,\"hw_centroid\":[",
+                audit->state_voronoi_density[i], audit->state_voronoi_radius[i],
+                audit->state_voronoi_best_elite_idx[i]);
+        for (int j = 0; j < BEHAVIORAL_DIM_HW_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_hw_centroid[i * BEHAVIORAL_DIM_HW_MAX + j]);
+            if (j < BEHAVIORAL_DIM_HW_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "],\"task_centroid\":[");
+        for (int j = 0; j < BEHAVIORAL_DIM_TASK_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_task_centroid[i * BEHAVIORAL_DIM_TASK_MAX + j]);
+            if (j < BEHAVIORAL_DIM_TASK_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "],\"gen_centroid\":[");
+        for (int j = 0; j < BEHAVIORAL_DIM_GEN_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_gen_centroid[i * BEHAVIORAL_DIM_GEN_MAX + j]);
+            if (j < BEHAVIORAL_DIM_GEN_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "]}");
+        if (i < audit->state_voronoi_count - 1 && i < STATE_EXPORT_VORONOI_COUNT - 1) fprintf(json_file, ",");
+    }
+    fprintf(json_file, "],");
+
+    fprintf(json_file, "\"archive\":{\"size\":%d,\"elites\":[", audit->state_archive_count);
+    for (int i = 0; i < audit->state_archive_count && i < STATE_EXPORT_ARCHIVE_COUNT; i++) {
+        fprintf(json_file, "{\"f\":%.4f,\"c\":%.4f,\"rank\":%.4f,\"gen\":%d,\"hash\":%llu,\"parents\":[%u,%u],\"hw_coords\":[",
+                audit->state_archive_fitness[i],
+                audit->state_archive_coherence[i],
+                audit->state_archive_effective_rank[i],
+                (int)audit->state_archive_generation[i],
+                (unsigned long long)audit->state_archive_genome_hash[i],
+                audit->state_archive_parent_id_0[i],
+                audit->state_archive_parent_id_1[i]);
+        for (int j = 0; j < BEHAVIORAL_DIM_HW_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_hw_coords[i * BEHAVIORAL_DIM_HW_MAX + j]);
+            if (j < BEHAVIORAL_DIM_HW_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "],\"task_coords\":[");
+        for (int j = 0; j < BEHAVIORAL_DIM_TASK_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_task_coords[i * BEHAVIORAL_DIM_TASK_MAX + j]);
+            if (j < BEHAVIORAL_DIM_TASK_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "],\"gen_coords\":[");
+        for (int j = 0; j < BEHAVIORAL_DIM_GEN_MAX; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_gen_coords[i * BEHAVIORAL_DIM_GEN_MAX + j]);
+            if (j < BEHAVIORAL_DIM_GEN_MAX - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "],\"hardware_features\":[");
+        for (int j = 0; j < HARDWARE_FEATURES_DIM; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_hardware_features[i * HARDWARE_FEATURES_DIM + j]);
+            if (j < HARDWARE_FEATURES_DIM - 1) fprintf(json_file, ",");
+        }
+        fprintf(json_file, "]}");
+        if (i < audit->state_archive_count - 1 && i < STATE_EXPORT_ARCHIVE_COUNT - 1) fprintf(json_file, ",");
+    }
+    fprintf(json_file, "]},");
+
+    fprintf(json_file, "\"pool\":{\"active\":%d,\"capacity\":%d,\"spawned\":%d,\"culled\":%d}",
+            audit->pool_alive_count, audit->pool_capacity,
+            audit->pool_total_spawned, audit->pool_total_culled);
+
+    fprintf(json_file, "}\n");
+    fflush(json_file);
+    return 0;
+}
+
+#endif

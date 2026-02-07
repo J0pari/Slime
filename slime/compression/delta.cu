@@ -53,13 +53,21 @@ __global__ void compute_delta_kernel(float* child_genome, float* parent_genome, 
 }
 
 __device__ void reconstruct_from_delta(float* parent_genome, uint16_t* delta_indices, float* delta_values, uint16_t num_deltas, float* output_genome, int genome_length) {
+    DEVICE_VALIDATE_PTR(parent_genome);
+    DEVICE_VALIDATE_PTR(output_genome);
+    DEVICE_VALIDATE_RANGE(genome_length, 1, GENOME_SIZE);
+
     for (int i = 0; i < genome_length; i++) {
         output_genome[i] = parent_genome[i];
+        DEVICE_VALIDATE_FINITE(output_genome[i]);
     }
     for (int i = 0; i < num_deltas; i++) {
         int idx = delta_indices[i];
         DEVICE_FATAL_IF(idx >= genome_length, "reconstruct_from_delta: delta index out of bounds");
+        DEVICE_VALIDATE_GENOME_SLOT(idx);
+        DEVICE_VALIDATE_FINITE(delta_values[i]);
         output_genome[idx] += delta_values[i];
+        DEVICE_VALIDATE_FINITE(output_genome[idx]);
     }
 }
 
@@ -76,10 +84,16 @@ __device__ void reconstruct_genome_from_archive(
     float* parent_genome_workspace,
     const DIRESAWeights* weights
 ) {
-    
+    DEVICE_VALIDATE_PTR(archive);
+    DEVICE_VALIDATE_PTR(output_genome);
+    DEVICE_VALIDATE_PTR(parent_genome_workspace);
+    DEVICE_VALIDATE_PTR(weights);
+    DEVICE_VALIDATE_RANGE(archive_size, 0, MAX_ARCHIVE_SIZE);
+    DEVICE_VALIDATE_RANGE(genome_length, 1, GENOME_SIZE);
+    DEVICE_VALIDATE_RANGE(num_deltas, 0, max_deltas);
+
     DEVICE_FATAL_IF(parent_hash == 0, "reconstruct_genome_from_archive: parent_hash is 0 (invalid)");
 
-    
     if (parent_hash == UINT64_MAX) {
         for (int i = 0; i < genome_length; i++) {
             parent_genome_workspace[i] = 0.0f;
@@ -88,7 +102,9 @@ __device__ void reconstruct_genome_from_archive(
         return;
     }
 
-    
+    DEVICE_VALIDATE_PTR(archive->hash_table_keys);
+    DEVICE_VALIDATE_PTR(archive->hash_table_values);
+
     int parent_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -96,6 +112,7 @@ __device__ void reconstruct_genome_from_archive(
     );
 
     DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
+    DEVICE_VALIDATE_ARCHIVE_IDX(parent_idx, archive_size);
     DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
 
     diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);

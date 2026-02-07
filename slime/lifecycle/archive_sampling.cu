@@ -62,10 +62,13 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     float* elite_genome = workspace_genome;
     diresa_decode(&archive->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX], elite_genome, diresa_genome_weights);
 
+    InitContext ctx;
+    ctx.derive_from_genome(entry->genome_hash, elite_genome, entry->gradients);
+
     int fitness_inherit_center_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_center");
     int fitness_inherit_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_steepness");
-    float fitness_inherit_center = genome_to_param(elite_genome, entry->gradients, fitness_inherit_center_slot, 0.5f, 0.5f, 0.5f, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
-    float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, 0.5f, 0.5f, 0.5f, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
+    float fitness_inherit_center = genome_to_param(elite_genome, entry->gradients, fitness_inherit_center_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
+    float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
     float fitness_modulation = NORMALIZED_MAX / (NORMALIZED_MAX + expf(-fitness_inherit_steepness * (archive->fitness[elite_idx] - fitness_inherit_center)));
 
     entry->fitness = archive->fitness[elite_idx] * fitness_modulation;

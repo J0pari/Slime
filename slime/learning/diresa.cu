@@ -3,41 +3,11 @@
 
 #include "../config/config.cu"
 #include "../utils/cuda_primitives.cuh"
+#include "diresa_types.cuh"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
 struct PoolEntry;
-
-struct DIRESAWeights {
-    int input_dim;   
-    int output_dim;  
-    int hidden1;     
-    int hidden2;     
-
-    float* encoder_w1;  
-    float* encoder_b1;  
-    float* encoder_w2;  
-    float* encoder_b2;  
-    float* encoder_w3;  
-    float* encoder_b3;  
-
-    float* decoder_w1;  
-    float* decoder_b1;  
-    float* decoder_w2;  
-    float* decoder_b2;  
-    float* decoder_w3;  
-    float* decoder_b3;  
-
-    float cov_weight;
-    float learning_rate;
-    uint32_t training_step;
-
-    float temperature;
-    int replica_id;
-
-    float distance_exponent;
-    float quality_weight;
-};
 
 struct DIRESABatch {
     int input_dim;   

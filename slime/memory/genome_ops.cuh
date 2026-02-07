@@ -2,6 +2,7 @@
 #define GENOME_OPS_CUH
 
 #include "../config/config.cu"
+#include "../debug/param_validator.cu"
 #include <cuda_runtime.h>
 
 struct GPUElite;
@@ -106,7 +107,6 @@ __device__ constexpr uint64_t fnv1a_hash(const char* str) {
 __device__ __forceinline__ int derive_param_slot(uint64_t genome_hash, const char* param_id) {
     uint64_t id_hash = fnv1a_hash(param_id);
 
-
     uint64_t combined = genome_hash ^ id_hash;
     combined ^= (combined >> 33);
     combined *= HASH_MIX_CONSTANT_A;
@@ -114,22 +114,92 @@ __device__ __forceinline__ int derive_param_slot(uint64_t genome_hash, const cha
     combined *= HASH_MIX_CONSTANT_B;
     combined ^= (combined >> 33);
 
-    return (int)(combined % GENOME_SIZE);
+    int slot = (int)(combined % GENOME_SIZE);
+    DEVICE_VALIDATE_GENOME_SLOT(slot);
+    return slot;
 }
 
+__device__ __forceinline__ float genome_to_bootstrap_param(
+    const float* genome,
+    const float* epigenetic,
+    int primary_slot,
+    float min_val,
+    float max_val
+) {
+    DEVICE_VALIDATE_PTR(genome);
+    DEVICE_VALIDATE_GENOME_SLOT(primary_slot);
+    float base_val = genome[primary_slot];
+    DEVICE_VALIDATE_FINITE(base_val);
+
+    int epi_slot = (primary_slot * 0x9e3779b9 + 0x7f4a7c15) % GENOME_SIZE;
+    DEVICE_VALIDATE_GENOME_SLOT(epi_slot);
+    float epigenetic_sensitivity = (genome[epi_slot] + 1.0f) * 0.5f;
+
+    int epi_bounds_slot = (primary_slot * 0x3c9f82a5 + 0x1ce4e5b9) % GENOME_SIZE;
+    DEVICE_VALIDATE_GENOME_SLOT(epi_bounds_slot);
+    float epi_min = genome[epi_bounds_slot] * 0.5f;
+    float epi_max = 2.0f + genome[epi_bounds_slot];
+
+    float epigenetic_factor = 1.0f;
+    if (epigenetic != nullptr) {
+        epigenetic_factor = 1.0f + epigenetic_sensitivity * epigenetic[primary_slot];
+        epigenetic_factor = fminf(fmaxf(epigenetic_factor, epi_min), epi_max);
+        DEVICE_VALIDATE_EPIGENETIC(epigenetic_factor, epi_min, epi_max);
+    }
+
+    int enhancer_1_slot = (primary_slot * 0x51b3e1f4 + 0x3f2a9c71) % GENOME_SIZE;
+    int enhancer_2_slot = (primary_slot * 0x7a2e914c + 0x5d8b4e3a) % GENOME_SIZE;
+    int enhancer_3_slot = (primary_slot * 0x2f1a8c9d + 0x9b7e5f2c) % GENOME_SIZE;
+    DEVICE_VALIDATE_GENOME_SLOT(enhancer_1_slot);
+    DEVICE_VALIDATE_GENOME_SLOT(enhancer_2_slot);
+    DEVICE_VALIDATE_GENOME_SLOT(enhancer_3_slot);
+
+    float internal_modulation = 0.1f * (genome[enhancer_1_slot] + genome[enhancer_2_slot] + genome[enhancer_3_slot]);
+
+    float expressed_val = base_val * epigenetic_factor * (1.0f + internal_modulation);
+    DEVICE_VALIDATE_FINITE(expressed_val);
+
+    float normalized = tanhf(expressed_val);
+    normalized = (normalized + 1.0f) * 0.5f;
+    DEVICE_VALIDATE_PROBABILITY(normalized);
+
+    float result = min_val + (max_val - min_val) * normalized;
+    DEVICE_VALIDATE_FINITE(result);
+    return result;
+}
 
 struct InitContext {
     float metabolic;
     float stress;
     float morphogen;
 
-    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome) {
+    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome, const float* epigenetic) {
         int ctx_metabolic_slot = derive_param_slot(genome_hash, "init_context_metabolic");
         int ctx_stress_slot = derive_param_slot(genome_hash, "init_context_stress");
         int ctx_morphogen_slot = derive_param_slot(genome_hash, "init_context_morphogen");
-        metabolic = (genome[ctx_metabolic_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        stress = (genome[ctx_stress_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        morphogen = (genome[ctx_morphogen_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+
+        int metabolic_min_slot = derive_param_slot(genome_hash, "init_context_metabolic_min");
+        int metabolic_max_slot = derive_param_slot(genome_hash, "init_context_metabolic_max");
+        int stress_min_slot = derive_param_slot(genome_hash, "init_context_stress_min");
+        int stress_max_slot = derive_param_slot(genome_hash, "init_context_stress_max");
+        int morphogen_min_slot = derive_param_slot(genome_hash, "init_context_morphogen_min");
+        int morphogen_max_slot = derive_param_slot(genome_hash, "init_context_morphogen_max");
+
+        float metabolic_min = (genome[metabolic_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float metabolic_max_raw = (genome[metabolic_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float metabolic_max = metabolic_min + metabolic_max_raw * (NORMALIZED_MAX - metabolic_min);
+
+        float stress_min = (genome[stress_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float stress_max_raw = (genome[stress_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float stress_max = stress_min + stress_max_raw * (NORMALIZED_MAX - stress_min);
+
+        float morphogen_min = (genome[morphogen_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float morphogen_max_raw = (genome[morphogen_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float morphogen_max = morphogen_min + morphogen_max_raw * (NORMALIZED_MAX - morphogen_min);
+
+        metabolic = genome_to_bootstrap_param(genome, epigenetic, ctx_metabolic_slot, metabolic_min, metabolic_max);
+        stress = genome_to_bootstrap_param(genome, epigenetic, ctx_stress_slot, stress_min, stress_max);
+        morphogen = genome_to_bootstrap_param(genome, epigenetic, ctx_morphogen_slot, morphogen_min, morphogen_max);
     }
 };
 
@@ -138,14 +208,33 @@ struct BehavioralDimensions {
     int task_dim;
     int gen_dim;
 
-    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome) {
+    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome, const float* epigenetic) {
         int hw_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_hw");
         int task_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_task");
         int gen_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_gen");
 
-        float hw_norm = (genome[hw_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float task_norm = (genome[task_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float gen_norm = (genome[gen_dim_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        int hw_min_slot = derive_param_slot(genome_hash, "behavioral_dim_hw_min");
+        int hw_max_slot = derive_param_slot(genome_hash, "behavioral_dim_hw_max");
+        int task_min_slot = derive_param_slot(genome_hash, "behavioral_dim_task_min");
+        int task_max_slot = derive_param_slot(genome_hash, "behavioral_dim_task_max");
+        int gen_min_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_min");
+        int gen_max_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_max");
+
+        float hw_min = (genome[hw_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float hw_max_raw = (genome[hw_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float hw_max = hw_min + hw_max_raw * (NORMALIZED_MAX - hw_min);
+
+        float task_min = (genome[task_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float task_max_raw = (genome[task_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float task_max = task_min + task_max_raw * (NORMALIZED_MAX - task_min);
+
+        float gen_min = (genome[gen_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float gen_max_raw = (genome[gen_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float gen_max = gen_min + gen_max_raw * (NORMALIZED_MAX - gen_min);
+
+        float hw_norm = genome_to_bootstrap_param(genome, epigenetic, hw_dim_slot, hw_min, hw_max);
+        float task_norm = genome_to_bootstrap_param(genome, epigenetic, task_dim_slot, task_min, task_max);
+        float gen_norm = genome_to_bootstrap_param(genome, epigenetic, gen_dim_slot, gen_min, gen_max);
 
         hw_dim = BEHAVIORAL_DIM_HW_MIN + (int)(hw_norm * (BEHAVIORAL_DIM_HW_MAX - BEHAVIORAL_DIM_HW_MIN));
         task_dim = BEHAVIORAL_DIM_TASK_MIN + (int)(task_norm * (BEHAVIORAL_DIM_TASK_MAX - BEHAVIORAL_DIM_TASK_MIN));
