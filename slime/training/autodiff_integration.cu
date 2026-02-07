@@ -194,7 +194,7 @@ __global__ void multi_head_ca_with_tape_kernel(
             acc += perception[j] * __half2float(inter_w[j * arch.head_dim + h]);
         }
         float x = acc;
-        interaction[h] = GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
+        interaction[h] = activation_gelu(x);
         interaction_sum += fabsf(interaction[h]);
         pre_gelu_saved[saved_base + h] = x;
         interaction_saved[saved_base + h] = interaction[h];

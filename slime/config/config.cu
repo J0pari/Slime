@@ -398,6 +398,10 @@ constexpr float DIRESA_DISTANCE_EXPONENT_MIN = 0.3f;
 constexpr float DIRESA_DISTANCE_EXPONENT_MAX = 2.0f;
 constexpr float DIRESA_QUALITY_WEIGHT_MIN = 0.01f;
 constexpr float DIRESA_QUALITY_WEIGHT_MAX = 1.0f;
+constexpr float DIRESA_TEMP_BASE_MIN = 0.5f;
+constexpr float DIRESA_TEMP_BASE_MAX = 2.0f;
+constexpr float DIRESA_TEMP_SCALE_MIN = 0.1f;
+constexpr float DIRESA_TEMP_SCALE_MAX = 1.0f;
 
 constexpr float VORONOI_CORRELATION_EXPONENT_MIN = 0.5f;
 constexpr float VORONOI_CORRELATION_EXPONENT_MAX = 1.0f;
@@ -693,7 +697,7 @@ constexpr int CA_VALUE_WEIGHT_SIZE = NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX
 constexpr int CA_WEIGHTS_PER_ENTRY_STRIDE = CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE + CA_VALUE_WEIGHT_SIZE;
 
 constexpr int BATCH_SIZE_MIN = 8;
-constexpr int BATCH_SIZE_MAX = 32;
+constexpr int BATCH_SIZE_MAX = 16;
 constexpr int DATASET_SIZE_MAX = OPPORTUNITY_TRAIN_SAMPLES;
 
 constexpr int SAVED_ACTIVATION_SIZE = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
@@ -702,14 +706,23 @@ constexpr int TAPE_ENTRIES_PER_ENTRY = TAPE_CAPACITY;
 constexpr int TAPE_VALUES_PER_ENTRY = VALUE_CAPACITY;
 
 constexpr int COL_WIDTH_MAX = 9 * CHANNELS_MAX;
-constexpr int BACKWARD_CHUNK_SAMPLES = 8192;
-constexpr size_t BACKWARD_WS_FP16_A_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
-constexpr size_t BACKWARD_WS_FP16_B_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
-constexpr size_t BACKWARD_WS_DW_SIZE = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(float);
-constexpr size_t BACKWARD_WS_DI_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
-constexpr size_t BACKWARD_WS_W_T_SIZE = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(half);
-constexpr size_t BACKWARD_WS_IM2COL_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * COL_WIDTH_MAX * sizeof(float);
-constexpr size_t BACKWARD_WS_DPREGELU_SIZE = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
+constexpr int BACKWARD_CHUNK_SAMPLES = 1024;  // Reduced 8x to allow WAVE_SIZE concurrent blocks
+// Per-block workspace sizes
+constexpr size_t BACKWARD_WS_FP16_A_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_FP16_B_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_DW_BLOCK = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_DI_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_W_T_BLOCK = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(half);
+constexpr size_t BACKWARD_WS_IM2COL_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * COL_WIDTH_MAX * sizeof(float);
+constexpr size_t BACKWARD_WS_DPREGELU_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(float);
+// Total sizes for WAVE_SIZE concurrent blocks
+constexpr size_t BACKWARD_WS_FP16_A_SIZE = BACKWARD_WS_FP16_A_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_FP16_B_SIZE = BACKWARD_WS_FP16_B_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_DW_SIZE = BACKWARD_WS_DW_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_DI_SIZE = BACKWARD_WS_DI_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_W_T_SIZE = BACKWARD_WS_W_T_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_IM2COL_SIZE = BACKWARD_WS_IM2COL_BLOCK * WAVE_SIZE;
+constexpr size_t BACKWARD_WS_DPREGELU_SIZE = BACKWARD_WS_DPREGELU_BLOCK * WAVE_SIZE;
 
 constexpr float LEARNING_RATE_MIN = 0.0001f;
 constexpr float LEARNING_RATE_MAX = 0.01f;
@@ -725,6 +738,12 @@ constexpr float ADAM_BETA2_MIN = 0.99f;
 constexpr float ADAM_BETA2_MAX = 0.9999f;
 constexpr float GRADIENT_CLIP_MIN = 0.1f;
 constexpr float GRADIENT_CLIP_MAX = 10.0f;
+constexpr float GRADIENT_FITNESS_WEIGHT_MIN = 0.0f;
+constexpr float GRADIENT_FITNESS_WEIGHT_MAX = 1.0f;
+constexpr float COHERENCE_FITNESS_WEIGHT_MIN = 0.0f;
+constexpr float COHERENCE_FITNESS_WEIGHT_MAX = 1.0f;
+constexpr float BEHAVIORAL_LEARNING_RATE_MIN = 0.001f;
+constexpr float BEHAVIORAL_LEARNING_RATE_MAX = 0.1f;
 constexpr float SPAWN_RATE_MIN = 0.01f;
 constexpr float SPAWN_RATE_MAX = 0.5f;
 constexpr float DECAY_THRESHOLD_MIN = 0.05f;

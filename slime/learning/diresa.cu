@@ -3,6 +3,7 @@
 
 #include "../config/config.cu"
 #include "../utils/cuda_primitives.cuh"
+#include "../utils/genome_params.cuh"
 #include "diresa_types.cuh"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -31,7 +32,7 @@ struct DIRESABatch {
     float cov_loss;
 };
 
-__global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed) {
+__global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed, float* genome) {
     int replica_id = blockIdx.x;
     int local_tid = threadIdx.x;
 
@@ -148,18 +149,43 @@ __global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_
     }
 
     if (local_tid == 0) {
-        weights->cov_weight = 0.0f;  
-        weights->learning_rate = 0.005f;
+        weights->cov_weight = 0.0f;
         weights->training_step = 0;
         weights->replica_id = replica_id;
-        weights->temperature = 1.0f + replica_id * 0.5f;  
         weights->distance_exponent = entry->distance_exponent;
         weights->quality_weight = entry->quality_weight;
-    }
-}
 
-__device__ inline float relu(float x) {
-    return fmaxf(0.0f, x);
+        int diresa_ctx_metabolic_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_metabolic");
+        int diresa_ctx_stress_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_stress");
+        int diresa_ctx_morphogen_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_morphogen");
+        float diresa_ctx_metabolic = genome_slot_to_unit(genome, diresa_ctx_metabolic_slot);
+        float diresa_ctx_stress = genome_slot_to_unit(genome, diresa_ctx_stress_slot);
+        float diresa_ctx_morphogen = genome_slot_to_unit(genome, diresa_ctx_morphogen_slot);
+
+        int diresa_temp_base_slot = derive_param_slot(entry->genome_hash, "diresa_temp_base");
+        int diresa_temp_scale_slot = derive_param_slot(entry->genome_hash, "diresa_temp_scale");
+        float temp_base = genome_slot_to_unit(genome, diresa_temp_base_slot);
+        float temp_scale = genome_slot_to_unit(genome, diresa_temp_scale_slot);
+        weights->temperature = DIRESA_TEMP_BASE_MIN + temp_base * (DIRESA_TEMP_BASE_MAX - DIRESA_TEMP_BASE_MIN)
+                             + replica_id * (DIRESA_TEMP_SCALE_MIN + temp_scale * (DIRESA_TEMP_SCALE_MAX - DIRESA_TEMP_SCALE_MIN));
+
+        int diresa_ctx_complexity_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_complexity");
+        int diresa_ctx_niche_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_niche");
+        int diresa_ctx_learning_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_learning");
+        int diresa_ctx_performance_slot = derive_param_slot(entry->genome_hash, "diresa_ctx_performance");
+        float diresa_ctx_complexity = genome_slot_to_unit(genome, diresa_ctx_complexity_slot);
+        float diresa_ctx_niche = genome_slot_to_unit(genome, diresa_ctx_niche_slot);
+        float diresa_ctx_learning = genome_slot_to_unit(genome, diresa_ctx_learning_slot);
+        float diresa_ctx_performance = genome_slot_to_unit(genome, diresa_ctx_performance_slot);
+
+        TrainingParams diresa_training_params;
+        diresa_training_params.derive_from_genome_hash(entry->genome_hash);
+        weights->learning_rate = diresa_training_params.get_behavioral_learning_rate(
+            genome, entry->gradients,
+            diresa_ctx_metabolic, diresa_ctx_stress, diresa_ctx_morphogen,
+            diresa_ctx_complexity, diresa_ctx_niche, diresa_ctx_learning, diresa_ctx_performance
+        );
+    }
 }
 
 __device__ void diresa_encode(const float* features, float* latent, const DIRESAWeights* weights) {
@@ -171,7 +197,7 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         for (int j = 0; j < weights->input_dim; j++) {
             sum += features[j] * weights->encoder_w1[j * weights->hidden1 + i];
         }
-        hidden1[i] = relu(sum);
+        hidden1[i] = activation_relu(sum);
     }
 
     for (int i = 0; i < weights->hidden2; i++) {
@@ -179,7 +205,7 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
         for (int j = 0; j < weights->hidden1; j++) {
             sum += hidden1[j] * weights->encoder_w2[j * weights->hidden2 + i];
         }
-        hidden2[i] = relu(sum);
+        hidden2[i] = activation_relu(sum);
     }
 
     int vec_output_dim = weights->output_dim / 4;
@@ -224,7 +250,7 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         for (int j = 0; j < weights->input_dim; j++) {
             sum += features[j] * weights->encoder_w1[j * weights->hidden1 + i];
         }
-        hidden1[i] = relu(sum);
+        hidden1[i] = activation_relu(sum);
     }
 
     for (int i = 0; i < weights->hidden2; i++) {
@@ -232,7 +258,7 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         for (int j = 0; j < weights->hidden1; j++) {
             sum += hidden1[j] * weights->encoder_w2[j * weights->hidden2 + i];
         }
-        hidden2[i] = relu(sum);
+        hidden2[i] = activation_relu(sum);
     }
 
     for (int i = 0; i < weights->hidden2; i++) {
@@ -289,7 +315,7 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
             sum += latent[j] * weights->decoder_w1[j * weights->hidden2 + i];
         }
 
-        hidden1[i] = relu(sum);
+        hidden1[i] = activation_relu(sum);
     }
 
     for (int i = 0; i < weights->hidden1; i++) {
@@ -297,7 +323,7 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
         for (int j = 0; j < weights->hidden2; j++) {
             sum += hidden1[j] * weights->decoder_w2[j * weights->hidden1 + i];
         }
-        hidden2[i] = relu(sum);
+        hidden2[i] = activation_relu(sum);
     }
 
     for (int i = 0; i < weights->input_dim; i++) {

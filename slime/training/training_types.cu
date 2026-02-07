@@ -193,15 +193,33 @@ __global__ void init_ca_param_map_kernel(CAParameterMap* param_map, Architecture
     }
 }
 
-__global__ void init_training_mode_kernel(HybridTrainingMode* mode, int grid_size, float* batch_images, int* batch_labels) {
+__global__ void init_training_mode_kernel(
+    HybridTrainingMode* mode,
+    int grid_size,
+    float* batch_images,
+    int* batch_labels,
+    float* genome,
+    float* gradients,
+    uint64_t genome_hash,
+    float ctx_metabolic,
+    float ctx_stress,
+    float ctx_morphogen,
+    float ctx_complexity,
+    float ctx_niche,
+    float ctx_learning,
+    float ctx_performance
+) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
+        TrainingParams training_params;
+        training_params.derive_from_genome_hash(genome_hash);
+
         mode->use_gradients = true;
         mode->use_selection = true;
-        mode->gradient_fitness_weight = 0.7f;
-        mode->coherence_fitness_weight = 0.3f;
-        mode->batch_size = 32;
-        mode->learning_rate = 0.001f;
-        mode->gradient_clip_norm = 1.0f;
+        mode->gradient_fitness_weight = training_params.get_gradient_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        mode->coherence_fitness_weight = training_params.get_coherence_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        mode->batch_size = training_params.get_batch_size(genome, gradients);
+        mode->learning_rate = training_params.get_learning_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        mode->gradient_clip_norm = training_params.get_gradient_clip_norm(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
         mode->adam_timestep = 1;
 
         mode->batch_images = batch_images;

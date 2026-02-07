@@ -1397,7 +1397,7 @@ __global__ void init_organism_kernel(
         uint64_t organism_genome_hash = gpu_sha256(organism_seed_genome, GENOME_SIZE);
 
         int initial_pool_size_slot = derive_param_slot(organism_genome_hash, "initial_pool_size");
-        float initial_pool_size_norm = fmaxf(0.0f, fminf(1.0f, (organism_seed_genome[initial_pool_size_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+        float initial_pool_size_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism_seed_genome, initial_pool_size_slot)));
         int initial_pool_size = 1 + (int)(initial_pool_size_norm * (pool_capacity - 1));
 
         organism->active_components = initial_pool_size;
@@ -1575,7 +1575,7 @@ __global__ void init_organism_phase2_kernel(
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 voronoi_cells failed");
         int default_decay_rate_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "memory_default_decay_rate");
-        float default_decay_rate_norm = (primary_genome[default_decay_rate_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float default_decay_rate_norm = genome_slot_to_unit(primary_genome, default_decay_rate_slot);
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
 
         ArchitectureParams arch = get_arch_from_pool(organism->pool, 0);
@@ -1768,16 +1768,16 @@ __global__ void init_organism_phase2_kernel(
 
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_hw_weights, organism->diresa_hw_weight_pool, hw_stride,
-            HARDWARE_FEATURES_DIM, dims.hw_dim, first_entry, seed + 999999);
+            HARDWARE_FEATURES_DIM, dims.hw_dim, first_entry, seed + 999999, primary_genome);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_task_weights, organism->diresa_task_weight_pool, task_stride,
-            task_input_dim, dims.task_dim, first_entry, seed + 888888);
+            task_input_dim, dims.task_dim, first_entry, seed + 888888, primary_genome);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_gen_weights, organism->diresa_gen_weight_pool, gen_stride,
-            1, dims.gen_dim, first_entry, seed + 777777);
+            1, dims.gen_dim, first_entry, seed + 777777, primary_genome);
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_genome_weights, organism->diresa_genome_weight_pool, genome_stride,
-            GENOME_SIZE, GENOME_LATENT_DIM_MAX, first_entry, seed + 666666);
+            GENOME_SIZE, GENOME_LATENT_DIM_MAX, first_entry, seed + 666666, primary_genome);
 
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa failed");
@@ -1880,7 +1880,6 @@ __global__ void init_organism_phase2_kernel(
         organism->total_loss_pool = buffers->total_loss_pool;
 
         organism->training_mode = buffers->training_mode;
-        init_training_mode_kernel<<<1, 1>>>(organism->training_mode, organism->pool->entries[0].grid_size, buffers->batch_images_pool, buffers->batch_labels_pool);
 
         organism->classifier = buffers->classifier;
 
@@ -1989,7 +1988,7 @@ __global__ void init_organism_phase2_kernel(
         printf("V:p2_sync5_post err=%d\n", (int)err);
 
         int voronoi_init_dt_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "voronoi_init_dt");
-        float voronoi_init_dt_norm = (primary_genome[voronoi_init_dt_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
         float voronoi_init_dt = VORONOI_INIT_DT_MIN + voronoi_init_dt_norm * (VORONOI_INIT_DT_MAX - VORONOI_INIT_DT_MIN);
 
         uint64_t init_genome_hash = organism->pool->entries[0].genome_hash;
@@ -1997,9 +1996,26 @@ __global__ void init_organism_phase2_kernel(
         int ctx_stress_slot = derive_param_slot(init_genome_hash, "init_ctx_stress");
         int ctx_morphogen_slot = derive_param_slot(init_genome_hash, "init_ctx_morphogen");
 
-        float ctx_metabolic = (primary_genome[ctx_metabolic_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float ctx_stress = (primary_genome[ctx_stress_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float ctx_morphogen = (primary_genome[ctx_morphogen_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float ctx_metabolic = genome_slot_to_unit(primary_genome, ctx_metabolic_slot);
+        float ctx_stress = genome_slot_to_unit(primary_genome, ctx_stress_slot);
+        float ctx_morphogen = genome_slot_to_unit(primary_genome, ctx_morphogen_slot);
+
+        init_training_mode_kernel<<<1, 1>>>(
+            organism->training_mode,
+            organism->pool->entries[0].grid_size,
+            buffers->batch_images_pool,
+            buffers->batch_labels_pool,
+            primary_genome,
+            organism->pool->entries[0].gradients,
+            init_genome_hash,
+            ctx_metabolic,
+            ctx_stress,
+            ctx_morphogen,
+            organism->telemetry->genome_complexity.hash_entropy,
+            organism->telemetry->archive_topology.novelty_gradient,
+            organism->telemetry->diresa_evolution.behavioral_drift_rate,
+            organism->telemetry->task_performance.accuracy
+        );
 
         diffusion_reaction_kernel<<<chem_grid, chem_block>>>(
             organism->chemical_field->concentration,
@@ -2032,9 +2048,9 @@ __global__ void init_organism_phase2_kernel(
             primary_genome,
             organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash,
-            0.5f,  
-            0.1f,  
-            0.3f,  
+            ctx_metabolic,
+            ctx_stress,
+            ctx_morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -2186,7 +2202,7 @@ __global__ void persistent_evolution_kernel(
 
         // training
         printf("V:TRAIN_start gen=%d\n", organism->generation);
-        load_batch_kernel<<<1, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size);
+        load_batch_kernel<<<WAVE_SIZE, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size);
         cudaError_t err_load = cudaGetLastError();
         if (err_load != cudaSuccess) {
             printf("!E:load_batch_launch gen=%d err=%d\n", organism->generation, (int)err_load);

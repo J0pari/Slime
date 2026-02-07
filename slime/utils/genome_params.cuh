@@ -212,6 +212,9 @@ struct TrainingParams {
     int learning_rate_slot;
     int batch_size_slot;
     int flow_lenia_lr_slot;
+    int gradient_fitness_weight_slot;
+    int coherence_fitness_weight_slot;
+    int behavioral_learning_rate_slot;
 
     int adam_epsilon_min_slot;
     int adam_epsilon_max_slot;
@@ -226,6 +229,9 @@ struct TrainingParams {
         learning_rate_slot = derive_param_slot(genome_hash, "learning_rate");
         batch_size_slot = derive_param_slot(genome_hash, "batch_size");
         flow_lenia_lr_slot = derive_param_slot(genome_hash, "flow_lenia_lr");
+        gradient_fitness_weight_slot = derive_param_slot(genome_hash, "gradient_fitness_weight");
+        coherence_fitness_weight_slot = derive_param_slot(genome_hash, "coherence_fitness_weight");
+        behavioral_learning_rate_slot = derive_param_slot(genome_hash, "behavioral_learning_rate");
 
         adam_epsilon_min_slot = derive_param_slot(genome_hash, "adam_epsilon_min");
         adam_epsilon_max_slot = derive_param_slot(genome_hash, "adam_epsilon_max");
@@ -266,6 +272,18 @@ struct TrainingParams {
 
     __device__ __forceinline__ float get_flow_lenia_lr(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
         return genome_to_param(genome, gradients, flow_lenia_lr_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, FLOW_LENIA_LR_MIN, FLOW_LENIA_LR_MAX);
+    }
+
+    __device__ __forceinline__ float get_gradient_fitness_weight(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
+        return genome_to_param(genome, gradients, gradient_fitness_weight_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, GRADIENT_FITNESS_WEIGHT_MIN, GRADIENT_FITNESS_WEIGHT_MAX);
+    }
+
+    __device__ __forceinline__ float get_coherence_fitness_weight(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
+        return genome_to_param(genome, gradients, coherence_fitness_weight_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, COHERENCE_FITNESS_WEIGHT_MIN, COHERENCE_FITNESS_WEIGHT_MAX);
+    }
+
+    __device__ __forceinline__ float get_behavioral_learning_rate(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
+        return genome_to_param(genome, gradients, behavioral_learning_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, BEHAVIORAL_LEARNING_RATE_MIN, BEHAVIORAL_LEARNING_RATE_MAX);
     }
 };
 
