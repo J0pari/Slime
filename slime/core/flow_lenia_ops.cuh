@@ -151,7 +151,7 @@ struct FlowLeniaOps {
         float scaled = (x - min_val) / safe_range;
         float exp_arg = -sharpness * (scaled - CENTERED_DIFFERENCE_SCALE);
         exp_arg = fmaxf(fminf(exp_arg, EXPF_ARG_LIMIT), -EXPF_ARG_LIMIT);
-        float sigmoid_val = 1.0f / (1.0f + expf(exp_arg));
+        float sigmoid_val = activation_sigmoid(-exp_arg);
         return min_val + range * sigmoid_val;
     }
 

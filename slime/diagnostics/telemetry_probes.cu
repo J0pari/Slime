@@ -518,7 +518,7 @@ __device__ void population_metrics_probe(
 }
 
 __device__ void populate_audit_buffer(
-    AuditBuffer* audit,
+    AuditBuffer* ring,
     int generation,
     float* logits,
     int* labels,
@@ -535,12 +535,11 @@ __device__ void populate_audit_buffer(
     MultiHeadCAState* ca_state,
     HardwareGeometry* hardware_geom
 ) {
+    AuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
+
     printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
            generation, (void*)logits, (void*)labels, (void*)batch_images,
            batch_size, num_classes, (void*)ca_concentration, grid_size);
-
-    audit->ready = 0;
-    __threadfence_system();
 
     audit->generation = generation;
     audit->batch_size = batch_size;
@@ -789,13 +788,14 @@ __device__ void populate_audit_buffer(
     audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
     audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
 
-    __threadfence_system();
-    audit->ready = 1;
-    __threadfence_system();
+    audit->provenance_source = PROVENANCE_SOURCE_TELEMETRY;
+    audit->fields_written_mask = AUDIT_MASK_GENERATION | AUDIT_MASK_BATCH | AUDIT_MASK_ACCURACY |
+                                 AUDIT_MASK_LOSS | AUDIT_MASK_POOL | AUDIT_MASK_ARCHIVE |
+                                 AUDIT_MASK_CHEMICAL | AUDIT_MASK_FLOW | AUDIT_MASK_HARDWARE;
 
-    printf("V:audit_done gen=%d correct=%d/%d acc=%.4f loss=%.4f train=%.4f test=%.4f pool=%d/%d\n",
-           generation, audit->correct_count, batch_size, audit->accuracy, audit->loss,
-           train_accuracy, test_accuracy, audit->pool_alive_count, audit->pool_capacity);
+    ring->commit_write(audit);
+
+    printf("V:audit_done gen=%d m=0x%x\n", generation, audit->fields_written_mask);
 }
 
 #endif

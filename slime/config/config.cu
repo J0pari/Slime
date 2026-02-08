@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
+#include "../debug/provenance.cuh"
 
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
@@ -322,6 +323,8 @@ constexpr float GELU_SQRT_2_OVER_PI = 0.7978845608f;
 constexpr float GELU_CUBIC_COEFFICIENT = 0.044715f;
 constexpr float GELU_SCALE = 0.5f;
 constexpr float GELU_OFFSET = 1.0f;
+constexpr float GELU_BACKWARD_X2_COEFF = 3.0f;
+constexpr float SIGMOID_SCALE = 1.0f;
 
 constexpr float GAUSSIAN_VARIANCE_DENOMINATOR = 2.0f;
 constexpr float CENTERED_DIFFERENCE_SCALE = 0.5f;
@@ -820,9 +823,11 @@ constexpr int STATE_EXPORT_VORONOI_COUNT = 16;
 constexpr int STATE_EXPORT_ARCHIVE_COUNT = 16;
 constexpr int STATE_EXPORT_CHEM_SIZE = 16;
 
-struct AuditBuffer {
-    volatile int ready;
-    volatile int consumed;
+struct AuditEntry {
+    uint32_t provenance_source;
+    uint32_t fields_written_mask;
+    uint64_t sequence_number;
+
     int generation;
     int batch_size;
     int num_classes;
@@ -966,5 +971,170 @@ struct AuditBuffer {
     int pool_total_spawned;
     int pool_total_culled;
 };
+
+constexpr uint32_t AUDIT_MASK_GENERATION = (1 << 0);
+constexpr uint32_t AUDIT_MASK_BATCH = (1 << 1);
+constexpr uint32_t AUDIT_MASK_ACCURACY = (1 << 2);
+constexpr uint32_t AUDIT_MASK_LOSS = (1 << 3);
+constexpr uint32_t AUDIT_MASK_POOL = (1 << 4);
+constexpr uint32_t AUDIT_MASK_ARCHIVE = (1 << 5);
+constexpr uint32_t AUDIT_MASK_DIRESA = (1 << 6);
+constexpr uint32_t AUDIT_MASK_CHEMICAL = (1 << 7);
+constexpr uint32_t AUDIT_MASK_FLOW = (1 << 8);
+constexpr uint32_t AUDIT_MASK_HARDWARE = (1 << 9);
+constexpr uint32_t AUDIT_MASK_SAMPLES = (1 << 10);
+constexpr uint32_t AUDIT_MASK_CA_SNAPSHOT = (1 << 11);
+constexpr uint32_t AUDIT_MASK_STATE_EXPORT = (1 << 12);
+
+__host__ __forceinline__ void audit_entry_init_sentinel(AuditEntry* buf) {
+    buf->provenance_source = PROVENANCE_SOURCE_NONE;
+    buf->fields_written_mask = 0;
+    buf->sequence_number = 0;
+
+    buf->generation = PROVENANCE_UNINITIALIZED_INT;
+    buf->batch_size = PROVENANCE_UNINITIALIZED_INT;
+    buf->num_classes = PROVENANCE_UNINITIALIZED_INT;
+    buf->grid_size = PROVENANCE_UNINITIALIZED_INT;
+    buf->correct_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->loss = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->train_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->test_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->generalization_gap = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->pool_alive_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->pool_capacity = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->archive_occupied_cells = PROVENANCE_UNINITIALIZED_INT;
+    buf->frontier_cells_gained = PROVENANCE_UNINITIALIZED_INT;
+    buf->frontier_cells_lost = PROVENANCE_UNINITIALIZED_INT;
+    buf->sparse_cell_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->niche_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->novelty_gradient = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->elite_fitness_best = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->elite_fitness_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->elite_fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_floor = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_range = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->density_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->density_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->density_variance = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->hw_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hw_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hw_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->total_population = PROVENANCE_UNINITIALIZED_INT;
+    buf->births_this_gen = PROVENANCE_UNINITIALIZED_INT;
+    buf->deaths_this_gen = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->diresa_recon_loss_hw = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_task = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_total = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_behavioral_drift = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_latent_utilization = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->genome_unique_hashes = PROVENANCE_UNINITIALIZED_INT;
+    buf->genome_hash_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->genome_avg_deltas = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->axis_corr_hw_task = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->axis_corr_hw_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->axis_corr_task_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hash_clustering_coefficient = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->chemical_concentration_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_concentration_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_gradient_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_source_activity = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_decay_rate_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->flow_lenia_mass_total = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_mass_conservation_error = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_affinity_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_flow_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->fitness_alpha = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_beta = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_gamma = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->memory_gpu_allocated = 0;
+    buf->memory_gpu_free = 0;
+    buf->memory_ca_state_size = 0;
+    buf->memory_chemical_field_size = 0;
+    buf->memory_archive_size = 0;
+
+    buf->state_agent_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->state_voronoi_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->state_archive_count = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->pool_total_spawned = PROVENANCE_UNINITIALIZED_INT;
+    buf->pool_total_culled = PROVENANCE_UNINITIALIZED_INT;
+
+    for (int i = 0; i < POOL_CAPACITY_MAX; i++) {
+        buf->pool_entry_alive[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_fitness[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->pool_entry_hunger[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->pool_entry_age[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_num_deltas[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_genome_hash[i] = PROVENANCE_UNINITIALIZED_HASH;
+    }
+
+    for (int i = 0; i < NUM_CLASSES_MAX; i++) {
+        buf->per_class_correct[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->per_class_total[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+
+    for (int i = 0; i < AUDIT_SAMPLE_COUNT; i++) {
+        buf->sample_labels[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->sample_predictions[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->sample_confidences[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+
+    for (int i = 0; i < CA_FIELD_SIZE; i++) {
+        buf->ca_snapshot[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+}
+
+__host__ __forceinline__ bool audit_entry_field_valid(const AuditEntry* buf, uint32_t mask) {
+    return (buf->fields_written_mask & mask) == mask;
+}
+
+__host__ __forceinline__ void audit_payload_refuse_invalid(const AuditEntry* buf, uint32_t mask, const char* name) {
+    if (!audit_entry_field_valid(buf, mask)) {
+        fprintf(stderr, "E_AUDIT %s m=0x%x have=0x%x\n", name, mask, buf->fields_written_mask);
+        abort();
+    }
+}
+
+constexpr uint32_t AUDIT_RING_SLOTS = 4;
+
+typedef RingBuffer<AuditEntry, AUDIT_RING_SLOTS> AuditBuffer;
+typedef HostRingBufferReader<AuditEntry, AUDIT_RING_SLOTS> AuditBufferReader;
+
+__host__ __forceinline__ void audit_buffer_init_sentinel(AuditBuffer* ring) {
+    ring->write_sequence = 0;
+    ring->read_sequence = 0;
+    ring->dropped_count = 0;
+    ring->corrupted_count = 0;
+    for (uint32_t i = 0; i < AUDIT_RING_SLOTS; i++) {
+        ring->slots[i].committed = 0;
+        ring->slots[i].header.sequence_number = 0;
+        ring->slots[i].header.checksum_valid = 0;
+        audit_entry_init_sentinel(&ring->slots[i].payload);
+    }
+}
 
 #endif

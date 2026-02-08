@@ -2098,10 +2098,10 @@ __global__ void check_convergence_kernel(
         int coherence_min_slot = derive_param_slot(genome_hash, "convergence_coherence_min");
         int coherence_max_slot = derive_param_slot(genome_hash, "convergence_coherence_max");
 
-        float fitness_min = (genome[fitness_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float fitness_max = (genome[fitness_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float coherence_min = (genome[coherence_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float coherence_max = (genome[coherence_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float fitness_min = genome_slot_to_unit(genome, fitness_min_slot);
+        float fitness_max = genome_slot_to_unit(genome, fitness_max_slot);
+        float coherence_min = genome_slot_to_unit(genome, coherence_min_slot);
+        float coherence_max = genome_slot_to_unit(genome, coherence_max_slot);
 
         InitContext conv_ctx;
         conv_ctx.derive_from_genome(genome_hash, genome, organism->pool->entries[0].gradients);
@@ -2163,7 +2163,7 @@ __global__ void persistent_evolution_kernel(
     uint64_t organism_genome_hash = gpu_sha256(organism_workspace_genomes, GENOME_SIZE);
 
     int pool_capacity_slot = derive_param_slot(organism_genome_hash, "pool_capacity");
-    float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, (organism_workspace_genomes[pool_capacity_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE));
+    float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism_workspace_genomes, pool_capacity_slot)));
     int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, test_dataset_array, pool_capacity, organism_workspace_genomes, buffers);
     err = cudaGetLastError();

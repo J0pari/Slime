@@ -91,7 +91,7 @@ struct LocalOrganismState {
         older_grad_avg /= 4.0f;
 
         bool gradient_stagnant = (recent_grad_avg < older_grad_avg * gradient_stagnation_thresh);
-        float fitness_sigmoid = 1.0f / (1.0f + expf(-fitness_threshold_steepness * (fitness - fitness_threshold_center * fitness_multiplier)));
+        float fitness_sigmoid = activation_sigmoid(fitness_threshold_steepness * (fitness - fitness_threshold_center * fitness_multiplier));
         bool fitness_plateaued = (fitness_sigmoid < 0.5f);
         bool learning_stopped = (coherence < coherence_stressed);
 
@@ -246,7 +246,7 @@ extern "C" __global__ void lifecycle_transition_kernel(
         int archive_threshold_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_archive_threshold_steepness");
         float archive_threshold_center = genome_to_param(entry_genome, entry->gradients, archive_threshold_center_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_THRESHOLD_CENTER_MIN, LIFECYCLE_FITNESS_THRESHOLD_CENTER_MAX);
         float archive_threshold_steepness = genome_to_param(entry_genome, entry->gradients, archive_threshold_steepness_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_FITNESS_THRESHOLD_STEEPNESS_MAX);
-        float archive_prob = 1.0f / (1.0f + expf(-archive_threshold_steepness * (entry->fitness - archive_threshold_center)));
+        float archive_prob = activation_sigmoid(archive_threshold_steepness * (entry->fitness - archive_threshold_center));
 
         if (archive_prob > 0.5f && archive_size < MAX_ARCHIVE_SIZE) {
             entry->alive = false;
@@ -430,14 +430,14 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     float elite_fitness_inherit = genome_to_param(block_genome, block_gradients, elite_fitness_inherit_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_FITNESS_INHERIT_MIN, LIFECYCLE_ELITE_FITNESS_INHERIT_MAX);
     float elite_coherence_reset = genome_to_param(block_genome, block_gradients, elite_coherence_reset_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_ELITE_COHERENCE_RESET_MIN, LIFECYCLE_ELITE_COHERENCE_RESET_MAX);
 
-    float boost_prob = 1.0f / (1.0f + expf(-boost_threshold_steepness * (block_avg_fitness - boost_threshold_center)));
+    float boost_prob = activation_sigmoid(boost_threshold_steepness * (block_avg_fitness - boost_threshold_center));
     if (valid && boost_prob > 0.5f) {
         if (my_fitness < block_avg_fitness * 0.5f) {
             entry->coherence = fminf(1.0f, my_coherence + 0.1f);
         }
     }
 
-    float crisis_fitness_prob = 1.0f / (1.0f + expf(-crisis_threshold_steepness * (block_avg_fitness - crisis_threshold_center * crisis_fitness_mult)));
+    float crisis_fitness_prob = activation_sigmoid(crisis_threshold_steepness * (block_avg_fitness - crisis_threshold_center * crisis_fitness_mult));
     __shared__ bool block_in_crisis;
     if (tid == 0) {
         block_in_crisis = (crisis_fitness_prob < 0.5f) ||

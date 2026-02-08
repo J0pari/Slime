@@ -40,16 +40,16 @@ struct PoolInitParams {
         int diversity_min_slot = derive_param_slot(genome_hash, "diversity_normalization_min");
         int diversity_max_slot = derive_param_slot(genome_hash, "diversity_normalization_max");
 
-        float hunger_min = (genome[hunger_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float hunger_max_raw = (genome[hunger_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float hunger_min = genome_slot_to_unit(genome, hunger_min_slot);
+        float hunger_max_raw = genome_slot_to_unit(genome, hunger_max_slot);
         float hunger_max = hunger_min + hunger_max_raw * (NORMALIZED_MAX - hunger_min);
 
-        float mutation_min = (genome[mutation_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float mutation_max_raw = (genome[mutation_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float mutation_min = genome_slot_to_unit(genome, mutation_min_slot);
+        float mutation_max_raw = genome_slot_to_unit(genome, mutation_max_slot);
         float mutation_max = mutation_min + mutation_max_raw * (NORMALIZED_MAX - mutation_min);
 
-        float diversity_min = (genome[diversity_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float diversity_max_raw = (genome[diversity_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float diversity_min = genome_slot_to_unit(genome, diversity_min_slot);
+        float diversity_max_raw = genome_slot_to_unit(genome, diversity_max_slot);
         float diversity_max = diversity_min + diversity_max_raw * (NORMALIZED_MAX - diversity_min);
 
         initial_hunger = genome_to_bootstrap_param(genome, epigenetic, hunger_slot, hunger_min, hunger_max);
@@ -248,8 +248,8 @@ struct TrainingParams {
     }
 
     __device__ __forceinline__ float get_adam_epsilon(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {
-        float eps_min = (genome[adam_epsilon_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float eps_max_raw = (genome[adam_epsilon_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float eps_min = genome_slot_to_unit(genome, adam_epsilon_min_slot);
+        float eps_max_raw = genome_slot_to_unit(genome, adam_epsilon_max_slot);
         float eps_max = eps_min + eps_max_raw * (NORMALIZED_MAX - eps_min);
         return genome_to_param(genome, gradients, adam_epsilon_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, eps_min, eps_max);
     }
@@ -263,8 +263,8 @@ struct TrainingParams {
     }
 
     __device__ __forceinline__ int get_batch_size(const float* genome, const float* gradients) {
-        float bs_min = (genome[batch_size_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float bs_max_raw = (genome[batch_size_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float bs_min = genome_slot_to_unit(genome, batch_size_min_slot);
+        float bs_max_raw = genome_slot_to_unit(genome, batch_size_max_slot);
         float bs_max = bs_min + bs_max_raw * (NORMALIZED_MAX - bs_min);
         float batch_size_norm = genome_to_bootstrap_param(genome, gradients, batch_size_slot, bs_min, bs_max);
         return BATCH_SIZE_MIN + (int)(batch_size_norm * (BATCH_SIZE_MAX - BATCH_SIZE_MIN));

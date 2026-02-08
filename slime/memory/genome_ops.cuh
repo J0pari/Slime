@@ -133,7 +133,7 @@ __device__ __forceinline__ float genome_to_bootstrap_param(
 
     int epi_slot = (primary_slot * 0x9e3779b9 + 0x7f4a7c15) % GENOME_SIZE;
     DEVICE_VALIDATE_GENOME_SLOT(epi_slot);
-    float epigenetic_sensitivity = (genome[epi_slot] + 1.0f) * 0.5f;
+    float epigenetic_sensitivity = genome_slot_to_unit(genome, epi_slot);
 
     int epi_bounds_slot = (primary_slot * 0x3c9f82a5 + 0x1ce4e5b9) % GENOME_SIZE;
     DEVICE_VALIDATE_GENOME_SLOT(epi_bounds_slot);
@@ -185,16 +185,16 @@ struct InitContext {
         int morphogen_min_slot = derive_param_slot(genome_hash, "init_context_morphogen_min");
         int morphogen_max_slot = derive_param_slot(genome_hash, "init_context_morphogen_max");
 
-        float metabolic_min = (genome[metabolic_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float metabolic_max_raw = (genome[metabolic_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float metabolic_min = genome_slot_to_unit(genome, metabolic_min_slot);
+        float metabolic_max_raw = genome_slot_to_unit(genome, metabolic_max_slot);
         float metabolic_max = metabolic_min + metabolic_max_raw * (NORMALIZED_MAX - metabolic_min);
 
-        float stress_min = (genome[stress_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float stress_max_raw = (genome[stress_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float stress_min = genome_slot_to_unit(genome, stress_min_slot);
+        float stress_max_raw = genome_slot_to_unit(genome, stress_max_slot);
         float stress_max = stress_min + stress_max_raw * (NORMALIZED_MAX - stress_min);
 
-        float morphogen_min = (genome[morphogen_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float morphogen_max_raw = (genome[morphogen_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float morphogen_min = genome_slot_to_unit(genome, morphogen_min_slot);
+        float morphogen_max_raw = genome_slot_to_unit(genome, morphogen_max_slot);
         float morphogen_max = morphogen_min + morphogen_max_raw * (NORMALIZED_MAX - morphogen_min);
 
         metabolic = genome_to_bootstrap_param(genome, epigenetic, ctx_metabolic_slot, metabolic_min, metabolic_max);
@@ -220,16 +220,16 @@ struct BehavioralDimensions {
         int gen_min_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_min");
         int gen_max_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_max");
 
-        float hw_min = (genome[hw_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float hw_max_raw = (genome[hw_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float hw_min = genome_slot_to_unit(genome, hw_min_slot);
+        float hw_max_raw = genome_slot_to_unit(genome, hw_max_slot);
         float hw_max = hw_min + hw_max_raw * (NORMALIZED_MAX - hw_min);
 
-        float task_min = (genome[task_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float task_max_raw = (genome[task_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float task_min = genome_slot_to_unit(genome, task_min_slot);
+        float task_max_raw = genome_slot_to_unit(genome, task_max_slot);
         float task_max = task_min + task_max_raw * (NORMALIZED_MAX - task_min);
 
-        float gen_min = (genome[gen_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float gen_max_raw = (genome[gen_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float gen_min = genome_slot_to_unit(genome, gen_min_slot);
+        float gen_max_raw = genome_slot_to_unit(genome, gen_max_slot);
         float gen_max = gen_min + gen_max_raw * (NORMALIZED_MAX - gen_min);
 
         float hw_norm = genome_to_bootstrap_param(genome, epigenetic, hw_dim_slot, hw_min, hw_max);
@@ -270,7 +270,7 @@ __device__ __forceinline__ float genome_to_param_impl(
 
 
     int epi_slot = (primary_slot * 0x9e3779b9 + 0x7f4a7c15) % GENOME_SIZE;
-    float epigenetic_sensitivity = (genome[epi_slot] + 1.0f) * 0.5f;
+    float epigenetic_sensitivity = genome_slot_to_unit(genome, epi_slot);
 
 
     int epi_bounds_slot = (primary_slot * 0x3c9f82a5 + 0x1ce4e5b9) % GENOME_SIZE;

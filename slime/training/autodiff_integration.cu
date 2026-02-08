@@ -183,7 +183,7 @@ __global__ void multi_head_ca_with_tape_kernel(
                 }
             }
         }
-        perception[h] = fmaxf(0.0f, acc);
+        perception[h] = activation_relu(acc);
         perception_saved[saved_base + h] = perception[h];
     }
 
@@ -208,7 +208,7 @@ __global__ void multi_head_ca_with_tape_kernel(
         output[c] = acc;
     }
 
-    float gate = 1.0f / (1.0f + expf(-(interaction_sum / (float)arch.head_dim - arch.ca_gate_center)));
+    float gate = activation_sigmoid(interaction_sum / (float)arch.head_dim - arch.ca_gate_center);
 
     int out_idx = batch_id * arch.num_heads * cells_per_grid * arch.channels +
                   head_id * cells_per_grid * arch.channels +

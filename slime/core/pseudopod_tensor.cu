@@ -230,14 +230,14 @@ __global__ void pipelined_ca_kernel(
     for (int i = 0; i < arch.channels; i++) {
         perc_accum += input_tile[threadIdx.x] * __half2float(perc_w[i]);
     }
-    perception_out[threadIdx.x] = fmaxf(0.0f, perc_accum);
+    perception_out[threadIdx.x] = activation_relu(perc_accum);
     __syncthreads();
 
     float inter_accum = 0.0f;
     for (int i = 0; i < arch.head_dim; i++) {
         inter_accum += perception_out[threadIdx.x] * __half2float(inter_w[i]);
     }
-    interaction_out[threadIdx.x] = fmaxf(0.0f, inter_accum);
+    interaction_out[threadIdx.x] = activation_relu(inter_accum);
     __syncthreads();
 
     float value_accum = 0.0f;

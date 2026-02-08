@@ -21,7 +21,7 @@ __device__ void compute_genome_deltas(
     uint64_t child_genome_hash
 ) {
     int threshold_slot = derive_param_slot(child_genome_hash, "delta_threshold");
-    float delta_threshold = (child_genome[threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+    float delta_threshold = genome_slot_to_unit(child_genome, threshold_slot) * DELTA_THRESHOLD_BASE_MAX;
 
     for (int j = 0; j < GENOME_SIZE; j++) {
         float diff = child_genome[j] - parent_genome[j];
@@ -40,7 +40,7 @@ __global__ void compute_delta_kernel(float* child_genome, float* parent_genome, 
     if (tid >= genome_length) return;
 
     int threshold_slot = derive_param_slot(child_genome_hash, "delta_threshold");
-    float delta_threshold = (child_genome[threshold_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * 0.01f;
+    float delta_threshold = genome_slot_to_unit(child_genome, threshold_slot) * DELTA_THRESHOLD_BASE_MAX;
 
     float diff = child_genome[tid] - parent_genome[tid];
     if (fabsf(diff) > delta_threshold) {

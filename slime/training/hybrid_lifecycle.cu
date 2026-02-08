@@ -450,7 +450,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                             }
                         }
                     }
-                    perception[h] = fmaxf(0.0f, acc);
+                    perception[h] = activation_relu(acc);
                 }
                 if (tid == 0 && work_idx == 0) printf("V:CA_PERC_DONE blk=%d\n", blockIdx.x);
 
@@ -479,7 +479,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 if (tid == 0 && work_idx == 0) printf("V:CA_VAL_DONE blk=%d\n", blockIdx.x);
 
-                float gate = 1.0f / (1.0f + expf(-(interaction_sum / (float)head_dim - arch.ca_gate_center)));
+                float gate = activation_sigmoid(interaction_sum / (float)head_dim - arch.ca_gate_center);
 
                 int saved_base = batch_id * num_heads * cells_per_grid * head_dim +
                                 head_id * cells_per_grid * head_dim +
@@ -1157,15 +1157,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int src_idx = batch_id * I_batch_stride + head_id * I_head_stride + within_batch;
                     int dst_idx = head_id * ws_dpregelu_stride + remainder;
 
-                    float x = pre_gelu_saved[src_idx];
-                    float x2 = x * x, x3 = x2 * x;
-                    float inner = GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x3);
-                    float tanh_inner = tanhf(inner);
-                    float sech2 = 1.0f - tanh_inner * tanh_inner;
-                    float d_inner = GELU_SQRT_2_OVER_PI * (1.0f + 3.0f * GELU_CUBIC_COEFFICIENT * x2);
-
-                    ws_dpregelu[dst_idx] = dL_dinteraction[src_idx] * GELU_SCALE *
-                        ((GELU_OFFSET + tanh_inner) + x * sech2 * d_inner);
+                    ws_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu_saved[src_idx], dL_dinteraction[src_idx]);
                 }
             }
             __syncthreads();

@@ -175,8 +175,7 @@ int main() {
         printf("[H-ERR] cudaHostGetDevicePointer audit buffer failed: %s\n", cudaGetErrorString(err));
         return 1;
     }
-    memset(h_audit, 0, sizeof(AuditBuffer));
-    h_audit->flow_lenia_mass_conservation_error = -1.0f;
+    audit_buffer_init_sentinel(h_audit);
     printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
            (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
 
@@ -397,54 +396,72 @@ int main() {
         return 1;
     }
 
+    AuditBufferReader reader;
+    reader.init(h_audit);
+
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
 
     while (true) {
-        std::atomic_thread_fence(std::memory_order_acquire);
+        AuditEntry entry;
+        RecordHeader hdr;
 
-        if (h_audit->ready) {
-            int gen = h_audit->generation;
+        while (reader.read_next(&entry, &hdr)) {
+            auto now_time = std::chrono::steady_clock::now();
+            double elapsed_sec = std::chrono::duration<double>(now_time - start_time).count();
+
+            if (!audit_entry_field_valid(&entry, AUDIT_MASK_GENERATION)) {
+                fprintf(stderr, "E_NOGEN seq=%llu\n", (unsigned long long)hdr.sequence_number);
+                continue;
+            }
+
+            int gen = entry.generation;
+
+            if (write_state_json(state_json_file, elapsed_sec, &entry) != 0) {
+                fprintf(stderr, "E_JSON gen=%d\n", gen);
+            }
+
             if (gen != last_gen) {
                 last_gen = gen;
 
-                auto now_time = std::chrono::steady_clock::now();
-                double elapsed_sec = std::chrono::duration<double>(now_time - start_time).count();
+                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d seq=%llu (%.1fs)\n",
+                       gen, entry.batch_size, entry.accuracy, entry.loss,
+                       entry.correct_count, entry.batch_size,
+                       (unsigned long long)hdr.sequence_number, elapsed_sec);
 
-                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d (%.1fs)\n",
-                       gen, h_audit->batch_size, h_audit->accuracy, h_audit->loss,
-                       h_audit->correct_count, h_audit->batch_size, elapsed_sec);
-
-                if (write_sample_images(session_dir, gen, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_sample_images failed\n");
+                if (write_sample_images(session_dir, gen, &entry) != 0) {
+                    fprintf(stderr, "E_SAMPLES gen=%d\n", gen);
                 }
 
                 char ca_path[256];
                 snprintf(ca_path, sizeof(ca_path), "%s/ca_states/gen%04d.pgm", session_dir, gen);
-                if (write_ca_snapshot(ca_path, gen, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_ca_snapshot failed\n");
+                if (write_ca_snapshot(ca_path, gen, &entry) != 0) {
+                    fprintf(stderr, "E_CA gen=%d\n", gen);
                 }
 
                 char predictions_path[256];
                 snprintf(predictions_path, sizeof(predictions_path), "%s/predictions_gen%04d.csv", session_dir, gen);
-                if (write_predictions_csv(predictions_path, gen, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_predictions_csv failed\n");
+                if (write_predictions_csv(predictions_path, gen, &entry) != 0) {
+                    fprintf(stderr, "E_PRED gen=%d\n", gen);
                 }
 
-                if (write_generation_summary(session_dir, gen, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_generation_summary failed\n");
+                if (write_generation_summary(session_dir, gen, &entry) != 0) {
+                    fprintf(stderr, "E_SUMMARY gen=%d\n", gen);
                 }
 
-                if (write_pool_state(session_dir, gen, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_pool_state failed\n");
-                }
-
-                if (write_state_json(state_json_file, elapsed_sec, h_audit) != 0) {
-                    fprintf(stderr, "FATAL: write_state_json failed\n");
+                if (write_pool_state(session_dir, gen, &entry) != 0) {
+                    fprintf(stderr, "E_POOL gen=%d\n", gen);
                 }
 
                 append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);
             }
+        }
+
+        uint64_t dropped = reader.get_dropped_count();
+        uint64_t corrupted = reader.get_corrupted_count();
+        if (dropped > 0 || corrupted > 0) {
+            fprintf(stderr, "E_RING dropped=%llu corrupted=%llu\n",
+                    (unsigned long long)dropped, (unsigned long long)corrupted);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

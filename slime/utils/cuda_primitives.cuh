@@ -100,6 +100,19 @@ __device__ __forceinline__ float activation_gelu(float x) {
     return GELU_SCALE * x * (GELU_OFFSET + tanhf(GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x * x * x)));
 }
 
+__device__ __forceinline__ float activation_sigmoid(float x) {
+    return SIGMOID_SCALE / (SIGMOID_SCALE + expf(-x));
+}
+
+__device__ __forceinline__ float activation_gelu_backward(float x, float dL_dy) {
+    float x2 = x * x, x3 = x2 * x;
+    float inner = GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x3);
+    float tanh_inner = tanhf(inner);
+    float sech2 = GELU_OFFSET - tanh_inner * tanh_inner;
+    float d_inner = GELU_SQRT_2_OVER_PI * (GELU_OFFSET + GELU_BACKWARD_X2_COEFF * GELU_CUBIC_COEFFICIENT * x2);
+    return dL_dy * GELU_SCALE * ((GELU_OFFSET + tanh_inner) + x * sech2 * d_inner);
+}
+
 __device__ __forceinline__ float genome_slot_to_unit(const float* genome, int slot) {
     return (genome[slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
 }
@@ -1361,15 +1374,7 @@ __global__ void batched_gelu_backward_kernel(
     int src_idx = head_id * src_head_stride + local_idx;
     int dst_idx = head_id * dst_head_stride + local_idx;
 
-    float x = pre_gelu[src_idx];
-    float x2 = x * x, x3 = x2 * x;
-    float inner = GELU_SQRT_2_OVER_PI * (x + GELU_CUBIC_COEFFICIENT * x3);
-    float tanh_inner = tanhf(inner);
-    float sech2 = 1.0f - tanh_inner * tanh_inner;
-    float d_inner = GELU_SQRT_2_OVER_PI * (1.0f + 3.0f * GELU_CUBIC_COEFFICIENT * x2);
-
-    dL_dpregelu[dst_idx] = dL_dI[src_idx] * GELU_SCALE *
-        ((GELU_OFFSET + tanh_inner) + x * sech2 * d_inner);
+    dL_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu[src_idx], dL_dI[src_idx]);
 }
 
 __global__ void batched_relu_backward_kernel(

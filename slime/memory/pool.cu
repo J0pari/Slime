@@ -171,24 +171,24 @@ __device__ __forceinline__ void derive_fitness_exponents(uint64_t genome_hash, c
     int renyi_min_slot = derive_param_slot(genome_hash, "rank_renyi_order_min");
     int renyi_max_slot = derive_param_slot(genome_hash, "rank_renyi_order_max");
 
-    float rank_min = (genome[rank_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float rank_max = rank_min + (genome[rank_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - rank_min);
-    float coh_min = (genome[coh_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float coh_max = coh_min + (genome[coh_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - coh_min);
-    float coupling_min = (genome[coupling_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float coupling_max = coupling_min + (genome[coupling_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - coupling_min);
-    float task_min = (genome[task_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float task_max = task_min + (genome[task_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - task_min);
-    float gen_min = (genome[gen_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float gen_max = gen_min + (genome[gen_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - gen_min);
-    float eff_min = (genome[eff_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float eff_max = eff_min + (genome[eff_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - eff_min);
-    float baldwin_min = (genome[baldwin_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float baldwin_max = baldwin_min + (genome[baldwin_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - baldwin_min);
-    float window_min = (genome[window_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float window_max = window_min + (genome[window_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - window_min);
-    float renyi_min = (genome[renyi_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-    float renyi_max = renyi_min + (genome[renyi_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - renyi_min);
+    float rank_min = genome_slot_to_unit(genome, rank_min_slot);
+    float rank_max = rank_min + genome_slot_to_unit(genome, rank_max_slot) * (NORMALIZED_MAX - rank_min);
+    float coh_min = genome_slot_to_unit(genome, coh_min_slot);
+    float coh_max = coh_min + genome_slot_to_unit(genome, coh_max_slot) * (NORMALIZED_MAX - coh_min);
+    float coupling_min = genome_slot_to_unit(genome, coupling_min_slot);
+    float coupling_max = coupling_min + genome_slot_to_unit(genome, coupling_max_slot) * (NORMALIZED_MAX - coupling_min);
+    float task_min = genome_slot_to_unit(genome, task_min_slot);
+    float task_max = task_min + genome_slot_to_unit(genome, task_max_slot) * (NORMALIZED_MAX - task_min);
+    float gen_min = genome_slot_to_unit(genome, gen_min_slot);
+    float gen_max = gen_min + genome_slot_to_unit(genome, gen_max_slot) * (NORMALIZED_MAX - gen_min);
+    float eff_min = genome_slot_to_unit(genome, eff_min_slot);
+    float eff_max = eff_min + genome_slot_to_unit(genome, eff_max_slot) * (NORMALIZED_MAX - eff_min);
+    float baldwin_min = genome_slot_to_unit(genome, baldwin_min_slot);
+    float baldwin_max = baldwin_min + genome_slot_to_unit(genome, baldwin_max_slot) * (NORMALIZED_MAX - baldwin_min);
+    float window_min = genome_slot_to_unit(genome, window_min_slot);
+    float window_max = window_min + genome_slot_to_unit(genome, window_max_slot) * (NORMALIZED_MAX - window_min);
+    float renyi_min = genome_slot_to_unit(genome, renyi_min_slot);
+    float renyi_max = renyi_min + genome_slot_to_unit(genome, renyi_max_slot) * (NORMALIZED_MAX - renyi_min);
 
     float rank_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, rank_exp_slot, rank_min, rank_max);
     float coh_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, coh_exp_slot, coh_min, coh_max);
@@ -372,7 +372,7 @@ __device__ void spawn_component_device(
         LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
     float inherit_steepness = genome_to_bootstrap_param(parent_genome, parent->gradients, inherit_steep_slot,
         LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
-    inheritance_factor = 1.0f / (1.0f + expf(-inherit_steepness * (parent->fitness - inherit_center)));
+    inheritance_factor = activation_sigmoid(inherit_steepness * (parent->fitness - inherit_center));
 
     for (int j = 0; j < GENOME_SIZE; j++) {
         pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
@@ -815,10 +815,10 @@ __global__ void compute_pool_stats_kernel(
 
         float* entry_gradients = pool->entries[idx].gradients;
 
-        float samples_min = (temp_genome[samples_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float samples_max = samples_min + (temp_genome[samples_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - samples_min);
-        float samples_base = (temp_genome[samples_base_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float samples_range = (temp_genome[samples_range_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
+        float samples_min = genome_slot_to_unit(temp_genome, samples_min_slot);
+        float samples_max = samples_min + genome_slot_to_unit(temp_genome, samples_max_slot) * (NORMALIZED_MAX - samples_min);
+        float samples_base = genome_slot_to_unit(temp_genome, samples_base_slot);
+        float samples_range = genome_slot_to_unit(temp_genome, samples_range_slot);
         int base_samples = (int)(samples_base * POOL_CAPACITY_MAX);
         int range_samples = (int)(samples_range * POOL_CAPACITY_MAX);
         int diversity_sample_count = base_samples + (int)(genome_to_bootstrap_param(temp_genome, entry_gradients, diversity_samples_slot, samples_min, samples_max) * range_samples);
@@ -836,12 +836,12 @@ __global__ void compute_pool_stats_kernel(
             }
         }
 
-        float hunger_min = (temp_genome[hunger_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float hunger_max = hunger_min + (temp_genome[hunger_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - hunger_min);
-        float mutation_min = (temp_genome[mutation_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float mutation_max = mutation_min + (temp_genome[mutation_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - mutation_min);
-        float diversity_min = (temp_genome[diversity_min_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE;
-        float diversity_max = diversity_min + (temp_genome[diversity_max_slot] + GENOME_TO_UNIT_OFFSET) * GENOME_TO_UNIT_SCALE * (NORMALIZED_MAX - diversity_min);
+        float hunger_min = genome_slot_to_unit(temp_genome, hunger_min_slot);
+        float hunger_max = hunger_min + genome_slot_to_unit(temp_genome, hunger_max_slot) * (NORMALIZED_MAX - hunger_min);
+        float mutation_min = genome_slot_to_unit(temp_genome, mutation_min_slot);
+        float mutation_max = mutation_min + genome_slot_to_unit(temp_genome, mutation_max_slot) * (NORMALIZED_MAX - mutation_min);
+        float diversity_min = genome_slot_to_unit(temp_genome, diversity_min_slot);
+        float diversity_max = diversity_min + genome_slot_to_unit(temp_genome, diversity_max_slot) * (NORMALIZED_MAX - diversity_min);
 
         params.initial_hunger = genome_to_bootstrap_param(temp_genome, entry_gradients, hunger_slot, hunger_min, hunger_max);
         params.mutation_scale = genome_to_bootstrap_param(temp_genome, entry_gradients, mutation_slot, mutation_min, mutation_max);

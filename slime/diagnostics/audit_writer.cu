@@ -2,12 +2,13 @@
 #define AUDIT_WRITER_CU
 
 #include "../config/config.cu"
+#include "../debug/provenance.cuh"
 extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 
-int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
+int write_sample_images(const char* session_dir, int gen, AuditEntry* audit) {
     int img_size = audit->grid_size * audit->grid_size;
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
         char png_path[256];
@@ -20,7 +21,7 @@ int write_sample_images(const char* session_dir, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
+int write_ca_snapshot(const char* path, int gen, AuditEntry* audit) {
     int ca_size = audit->grid_size * audit->grid_size;
     unsigned char* pixels = (unsigned char*)malloc(ca_size);
     if (!pixels) {
@@ -50,7 +51,7 @@ int write_ca_snapshot(const char* path, int gen, AuditBuffer* audit) {
     return 0;
 }
 
-int write_predictions_csv(const char* path, int gen, AuditBuffer* audit) {
+int write_predictions_csv(const char* path, int gen, AuditEntry* audit) {
     FILE* f = fopen(path, "w");
     if (!f) {
         fprintf(stderr, "FATAL: Cannot create predictions %s\n", path);
@@ -94,7 +95,7 @@ void append_to_manifest(const char* manifest_path, const char* predictions_path,
     }
 }
 
-int write_generation_summary(const char* session_dir, int gen, AuditBuffer* audit) {
+int write_generation_summary(const char* session_dir, int gen, AuditEntry* audit) {
     char path[256];
     snprintf(path, sizeof(path), "%s/metrics.csv", session_dir);
 
@@ -147,7 +148,7 @@ int write_generation_summary(const char* session_dir, int gen, AuditBuffer* audi
     return 0;
 }
 
-int write_pool_state(const char* session_dir, int gen, AuditBuffer* audit) {
+int write_pool_state(const char* session_dir, int gen, AuditEntry* audit) {
     if (!audit) return 1;
 
     char path[256];
@@ -220,10 +221,28 @@ int write_chemical_field(const char* session_dir, int gen, float* concentration,
     return 0;
 }
 
-int write_state_json(FILE* json_file, double elapsed_time, AuditBuffer* audit) {
+int write_state_json(FILE* json_file, double elapsed_time, AuditEntry* audit) {
     if (!json_file || !audit) return 1;
 
-    fprintf(json_file, "{\"gen\":%d,\"elapsed\":%.2f,", audit->generation, elapsed_time);
+    if (audit->provenance_source == PROVENANCE_SOURCE_NONE) {
+        return 0;
+    }
+
+    if (host_is_uninitialized_int(audit->generation)) {
+        fprintf(stderr, "E_UNINIT audit.generation\n");
+        return 1;
+    }
+
+    if (!(audit->fields_written_mask & AUDIT_MASK_POOL)) {
+        fprintf(stderr, "E_NOPROV audit.pool m=0x%x\n", audit->fields_written_mask);
+        return 1;
+    }
+
+    HOST_ASSERT_INITIALIZED_INT(audit->pool_alive_count, "pool_alive_count");
+    HOST_ASSERT_INITIALIZED_INT(audit->pool_capacity, "pool_capacity");
+
+    fprintf(json_file, "{\"gen\":%d,\"elapsed\":%.2f,\"seq\":%llu,",
+            audit->generation, elapsed_time, (unsigned long long)audit->sequence_number);
 
     fprintf(json_file, "\"chemical\":{\"concentration\":[");
     for (int i = 0; i < STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE; i++) {

@@ -176,7 +176,7 @@ __device__ int ad_cos(ADTape* tape, int x_idx) {
 
 __device__ int ad_relu(ADTape* tape, int x_idx) {
     float x = tape->value_buffer[x_idx];
-    float result = fmaxf(0.0f, x);
+    float result = activation_relu(x);
     return tape_record_unary(tape, OP_RELU, x_idx, result, x);
 }
 

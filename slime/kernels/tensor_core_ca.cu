@@ -80,7 +80,7 @@ __global__ void relu_kernel(
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        data[idx] = fmaxf(0.0f, data[idx]);
+        data[idx] = activation_relu(data[idx]);
     }
 }
 
@@ -91,7 +91,7 @@ __global__ void gelu_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float x = data[idx];
-        data[idx] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
+        data[idx] = activation_gelu(x);
     }
 }
 
@@ -221,7 +221,7 @@ __global__ void multi_head_ca_tensor_kernel(
     __syncthreads();
 
     for (int i = tid; i < perception_size; i += block_threads) {
-        fp32_workspace[output_offset + i] = fmaxf(0.0f, fp32_workspace[output_offset + i]);
+        fp32_workspace[output_offset + i] = activation_relu(fp32_workspace[output_offset + i]);
     }
     __syncthreads();
 
@@ -247,7 +247,7 @@ __global__ void multi_head_ca_tensor_kernel(
 
     for (int i = tid; i < perception_size; i += block_threads) {
         float x = interaction_output[i];
-        interaction_output[i] = 0.5f * x * (1.0f + tanhf(0.7978845f * (x + 0.044715f * x * x * x)));
+        interaction_output[i] = activation_gelu(x);
     }
     __syncthreads();
 
