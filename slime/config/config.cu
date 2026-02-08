@@ -571,10 +571,33 @@ constexpr float LIFECYCLE_CRISIS_THRESHOLD_CENTER_MAX = 0.6f;
 constexpr float LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MIN = 5.0f;
 constexpr float LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MAX = 20.0f;
 
+// Stress fitness penalty - multiplier applied when organism is stressed
+constexpr float LIFECYCLE_STRESS_FITNESS_PENALTY_MIN = 0.85f;
+constexpr float LIFECYCLE_STRESS_FITNESS_PENALTY_MAX = 0.99f;
 
+// Sigmoid decision thresholds - genome controls where sigmoid outputs trigger actions
+constexpr float LIFECYCLE_SIGMOID_THRESHOLD_MIN = 0.3f;
+constexpr float LIFECYCLE_SIGMOID_THRESHOLD_MAX = 0.7f;
 
+// Density comparison multiplier for sparse neighbor detection
+constexpr float LIFECYCLE_DENSITY_MULTIPLIER_MIN = 0.5f;
+constexpr float LIFECYCLE_DENSITY_MULTIPLIER_MAX = 0.9f;
 
+// Fitness ratio threshold for boost eligibility
+constexpr float LIFECYCLE_BOOST_FITNESS_RATIO_MIN = 0.3f;
+constexpr float LIFECYCLE_BOOST_FITNESS_RATIO_MAX = 0.7f;
 
+// Coherence boost amount when organism is below avg in high-performing block
+constexpr float LIFECYCLE_COHERENCE_BOOST_MIN = 0.05f;
+constexpr float LIFECYCLE_COHERENCE_BOOST_MAX = 0.2f;
+
+// Crisis detection: minimum fraction of block that must be active
+constexpr float LIFECYCLE_CRISIS_ACTIVE_RATIO_MIN = 0.15f;
+constexpr float LIFECYCLE_CRISIS_ACTIVE_RATIO_MAX = 0.4f;
+
+// EMA smoothing factor for accuracy tracking (higher = more weight to history)
+constexpr float EMA_SMOOTHING_MIN = 0.7f;
+constexpr float EMA_SMOOTHING_MAX = 0.95f;
 
 constexpr int MIN_DENSITY_INIT = MAX_ARCHIVE_SIZE * 100 - 1;
 
@@ -737,6 +760,14 @@ constexpr float ADAM_BETA1_MIN = 0.85f;
 constexpr float ADAM_BETA1_MAX = 0.95f;
 constexpr float ADAM_BETA2_MIN = 0.99f;
 constexpr float ADAM_BETA2_MAX = 0.9999f;
+constexpr float ADAM_EPSILON_MIN = 1e-8f;
+constexpr float ADAM_EPSILON_MAX = 1e-6f;
+constexpr float INITIAL_HUNGER_MIN = 0.0f;
+constexpr float INITIAL_HUNGER_MAX = 1.0f;
+constexpr float GENOME_MUTATION_SCALE_MIN = 0.001f;
+constexpr float GENOME_MUTATION_SCALE_MAX = 0.1f;
+constexpr float DIVERSITY_NORMALIZATION_MIN = 0.1f;
+constexpr float DIVERSITY_NORMALIZATION_MAX = 10.0f;
 constexpr float GRADIENT_CLIP_MIN = 0.1f;
 constexpr float GRADIENT_CLIP_MAX = 10.0f;
 constexpr float GRADIENT_FITNESS_WEIGHT_MIN = 0.0f;
@@ -823,7 +854,7 @@ constexpr int STATE_EXPORT_VORONOI_COUNT = 16;
 constexpr int STATE_EXPORT_ARCHIVE_COUNT = 16;
 constexpr int STATE_EXPORT_CHEM_SIZE = 16;
 
-struct AuditEntry {
+struct StateExportEntry {
     uint32_t provenance_source;
     uint32_t fields_written_mask;
     uint64_t sequence_number;
@@ -986,7 +1017,7 @@ constexpr uint32_t AUDIT_MASK_SAMPLES = (1 << 10);
 constexpr uint32_t AUDIT_MASK_CA_SNAPSHOT = (1 << 11);
 constexpr uint32_t AUDIT_MASK_STATE_EXPORT = (1 << 12);
 
-__host__ __forceinline__ void audit_entry_init_sentinel(AuditEntry* buf) {
+__host__ __forceinline__ void state_export_init_sentinel(StateExportEntry* buf) {
     buf->provenance_source = PROVENANCE_SOURCE_NONE;
     buf->fields_written_mask = 0;
     buf->sequence_number = 0;
@@ -1108,12 +1139,12 @@ __host__ __forceinline__ void audit_entry_init_sentinel(AuditEntry* buf) {
     }
 }
 
-__host__ __forceinline__ bool audit_entry_field_valid(const AuditEntry* buf, uint32_t mask) {
+__host__ __forceinline__ bool state_export_field_valid(const StateExportEntry* buf, uint32_t mask) {
     return (buf->fields_written_mask & mask) == mask;
 }
 
-__host__ __forceinline__ void audit_payload_refuse_invalid(const AuditEntry* buf, uint32_t mask, const char* name) {
-    if (!audit_entry_field_valid(buf, mask)) {
+__host__ __forceinline__ void state_export_refuse_invalid(const StateExportEntry* buf, uint32_t mask, const char* name) {
+    if (!state_export_field_valid(buf, mask)) {
         fprintf(stderr, "E_AUDIT %s m=0x%x have=0x%x\n", name, mask, buf->fields_written_mask);
         abort();
     }
@@ -1121,10 +1152,10 @@ __host__ __forceinline__ void audit_payload_refuse_invalid(const AuditEntry* buf
 
 constexpr uint32_t AUDIT_RING_SLOTS = 4;
 
-typedef RingBuffer<AuditEntry, AUDIT_RING_SLOTS> AuditBuffer;
-typedef HostRingBufferReader<AuditEntry, AUDIT_RING_SLOTS> AuditBufferReader;
+typedef RingBuffer<StateExportEntry, AUDIT_RING_SLOTS> StateExportBuffer;
+typedef HostRingBufferReader<StateExportEntry, AUDIT_RING_SLOTS> StateExportBufferReader;
 
-__host__ __forceinline__ void audit_buffer_init_sentinel(AuditBuffer* ring) {
+__host__ __forceinline__ void state_export_buffer_init_sentinel(StateExportBuffer* ring) {
     ring->write_sequence = 0;
     ring->read_sequence = 0;
     ring->dropped_count = 0;
@@ -1133,7 +1164,7 @@ __host__ __forceinline__ void audit_buffer_init_sentinel(AuditBuffer* ring) {
         ring->slots[i].committed = 0;
         ring->slots[i].header.sequence_number = 0;
         ring->slots[i].header.checksum_valid = 0;
-        audit_entry_init_sentinel(&ring->slots[i].payload);
+        state_export_init_sentinel(&ring->slots[i].payload);
     }
 }
 

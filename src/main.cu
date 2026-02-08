@@ -237,6 +237,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.archive_genome_hash, sizeof(uint64_t) * MAX_ARCHIVE_SIZE, "archive_genome_hash");
     CUDA_ALLOC_CHECK(buffers_host.archive_parent_ids, sizeof(uint32_t) * MAX_ARCHIVE_SIZE * PARENT_COUNT, "archive_parent_ids");
     CUDA_ALLOC_CHECK(buffers_host.archive_generation, sizeof(uint16_t) * MAX_ARCHIVE_SIZE, "archive_generation");
+    CUDA_ALLOC_CHECK(buffers_host.archive_fitness_input_hash, sizeof(uint64_t) * MAX_ARCHIVE_SIZE, "archive_fitness_input_hash");
+    CUDA_ALLOC_CHECK(buffers_host.archive_fitness_computed_at_generation, sizeof(int) * MAX_ARCHIVE_SIZE, "archive_fitness_computed_at_generation");
     CUDA_ALLOC_CHECK(buffers_host.archive_hw_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_HW_MAX, "archive_hw_coords");
     CUDA_ALLOC_CHECK(buffers_host.archive_task_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_TASK_MAX, "archive_task_coords");
     CUDA_ALLOC_CHECK(buffers_host.archive_gen_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_GEN_MAX, "archive_gen_coords");

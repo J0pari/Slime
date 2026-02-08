@@ -63,6 +63,8 @@ struct OrganismPreallocatedBuffers {
     uint64_t* archive_genome_hash;
     uint32_t* archive_parent_ids;
     uint16_t* archive_generation;
+    uint64_t* archive_fitness_input_hash;
+    int* archive_fitness_computed_at_generation;
     float* archive_hw_coords;
     float* archive_task_coords;
     float* archive_gen_coords;
@@ -376,7 +378,7 @@ __global__ void selection_kernel(Organism* organism, ComponentPool* pool, GPUEli
 __global__ void archive_driven_lifecycle_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, float hunger_threshold, int generation, float* workspace_genomes, DIRESAWeights* diresa_genome_weights);
 __global__ void spawn_wave_kernel(Organism* organism, ComponentPool* pool, float spawn_probability, int generation, float* workspace_genomes);
 __global__ void culling_kernel(Organism* organism, ComponentPool* pool, GPUElite* archive, int archive_size, ChemicalField* chemical_field, ArchitectureParams arch, float fitness_threshold, float hunger_threshold);
-__global__ void compute_fitness_from_diresa_kernel(ComponentPool* pool);
+__global__ void compute_fitness_from_diresa_kernel(ComponentPool* pool, int generation);
 __global__ void store_navigation_history_kernel(Organism* organism, BehavioralState* agents, TemporalTube* tubes, int generation, int hw_dim, int task_dim, int gen_dim);
 
 __global__ void component_evolution_kernel(
@@ -448,30 +450,60 @@ __global__ void component_evolution_kernel(
     }
 }
 
+__device__ __forceinline__ uint64_t compute_fitness_input_hash(
+    float task_accuracy, float gen_gap_term, float effective_rank, float hardware_efficiency,
+    float task_exp, float gen_exp, float rank_exp, float eff_exp
+) {
+    uint64_t hash = 0x9e3779b97f4a7c15ULL;
+    hash ^= __float_as_uint(task_accuracy) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(gen_gap_term) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(effective_rank) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(hardware_efficiency) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(task_exp) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(gen_exp) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(rank_exp) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    hash ^= __float_as_uint(eff_exp) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+__device__ void compute_fitness(PoolEntry* entry, int generation) {
+    float task_accuracy = entry->task_accuracy.value;
+    float gen_gap_term = 1.0f - entry->generalization_gap.value;
+    float effective_rank = entry->effective_rank.value;
+    float hardware_efficiency = entry->hardware_efficiency.value;
+
+    DEVICE_FATAL_IF(isnan(task_accuracy), "compute_fitness: task_accuracy is NaN");
+    DEVICE_FATAL_IF(isnan(entry->generalization_gap.value), "compute_fitness: generalization_gap is NaN");
+    DEVICE_FATAL_IF(isnan(hardware_efficiency), "compute_fitness: hardware_efficiency is NaN");
+    DEVICE_FATAL_IF(isnan(effective_rank), "compute_fitness: effective_rank is NaN");
+    DEVICE_FATAL_IF(gen_gap_term <= 0.0f, "compute_fitness: gen_gap_term non-positive");
+    DEVICE_FATAL_IF(task_accuracy <= 0.0f, "compute_fitness: task_accuracy non-positive");
+    DEVICE_FATAL_IF(effective_rank <= 0.0f, "compute_fitness: effective_rank non-positive");
+    DEVICE_FATAL_IF(hardware_efficiency <= 0.0f, "compute_fitness: hardware_efficiency non-positive");
+
+    float fitness = powf(task_accuracy, entry->fitness_task_exponent)
+                  * powf(gen_gap_term, entry->fitness_gen_exponent)
+                  * powf(effective_rank, entry->fitness_rank_exponent)
+                  * powf(hardware_efficiency, entry->fitness_efficiency_exponent);
+
+    uint64_t input_hash = compute_fitness_input_hash(
+        task_accuracy, gen_gap_term, effective_rank, hardware_efficiency,
+        entry->fitness_task_exponent, entry->fitness_gen_exponent,
+        entry->fitness_rank_exponent, entry->fitness_efficiency_exponent
+    );
+
+    entry->fitness.set_computed(fitness, generation, input_hash);
+}
+
 __global__ void compute_fitness_from_diresa_kernel(
-    ComponentPool* pool
+    ComponentPool* pool,
+    int generation
 ) {
     int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (entry_idx >= pool->capacity || !pool->alive_flags[entry_idx]) return;
 
     PoolEntry* entry = &pool->entries[entry_idx];
-
-    float effective_rank = entry->effective_rank;
-    float gen_gap_term = 1.0f - entry->generalization_gap;
-
-    DEVICE_FATAL_IF(isnan(entry->task_accuracy), "compute_fitness: task_accuracy is NaN");
-    DEVICE_FATAL_IF(isnan(entry->generalization_gap), "compute_fitness: generalization_gap is NaN");
-    DEVICE_FATAL_IF(isnan(entry->hardware_efficiency), "compute_fitness: hardware_efficiency is NaN");
-    DEVICE_FATAL_IF(isnan(effective_rank), "compute_fitness: effective_rank is NaN");
-    DEVICE_FATAL_IF(gen_gap_term <= 0.0f, "compute_fitness: gen_gap_term non-positive");
-    DEVICE_FATAL_IF(entry->task_accuracy <= 0.0f, "compute_fitness: task_accuracy non-positive");
-    DEVICE_FATAL_IF(effective_rank <= 0.0f, "compute_fitness: effective_rank non-positive");
-    DEVICE_FATAL_IF(entry->hardware_efficiency <= 0.0f, "compute_fitness: hardware_efficiency non-positive");
-
-    entry->fitness = powf(entry->task_accuracy, entry->fitness_task_exponent)
-                   * powf(gen_gap_term, entry->fitness_gen_exponent)
-                   * powf(effective_rank, entry->fitness_rank_exponent)
-                   * powf(entry->hardware_efficiency, entry->fitness_efficiency_exponent);
+    compute_fitness(entry, generation);
 }
 
 __global__ void selection_kernel(
@@ -485,11 +517,12 @@ __global__ void selection_kernel(
     int generation,
     float* workspace_genomes
 ) {
-    int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (entry_idx >= pool->capacity) return;
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
 
+    int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "selection_kernel: dead entry in alive_indices");
 
     float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
     float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
@@ -526,14 +559,14 @@ __global__ void selection_kernel(
         parent_id_0 = parent_idx;
     }
 
-    DEVICE_FATAL_IF(entry->coherence <= 0.0f, "organism: entry coherence <= 0");
+    DEVICE_FATAL_IF(entry->coherence.value <= 0.0f, "organism: entry coherence <= 0");
 
     insert_elite_device(
         archive,
         archive_size,
-        entry->fitness,
-        entry->coherence,
-        entry->fitness / entry->coherence,
+        entry->fitness.value,
+        entry->coherence.value,
+        entry->fitness.value / entry->coherence.value,
         entry->genome_hash,
         parent_id_0,
         parent_id_1,
@@ -541,12 +574,14 @@ __global__ void selection_kernel(
         &organism->hw_coords_pool[entry_idx * hw_dim],
         &organism->task_coords_pool[entry_idx * task_dim],
         &organism->gen_coords_pool[entry_idx * gen_dim],
-        entry->task_accuracy,
+        entry->task_accuracy.value,
         &archive->per_class_accuracy[entry_idx * NUM_CLASSES_MAX],
         NUM_CLASSES_MAX,
         voronoi_cells,
         num_cells,
-        latent_genome
+        latent_genome,
+        entry->fitness.input_hash,
+        entry->fitness.computed_at_generation
     );
 
     if (entry->parent_hash == UINT64_MAX) {
@@ -565,13 +600,14 @@ __global__ void spawn_wave_kernel(
     __shared__ int qualifying_count;
 
     int tid = threadIdx.x;
-    int capacity = pool->capacity;
+    int alive_count = pool->alive_indices_count;
 
     if (tid == 0) qualifying_count = 0;
     __syncthreads();
 
-    for (int i = tid; i < capacity; i += blockDim.x) {
-        if (!pool->alive_flags[i]) continue;
+    for (int compact = tid; compact < alive_count; compact += blockDim.x) {
+        int i = pool->alive_indices[compact];
+        DEVICE_FATAL_IF(!pool->entries[i].alive, "spawn_wave_kernel: dead entry in alive_indices");
 
         float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_GENOME];
         float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_PARENT];
@@ -731,7 +767,7 @@ __global__ void culling_kernel(
 
     PoolEntry* entry = &pool->entries[idx];
 
-    if (entry->alive) {
+    if (pool->alive_flags[idx]) {
         float* entry_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
         float* entry_parent_temp = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
         reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
@@ -739,22 +775,22 @@ __global__ void culling_kernel(
             entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
 
         uint64_t entry_genome_hash = entry->genome_hash;
-        float ctx_metabolic = entry->fitness;
-        float ctx_stress = entry->hunger;
+        float ctx_metabolic = entry->fitness.value;
+        float ctx_stress = entry->hunger.value;
 
         float ctx_morphogen = chemical_field->cached_mean;
 
         int fitness_cull_mult_slot = derive_param_slot(entry_genome_hash, "lifecycle_fitness_culling_mult");
         float fitness_cull_mult = genome_to_param(entry_genome, entry->gradients, fitness_cull_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, FITNESS_CULLING_MULT_MIN, FITNESS_CULLING_MULT_MAX);
 
-        if (entry->fitness < fitness_threshold * fitness_cull_mult) {
-            entry->alive = false;
+        if (entry->fitness.value < fitness_threshold * fitness_cull_mult) {
+            pool->alive_flags[idx] = false;
             Atomics::increment_int(pool->total_culled);
             Atomics::decrement_int(pool->active_count);
         }
 
-        else if (entry->hunger > hunger_threshold) {
-            entry->alive = false;
+        else if (entry->hunger.value > hunger_threshold) {
+            pool->alive_flags[idx] = false;
             Atomics::increment_int(pool->total_culled);
             Atomics::decrement_int(pool->active_count);
         }
@@ -780,13 +816,13 @@ __global__ void archive_driven_lifecycle_kernel(
     PoolEntry* entry = &pool->entries[idx];
 
     bool should_cull = false;
-    if (entry->alive) {
-        if (entry->hunger > hunger_threshold) {
+    if (pool->alive_flags[idx]) {
+        if (entry->hunger.value > hunger_threshold) {
             should_cull = true;
         }
     }
 
-    if (should_cull || !entry->alive) {
+    if (should_cull || !pool->alive_flags[idx]) {
         DEVICE_FATAL_IF(archive_size <= 0, "archive_driven_lifecycle: archive empty when replacement needed");
         if (should_cull) {
             Atomics::increment_int(pool->total_culled);
@@ -822,11 +858,12 @@ __global__ void populate_organism_flow_params_kernel(
     float* workspace_genomes,
     int max_grid_size
 ) {
-    int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (entry_idx >= pool->capacity) return;
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
 
+    int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "populate_organism_flow_params_kernel: dead entry in alive_indices");
 
     ArchitectureParams arch = get_arch_from_pool(pool, entry_idx);
 
@@ -840,12 +877,12 @@ __global__ void populate_organism_flow_params_kernel(
     float* epigenetic = entry->gradients;
     uint64_t genome_hash = entry->genome_hash;
 
-    float context_metabolic = entry->fitness;
+    float context_metabolic = entry->fitness.value;
     int stress_numerator_slot = derive_param_slot(genome_hash, "context_stress_numerator");
     float stress_numerator = genome_to_param(
         genome, epigenetic, stress_numerator_slot,
-        entry->fitness,
-        entry->hunger,
+        entry->fitness.value,
+        entry->hunger.value,
         safe_epsilon(1.0f),
         organism->telemetry->genome_complexity.hash_entropy,
         organism->telemetry->archive_topology.novelty_gradient,
@@ -853,8 +890,8 @@ __global__ void populate_organism_flow_params_kernel(
         organism->telemetry->task_performance.accuracy,
         NORMALIZED_MIN, NORMALIZED_MAX
     );
-    DEVICE_FATAL_IF(entry->hunger <= 0.0f, "archive_driven_lifecycle: hunger <= 0 before stress division");
-    float context_stress = stress_numerator / entry->hunger;
+    DEVICE_FATAL_IF(entry->hunger.value <= 0.0f, "archive_driven_lifecycle: hunger <= 0 before stress division");
+    float context_stress = stress_numerator / entry->hunger.value;
 
     float context_morphogen = chemical_field->cached_mean;
 
@@ -957,7 +994,7 @@ __global__ void behavioral_update_kernel(
     }
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) {
+    if (!pool->alive_flags[entry_idx]) {
         if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_NOT_ALIVE entry=0\n");
         return;
     }
@@ -975,13 +1012,13 @@ __global__ void behavioral_update_kernel(
     uint64_t genome_hash = entry->genome_hash;
     float* genome = primary_genome;
     float* gradients = entry->gradients;
-    float ctx_metabolic = entry->fitness;
-    float ctx_stress = entry->hunger;
+    float ctx_metabolic = entry->fitness.value;
+    float ctx_stress = entry->hunger.value;
 
     float ctx_morphogen = chemical_field->cached_mean;
 
     BehavioralDimensions dims;
-    dims.derive_from_genome(genome_hash, primary_genome, gradients);
+    dims.derive_from_genome(primary_genome, gradients);
 
     if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", organism->generation, entry_idx);
 
@@ -996,10 +1033,10 @@ __global__ void behavioral_update_kernel(
         int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
 
         ChemotaxisParams chem_params;
-        chem_params.derive_from_genome_hash(genome_hash);
+        // ChemotaxisParams uses static slots from GenomeParamTable, no init needed
 
         InitContext init_ctx;
-        init_ctx.derive_from_genome(genome_hash, primary_genome, entry->gradients);
+        init_ctx.derive_from_genome(primary_genome, entry->gradients);
 
         float behavioral_field_sigma = chem_params.get_behavioral_field_sigma(primary_genome, entry->gradients, init_ctx.metabolic, init_ctx.stress, init_ctx.morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
 
@@ -1515,6 +1552,8 @@ __global__ void init_organism_phase2_kernel(
         organism->archive->genome_hash = buffers->archive_genome_hash;
         organism->archive->parent_ids = buffers->archive_parent_ids;
         organism->archive->generation = buffers->archive_generation;
+        organism->archive->fitness_input_hash = buffers->archive_fitness_input_hash;
+        organism->archive->fitness_computed_at_generation = buffers->archive_fitness_computed_at_generation;
         organism->archive->hw_coords = buffers->archive_hw_coords;
         organism->archive->task_coords = buffers->archive_task_coords;
         organism->archive->gen_coords = buffers->archive_gen_coords;
@@ -2210,10 +2249,11 @@ __global__ void persistent_evolution_kernel(
         cudaDeviceSynchronize();
         printf("V:TRAIN_reset_done\n");
 
-        int num_waves = (capacity + WAVE_SIZE - 1) / WAVE_SIZE;
+        int alive_count = organism->pool->alive_indices_count;
+        int num_waves = (alive_count + WAVE_SIZE - 1) / WAVE_SIZE;
         for (int wave = 0; wave < num_waves; wave++) {
             int wave_start = wave * WAVE_SIZE;
-            int wave_blocks = min(WAVE_SIZE, capacity - wave_start);
+            int wave_blocks = min(WAVE_SIZE, alive_count - wave_start);
             hybrid_organism_lifecycle_kernel<<<wave_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
                 organism, organism->training_mode, organism->param_map, organism->generation,
                 organism_workspace_genomes, audit, wave_start);
@@ -2292,7 +2332,7 @@ __global__ void persistent_evolution_kernel(
         printf("V:P1_comp gen=%d\n", organism->generation);
 
         int fitness_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        compute_fitness_from_diresa_kernel<<<fitness_blocks, BLOCK_SIZE>>>(organism->pool);
+        compute_fitness_from_diresa_kernel<<<fitness_blocks, BLOCK_SIZE>>>(organism->pool, organism->generation);
         cudaDeviceSynchronize();
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "P1_fitness failed");
@@ -2389,7 +2429,9 @@ __global__ void persistent_evolution_kernel(
               % organism->chemical_field->history->capacity;
         float* attractor_field = organism->chemical_field->history->entries[history_idx].data;
 
-        for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
+        int p2_alive_count = organism->pool->alive_indices_count;
+        for (int compact = 0; compact < p2_alive_count; compact++) {
+            int entry_idx = organism->pool->alive_indices[compact];
             initialize_ca_from_field_kernel<<<init_field_grid, init_field_block>>>(
                 organism->pool,
                 organism->chemical_field->concentration,
@@ -2413,7 +2455,8 @@ __global__ void persistent_evolution_kernel(
         cudaDeviceSynchronize();
         printf("V:P2_init_ca gen=%d\n", organism->generation);
 
-        for (int entry_idx = 0; entry_idx < capacity; entry_idx++) {
+        for (int compact = 0; compact < p2_alive_count; compact++) {
+            int entry_idx = organism->pool->alive_indices[compact];
             update_field_from_ca_kernel<<<init_field_grid, init_field_block>>>(
                 organism->pool,
                 organism->chemical_field->concentration,
@@ -2424,11 +2467,11 @@ __global__ void persistent_evolution_kernel(
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "P2_update_field failed");
 
-        cudaDeviceSynchronize();  
+        cudaDeviceSynchronize();
         printf("V:P2_done gen=%d\n", organism->generation);
 
         printf("V:P3_start gen=%d\n", organism->generation);
-        behavioral_update_kernel<<<capacity, WARP_SIZE>>>(
+        behavioral_update_kernel<<<p2_alive_count, WARP_SIZE>>>(
             organism, organism->behavioral_agents, organism->chemical_field,
             organism->chemical_field->history, organism->generation, arch_p1, organism_workspace_genomes);
         err = cudaGetLastError();

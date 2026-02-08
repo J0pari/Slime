@@ -5,11 +5,175 @@
 #include <cstdint>
 #include <cfloat>
 #include <cmath>
+#include <atomic>
+#include <cstdio>
 
-constexpr int32_t PROVENANCE_UNINITIALIZED_INT = -2147483647;
-constexpr float PROVENANCE_UNINITIALIZED_FLOAT = -3.402823466e+38f;
-constexpr uint64_t PROVENANCE_UNINITIALIZED_HASH = 0xDEADBEEFDEADBEEFULL;
-constexpr int32_t PROVENANCE_INVALID_INDEX = -999999999;
+constexpr int32_t PROVENANCE_UNINITIALIZED_INT = INT_MIN;
+constexpr float PROVENANCE_UNINITIALIZED_FLOAT = NAN;
+constexpr uint64_t PROVENANCE_UNINITIALIZED_HASH = UINT64_MAX;
+constexpr int32_t PROVENANCE_INVALID_INDEX = -1;
+
+enum class ComputeState : uint8_t {
+    UNCOMPUTED,
+    COMPUTING,
+    COMPUTED,
+    COMPUTATION_FAILED,
+    STALE,
+    INVALIDATED
+};
+
+enum class LifecyclePhase : uint8_t {
+    DEAD = 0,
+    ACTIVE = 1,
+    STRESSED = 2,
+    DORMANT = 3,
+    REACTIVATING = 4,
+    ARCHIVED = 5
+};
+
+enum class NicheState : uint8_t {
+    UNASSIGNED,
+    COMPUTING,
+    ASSIGNED,
+    STALE,
+    EVICTED
+};
+
+enum class FieldEpochPhase : uint8_t {
+    ACCUMULATING,
+    REINFORCING,
+    RESETTING,
+    READY
+};
+
+enum class BufferEntryState : uint8_t {
+    EMPTY,
+    WRITING,
+    VALID,
+    CONSUMED,
+    CORRUPT
+};
+
+namespace StalenessThreshold {
+    constexpr int FITNESS = 1;
+    constexpr int LIFECYCLE_SIGNALS = 1;
+    constexpr int BEHAVIORAL_COORDS = 1;
+    constexpr int NICHE_ASSIGNMENT = 100;
+    constexpr int SIGNAL_FLOW = 100;
+    constexpr int ENCODER_WEIGHTS_EPOCH = 1;
+}
+template<typename T>
+struct MeasuredValue {
+    T value;
+    ComputeState state;
+    int computed_at_generation;
+    uint64_t input_hash;
+
+    __device__ __host__ MeasuredValue() :
+        value(static_cast<T>(0)),
+        state(ComputeState::UNCOMPUTED),
+        computed_at_generation(INT_MIN),
+        input_hash(UINT64_MAX) {}
+
+    __device__ bool is_valid() const {
+        return state == ComputeState::COMPUTED;
+    }
+
+    __device__ bool is_stale(int current_generation, int threshold) const {
+        if (computed_at_generation == INT_MIN) return true;
+        return (current_generation - computed_at_generation) > threshold;
+    }
+
+    __device__ void set_computed(T v, int generation, uint64_t hash) {
+        value = v;
+        state = ComputeState::COMPUTED;
+        computed_at_generation = generation;
+        input_hash = hash;
+    }
+
+    __device__ void set_uncomputed() {
+        state = ComputeState::UNCOMPUTED;
+        computed_at_generation = INT_MIN;
+        input_hash = UINT64_MAX;
+    }
+
+    __device__ void mark_stale() { state = ComputeState::STALE; }
+    __device__ void mark_invalid() { state = ComputeState::INVALIDATED; }
+    __device__ void mark_computing() { state = ComputeState::COMPUTING; }
+    __device__ void mark_failed() { state = ComputeState::COMPUTATION_FAILED; }
+};
+
+template<>
+__device__ __host__ inline MeasuredValue<float>::MeasuredValue() :
+    value(NAN),
+    state(ComputeState::UNCOMPUTED),
+    computed_at_generation(INT_MIN),
+    input_hash(UINT64_MAX) {}
+
+template<>
+__device__ inline bool MeasuredValue<float>::is_valid() const {
+    return state == ComputeState::COMPUTED && !isnan(value);
+}
+
+template<>
+__device__ inline void MeasuredValue<float>::set_uncomputed() {
+    value = NAN;
+    state = ComputeState::UNCOMPUTED;
+    computed_at_generation = INT_MIN;
+    input_hash = UINT64_MAX;
+}
+
+__device__ __forceinline__ bool is_valid_phase_transition(LifecyclePhase from, LifecyclePhase to) {
+    switch (from) {
+        case LifecyclePhase::DEAD:
+            return to == LifecyclePhase::ACTIVE;
+        case LifecyclePhase::ACTIVE:
+            return to == LifecyclePhase::DORMANT ||
+                   to == LifecyclePhase::ARCHIVED ||
+                   to == LifecyclePhase::DEAD;
+        case LifecyclePhase::DORMANT:
+            return to == LifecyclePhase::ACTIVE ||
+                   to == LifecyclePhase::DEAD;
+        case LifecyclePhase::ARCHIVED:
+            return to == LifecyclePhase::ACTIVE;
+    }
+    return false;
+}
+
+__device__ __forceinline__ const char* phase_to_string(LifecyclePhase phase) {
+    switch (phase) {
+        case LifecyclePhase::DEAD: return "DEAD";
+        case LifecyclePhase::ACTIVE: return "ACTIVE";
+        case LifecyclePhase::DORMANT: return "DORMANT";
+        case LifecyclePhase::ARCHIVED: return "ARCHIVED";
+    }
+    return "UNKNOWN";
+}
+
+__device__ __forceinline__ const char* compute_state_to_string(ComputeState state) {
+    switch (state) {
+        case ComputeState::UNCOMPUTED: return "UNCOMPUTED";
+        case ComputeState::COMPUTING: return "COMPUTING";
+        case ComputeState::COMPUTED: return "COMPUTED";
+        case ComputeState::COMPUTATION_FAILED: return "FAILED";
+        case ComputeState::STALE: return "STALE";
+        case ComputeState::INVALIDATED: return "INVALIDATED";
+    }
+    return "UNKNOWN";
+}
+
+struct PhaseTransitionRecord {
+    LifecyclePhase previous_phase;
+    LifecyclePhase current_phase;
+    int transition_generation;
+    int transition_count;
+
+    __device__ __host__ PhaseTransitionRecord() :
+        previous_phase(LifecyclePhase::DEAD),
+        current_phase(LifecyclePhase::DEAD),
+        transition_generation(INT_MIN),
+        transition_count(0) {}
+};
 
 constexpr uint32_t PROVENANCE_SOURCE_NONE = 0;
 constexpr uint32_t PROVENANCE_SOURCE_INIT = 1;
@@ -209,7 +373,7 @@ __device__ __forceinline__ bool is_uninitialized_int(int32_t val) {
 }
 
 __device__ __forceinline__ bool is_uninitialized_float(float val) {
-    return val == PROVENANCE_UNINITIALIZED_FLOAT || isnan(val) || val < -1.0e+37f;
+    return isnan(val);
 }
 
 __host__ __forceinline__ bool host_is_uninitialized_int(int32_t val) {
@@ -217,7 +381,7 @@ __host__ __forceinline__ bool host_is_uninitialized_int(int32_t val) {
 }
 
 __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
-    return val == PROVENANCE_UNINITIALIZED_FLOAT || std::isnan(val) || val < -1.0e+37f;
+    return std::isnan(val);
 }
 
 #define PROVENANCE_FATAL(msg) do { \
@@ -273,6 +437,93 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
     } \
 } while(0)
 
+// ============================================================================
+// AUDIT ENTRY [per architecture.md - append-only, cryptographically chained]
+// ============================================================================
+
+enum class AuditEventType : uint16_t {
+    SPAWN,
+    CULL,
+    PHASE_TRANSITION,
+    ARCHIVE_INSERT,
+    ARCHIVE_EVICT,
+    FIELD_EPOCH_BOUNDARY,
+    WEIGHT_UPDATE,
+    GRADIENT_STEP,
+    INTEGRITY_VIOLATION,
+    STALENESS_DETECTED,
+    SENTINEL_ACCESS_ATTEMPTED
+};
+
+struct SpawnData {
+    int parent_idx;
+    float mutation_rate;
+    uint64_t parent_hash;
+    uint64_t child_hash;
+};
+
+struct PhaseData {
+    LifecyclePhase from;
+    LifecyclePhase to;
+    float trigger_value;
+    int entry_idx;
+};
+
+struct ArchiveData {
+    int niche_id;
+    float distance_to_centroid;
+    float fitness_at_insertion;
+    int evicted_idx;  // -1 if no eviction
+};
+
+struct EpochData {
+    float signal_flow_sum;
+    float reinforcement_applied;
+    int epoch_number;
+    int generation;
+};
+
+struct ViolationData {
+    char message[120];  // Sized to fit in union
+    int severity;       // 0=warning, 1=error, 2=fatal
+};
+
+// Architecture.md compliant AuditEntry
+struct AuditEntry {
+    uint64_t timestamp_ns;          // Nanosecond timestamp
+    uint64_t prev_entry_hash;       // Hash of previous entry (cryptographic chain)
+    int generation;                 // Generation when event occurred
+    int entry_idx;                  // Which pool entry (if applicable)
+    AuditEventType event_type;
+    uint16_t reserved;              // Alignment padding
+
+    union {
+        SpawnData spawn_data;
+        PhaseData phase_data;
+        ArchiveData archive_data;
+        EpochData epoch_data;
+        ViolationData violation_data;
+    };
+
+    uint32_t entry_crc;             // CRC of this entry
+};
+
+__device__ __forceinline__ void audit_entry_init(AuditEntry* entry, AuditEventType type, int gen, int idx) {
+    entry->timestamp_ns = clock64();
+    entry->prev_entry_hash = PROVENANCE_UNINITIALIZED_HASH;  // Set by caller from chain
+    entry->generation = gen;
+    entry->entry_idx = idx;
+    entry->event_type = type;
+    entry->reserved = 0;
+    entry->entry_crc = 0;  // Computed after payload is set
+}
+
+__device__ __forceinline__ void audit_entry_finalize(AuditEntry* entry, uint64_t prev_hash) {
+    entry->prev_entry_hash = prev_hash;
+    entry->entry_crc = crc32_compute(entry, sizeof(AuditEntry) - sizeof(uint32_t));
+}
+
+// Legacy AuditRecord for backwards compatibility with existing telemetry
 struct AuditRecord {
     RecordHeader header;
 

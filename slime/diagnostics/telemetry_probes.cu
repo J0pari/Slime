@@ -151,18 +151,17 @@ __device__ void genome_complexity_probe(
     ComponentPool* pool,
     GenomeComplexityMetrics* metrics
 ) {
-    int capacity = pool->capacity;
-    DEVICE_FATAL_IF(capacity == 0, "genome_complexity_probe: pool capacity is 0");
+    int alive_count = pool->alive_indices_count;
+    DEVICE_FATAL_IF(alive_count == 0, "genome_complexity_probe: no alive entries");
 
     uint64_t seen_hashes[POOL_CAPACITY_MAX];
     int unique_count = 0;
     float total_deltas = 0.0f;
     float hash_frequencies[POOL_CAPACITY_MAX];
-    int alive_count = 0;
 
-    for (int i = 0; i < capacity; i++) {
-        if (!pool->alive_flags[i]) continue;
-        alive_count++;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int i = pool->alive_indices[compact];
+        DEVICE_FATAL_IF(!pool->alive_flags[i], "genome_complexity_probe: dead entry in alive_indices");
 
         PoolEntry* e = &pool->entries[i];
         uint64_t hash = e->genome_hash;
@@ -183,11 +182,9 @@ __device__ void genome_complexity_probe(
         total_deltas += e->num_deltas;
     }
 
-    DEVICE_FATAL_IF(alive_count == 0, "genome_complexity_probe: no alive entries");
-
     int display_count = 0;
-    for (int i = 0; i < capacity && display_count < 10; i++) {
-        if (!pool->alive_flags[i]) continue;
+    for (int compact = 0; compact < alive_count && display_count < 10; compact++) {
+        int i = pool->alive_indices[compact];
         PoolEntry* e = &pool->entries[i];
         display_count++;
     }
@@ -390,8 +387,8 @@ __device__ void diresa_evolution_probe(
     ComponentPool* pool,
     DIRESAEvolutionMetrics* metrics
 ) {
-    int capacity = pool->capacity;
-    DEVICE_FATAL_IF(capacity == 0, "diresa_evolution_probe: pool capacity is 0");
+    int alive_count = pool->alive_indices_count;
+    DEVICE_FATAL_IF(alive_count == 0, "diresa_evolution_probe: no alive entries");
 
     float sum_recon_hw = 0.0f;
     float sum_recon_task = 0.0f;
@@ -402,25 +399,22 @@ __device__ void diresa_evolution_probe(
     float sum_compression = 0.0f;
     float sum_hw_corr = 0.0f;
     float sum_grad_mag = 0.0f;
-    int alive_count = 0;
 
-    for (int i = 0; i < capacity; i++) {
-        if (!pool->alive_flags[i]) continue;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int i = pool->alive_indices[compact];
+        DEVICE_FATAL_IF(!pool->alive_flags[i], "diresa_evolution_probe: dead entry in alive_indices");
         PoolEntry* e = &pool->entries[i];
 
-        sum_recon_hw += e->recon_loss_hw;
-        sum_recon_task += e->recon_loss_task;
-        sum_recon_gen += e->recon_loss_gen;
-        sum_recon_total += e->recon_loss_total;
-        sum_drift += e->behavioral_drift_rate;
-        sum_latent_util += e->latent_utilization;
-        sum_compression += e->compression_ratio;
-        sum_hw_corr += e->hardware_feature_correlation;
-        sum_grad_mag += e->gradient_magnitude;
-        alive_count++;
+        sum_recon_hw += e->recon_loss_hw.value;
+        sum_recon_task += e->recon_loss_task.value;
+        sum_recon_gen += e->recon_loss_gen.value;
+        sum_recon_total += e->recon_loss_total.value;
+        sum_drift += e->behavioral_drift_rate.value;
+        sum_latent_util += e->latent_utilization.value;
+        sum_compression += e->compression_ratio.value;
+        sum_hw_corr += e->hardware_feature_correlation.value;
+        sum_grad_mag += e->gradient_magnitude.value;
     }
-
-    DEVICE_FATAL_IF(alive_count == 0, "diresa_evolution_probe: no alive entries");
     metrics->recon_loss_hw = sum_recon_hw / alive_count;
     metrics->recon_loss_task = sum_recon_task / alive_count;
     metrics->recon_loss_gen = sum_recon_gen / alive_count;
@@ -437,8 +431,8 @@ __device__ void task_performance_probe(
     ComponentPool* pool,
     TaskPerformanceMetrics* metrics
 ) {
-    int capacity = pool->capacity;
-    DEVICE_FATAL_IF(capacity == 0, "task_performance_probe: pool capacity is 0");
+    int alive_count = pool->alive_indices_count;
+    DEVICE_FATAL_IF(alive_count == 0, "task_performance_probe: no alive entries");
 
     float sum_accuracy = 0.0f;
     float sum_train_accuracy = 0.0f;
@@ -452,26 +446,23 @@ __device__ void task_performance_probe(
         sum_per_class_correct[c] = 0;
         sum_per_class_total[c] = 0;
     }
-    int alive_count = 0;
 
-    for (int i = 0; i < capacity; i++) {
-        if (!pool->alive_flags[i]) continue;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int i = pool->alive_indices[compact];
+        DEVICE_FATAL_IF(!pool->alive_flags[i], "task_performance_probe: dead entry in alive_indices");
         PoolEntry* e = &pool->entries[i];
 
-        sum_accuracy += e->task_accuracy;
-        sum_train_accuracy += e->train_accuracy;
-        sum_test_accuracy += e->test_accuracy;
-        sum_loss += e->task_loss;
-        sum_stability += e->classification_stability;
-        sum_confidence += e->avg_confidence;
+        sum_accuracy += e->task_accuracy.value;
+        sum_train_accuracy += e->train_accuracy.value;
+        sum_test_accuracy += e->test_accuracy.value;
+        sum_loss += e->task_loss.value;
+        sum_stability += e->classification_stability.value;
+        sum_confidence += e->avg_confidence.value;
         for (int c = 0; c < NUM_CLASSES_MAX; c++) {
             sum_per_class_correct[c] += e->per_class_correct[c];
             sum_per_class_total[c] += e->per_class_total[c];
         }
-        alive_count++;
     }
-
-    DEVICE_FATAL_IF(alive_count == 0, "task_performance_probe: no alive entries");
     metrics->accuracy = sum_accuracy / alive_count;
     metrics->train_accuracy = sum_train_accuracy / alive_count;
     metrics->test_accuracy = sum_test_accuracy / alive_count;
@@ -490,27 +481,24 @@ __device__ void population_metrics_probe(
     ComponentPool* pool,
     PopulationMetrics* metrics
 ) {
-    int capacity = pool->capacity;
-    DEVICE_FATAL_IF(capacity == 0, "population_metrics_probe: pool capacity is 0");
+    int alive_count = pool->alive_indices_count;
+    DEVICE_FATAL_IF(alive_count == 0, "population_metrics_probe: no alive entries");
 
     float sum_accuracy = 0.0f;
     float sum_gen_gap = 0.0f;
     float sum_hw_eff = 0.0f;
     float sum_fitness = 0.0f;
-    int alive_count = 0;
 
-    for (int i = 0; i < capacity; i++) {
-        if (!pool->alive_flags[i]) continue;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int i = pool->alive_indices[compact];
+        DEVICE_FATAL_IF(!pool->alive_flags[i], "population_metrics_probe: dead entry in alive_indices");
         PoolEntry* e = &pool->entries[i];
 
-        sum_accuracy += e->task_accuracy;
-        sum_gen_gap += e->generalization_gap;
-        sum_hw_eff += e->hardware_efficiency;
-        sum_fitness += e->fitness;
-        alive_count++;
+        sum_accuracy += e->task_accuracy.value;
+        sum_gen_gap += e->generalization_gap.value;
+        sum_hw_eff += e->hardware_efficiency.value;
+        sum_fitness += e->fitness.value;
     }
-
-    DEVICE_FATAL_IF(alive_count == 0, "population_metrics_probe: no alive entries");
     metrics->total_accuracy = sum_accuracy / alive_count;
     metrics->total_generalization_gap = sum_gen_gap / alive_count;
     metrics->total_hardware_efficiency = sum_hw_eff / alive_count;

@@ -3,6 +3,7 @@
 
 #include "../config/config.cu"
 #include "../debug/param_validator.cu"
+#include "../debug/provenance.cuh"
 #include <cuda_runtime.h>
 
 struct GPUElite;
@@ -10,31 +11,44 @@ struct MultiHeadCAState;
 
 struct PoolEntry {
     int id;
-    float fitness;
-    float coherence;
-    float task_accuracy;
-    float train_accuracy;
-    float test_accuracy;
-    float task_loss;
-    float classification_stability;
-    float avg_confidence;
+    MeasuredValue<float> fitness;
+    MeasuredValue<float> coherence;
+    MeasuredValue<float> task_accuracy;
+    MeasuredValue<float> train_accuracy;
+    MeasuredValue<float> test_accuracy;
+    MeasuredValue<float> task_loss;
+    MeasuredValue<float> classification_stability;
+    MeasuredValue<float> avg_confidence;
     int per_class_correct[NUM_CLASSES_MAX];
     int per_class_total[NUM_CLASSES_MAX];
-    float generalization_gap;
-    float hardware_efficiency;
-    float gradient_magnitude;
-    float effective_rank;
-    float recon_loss_hw;
-    float recon_loss_task;
-    float recon_loss_gen;
-    float recon_loss_total;
-    float behavioral_drift_rate;
-    float latent_utilization;
-    float compression_ratio;
-    float hardware_feature_correlation;
-    float hunger;
+    MeasuredValue<float> generalization_gap;
+    MeasuredValue<float> hardware_efficiency;
+    MeasuredValue<float> gradient_magnitude;
+    MeasuredValue<float> effective_rank;
+    MeasuredValue<float> recon_loss_hw;
+    MeasuredValue<float> recon_loss_task;
+    MeasuredValue<float> recon_loss_gen;
+    MeasuredValue<float> recon_loss_total;
+    MeasuredValue<float> behavioral_drift_rate;
+    MeasuredValue<float> latent_utilization;
+    MeasuredValue<float> compression_ratio;
+    MeasuredValue<float> hardware_feature_correlation;
+    MeasuredValue<float> hunger;
     int age;
-    bool alive;
+
+    LifecyclePhase phase;
+    MeasuredValue<float> stress;
+    MeasuredValue<float> dormancy;
+    MeasuredValue<float> reactivation;
+    int field_epoch;
+    int epoch_start_generation;
+    float* signal_flow_accumulator;
+    float* behavioral_coords;
+    int niche_id;
+    NicheState niche_state;
+    float niche_rank;
+    int last_archive_use;
+    PhaseTransitionRecord phase_record;
     uint64_t genome_hash;
     int generation;
     float* gradients;
@@ -91,32 +105,266 @@ struct PoolEntry {
     MultiHeadCAState* ca_state;
 };
 
-__device__ constexpr uint64_t fnv1a_hash(const char* str) {
-    uint64_t hash = 14695981039346656037ULL;
-    int cycles = 0;
-    while (*str && cycles < MAX_KERNEL_CYCLES) {
-        hash ^= (uint64_t)(*str++);
-        hash *= 1099511628211ULL;
-        cycles++;
-    }
-    return hash;
+namespace GenomeParamTable {
+    constexpr int BLOCK_SIZE = 8;
+
+    // Block 0: Architecture
+    constexpr int ARCHITECTURE_BLOCK = 0;
+    constexpr int num_heads = ARCHITECTURE_BLOCK + 0;
+    constexpr int head_dim = ARCHITECTURE_BLOCK + 1;
+    constexpr int grid_size = ARCHITECTURE_BLOCK + 2;
+    constexpr int channels = ARCHITECTURE_BLOCK + 3;
+    constexpr int hidden_dim = ARCHITECTURE_BLOCK + 4;
+    constexpr int ca_gate_center = ARCHITECTURE_BLOCK + 5;
+    constexpr int pool_capacity = ARCHITECTURE_BLOCK + 6;
+    constexpr int initial_pool_size = ARCHITECTURE_BLOCK + 7;
+
+    // Block 1: Optimizer
+    constexpr int OPTIMIZER_BLOCK = 1 * BLOCK_SIZE;
+    constexpr int adam_beta1 = OPTIMIZER_BLOCK + 0;
+    constexpr int adam_beta2 = OPTIMIZER_BLOCK + 1;
+    constexpr int adam_epsilon = OPTIMIZER_BLOCK + 2;
+    constexpr int learning_rate = OPTIMIZER_BLOCK + 3;
+    constexpr int gradient_clip_norm = OPTIMIZER_BLOCK + 4;
+    constexpr int batch_size = OPTIMIZER_BLOCK + 5;
+    constexpr int flow_lenia_lr = OPTIMIZER_BLOCK + 6;
+    constexpr int behavioral_learning_rate = OPTIMIZER_BLOCK + 7;
+
+    // Block 2: Flow-Lenia
+    constexpr int FLOW_LENIA_BLOCK = 2 * BLOCK_SIZE;
+    constexpr int flow_lenia_s = FLOW_LENIA_BLOCK + 0;
+    constexpr int flow_lenia_beta_A = FLOW_LENIA_BLOCK + 1;
+    constexpr int flow_lenia_n = FLOW_LENIA_BLOCK + 2;
+    constexpr int flow_alpha_min = FLOW_LENIA_BLOCK + 3;
+    constexpr int flow_alpha_max = FLOW_LENIA_BLOCK + 4;
+    constexpr int flow_sharpness = FLOW_LENIA_BLOCK + 5;
+    constexpr int flow_resource_dt = FLOW_LENIA_BLOCK + 6;
+
+    // Block 3-5: Chemotaxis
+    constexpr int CHEMOTAXIS_BLOCK = 3 * BLOCK_SIZE;
+    constexpr int chemotaxis_theta = CHEMOTAXIS_BLOCK + 0;
+    constexpr int chemotaxis_sigma = CHEMOTAXIS_BLOCK + 1;
+    constexpr int chemotaxis_sensitivity_threshold = CHEMOTAXIS_BLOCK + 2;
+    constexpr int chemotaxis_exploration_growth = CHEMOTAXIS_BLOCK + 3;
+    constexpr int chemotaxis_sensitivity_decay = CHEMOTAXIS_BLOCK + 4;
+    constexpr int chemotaxis_exploration_decay = CHEMOTAXIS_BLOCK + 5;
+    constexpr int chemotaxis_sensitivity_growth = CHEMOTAXIS_BLOCK + 6;
+    constexpr int chemotaxis_hurst_exponent = CHEMOTAXIS_BLOCK + 7;
+
+    constexpr int CHEMOTAXIS_BLOCK_2 = 4 * BLOCK_SIZE;
+    constexpr int chemotaxis_levy_alpha = CHEMOTAXIS_BLOCK_2 + 0;
+    constexpr int chemotaxis_min_sensitivity_clamp = CHEMOTAXIS_BLOCK_2 + 1;
+    constexpr int chemotaxis_max_sensitivity_clamp = CHEMOTAXIS_BLOCK_2 + 2;
+    constexpr int chemotaxis_min_exploration_clamp = CHEMOTAXIS_BLOCK_2 + 3;
+    constexpr int chemotaxis_max_exploration_clamp = CHEMOTAXIS_BLOCK_2 + 4;
+    constexpr int chemotaxis_gradient_mix_weight = CHEMOTAXIS_BLOCK_2 + 5;
+    constexpr int chemotaxis_memory_decay_rate = CHEMOTAXIS_BLOCK_2 + 6;
+    constexpr int chemotaxis_attractor_sigma = CHEMOTAXIS_BLOCK_2 + 7;
+
+    constexpr int CHEMOTAXIS_BLOCK_3 = 5 * BLOCK_SIZE;
+    constexpr int chemotaxis_behavioral_field_sigma = CHEMOTAXIS_BLOCK_3 + 0;
+    constexpr int chemotaxis_agent_embedding_scale = CHEMOTAXIS_BLOCK_3 + 1;
+    constexpr int chemotaxis_init_exploration = CHEMOTAXIS_BLOCK_3 + 2;
+    constexpr int chemotaxis_init_sensitivity = CHEMOTAXIS_BLOCK_3 + 3;
+    constexpr int chemotaxis_agent_source_sigma = CHEMOTAXIS_BLOCK_3 + 4;
+    constexpr int chemotaxis_agent_source_strength = CHEMOTAXIS_BLOCK_3 + 5;
+    constexpr int chemotaxis_chemical_decay = CHEMOTAXIS_BLOCK_3 + 6;
+    constexpr int chemotaxis_dt = CHEMOTAXIS_BLOCK_3 + 7;
+
+    // Block 6: Fitness
+    constexpr int FITNESS_BLOCK = 6 * BLOCK_SIZE;
+    constexpr int gradient_fitness_weight = FITNESS_BLOCK + 0;
+    constexpr int coherence_fitness_weight = FITNESS_BLOCK + 1;
+    constexpr int fitness_rank_exponent = FITNESS_BLOCK + 2;
+    constexpr int fitness_coherence_exponent = FITNESS_BLOCK + 3;
+    constexpr int fitness_coupling_exponent = FITNESS_BLOCK + 4;
+    constexpr int fitness_task_exponent = FITNESS_BLOCK + 5;
+    constexpr int fitness_gen_exponent = FITNESS_BLOCK + 6;
+    constexpr int fitness_efficiency_exponent = FITNESS_BLOCK + 7;
+
+    // Block 7: Pool/Init
+    constexpr int POOL_BLOCK = 7 * BLOCK_SIZE;
+    constexpr int initial_hunger = POOL_BLOCK + 0;
+    constexpr int genome_mutation_scale = POOL_BLOCK + 1;
+    constexpr int mutation_levy_alpha = POOL_BLOCK + 2;
+    constexpr int diversity_normalization = POOL_BLOCK + 3;
+    constexpr int warp_ca_growth_rate = POOL_BLOCK + 4;
+    constexpr int baldwin_sensitivity = POOL_BLOCK + 5;
+    constexpr int coherence_window_size = POOL_BLOCK + 6;
+    constexpr int renyi_q = POOL_BLOCK + 7;
+
+    // Block 8: Context
+    constexpr int CONTEXT_BLOCK = 8 * BLOCK_SIZE;
+    constexpr int init_context_metabolic = CONTEXT_BLOCK + 0;
+    constexpr int init_context_stress = CONTEXT_BLOCK + 1;
+    constexpr int init_context_morphogen = CONTEXT_BLOCK + 2;
+    constexpr int context_stress_numerator = CONTEXT_BLOCK + 3;
+    constexpr int embed_ctx_metabolic = CONTEXT_BLOCK + 4;
+    constexpr int embed_ctx_stress = CONTEXT_BLOCK + 5;
+    constexpr int embed_ctx_morphogen = CONTEXT_BLOCK + 6;
+
+    // Block 9: Behavioral
+    constexpr int BEHAVIORAL_BLOCK = 9 * BLOCK_SIZE;
+    constexpr int behavioral_dim_hw = BEHAVIORAL_BLOCK + 0;
+    constexpr int behavioral_dim_task = BEHAVIORAL_BLOCK + 1;
+    constexpr int behavioral_dim_gen = BEHAVIORAL_BLOCK + 2;
+
+    // Block 10: DIRESA
+    constexpr int DIRESA_BLOCK = 10 * BLOCK_SIZE;
+    constexpr int dist_weight = DIRESA_BLOCK + 0;
+    constexpr int recon_weight = DIRESA_BLOCK + 1;
+    constexpr int distance_exponent = DIRESA_BLOCK + 2;
+    constexpr int quality_weight = DIRESA_BLOCK + 3;
+    constexpr int diresa_num_replicas = DIRESA_BLOCK + 4;
+    constexpr int diresa_hidden1 = DIRESA_BLOCK + 5;
+    constexpr int diresa_hidden2 = DIRESA_BLOCK + 6;
+    constexpr int diresa_batch_size = DIRESA_BLOCK + 7;
+
+    // Block 11: DIRESA extended
+    constexpr int DIRESA_BLOCK_2 = 11 * BLOCK_SIZE;
+    constexpr int diresa_anneal_step = DIRESA_BLOCK_2 + 0;
+    constexpr int diresa_cov_target = DIRESA_BLOCK_2 + 1;
+    constexpr int diresa_ctx_metabolic = DIRESA_BLOCK_2 + 2;
+    constexpr int diresa_ctx_stress = DIRESA_BLOCK_2 + 3;
+    constexpr int diresa_ctx_morphogen = DIRESA_BLOCK_2 + 4;
+    constexpr int diresa_temp_base = DIRESA_BLOCK_2 + 5;
+    constexpr int diresa_temp_scale = DIRESA_BLOCK_2 + 6;
+    constexpr int diresa_gradient_clip = DIRESA_BLOCK_2 + 7;
+
+    // Block 12-15: Lifecycle
+    constexpr int LIFECYCLE_BLOCK = 12 * BLOCK_SIZE;
+    constexpr int lifecycle_coherence_stressed = LIFECYCLE_BLOCK + 0;
+    constexpr int lifecycle_coherence_recover = LIFECYCLE_BLOCK + 1;
+    constexpr int lifecycle_stress_accum_rate = LIFECYCLE_BLOCK + 2;
+    constexpr int lifecycle_stress_decay_rate = LIFECYCLE_BLOCK + 3;
+    constexpr int lifecycle_stress_threshold = LIFECYCLE_BLOCK + 4;
+    constexpr int lifecycle_fitness_multiplier = LIFECYCLE_BLOCK + 5;
+    constexpr int lifecycle_gradient_stagnation = LIFECYCLE_BLOCK + 6;
+    constexpr int lifecycle_dormant_stress_mult = LIFECYCLE_BLOCK + 7;
+
+    constexpr int LIFECYCLE_BLOCK_2 = 13 * BLOCK_SIZE;
+    constexpr int lifecycle_fitness_threshold_center = LIFECYCLE_BLOCK_2 + 0;
+    constexpr int lifecycle_fitness_threshold_steepness = LIFECYCLE_BLOCK_2 + 1;
+    constexpr int lifecycle_sigmoid_threshold = LIFECYCLE_BLOCK_2 + 2;
+    constexpr int lifecycle_archive_threshold_center = LIFECYCLE_BLOCK_2 + 3;
+    constexpr int lifecycle_archive_threshold_steepness = LIFECYCLE_BLOCK_2 + 4;
+    constexpr int lifecycle_density_multiplier = LIFECYCLE_BLOCK_2 + 5;
+    constexpr int lifecycle_stress_fitness_penalty = LIFECYCLE_BLOCK_2 + 6;
+    constexpr int lifecycle_fitness_culling_mult = LIFECYCLE_BLOCK_2 + 7;
+
+    constexpr int LIFECYCLE_BLOCK_3 = 14 * BLOCK_SIZE;
+    constexpr int lifecycle_boost_threshold_center = LIFECYCLE_BLOCK_3 + 0;
+    constexpr int lifecycle_boost_threshold_steepness = LIFECYCLE_BLOCK_3 + 1;
+    constexpr int lifecycle_crisis_fitness_mult = LIFECYCLE_BLOCK_3 + 2;
+    constexpr int lifecycle_crisis_coherence = LIFECYCLE_BLOCK_3 + 3;
+    constexpr int lifecycle_crisis_threshold_center = LIFECYCLE_BLOCK_3 + 4;
+    constexpr int lifecycle_crisis_threshold_steepness = LIFECYCLE_BLOCK_3 + 5;
+    constexpr int lifecycle_elite_fitness_inherit = LIFECYCLE_BLOCK_3 + 6;
+    constexpr int lifecycle_elite_coherence_reset = LIFECYCLE_BLOCK_3 + 7;
+
+    constexpr int LIFECYCLE_BLOCK_4 = 15 * BLOCK_SIZE;
+    constexpr int lifecycle_boost_fitness_ratio = LIFECYCLE_BLOCK_4 + 0;
+    constexpr int lifecycle_coherence_boost = LIFECYCLE_BLOCK_4 + 1;
+    constexpr int lifecycle_crisis_active_ratio = LIFECYCLE_BLOCK_4 + 2;
+    constexpr int lifecycle_fitness_inherit_center = LIFECYCLE_BLOCK_4 + 3;
+    constexpr int lifecycle_fitness_inherit_steepness = LIFECYCLE_BLOCK_4 + 4;
+
+    // Block 16-17: Memory
+    constexpr int MEMORY_BLOCK = 16 * BLOCK_SIZE;
+    constexpr int memory_decay_factor = MEMORY_BLOCK + 0;
+    constexpr int memory_importance = MEMORY_BLOCK + 1;
+    constexpr int memory_decay_threshold = MEMORY_BLOCK + 2;
+    constexpr int memory_consolidation_threshold = MEMORY_BLOCK + 3;
+    constexpr int memory_flow_lenia_dt = MEMORY_BLOCK + 4;
+    constexpr int memory_default_decay_rate = MEMORY_BLOCK + 5;
+
+    // Block 18-19: Chemical field init
+    constexpr int CHEM_INIT_BLOCK = 18 * BLOCK_SIZE;
+    constexpr int chem_diffusivity = CHEM_INIT_BLOCK + 0;
+    constexpr int chem_reaction_order = CHEM_INIT_BLOCK + 1;
+    constexpr int chem_reaction_rate = CHEM_INIT_BLOCK + 2;
+    constexpr int chem_decay_rate = CHEM_INIT_BLOCK + 3;
+    constexpr int chem_init_base_value = CHEM_INIT_BLOCK + 4;
+    constexpr int chem_init_genome_influence = CHEM_INIT_BLOCK + 5;
+    constexpr int chem_init_noise_scale = CHEM_INIT_BLOCK + 6;
+
+    // Block 20-21: Agent params
+    constexpr int AGENT_BLOCK = 20 * BLOCK_SIZE;
+    constexpr int max_agent_velocity = AGENT_BLOCK + 0;
+    constexpr int fourier_base_freq = AGENT_BLOCK + 1;
+    constexpr int fourier_num_octaves = AGENT_BLOCK + 2;
+    constexpr int fourier_spectrum_exponent = AGENT_BLOCK + 3;
+
+    // Block 22-23: Resource params
+    constexpr int RESOURCE_BLOCK = 22 * BLOCK_SIZE;
+    constexpr int resource_density_initial = RESOURCE_BLOCK + 0;
+    constexpr int resource_density_noise = RESOURCE_BLOCK + 1;
+
+    // Block 24-25: Spawn/Mutation
+    constexpr int SPAWN_BLOCK = 24 * BLOCK_SIZE;
+    constexpr int spawn_fitness_threshold = SPAWN_BLOCK + 0;
+    constexpr int spawn_ctx_metabolic = SPAWN_BLOCK + 1;
+    constexpr int spawn_ctx_stress = SPAWN_BLOCK + 2;
+    constexpr int spawn_ctx_morphogen = SPAWN_BLOCK + 3;
+    constexpr int mutation_ctx_metabolic = SPAWN_BLOCK + 4;
+    constexpr int mutation_ctx_stress = SPAWN_BLOCK + 5;
+    constexpr int mutation_ctx_morphogen = SPAWN_BLOCK + 6;
+    constexpr int metalearning_mutation_rate = SPAWN_BLOCK + 7;
+
+    // Block 26-27: Curriculum
+    constexpr int CURRICULUM_BLOCK = 26 * BLOCK_SIZE;
+    constexpr int curriculum_accuracy_threshold = CURRICULUM_BLOCK + 0;
+    constexpr int curriculum_diversity_threshold = CURRICULUM_BLOCK + 1;
+    constexpr int curriculum_min_generations = CURRICULUM_BLOCK + 2;
+
+    // Block 28-29: Convergence
+    constexpr int CONVERGENCE_BLOCK = 28 * BLOCK_SIZE;
+    constexpr int convergence_fitness_threshold = CONVERGENCE_BLOCK + 0;
+    constexpr int convergence_coherence_threshold = CONVERGENCE_BLOCK + 1;
+
+    // Block 30: Delta encoding
+    constexpr int DELTA_BLOCK = 30 * BLOCK_SIZE;
+    constexpr int delta_threshold = DELTA_BLOCK + 0;
+
+    // Block 31: Voronoi
+    constexpr int VORONOI_BLOCK = 31 * BLOCK_SIZE;
+    constexpr int voronoi_init_dt = VORONOI_BLOCK + 0;
+    constexpr int voronoi_correlation_exponent = VORONOI_BLOCK + 1;
+    constexpr int weight_delta_threshold = VORONOI_BLOCK + 2;
+
+    // Block 32: Diversity
+    constexpr int DIVERSITY_BLOCK = 32 * BLOCK_SIZE;
+    constexpr int diversity_sample_count = DIVERSITY_BLOCK + 0;
+
+    // Block 33: EMA
+    constexpr int EMA_BLOCK = 33 * BLOCK_SIZE;
+    constexpr int accuracy_ema_smoothing = EMA_BLOCK + 0;
+
+    // Block 34: Fitness inheritance
+    constexpr int FITNESS_INHERIT_BLOCK = 34 * BLOCK_SIZE;
+    constexpr int fitness_inherit_center = FITNESS_INHERIT_BLOCK + 0;
+    constexpr int fitness_inherit_steepness = FITNESS_INHERIT_BLOCK + 1;
+
+    // Block 35: Bounds for context and behavioral dimensions
+    constexpr int BOUNDS_BLOCK = 35 * BLOCK_SIZE;
+
+    constexpr int EPIGENETIC_SENSITIVITY_BLOCK = 64 * BLOCK_SIZE;
+    constexpr int ENHANCER_BLOCK = 80 * BLOCK_SIZE;
+    constexpr int CONTEXT_COUPLING_BLOCK = 96 * BLOCK_SIZE;
+
+    constexpr int TOTAL_TYPED_SLOTS = 100 * BLOCK_SIZE;
 }
 
+__device__ __forceinline__ int get_epigenetic_sensitivity_slot(int primary_slot) {
+    return GenomeParamTable::EPIGENETIC_SENSITIVITY_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
+}
 
+__device__ __forceinline__ int get_enhancer_slot(int primary_slot, int enhancer_idx) {
+    return GenomeParamTable::ENHANCER_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE) * 8 + enhancer_idx;
+}
 
-__device__ __forceinline__ int derive_param_slot(uint64_t genome_hash, const char* param_id) {
-    uint64_t id_hash = fnv1a_hash(param_id);
-
-    uint64_t combined = genome_hash ^ id_hash;
-    combined ^= (combined >> 33);
-    combined *= HASH_MIX_CONSTANT_A;
-    combined ^= (combined >> 33);
-    combined *= HASH_MIX_CONSTANT_B;
-    combined ^= (combined >> 33);
-
-    int slot = (int)(combined % GENOME_SIZE);
-    DEVICE_VALIDATE_GENOME_SLOT(slot);
-    return slot;
+__device__ __forceinline__ int get_context_coupling_slot(int primary_slot) {
+    return GenomeParamTable::CONTEXT_COUPLING_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
 }
 
 __device__ __forceinline__ float genome_to_bootstrap_param(
@@ -131,11 +379,11 @@ __device__ __forceinline__ float genome_to_bootstrap_param(
     float base_val = genome[primary_slot];
     DEVICE_VALIDATE_FINITE(base_val);
 
-    int epi_slot = (primary_slot * 0x9e3779b9 + 0x7f4a7c15) % GENOME_SIZE;
+    int epi_slot = get_epigenetic_sensitivity_slot(primary_slot);
     DEVICE_VALIDATE_GENOME_SLOT(epi_slot);
     float epigenetic_sensitivity = genome_slot_to_unit(genome, epi_slot);
 
-    int epi_bounds_slot = (primary_slot * 0x3c9f82a5 + 0x1ce4e5b9) % GENOME_SIZE;
+    int epi_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
     DEVICE_VALIDATE_GENOME_SLOT(epi_bounds_slot);
     float epi_min = genome[epi_bounds_slot] * 0.5f;
     float epi_max = 2.0f + genome[epi_bounds_slot];
@@ -147,9 +395,9 @@ __device__ __forceinline__ float genome_to_bootstrap_param(
         DEVICE_VALIDATE_EPIGENETIC(epigenetic_factor, epi_min, epi_max);
     }
 
-    int enhancer_1_slot = (primary_slot * 0x51b3e1f4 + 0x3f2a9c71) % GENOME_SIZE;
-    int enhancer_2_slot = (primary_slot * 0x7a2e914c + 0x5d8b4e3a) % GENOME_SIZE;
-    int enhancer_3_slot = (primary_slot * 0x2f1a8c9d + 0x9b7e5f2c) % GENOME_SIZE;
+    int enhancer_1_slot = get_enhancer_slot(primary_slot, 0);
+    int enhancer_2_slot = get_enhancer_slot(primary_slot, 1);
+    int enhancer_3_slot = get_enhancer_slot(primary_slot, 2);
     DEVICE_VALIDATE_GENOME_SLOT(enhancer_1_slot);
     DEVICE_VALIDATE_GENOME_SLOT(enhancer_2_slot);
     DEVICE_VALIDATE_GENOME_SLOT(enhancer_3_slot);
@@ -173,33 +421,23 @@ struct InitContext {
     float stress;
     float morphogen;
 
-    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome, const float* epigenetic) {
-        int ctx_metabolic_slot = derive_param_slot(genome_hash, "init_context_metabolic");
-        int ctx_stress_slot = derive_param_slot(genome_hash, "init_context_stress");
-        int ctx_morphogen_slot = derive_param_slot(genome_hash, "init_context_morphogen");
+    __device__ __forceinline__ void derive_from_genome(const float* genome, const float* epigenetic) {
+        int metabolic_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 0;
+        int stress_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 1;
+        int morphogen_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 2;
 
-        int metabolic_min_slot = derive_param_slot(genome_hash, "init_context_metabolic_min");
-        int metabolic_max_slot = derive_param_slot(genome_hash, "init_context_metabolic_max");
-        int stress_min_slot = derive_param_slot(genome_hash, "init_context_stress_min");
-        int stress_max_slot = derive_param_slot(genome_hash, "init_context_stress_max");
-        int morphogen_min_slot = derive_param_slot(genome_hash, "init_context_morphogen_min");
-        int morphogen_max_slot = derive_param_slot(genome_hash, "init_context_morphogen_max");
+        float metabolic_min = genome_slot_to_unit(genome, metabolic_bounds_slot);
+        float metabolic_max = metabolic_min + genome_slot_to_unit(genome, metabolic_bounds_slot + 3) * (NORMALIZED_MAX - metabolic_min);
 
-        float metabolic_min = genome_slot_to_unit(genome, metabolic_min_slot);
-        float metabolic_max_raw = genome_slot_to_unit(genome, metabolic_max_slot);
-        float metabolic_max = metabolic_min + metabolic_max_raw * (NORMALIZED_MAX - metabolic_min);
+        float stress_min = genome_slot_to_unit(genome, stress_bounds_slot);
+        float stress_max = stress_min + genome_slot_to_unit(genome, stress_bounds_slot + 3) * (NORMALIZED_MAX - stress_min);
 
-        float stress_min = genome_slot_to_unit(genome, stress_min_slot);
-        float stress_max_raw = genome_slot_to_unit(genome, stress_max_slot);
-        float stress_max = stress_min + stress_max_raw * (NORMALIZED_MAX - stress_min);
+        float morphogen_min = genome_slot_to_unit(genome, morphogen_bounds_slot);
+        float morphogen_max = morphogen_min + genome_slot_to_unit(genome, morphogen_bounds_slot + 3) * (NORMALIZED_MAX - morphogen_min);
 
-        float morphogen_min = genome_slot_to_unit(genome, morphogen_min_slot);
-        float morphogen_max_raw = genome_slot_to_unit(genome, morphogen_max_slot);
-        float morphogen_max = morphogen_min + morphogen_max_raw * (NORMALIZED_MAX - morphogen_min);
-
-        metabolic = genome_to_bootstrap_param(genome, epigenetic, ctx_metabolic_slot, metabolic_min, metabolic_max);
-        stress = genome_to_bootstrap_param(genome, epigenetic, ctx_stress_slot, stress_min, stress_max);
-        morphogen = genome_to_bootstrap_param(genome, epigenetic, ctx_morphogen_slot, morphogen_min, morphogen_max);
+        metabolic = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::init_context_metabolic, metabolic_min, metabolic_max);
+        stress = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::init_context_stress, stress_min, stress_max);
+        morphogen = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::init_context_morphogen, morphogen_min, morphogen_max);
     }
 };
 
@@ -208,33 +446,23 @@ struct BehavioralDimensions {
     int task_dim;
     int gen_dim;
 
-    __device__ __forceinline__ void derive_from_genome(uint64_t genome_hash, const float* genome, const float* epigenetic) {
-        int hw_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_hw");
-        int task_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_task");
-        int gen_dim_slot = derive_param_slot(genome_hash, "behavioral_dim_gen");
+    __device__ __forceinline__ void derive_from_genome(const float* genome, const float* epigenetic) {
+        int hw_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 3;
+        int task_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 4;
+        int gen_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 5;
 
-        int hw_min_slot = derive_param_slot(genome_hash, "behavioral_dim_hw_min");
-        int hw_max_slot = derive_param_slot(genome_hash, "behavioral_dim_hw_max");
-        int task_min_slot = derive_param_slot(genome_hash, "behavioral_dim_task_min");
-        int task_max_slot = derive_param_slot(genome_hash, "behavioral_dim_task_max");
-        int gen_min_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_min");
-        int gen_max_slot = derive_param_slot(genome_hash, "behavioral_dim_gen_max");
+        float hw_min = genome_slot_to_unit(genome, hw_bounds_slot);
+        float hw_max = hw_min + genome_slot_to_unit(genome, hw_bounds_slot + 3) * (NORMALIZED_MAX - hw_min);
 
-        float hw_min = genome_slot_to_unit(genome, hw_min_slot);
-        float hw_max_raw = genome_slot_to_unit(genome, hw_max_slot);
-        float hw_max = hw_min + hw_max_raw * (NORMALIZED_MAX - hw_min);
+        float task_min = genome_slot_to_unit(genome, task_bounds_slot);
+        float task_max = task_min + genome_slot_to_unit(genome, task_bounds_slot + 3) * (NORMALIZED_MAX - task_min);
 
-        float task_min = genome_slot_to_unit(genome, task_min_slot);
-        float task_max_raw = genome_slot_to_unit(genome, task_max_slot);
-        float task_max = task_min + task_max_raw * (NORMALIZED_MAX - task_min);
+        float gen_min = genome_slot_to_unit(genome, gen_bounds_slot);
+        float gen_max = gen_min + genome_slot_to_unit(genome, gen_bounds_slot + 3) * (NORMALIZED_MAX - gen_min);
 
-        float gen_min = genome_slot_to_unit(genome, gen_min_slot);
-        float gen_max_raw = genome_slot_to_unit(genome, gen_max_slot);
-        float gen_max = gen_min + gen_max_raw * (NORMALIZED_MAX - gen_min);
-
-        float hw_norm = genome_to_bootstrap_param(genome, epigenetic, hw_dim_slot, hw_min, hw_max);
-        float task_norm = genome_to_bootstrap_param(genome, epigenetic, task_dim_slot, task_min, task_max);
-        float gen_norm = genome_to_bootstrap_param(genome, epigenetic, gen_dim_slot, gen_min, gen_max);
+        float hw_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_hw, hw_min, hw_max);
+        float task_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_task, task_min, task_max);
+        float gen_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_gen, gen_min, gen_max);
 
         hw_dim = BEHAVIORAL_DIM_HW_MIN + (int)(hw_norm * (BEHAVIORAL_DIM_HW_MAX - BEHAVIORAL_DIM_HW_MIN));
         task_dim = BEHAVIORAL_DIM_TASK_MIN + (int)(task_norm * (BEHAVIORAL_DIM_TASK_MAX - BEHAVIORAL_DIM_TASK_MIN));
@@ -260,45 +488,27 @@ __device__ __forceinline__ float genome_to_param_impl(
     float min_val,
     float max_val
 ) {
-    #ifndef GENOME_SIZE
-    #define GENOME_SIZE 1024
-    #endif
-
-
     float base_val = genome[primary_slot];
 
-
-
-    int epi_slot = (primary_slot * 0x9e3779b9 + 0x7f4a7c15) % GENOME_SIZE;
+    int epi_slot = get_epigenetic_sensitivity_slot(primary_slot);
     float epigenetic_sensitivity = genome_slot_to_unit(genome, epi_slot);
 
-
-    int epi_bounds_slot = (primary_slot * 0x3c9f82a5 + 0x1ce4e5b9) % GENOME_SIZE;
+    int epi_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
     float epi_min = genome[epi_bounds_slot] * 0.5f;
     float epi_max = 2.0f + genome[epi_bounds_slot];
 
     float epigenetic_factor = 1.0f + epigenetic_sensitivity * epigenetic[primary_slot];
     epigenetic_factor = fminf(fmaxf(epigenetic_factor, epi_min), epi_max);
 
+    float enhancer_1 = genome[get_enhancer_slot(primary_slot, 0)];
+    float enhancer_2 = genome[get_enhancer_slot(primary_slot, 1)];
+    float enhancer_3 = genome[get_enhancer_slot(primary_slot, 2)];
+    float enhancer_4 = genome[get_enhancer_slot(primary_slot, 3)];
+    float enhancer_5 = genome[get_enhancer_slot(primary_slot, 4)];
+    float enhancer_6 = genome[get_enhancer_slot(primary_slot, 5)];
+    float enhancer_7 = genome[get_enhancer_slot(primary_slot, 6)];
 
-    int enhancer_1_slot = (primary_slot * 0x51b3e1f4 + 0x3f2a9c71) % GENOME_SIZE;
-    int enhancer_2_slot = (primary_slot * 0x7a2e914c + 0x5d8b4e3a) % GENOME_SIZE;
-    int enhancer_3_slot = (primary_slot * 0x2f1a8c9d + 0x9b7e5f2c) % GENOME_SIZE;
-    int enhancer_4_slot = (primary_slot * 0x4b7c2e91 + 0x6a5d3f1c) % GENOME_SIZE;  
-    int enhancer_5_slot = (primary_slot * 0x9c3e7a2f + 0x8b4f1d6e) % GENOME_SIZE;
-    int enhancer_6_slot = (primary_slot * 0x6f1b8d3c + 0x2e9a4c5b) % GENOME_SIZE;
-    int enhancer_7_slot = (primary_slot * 0x3a7f5e2c + 0x1d6b9f4a) % GENOME_SIZE;
-
-    float enhancer_1 = genome[enhancer_1_slot];
-    float enhancer_2 = genome[enhancer_2_slot];
-    float enhancer_3 = genome[enhancer_3_slot];
-    float enhancer_4 = genome[enhancer_4_slot];
-    float enhancer_5 = genome[enhancer_5_slot];
-    float enhancer_6 = genome[enhancer_6_slot];
-    float enhancer_7 = genome[enhancer_7_slot];
-
-
-    int ctx_slot = (primary_slot * 0x8e5f3c2a + 0x4d9b7e1f) % GENOME_SIZE;
+    int ctx_slot = get_context_coupling_slot(primary_slot);
     float context_coupling = (genome[ctx_slot] + 1.0f) * 0.25f;
 
     float context_modulation =
@@ -306,14 +516,13 @@ __device__ __forceinline__ float genome_to_param_impl(
             enhancer_1 * context_metabolic +
             enhancer_2 * context_stress +
             enhancer_3 * context_morphogen +
-            enhancer_4 * context_complexity +    
-            enhancer_5 * context_niche +         
-            enhancer_6 * context_learning +      
-            enhancer_7 * context_performance     
+            enhancer_4 * context_complexity +
+            enhancer_5 * context_niche +
+            enhancer_6 * context_learning +
+            enhancer_7 * context_performance
         );
 
     float expressed_val = base_val * epigenetic_factor * (1.0f + context_modulation);
-
 
     float normalized = tanhf(expressed_val);
     normalized = (normalized + 1.0f) * 0.5f;

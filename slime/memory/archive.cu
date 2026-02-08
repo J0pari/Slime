@@ -32,16 +32,19 @@ struct GPUElite {
     int task_dim;
     int gen_dim;
 
-    half* weight_deltas;             
-    uint32_t* weight_delta_indices;  
-    uint16_t* num_weight_deltas;     
+    uint64_t* fitness_input_hash;
+    int* fitness_computed_at_generation;
 
-    int* archived_num_heads;         
-    int* archived_channels;          
-    int* archived_head_dim;          
+    half* weight_deltas;
+    uint32_t* weight_delta_indices;
+    uint16_t* num_weight_deltas;
 
-    uint64_t* hash_table_keys;       
-    int* hash_table_values;          
+    int* archived_num_heads;
+    int* archived_channels;
+    int* archived_head_dim;
+
+    uint64_t* hash_table_keys;
+    int* hash_table_values;
 };
 
 struct VoronoiCell {
@@ -135,6 +138,17 @@ __device__ void hash_table_remove(
     DEVICE_FATAL_IF(true, "hash_table_remove: exhausted probe limit");
 }
 
+__device__ void restore_fitness_from_archive(
+    PoolEntry* entry,
+    const GPUElite* archive,
+    int elite_idx
+) {
+    entry->fitness.value = archive->fitness[elite_idx];
+    entry->fitness.state = ComputeState::COMPUTED;
+    entry->fitness.computed_at_generation = archive->fitness_computed_at_generation[elite_idx];
+    entry->fitness.input_hash = archive->fitness_input_hash[elite_idx];
+}
+
 __global__ void init_hash_table_kernel(
     uint64_t* keys,
     int* values,
@@ -209,7 +223,9 @@ __global__ void create_elite_kernel(
     float fitness_val,
     float coherence_val,
     float effective_rank_val,
-    uint32_t genome_size
+    uint32_t genome_size,
+    uint64_t fitness_input_hash,
+    int fitness_computed_at_generation
 ) {
     if (threadIdx.x == 0) {
         archive->fitness[elite_idx] = fitness_val;
@@ -217,6 +233,8 @@ __global__ void create_elite_kernel(
         archive->effective_rank[elite_idx] = effective_rank_val;
         archive->genome_hash[elite_idx] = gpu_sha256(genome, genome_size);
         archive->generation[elite_idx] = get_generation();
+        archive->fitness_input_hash[elite_idx] = fitness_input_hash;
+        archive->fitness_computed_at_generation[elite_idx] = fitness_computed_at_generation;
     }
 }
 
@@ -341,7 +359,9 @@ __device__ void insert_elite_device(
     int num_classes,
     VoronoiCell* __restrict__ cells,
     int num_cells,
-    float* latent_genome_new
+    float* latent_genome_new,
+    uint64_t fitness_input_hash,
+    int fitness_computed_at_generation
 ) {
     int existing_idx = hash_table_lookup(
         archive->hash_table_keys,
@@ -385,6 +405,8 @@ __device__ void insert_elite_device(
     archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
     archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
     archive->generation[idx] = generation_val;
+    archive->fitness_input_hash[idx] = fitness_input_hash;
+    archive->fitness_computed_at_generation[idx] = fitness_computed_at_generation;
 
     for (int d = 0; d < hw_dim; d++) {
         archive->hw_coords[idx * hw_dim + d] = hw_coords_new[d];

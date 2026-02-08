@@ -150,10 +150,10 @@ __global__ void prepare_ca_fp16_kernel(
     ArchitectureParams arch,
     int entry_idx
 ) {
-    if (entry_idx >= pool->capacity) return;
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "prepare_ca_fp16_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "prepare_ca_fp16_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;
@@ -176,11 +176,11 @@ __global__ void multi_head_ca_tensor_kernel(
     int tid = threadIdx.x;
     int block_threads = blockDim.x;
 
-    if (entry_idx >= pool->capacity) return;
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "multi_head_ca_tensor_kernel: entry_idx out of bounds");
     if (head >= arch.num_heads) return;
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "multi_head_ca_tensor_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;

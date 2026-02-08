@@ -118,11 +118,12 @@ __global__ void init_organism_ca_weights_kernel(
     ComponentPool* __restrict__ pool,
     ArchitectureParams arch
 ) {
-    int entry_idx = blockIdx.y;
-    if (entry_idx >= pool->capacity) return;
+    int compact_idx = blockIdx.y;
+    if (compact_idx >= pool->alive_indices_count) return;
 
+    int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "init_organism_ca_weights_kernel: dead entry in alive_indices");
 
     MultiHeadCAState* ca_state = entry->ca_state;
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;

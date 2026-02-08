@@ -20,7 +20,7 @@ __device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* 
     arch.head_dim = pool->entries[idx].head_dim;
     arch.grid_size = pool->entries[idx].grid_size;
 
-    float coherence = pool->entries[idx].coherence;
+    float coherence = pool->entries[idx].coherence.value;
     DEVICE_FATAL_IF(coherence < 0.0f || coherence > 1.0f, "get_arch_from_pool: coherence not in [0,1]");
     arch.ca_gate_center = 2.0f - 1.5f * coherence;
     return arch;
@@ -67,26 +67,16 @@ __global__ void finalize_alive_count_kernel(
     }
 }
 
-__device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
-    int num_heads_slot = derive_param_slot(genome_hash, "arch_num_heads");
-    int channels_slot = derive_param_slot(genome_hash, "arch_channels");
-    int head_dim_slot = derive_param_slot(genome_hash, "arch_head_dim");
-    int grid_size_slot = derive_param_slot(genome_hash, "arch_grid_size");
+__device__ __forceinline__ void derive_architecture(const float* genome, PoolEntry* entry) {
+    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::num_heads]), "arch_num_heads genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::channels]), "arch_channels genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::head_dim]), "arch_head_dim genome value is NaN");
+    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::grid_size]), "arch_grid_size genome value is NaN");
 
-    DEVICE_FATAL_IF(num_heads_slot < 0 || num_heads_slot >= GENOME_SIZE, "arch_num_heads slot out of bounds");
-    DEVICE_FATAL_IF(channels_slot < 0 || channels_slot >= GENOME_SIZE, "arch_channels slot out of bounds");
-    DEVICE_FATAL_IF(head_dim_slot < 0 || head_dim_slot >= GENOME_SIZE, "arch_head_dim slot out of bounds");
-    DEVICE_FATAL_IF(grid_size_slot < 0 || grid_size_slot >= GENOME_SIZE, "arch_grid_size slot out of bounds");
-
-    DEVICE_FATAL_IF(isnan(genome[num_heads_slot]), "arch_num_heads genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[channels_slot]), "arch_channels genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[head_dim_slot]), "arch_head_dim genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[grid_size_slot]), "arch_grid_size genome value is NaN");
-
-    float num_heads_norm = genome_to_bootstrap_param(genome, entry->gradients, num_heads_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float channels_norm = genome_to_bootstrap_param(genome, entry->gradients, channels_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float head_dim_norm = genome_to_bootstrap_param(genome, entry->gradients, head_dim_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float grid_size_norm = genome_to_bootstrap_param(genome, entry->gradients, grid_size_slot, NORMALIZED_MIN, NORMALIZED_MAX);
+    float num_heads_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::num_heads, NORMALIZED_MIN, NORMALIZED_MAX);
+    float channels_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::channels, NORMALIZED_MIN, NORMALIZED_MAX);
+    float head_dim_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::head_dim, NORMALIZED_MIN, NORMALIZED_MAX);
+    float grid_size_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::grid_size, NORMALIZED_MIN, NORMALIZED_MAX);
 
     entry->num_heads = (int)fmaxf((float)NUM_HEADS_MIN, fminf((float)NUM_HEADS_MAX, NUM_HEADS_MIN + num_heads_norm * (NUM_HEADS_MAX - NUM_HEADS_MIN)));
 
@@ -106,28 +96,17 @@ __device__ __forceinline__ void derive_architecture(uint64_t genome_hash, const 
     DEVICE_FATAL_IF(entry->hidden_dim <= 0, "derived hidden_dim <= 0");
 }
 
-__device__ __forceinline__ void derive_diresa(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
-    int replicas_slot = derive_param_slot(genome_hash, "diresa_num_replicas");
-    int hidden1_slot = derive_param_slot(genome_hash, "diresa_hidden1");
-    int hidden2_slot = derive_param_slot(genome_hash, "diresa_hidden2");
-    int batch_size_slot = derive_param_slot(genome_hash, "diresa_batch_size");
-    int anneal_step_slot = derive_param_slot(genome_hash, "diresa_anneal_step");
-    int cov_target_slot = derive_param_slot(genome_hash, "diresa_cov_target");
-    int dist_weight_slot = derive_param_slot(genome_hash, "diresa_dist_weight");
-    int recon_weight_slot = derive_param_slot(genome_hash, "diresa_recon_weight");
-    int distance_exponent_slot = derive_param_slot(genome_hash, "diresa_distance_exponent");
-    int quality_weight_slot = derive_param_slot(genome_hash, "diresa_quality_weight");
-
-    float replicas_norm = genome_to_bootstrap_param(genome, entry->gradients, replicas_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float hidden1_norm = genome_to_bootstrap_param(genome, entry->gradients, hidden1_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float hidden2_norm = genome_to_bootstrap_param(genome, entry->gradients, hidden2_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float batch_size_norm = genome_to_bootstrap_param(genome, entry->gradients, batch_size_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float anneal_step_norm = genome_to_bootstrap_param(genome, entry->gradients, anneal_step_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float cov_target_norm = genome_to_bootstrap_param(genome, entry->gradients, cov_target_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float dist_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, dist_weight_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float recon_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, recon_weight_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float distance_exponent_norm = genome_to_bootstrap_param(genome, entry->gradients, distance_exponent_slot, NORMALIZED_MIN, NORMALIZED_MAX);
-    float quality_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, quality_weight_slot, NORMALIZED_MIN, NORMALIZED_MAX);
+__device__ __forceinline__ void derive_diresa(const float* genome, PoolEntry* entry) {
+    float replicas_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_num_replicas, NORMALIZED_MIN, NORMALIZED_MAX);
+    float hidden1_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_hidden1, NORMALIZED_MIN, NORMALIZED_MAX);
+    float hidden2_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_hidden2, NORMALIZED_MIN, NORMALIZED_MAX);
+    float batch_size_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_batch_size, NORMALIZED_MIN, NORMALIZED_MAX);
+    float anneal_step_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_anneal_step, NORMALIZED_MIN, NORMALIZED_MAX);
+    float cov_target_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::diresa_cov_target, NORMALIZED_MIN, NORMALIZED_MAX);
+    float dist_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::dist_weight, NORMALIZED_MIN, NORMALIZED_MAX);
+    float recon_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::recon_weight, NORMALIZED_MIN, NORMALIZED_MAX);
+    float distance_exponent_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::distance_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float quality_weight_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::quality_weight, NORMALIZED_MIN, NORMALIZED_MAX);
 
     entry->num_tempering_replicas = (int)fmaxf((float)NUM_TEMPERING_REPLICAS_MIN, fminf((float)NUM_TEMPERING_REPLICAS_MAX, NUM_TEMPERING_REPLICAS_MIN + replicas_norm * (NUM_TEMPERING_REPLICAS_MAX - NUM_TEMPERING_REPLICAS_MIN)));
     entry->diresa_hidden1 = (int)fmaxf((float)DIRESA_HIDDEN1_MIN, fminf((float)DIRESA_HIDDEN1_MAX, DIRESA_HIDDEN1_MIN + hidden1_norm * (DIRESA_HIDDEN1_MAX - DIRESA_HIDDEN1_MIN)));
@@ -141,64 +120,16 @@ __device__ __forceinline__ void derive_diresa(uint64_t genome_hash, const float*
     entry->quality_weight = fmaxf(DIRESA_QUALITY_WEIGHT_MIN, fminf(DIRESA_QUALITY_WEIGHT_MAX, DIRESA_QUALITY_WEIGHT_MIN + quality_weight_norm * (DIRESA_QUALITY_WEIGHT_MAX - DIRESA_QUALITY_WEIGHT_MIN)));
 }
 
-__device__ __forceinline__ void derive_fitness_exponents(uint64_t genome_hash, const float* genome, PoolEntry* entry) {
-    int rank_exp_slot = derive_param_slot(genome_hash, "fitness_rank_exponent");
-    int coh_exp_slot = derive_param_slot(genome_hash, "fitness_coherence_exponent");
-    int coupling_exp_slot = derive_param_slot(genome_hash, "fitness_coupling_exponent");
-    int task_exp_slot = derive_param_slot(genome_hash, "fitness_task_exponent");
-    int gen_exp_slot = derive_param_slot(genome_hash, "fitness_gen_exponent");
-    int eff_exp_slot = derive_param_slot(genome_hash, "fitness_efficiency_exponent");
-    int baldwin_slot = derive_param_slot(genome_hash, "baldwin_sensitivity");
-    int window_slot = derive_param_slot(genome_hash, "coherence_window_size");
-    int renyi_q_slot = derive_param_slot(genome_hash, "rank_renyi_order");
-
-    int rank_min_slot = derive_param_slot(genome_hash, "fitness_rank_exponent_min");
-    int rank_max_slot = derive_param_slot(genome_hash, "fitness_rank_exponent_max");
-    int coh_min_slot = derive_param_slot(genome_hash, "fitness_coherence_exponent_min");
-    int coh_max_slot = derive_param_slot(genome_hash, "fitness_coherence_exponent_max");
-    int coupling_min_slot = derive_param_slot(genome_hash, "fitness_coupling_exponent_min");
-    int coupling_max_slot = derive_param_slot(genome_hash, "fitness_coupling_exponent_max");
-    int task_min_slot = derive_param_slot(genome_hash, "fitness_task_exponent_min");
-    int task_max_slot = derive_param_slot(genome_hash, "fitness_task_exponent_max");
-    int gen_min_slot = derive_param_slot(genome_hash, "fitness_gen_exponent_min");
-    int gen_max_slot = derive_param_slot(genome_hash, "fitness_gen_exponent_max");
-    int eff_min_slot = derive_param_slot(genome_hash, "fitness_efficiency_exponent_min");
-    int eff_max_slot = derive_param_slot(genome_hash, "fitness_efficiency_exponent_max");
-    int baldwin_min_slot = derive_param_slot(genome_hash, "baldwin_sensitivity_min");
-    int baldwin_max_slot = derive_param_slot(genome_hash, "baldwin_sensitivity_max");
-    int window_min_slot = derive_param_slot(genome_hash, "coherence_window_size_min");
-    int window_max_slot = derive_param_slot(genome_hash, "coherence_window_size_max");
-    int renyi_min_slot = derive_param_slot(genome_hash, "rank_renyi_order_min");
-    int renyi_max_slot = derive_param_slot(genome_hash, "rank_renyi_order_max");
-
-    float rank_min = genome_slot_to_unit(genome, rank_min_slot);
-    float rank_max = rank_min + genome_slot_to_unit(genome, rank_max_slot) * (NORMALIZED_MAX - rank_min);
-    float coh_min = genome_slot_to_unit(genome, coh_min_slot);
-    float coh_max = coh_min + genome_slot_to_unit(genome, coh_max_slot) * (NORMALIZED_MAX - coh_min);
-    float coupling_min = genome_slot_to_unit(genome, coupling_min_slot);
-    float coupling_max = coupling_min + genome_slot_to_unit(genome, coupling_max_slot) * (NORMALIZED_MAX - coupling_min);
-    float task_min = genome_slot_to_unit(genome, task_min_slot);
-    float task_max = task_min + genome_slot_to_unit(genome, task_max_slot) * (NORMALIZED_MAX - task_min);
-    float gen_min = genome_slot_to_unit(genome, gen_min_slot);
-    float gen_max = gen_min + genome_slot_to_unit(genome, gen_max_slot) * (NORMALIZED_MAX - gen_min);
-    float eff_min = genome_slot_to_unit(genome, eff_min_slot);
-    float eff_max = eff_min + genome_slot_to_unit(genome, eff_max_slot) * (NORMALIZED_MAX - eff_min);
-    float baldwin_min = genome_slot_to_unit(genome, baldwin_min_slot);
-    float baldwin_max = baldwin_min + genome_slot_to_unit(genome, baldwin_max_slot) * (NORMALIZED_MAX - baldwin_min);
-    float window_min = genome_slot_to_unit(genome, window_min_slot);
-    float window_max = window_min + genome_slot_to_unit(genome, window_max_slot) * (NORMALIZED_MAX - window_min);
-    float renyi_min = genome_slot_to_unit(genome, renyi_min_slot);
-    float renyi_max = renyi_min + genome_slot_to_unit(genome, renyi_max_slot) * (NORMALIZED_MAX - renyi_min);
-
-    float rank_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, rank_exp_slot, rank_min, rank_max);
-    float coh_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, coh_exp_slot, coh_min, coh_max);
-    float coupling_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, coupling_exp_slot, coupling_min, coupling_max);
-    float task_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, task_exp_slot, task_min, task_max);
-    float gen_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, gen_exp_slot, gen_min, gen_max);
-    float eff_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, eff_exp_slot, eff_min, eff_max);
-    float baldwin_norm = genome_to_bootstrap_param(genome, entry->gradients, baldwin_slot, baldwin_min, baldwin_max);
-    float window_norm = genome_to_bootstrap_param(genome, entry->gradients, window_slot, window_min, window_max);
-    float renyi_q_norm = genome_to_bootstrap_param(genome, entry->gradients, renyi_q_slot, renyi_min, renyi_max);
+__device__ __forceinline__ void derive_fitness_exponents(const float* genome, PoolEntry* entry) {
+    float rank_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_rank_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float coh_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_coherence_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float coupling_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_coupling_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float task_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_task_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float gen_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_gen_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float eff_exp_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::fitness_efficiency_exponent, NORMALIZED_MIN, NORMALIZED_MAX);
+    float baldwin_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::baldwin_sensitivity, NORMALIZED_MIN, NORMALIZED_MAX);
+    float window_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::coherence_window_size, NORMALIZED_MIN, NORMALIZED_MAX);
+    float renyi_q_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::renyi_q, NORMALIZED_MIN, NORMALIZED_MAX);
 
     entry->fitness_rank_exponent = FITNESS_RANK_EXPONENT_MIN + rank_exp_norm * (FITNESS_RANK_EXPONENT_MAX - FITNESS_RANK_EXPONENT_MIN);
     entry->fitness_coherence_exponent = FITNESS_COHERENCE_EXPONENT_MIN + coh_exp_norm * (FITNESS_COHERENCE_EXPONENT_MAX - FITNESS_COHERENCE_EXPONENT_MIN);
@@ -256,6 +187,7 @@ __device__ void spawn_component_device(
     int archive_size,
     int parent_id,
     float mutation_rate,
+    int generation,
     float* workspace_parent_genome,
     float* workspace_child_genome,
     float* workspace_parent_temp,
@@ -292,7 +224,6 @@ __device__ void spawn_component_device(
 
     pool->entries[i].id = new_id;
     pool->entries[i].age = 0;
-    pool->entries[i].alive = true;
     pool->alive_flags[i] = true;  
     
     DEVICE_FATAL_IF(parent_id < 0 || parent_id >= pool->capacity, "spawn_component_device: invalid parent_id");
@@ -335,7 +266,7 @@ __device__ void spawn_component_device(
         parent->delta_indices, parent->delta_values, parent->num_deltas,
         parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
 
-    params.derive_from_genome(parent->genome_hash, parent_genome, parent->gradients);
+    params.derive_from_genome(parent_genome, parent->gradients);
 
     if (use_latent) {
         float* ref_latent = &archive->latent_genome[reference_archive_idx * GENOME_LATENT_DIM_MAX];
@@ -366,13 +297,11 @@ __device__ void spawn_component_device(
 
     pool->entries[i].parent_hash = reference_hash;
 
-    int inherit_center_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_center");
-    int inherit_steep_slot = derive_param_slot(parent->genome_hash, "fitness_inherit_steepness");
-    float inherit_center = genome_to_bootstrap_param(parent_genome, parent->gradients, inherit_center_slot,
+    float inherit_center = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_center,
         LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
-    float inherit_steepness = genome_to_bootstrap_param(parent_genome, parent->gradients, inherit_steep_slot,
+    float inherit_steepness = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_steepness,
         LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
-    inheritance_factor = activation_sigmoid(inherit_steepness * (parent->fitness - inherit_center));
+    inheritance_factor = activation_sigmoid(inherit_steepness * (parent->fitness.value - inherit_center));
 
     for (int j = 0; j < GENOME_SIZE; j++) {
         pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
@@ -392,18 +321,18 @@ __device__ void spawn_component_device(
     );
 
     PoolInitParams init_params;
-    init_params.derive_from_genome(pool->entries[i].genome_hash, child_genome, pool->entries[i].gradients);
-    pool->entries[i].hunger = init_params.initial_hunger;
-    derive_architecture(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-    derive_diresa(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-    derive_fitness_exponents(pool->entries[i].genome_hash, child_genome, &pool->entries[i]);
-    pool->entries[i].fitness = NAN;
+    init_params.derive_from_genome(child_genome, pool->entries[i].gradients);
+    pool->entries[i].hunger.set_computed(init_params.initial_hunger, generation, pool->entries[i].genome_hash);
+    derive_architecture(child_genome, &pool->entries[i]);
+    derive_diresa(child_genome, &pool->entries[i]);
+    derive_fitness_exponents(child_genome, &pool->entries[i]);
+    pool->entries[i].fitness.set_uncomputed();
     pool->fitness_values[i] = NAN;
-    pool->entries[i].coherence = NAN;
-    pool->entries[i].task_accuracy = NAN;
-    pool->entries[i].generalization_gap = NAN;
-    pool->entries[i].hardware_efficiency = NAN;
-    pool->entries[i].effective_rank = NAN;
+    pool->entries[i].coherence.set_uncomputed();
+    pool->entries[i].task_accuracy.set_uncomputed();
+    pool->entries[i].generalization_gap.set_uncomputed();
+    pool->entries[i].hardware_efficiency.set_uncomputed();
+    pool->entries[i].effective_rank.set_uncomputed();
     pool->entries[i].active_warps = 0;
     pool->entries[i].divergent_branches = 0;
     pool->entries[i].total_branches = 0;
@@ -425,10 +354,9 @@ __global__ void cull_weak_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        
         if (pool->alive_flags[idx] && pool->fitness_values[idx] < threshold) {
-            pool->entries[idx].alive = false;
-            pool->alive_flags[idx] = false;  
+            pool->entries[idx].phase = LifecyclePhase::DEAD;
+            pool->alive_flags[idx] = false;
             Atomics::decrement_int(pool->active_count);
             Atomics::increment_int(pool->total_culled);
         }
@@ -991,13 +919,13 @@ __global__ void collect_pool_task_accuracies_kernel(
     ComponentPool* pool,
     float* pool_task_accuracies
 ) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int compact_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (compact_idx >= pool->alive_indices_count) return;
 
-    
-    if (tid >= pool->capacity) return;
-    if (!pool->alive_flags[tid]) return;
+    int tid = pool->alive_indices[compact_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[tid], "collect_pool_task_accuracies_kernel: dead entry in alive_indices");
 
-    pool_task_accuracies[tid] = pool->entries[tid].task_accuracy;
+    pool_task_accuracies[tid] = pool->entries[tid].task_accuracy.value;
 }
 
 __global__ void inherit_ca_weights_kernel(
@@ -1047,11 +975,11 @@ __global__ void find_pending_weight_inherits_kernel(
     int* parent_indices,
     int* num_pending
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= pool->capacity) return;
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
 
-
-    if (!pool->alive_flags[idx]) return;
+    int idx = pool->alive_indices[compact_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[idx], "find_pending_weight_inherits_kernel: dead entry in alive_indices");
 
     PoolEntry* entry = &pool->entries[idx];
     if (entry->age != 0) return;
@@ -1079,9 +1007,12 @@ __global__ void seed_archive_from_pool_kernel(
     int gen_dim,
     int num_classes
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_to_seed) return;
-    if (!pool->alive_flags[idx]) return;
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int actual_num_to_seed = min(num_to_seed, pool->alive_indices_count);
+    if (compact_idx >= actual_num_to_seed) return;
+
+    int idx = pool->alive_indices[compact_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[idx], "seed_archive_from_pool_kernel: dead entry in alive_indices");
 
     PoolEntry* entry = &pool->entries[idx];
 
@@ -1109,9 +1040,9 @@ __global__ void seed_archive_from_pool_kernel(
     insert_elite_device(
         archive,
         archive_size,
-        entry->fitness,
-        entry->coherence,
-        entry->effective_rank,
+        entry->fitness.value,
+        entry->coherence.value,
+        entry->effective_rank.value,
         entry->genome_hash,
         0,
         0,
@@ -1124,7 +1055,9 @@ __global__ void seed_archive_from_pool_kernel(
         num_classes,
         voronoi_cells,
         num_voronoi_cells,
-        latent
+        latent,
+        entry->fitness.input_hash,
+        entry->fitness.computed_at_generation
     );
 }
 

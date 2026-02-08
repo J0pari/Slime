@@ -10,7 +10,8 @@
 #include "../core/chemotaxis.cu"
 
 __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state, int* sparse_cells_buffer) {
-    if (archive_size == 0) return -1;
+    DEVICE_FATAL_IF(archive_size <= 0, "sample_from_archive_novel: empty archive");
+    DEVICE_FATAL_IF(num_cells <= 0, "sample_from_archive_novel: no voronoi cells");
 
     int* sparse_cells = sparse_cells_buffer;
 
@@ -33,21 +34,23 @@ __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, Vo
     } else {
         int cell_idx = sparse_cells[curand(rand_state) % num_sparse];
         int elite_idx = voronoi_cells[cell_idx].best_elite_idx;
-        result = (elite_idx >= 0 && elite_idx < archive_size) ? elite_idx : 0;
+        DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= archive_size,
+            "sample_from_archive_novel: cell %d has invalid best_elite_idx %d", cell_idx, elite_idx);
+        result = elite_idx;
     }
 
     return result;
 }
 
 __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
-    if (archive_size == 0) return;
+    DEVICE_FATAL_IF(archive_size <= 0, "replace_from_archive_device: empty archive");
+    DEVICE_FATAL_IF(num_cells <= 0, "replace_from_archive_device: no voronoi cells");
 
     curandState rand_state;
     curand_init(seed, 0, 0, &rand_state);
 
     int* sparse_cells_buffer = (int*)(workspace_genome + 2 * GENOME_SIZE);
     int elite_idx = sample_from_archive_novel(archive, archive_size, voronoi_cells, num_cells, &rand_state, sparse_cells_buffer);
-    if (elite_idx < 0 || elite_idx >= archive_size) return;
 
     PoolEntry* entry = &pool->entries[pool_idx];
 
@@ -71,11 +74,16 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
     float fitness_modulation = NORMALIZED_MAX / (NORMALIZED_MAX + expf(-fitness_inherit_steepness * (archive->fitness[elite_idx] - fitness_inherit_center)));
 
-    entry->fitness = archive->fitness[elite_idx] * fitness_modulation;
-    entry->coherence = archive->coherence[elite_idx];
-    entry->task_accuracy = NAN;  
-    entry->generalization_gap = NAN;  
-    entry->hardware_efficiency = NAN;  
+    float modulated_fitness = archive->fitness[elite_idx] * fitness_modulation;
+    uint64_t mod_hash = archive->fitness_input_hash[elite_idx];
+    mod_hash ^= __float_as_uint(fitness_modulation) + 0x9e3779b9 + (mod_hash << 6) + (mod_hash >> 2);
+    entry->fitness.set_computed(modulated_fitness, generation, mod_hash);
+    entry->coherence.value = archive->coherence[elite_idx];
+    entry->coherence.state = ComputeState::COMPUTED;
+    entry->coherence.computed_at_generation = archive->fitness_computed_at_generation[elite_idx];
+    entry->task_accuracy.set_uncomputed();
+    entry->generalization_gap.set_uncomputed();
+    entry->hardware_efficiency.set_uncomputed();  
     entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
     entry->generation = archive->generation[elite_idx];
 

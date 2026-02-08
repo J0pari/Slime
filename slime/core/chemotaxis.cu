@@ -97,10 +97,10 @@ __global__ void update_field_from_ca_kernel(
     int max_grid_size,
     int entry_idx
 ) {
-    if (entry_idx >= pool->capacity) return;
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "update_field_from_ca_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "update_field_from_ca_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -135,10 +135,10 @@ __global__ void initialize_ca_from_field_kernel(
     int max_grid_size,
     int entry_idx
 ) {
-    if (entry_idx >= pool->capacity) return;
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "initialize_ca_from_field_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    if (!entry->alive) return;
+    DEVICE_FATAL_IF(!entry->alive, "initialize_ca_from_field_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -1155,9 +1155,11 @@ extern "C" __global__ void update_fitness_landscape_kernel(
     float* __restrict__ fitness_landscape,
     int grid_size
 ) {
-    int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (entry_idx >= pool->capacity) return;
-    if (!pool->alive_flags[entry_idx]) return;
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
+
+    int entry_idx = pool->alive_indices[compact_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_fitness_landscape_kernel: dead entry in alive_indices");
 
     float px = agents[entry_idx].position[0];
     float py = agents[entry_idx].position[1];

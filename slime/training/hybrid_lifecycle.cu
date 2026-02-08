@@ -213,21 +213,22 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     int wave_start
 ) {
     extern __shared__ float sdata[];
-    int entry_idx = wave_start + blockIdx.x;
+    int compact_idx = wave_start + blockIdx.x;
     int wave_position = blockIdx.x;
     int tid = threadIdx.x;
     if (blockIdx.x == 0 && tid == 0) g_block_counter = 0;
     __threadfence();
     ComponentPool* pool = organism->pool;
 
-    if (entry_idx >= pool->capacity) return;
+    if (compact_idx >= pool->alive_indices_count) return;
 
+    int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
 
     __shared__ bool s_entry_alive;
-    if (tid == 0) s_entry_alive = entry->alive;
+    if (tid == 0) s_entry_alive = pool->alive_flags[entry_idx];
     __syncthreads();
-    if (!s_entry_alive) return;
+    DEVICE_FATAL_IF(!s_entry_alive, "hybrid_organism_lifecycle_kernel: dead entry in alive_indices");
     if (tid == 0) atomicAdd(&g_block_counter, 1);
 
     MultiHeadCAState* ca_state = entry->ca_state;
@@ -297,7 +298,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         num_classes = organism->current_dataset->descriptor->num_classes;
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
+        dims.derive_from_genome(primary_genome, entry->gradients);
         behavioral_dim = dims.total();
 
         arch.num_heads = entry->num_heads;
@@ -305,7 +306,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         arch.hidden_dim = entry->hidden_dim;
         arch.head_dim = entry->head_dim;
         arch.grid_size = entry->grid_size;
-        float accuracy = entry->task_accuracy;
+        float accuracy = entry->task_accuracy.value;
         arch.ca_gate_center = 2.0f - 1.5f * fminf(fmaxf(accuracy, 0.0f), 1.0f);
 
         num_features = arch.num_heads * arch.channels;
@@ -676,7 +677,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             if (tid == 0) {
                 BehavioralDimensions dims;
-                dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
+                dims.derive_from_genome(primary_genome, entry->gradients);
                 int task_dim = dims.task_dim;
 
                 DEVICE_FATAL_IF(organism->diresa_task_weights->input_dim != num_features,
@@ -823,13 +824,19 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 float accuracy = (float)correct / batch_size;
                 avg_confidence /= batch_size;
 
+                int ema_slot = derive_param_slot(entry->genome_hash, "accuracy_ema_smoothing");
+                float ema_smoothing = genome_slot_to_unit(primary_genome, ema_slot);
+                ema_smoothing = EMA_SMOOTHING_MIN + ema_smoothing * (EMA_SMOOTHING_MAX - EMA_SMOOTHING_MIN);
+
+                int current_gen = organism->generation;
                 if (training_mode->is_train_batch) {
-                    entry->train_accuracy = 0.9f * entry->train_accuracy + 0.1f * accuracy;
+                    float smoothed = ema_smoothing * entry->train_accuracy.value + (1.0f - ema_smoothing) * accuracy;
+                    entry->train_accuracy.set_computed(smoothed, current_gen, entry->genome_hash);
                 } else {
-                    entry->test_accuracy = accuracy;
+                    entry->test_accuracy.set_computed(accuracy, current_gen, entry->genome_hash);
                 }
-                entry->task_accuracy = accuracy;
-                entry->avg_confidence = avg_confidence;
+                entry->task_accuracy.set_computed(accuracy, current_gen, entry->genome_hash);
+                entry->avg_confidence.set_computed(avg_confidence, current_gen, entry->genome_hash);
                 for (int c = 0; c < NUM_CLASSES_MAX; c++) {
                     entry->per_class_correct[c] = local_per_class_correct[c];
                     entry->per_class_total[c] = local_per_class_total[c];
@@ -1511,13 +1518,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 dim3 diff_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
                 dim3 diff_block(16, 16);
 
-                float ctx_metabolic = entry->fitness;
-                float ctx_stress = entry->hunger;
+                float ctx_metabolic = entry->fitness.value;
+                float ctx_stress = entry->hunger.value;
                 float ctx_morphogen = organism->chemical_field->cached_mean;
                 float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
                 float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
                 float ctx_learning = training_mode->learning_rate;
-                float ctx_performance = entry->task_accuracy;
+                float ctx_performance = entry->task_accuracy.value;
 
                 diffusion_reaction_backward_kernel<<<diff_grid, diff_block>>>(
                     organism->buffers->grad_concentration_buffer,
@@ -1646,8 +1653,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     float d_beta_A = s_d_beta_A / (batch_size * total_cells);
                     float d_n = s_d_n / (batch_size * total_cells);
 
-                    float ctx_metabolic = entry->fitness;
-                    float ctx_stress = entry->hunger;
+                    float ctx_metabolic = entry->fitness.value;
+                    float ctx_stress = entry->hunger.value;
                     float ctx_morphogen = local_ca_mean;
                     float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
                     float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
@@ -1747,7 +1754,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     }
                 }
                 float eff_rank = expf(entropy);
-                entry->effective_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
+                float clamped_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
+                entry->effective_rank.set_computed(clamped_rank, organism->generation, entry->genome_hash);
             }
             __syncthreads();
         }
@@ -1758,8 +1766,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int interaction_params = arch.num_heads * arch.head_dim * arch.head_dim;
             int value_params = arch.num_heads * arch.head_dim * arch.channels;
 
-            float ctx_metabolic = entry->fitness;
-            float ctx_stress = entry->hunger;
+            float ctx_metabolic = entry->fitness.value;
+            float ctx_stress = entry->hunger.value;
             float ctx_morphogen = local_ca_mean;
 
             TrainingParams train_params;
@@ -1860,8 +1868,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         GPUElite* archive = organism->archive;
         int archive_size_val = organism->archive_size;
 
-        for (int eid = tid; eid < pool->capacity; eid += blockDim.x) {
-            if (!pool->alive_flags[eid]) continue;
+        int alive_ct = pool->alive_indices_count;
+        for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
+            int eid = pool->alive_indices[compact];
+            DEVICE_FATAL_IF(!pool->entries[eid].alive, "hybrid_lifecycle: dead entry in alive_indices (metrics loop)");
 
             PoolEntry* ent = &pool->entries[eid];
             float* eid_primary_genome = &component_workspace_genomes[eid * 2 * GENOME_SIZE];
@@ -1902,13 +1912,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
         {
             float local_acc = 0.0f, local_gap = 0.0f, local_hw = 0.0f, local_fit = 0.0f;
-            for (int eid = tid; eid < pool->capacity; eid += blockDim.x) {
-                if (pool->alive_flags[eid]) {
-                    local_acc += pool->entries[eid].task_accuracy;
-                    local_gap += pool->entries[eid].generalization_gap;
-                    local_hw += pool->entries[eid].hardware_efficiency;
-                    local_fit += pool->fitness_values[eid];
-                }
+            for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
+                int eid = pool->alive_indices[compact];
+                local_acc += pool->entries[eid].task_accuracy.value;
+                local_gap += pool->entries[eid].generalization_gap.value;
+                local_hw += pool->entries[eid].hardware_efficiency.value;
+                local_fit += pool->fitness_values[eid];
             }
             sdata[tid] = local_acc;
             __syncthreads();
@@ -1952,11 +1961,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         __syncthreads();
 
         if (generation > 0) {
-            for (int eid = tid; eid < pool->capacity; eid += blockDim.x) {
-                if (!pool->alive_flags[eid]) continue;
+            for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
+                int eid = pool->alive_indices[compact];
+                DEVICE_FATAL_IF(!pool->alive_flags[eid], "hybrid_lifecycle: dead entry in alive_indices (baldwin loop)");
 
                 float prev_task_accuracy = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
-                float current_task_accuracy = pool->entries[eid].task_accuracy;
+                float current_task_accuracy = pool->entries[eid].task_accuracy.value;
                 float learning_success = current_task_accuracy - prev_task_accuracy;
 
                 if (is_meaningful(learning_success, 1.0f)) {
@@ -2154,7 +2164,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
         for (int e = 0; e < pool_cap && e < batch_sz; e++) {
             PoolEntry* ent = &organism->pool->entries[e];
-            if (ent->alive && ent->ca_state && ent->ca_state->ca_concentration) {
+            if (organism->pool->alive_flags[e] && ent->ca_state && ent->ca_state->ca_concentration) {
                 int src_offset = e * copy_size;
                 for (int idx = tid; idx < copy_size; idx += blockDim.x) {
                     ent->ca_state->ca_concentration[idx] = organism->batch_ca_states_pool[src_offset + idx];
