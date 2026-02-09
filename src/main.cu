@@ -264,10 +264,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.all_rd_fields, sizeof(float) * RD_FIELD_COUNT * CA_FIELD_SIZE, "all_rd_fields");
     CUDA_ALLOC_CHECK(buffers_host.shared_workspace, sizeof(float) * POOL_CAPACITY_MAX * POOL_CAPACITY_MAX, "shared_workspace");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_states, sizeof(LocalOrganismState<BLOCK_SIZE>) * ((POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "lifecycle_states");
-    // diresa_genome_weights is shared (GENOME_SIZE is fixed for all entries)
+    
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_genome_weights");
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_GENOME_STRIDE, "diresa_genome_weight_pool");
-    // Per-entry diresa weights - each pool entry has its own weights with its own input_dim
+    
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_task_weights");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_hw_weights");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_gen_weights");
@@ -366,7 +366,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
-    // Unified backward workspace - all components contiguous per entry
+    
     constexpr size_t BACKWARD_WS_TOTAL_SIZE = BACKWARD_WS_FP16_A_SIZE + BACKWARD_WS_FP16_B_SIZE +
         BACKWARD_WS_DW_SIZE + BACKWARD_WS_DI_SIZE + BACKWARD_WS_W_T_SIZE +
         BACKWARD_WS_IM2COL_SIZE + BACKWARD_WS_DPREGELU_SIZE;

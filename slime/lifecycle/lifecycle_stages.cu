@@ -10,7 +10,7 @@
 
 namespace cg = cooperative_groups;
 
-// LifecyclePhase defined in provenance.cuh
+
 
 template<int SECTION_SIZE>
 struct LocalOrganismState {
@@ -336,8 +336,8 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     int compact_idx = block_id * blockDim.x + tid;
     int alive_count = pool->alive_indices_count;
 
-    // Kernel MUST be launched with grid = (alive_count + BLOCK_SIZE - 1) / BLOCK_SIZE
-    // Every thread in full blocks has an organism. Partial last block handled below.
+    
+    
     int threads_in_block = min((int)blockDim.x, alive_count - block_id * blockDim.x);
     DEVICE_FATAL_IF(threads_in_block <= 0, "hierarchical_lifecycle_kernel: block launched with no valid threads");
 
@@ -518,7 +518,7 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
         int worst_actual = shared_actual_idx[worst_tid];
         local_state.phases[worst_tid] = LifecyclePhase::REACTIVATING;
         float new_fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
-        // Modulated fitness from archive - set proper provenance
+        
         pool->entries[worst_actual].fitness.value = new_fitness;
         pool->entries[worst_actual].fitness.state = ComputeState::COMPUTED;
         pool->entries[worst_actual].fitness.computed_at_generation = generation;

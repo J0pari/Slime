@@ -95,13 +95,13 @@ struct OrganismPreallocatedBuffers {
     float* all_rd_fields;
     float* shared_workspace;
     LocalOrganismState<BLOCK_SIZE>* lifecycle_states;
-    // diresa_genome_weights is shared because GENOME_SIZE is fixed for all entries
+    
     DIRESAWeights* diresa_genome_weights;
     float* diresa_genome_weight_pool;
-    // Per-entry diresa weights - each entry has its own because input_dim varies per entry
-    DIRESAWeights* per_entry_diresa_task_weights;  // [POOL_CAPACITY_MAX]
-    DIRESAWeights* per_entry_diresa_hw_weights;    // [POOL_CAPACITY_MAX]
-    DIRESAWeights* per_entry_diresa_gen_weights;   // [POOL_CAPACITY_MAX]
+    
+    DIRESAWeights* per_entry_diresa_task_weights;  
+    DIRESAWeights* per_entry_diresa_hw_weights;    
+    DIRESAWeights* per_entry_diresa_gen_weights;   
     float* per_entry_diresa_task_weight_pool;
     float* per_entry_diresa_hw_weight_pool;
     float* per_entry_diresa_gen_weight_pool;
@@ -181,7 +181,7 @@ struct OrganismPreallocatedBuffers {
     int* weight_inherit_child_indices;
     int* weight_inherit_parent_indices;
     int* weight_inherit_num_pending;
-    char* backward_workspace;  // Unified backward workspace - all components per entry contiguous
+    char* backward_workspace;  
     curandState* rng_states;
     TapeEntry* ad_tape_entries_pool;
     float* ad_tape_values_pool;
@@ -232,13 +232,13 @@ struct Organism {
     float* prediction_error_history;
     float* fitness_workspace_pool;
 
-    // diresa_genome_weights is shared because GENOME_SIZE is fixed for all entries
+    
     DIRESAWeights* diresa_genome_weights;
     float* diresa_genome_weight_pool;
-    // Per-entry diresa weights - each entry has its own because input_dim varies per entry
-    DIRESAWeights* per_entry_diresa_task_weights;  // [POOL_CAPACITY_MAX]
-    DIRESAWeights* per_entry_diresa_hw_weights;    // [POOL_CAPACITY_MAX]
-    DIRESAWeights* per_entry_diresa_gen_weights;   // [POOL_CAPACITY_MAX]
+    
+    DIRESAWeights* per_entry_diresa_task_weights;  
+    DIRESAWeights* per_entry_diresa_hw_weights;    
+    DIRESAWeights* per_entry_diresa_gen_weights;   
     float* per_entry_diresa_task_weight_pool;
     float* per_entry_diresa_hw_weight_pool;
     float* per_entry_diresa_gen_weight_pool;
@@ -1034,7 +1034,7 @@ __global__ void behavioral_update_kernel(
         int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
 
         ChemotaxisParams chem_params;
-        // ChemotaxisParams uses static slots from GenomeParamTable, no init needed
+        
 
         InitContext init_ctx;
         init_ctx.derive_from_genome(primary_genome, entry->gradients);
@@ -1508,10 +1508,10 @@ __global__ void init_organism_phase2_kernel(
         cudaError_t err;
         printf("V:p2_enter seed=%u\n", seed);
 
-        // Shared genome weights (GENOME_SIZE is fixed for all entries)
+        
         organism->diresa_genome_weights = buffers->diresa_genome_weights;
         organism->diresa_genome_weight_pool = buffers->diresa_genome_weight_pool;
-        // Per-entry diresa weights (input_dim varies per entry)
+        
         organism->per_entry_diresa_task_weights = buffers->per_entry_diresa_task_weights;
         organism->per_entry_diresa_hw_weights = buffers->per_entry_diresa_hw_weights;
         organism->per_entry_diresa_gen_weights = buffers->per_entry_diresa_gen_weights;
@@ -1769,7 +1769,7 @@ __global__ void init_organism_phase2_kernel(
         organism->telemetry->memory_allocation.device_heap_limit = DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
-        // Shared genome weights (GENOME_SIZE is fixed for all entries)
+        
         size_t genome_stride = GENOME_SIZE * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                                DIRESA_HIDDEN2_MAX * GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX +
@@ -1783,16 +1783,16 @@ __global__ void init_organism_phase2_kernel(
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa_genome failed");
 
-        // Per-entry diresa weights - each entry gets its own with its real input_dim
+        
         for (int entry_idx = 0; entry_idx < pool_capacity; entry_idx++) {
             PoolEntry* e = &organism->pool->entries[entry_idx];
             if (!organism->pool->alive_flags[entry_idx]) continue;
 
-            // Entry's real input dimension for task weights
+            
             int entry_task_input_dim = e->num_heads * e->channels;
             e->diresa_task_input_dim = entry_task_input_dim;
 
-            // Compute entry's task stride using its real dimensions
+            
             size_t entry_task_stride =
                 entry_task_input_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                 DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
@@ -1817,12 +1817,12 @@ __global__ void init_organism_phase2_kernel(
                 DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                 DIRESA_HIDDEN1_MAX * 1 + 1;
 
-            // Wire entry's diresa weights to per-entry arrays
+            
             e->diresa_task_weights = &organism->per_entry_diresa_task_weights[entry_idx];
             e->diresa_hw_weights = &organism->per_entry_diresa_hw_weights[entry_idx];
             e->diresa_gen_weights = &organism->per_entry_diresa_gen_weights[entry_idx];
 
-            // Initialize entry's diresa weights with entry's real dimensions
+            
             float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + entry_idx * DIRESA_TASK_STRIDE_PER_ENTRY;
             float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + entry_idx * DIRESA_HW_STRIDE;
             float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + entry_idx * DIRESA_GEN_STRIDE;
@@ -2269,7 +2269,7 @@ __global__ void persistent_evolution_kernel(
             int wave_start = wave * WAVE_SIZE;
             int wave_blocks = min(WAVE_SIZE, alive_count - wave_start);
 
-            // Load batch for this wave
+            
             load_batch_kernel<<<wave_blocks, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size, wave_start);
             cudaError_t err_load = cudaGetLastError();
             if (err_load != cudaSuccess) {

@@ -201,15 +201,14 @@ __device__ void spawn_component_device(
     PoolInitParams params;
     int use_latent;
 
-    // Atomically reserve a slot first - prevents race where multiple threads pass capacity check
-    int reserved_count = Atomics::increment_int(pool->active_count);
-    if (reserved_count > pool->capacity) {
-        // Over capacity - undo reservation and exit
-        Atomics::decrement_int(pool->active_count);
+    
+    int old_count = atomicAdd((int*)&pool->active_count, 1);
+    if (old_count >= pool->capacity) {
+        atomicSub((int*)&pool->active_count, 1);
         return;
     }
 
-    // Find a free slot using atomicCAS
+    
     for (int i = 0; i < pool->capacity; i++) {
         if (pool->entries[i].id == INT_MAX) {
             int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);
@@ -221,12 +220,11 @@ __device__ void spawn_component_device(
     }
 
     if (slot_idx < 0) {
-        // No slot found despite reservation - undo and exit (shouldn't happen)
-        Atomics::decrement_int(pool->active_count);
+        atomicSub((int*)&pool->active_count, 1);
         return;
     }
 
-    // Now safe to get the ID
+    
     new_id = atomicAdd((int*)&pool->total_spawned, 1);
     int i = slot_idx;
 

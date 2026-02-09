@@ -32,7 +32,7 @@ __device__ int find_parent_by_hash(GPUElite* archive, int archive_size, uint64_t
 __device__ void update_genealogy_on_spawn(GPUElite* archive, int new_elite_idx, int parent1_idx, int parent2_idx) {
     DEVICE_VALIDATE_PTR(archive);
     DEVICE_VALIDATE_RANGE(new_elite_idx, 0, MAX_ARCHIVE_SIZE - 1);
-    // Use UINT32_MAX as sentinel for "no parent" (not 0 which is a valid index)
+    
     archive->parent_ids[new_elite_idx * PARENT_COUNT] = (parent1_idx >= 0) ? (uint32_t)parent1_idx : UINT32_MAX;
     archive->parent_ids[new_elite_idx * PARENT_COUNT + 1] = (parent2_idx >= 0) ? (uint32_t)parent2_idx : UINT32_MAX;
 }

@@ -105,17 +105,17 @@ struct PoolEntry {
 
     MultiHeadCAState* ca_state;
 
-    // Per-entry diresa weights (each entry has its own architecture)
+    
     DIRESAWeights* diresa_task_weights;
     DIRESAWeights* diresa_hw_weights;
     DIRESAWeights* diresa_gen_weights;
-    int diresa_task_input_dim;  // num_heads * channels for this entry
+    int diresa_task_input_dim;  
 };
 
 namespace GenomeParamTable {
     constexpr int BLOCK_SIZE = 8;
 
-    // Block 0: Architecture
+    
     constexpr int ARCHITECTURE_BLOCK = 0;
     constexpr int num_heads = ARCHITECTURE_BLOCK + 0;
     constexpr int head_dim = ARCHITECTURE_BLOCK + 1;
@@ -126,7 +126,7 @@ namespace GenomeParamTable {
     constexpr int pool_capacity = ARCHITECTURE_BLOCK + 6;
     constexpr int initial_pool_size = ARCHITECTURE_BLOCK + 7;
 
-    // Block 1: Optimizer
+    
     constexpr int OPTIMIZER_BLOCK = 1 * BLOCK_SIZE;
     constexpr int adam_beta1 = OPTIMIZER_BLOCK + 0;
     constexpr int adam_beta2 = OPTIMIZER_BLOCK + 1;
@@ -137,7 +137,7 @@ namespace GenomeParamTable {
     constexpr int flow_lenia_lr = OPTIMIZER_BLOCK + 6;
     constexpr int behavioral_learning_rate = OPTIMIZER_BLOCK + 7;
 
-    // Block 2: Flow-Lenia
+    
     constexpr int FLOW_LENIA_BLOCK = 2 * BLOCK_SIZE;
     constexpr int flow_lenia_s = FLOW_LENIA_BLOCK + 0;
     constexpr int flow_lenia_beta_A = FLOW_LENIA_BLOCK + 1;
@@ -147,7 +147,7 @@ namespace GenomeParamTable {
     constexpr int flow_sharpness = FLOW_LENIA_BLOCK + 5;
     constexpr int flow_resource_dt = FLOW_LENIA_BLOCK + 6;
 
-    // Block 3-5: Chemotaxis
+    
     constexpr int CHEMOTAXIS_BLOCK = 3 * BLOCK_SIZE;
     constexpr int chemotaxis_theta = CHEMOTAXIS_BLOCK + 0;
     constexpr int chemotaxis_sigma = CHEMOTAXIS_BLOCK + 1;
@@ -178,7 +178,7 @@ namespace GenomeParamTable {
     constexpr int chemotaxis_chemical_decay = CHEMOTAXIS_BLOCK_3 + 6;
     constexpr int chemotaxis_dt = CHEMOTAXIS_BLOCK_3 + 7;
 
-    // Block 6: Fitness
+    
     constexpr int FITNESS_BLOCK = 6 * BLOCK_SIZE;
     constexpr int gradient_fitness_weight = FITNESS_BLOCK + 0;
     constexpr int coherence_fitness_weight = FITNESS_BLOCK + 1;
@@ -189,7 +189,7 @@ namespace GenomeParamTable {
     constexpr int fitness_gen_exponent = FITNESS_BLOCK + 6;
     constexpr int fitness_efficiency_exponent = FITNESS_BLOCK + 7;
 
-    // Block 7: Pool/Init
+    
     constexpr int POOL_BLOCK = 7 * BLOCK_SIZE;
     constexpr int initial_hunger = POOL_BLOCK + 0;
     constexpr int genome_mutation_scale = POOL_BLOCK + 1;
@@ -200,7 +200,7 @@ namespace GenomeParamTable {
     constexpr int coherence_window_size = POOL_BLOCK + 6;
     constexpr int renyi_q = POOL_BLOCK + 7;
 
-    // Block 8: Context
+    
     constexpr int CONTEXT_BLOCK = 8 * BLOCK_SIZE;
     constexpr int init_context_metabolic = CONTEXT_BLOCK + 0;
     constexpr int init_context_stress = CONTEXT_BLOCK + 1;
@@ -210,13 +210,13 @@ namespace GenomeParamTable {
     constexpr int embed_ctx_stress = CONTEXT_BLOCK + 5;
     constexpr int embed_ctx_morphogen = CONTEXT_BLOCK + 6;
 
-    // Block 9: Behavioral
+    
     constexpr int BEHAVIORAL_BLOCK = 9 * BLOCK_SIZE;
     constexpr int behavioral_dim_hw = BEHAVIORAL_BLOCK + 0;
     constexpr int behavioral_dim_task = BEHAVIORAL_BLOCK + 1;
     constexpr int behavioral_dim_gen = BEHAVIORAL_BLOCK + 2;
 
-    // Block 10: DIRESA
+    
     constexpr int DIRESA_BLOCK = 10 * BLOCK_SIZE;
     constexpr int dist_weight = DIRESA_BLOCK + 0;
     constexpr int recon_weight = DIRESA_BLOCK + 1;
@@ -227,7 +227,7 @@ namespace GenomeParamTable {
     constexpr int diresa_hidden2 = DIRESA_BLOCK + 6;
     constexpr int diresa_batch_size = DIRESA_BLOCK + 7;
 
-    // Block 11: DIRESA extended
+    
     constexpr int DIRESA_BLOCK_2 = 11 * BLOCK_SIZE;
     constexpr int diresa_anneal_step = DIRESA_BLOCK_2 + 0;
     constexpr int diresa_cov_target = DIRESA_BLOCK_2 + 1;
@@ -238,14 +238,14 @@ namespace GenomeParamTable {
     constexpr int diresa_temp_scale = DIRESA_BLOCK_2 + 6;
     constexpr int diresa_gradient_clip = DIRESA_BLOCK_2 + 7;
 
-    // Block 36: DIRESA context extended
+    
     constexpr int DIRESA_BLOCK_3 = 36 * BLOCK_SIZE;
     constexpr int diresa_ctx_complexity = DIRESA_BLOCK_3 + 0;
     constexpr int diresa_ctx_niche = DIRESA_BLOCK_3 + 1;
     constexpr int diresa_ctx_learning = DIRESA_BLOCK_3 + 2;
     constexpr int diresa_ctx_performance = DIRESA_BLOCK_3 + 3;
 
-    // Block 12-15: Lifecycle
+    
     constexpr int LIFECYCLE_BLOCK = 12 * BLOCK_SIZE;
     constexpr int lifecycle_coherence_stressed = LIFECYCLE_BLOCK + 0;
     constexpr int lifecycle_coherence_recover = LIFECYCLE_BLOCK + 1;
@@ -283,7 +283,7 @@ namespace GenomeParamTable {
     constexpr int lifecycle_fitness_inherit_center = LIFECYCLE_BLOCK_4 + 3;
     constexpr int lifecycle_fitness_inherit_steepness = LIFECYCLE_BLOCK_4 + 4;
 
-    // Block 16-17: Memory
+    
     constexpr int MEMORY_BLOCK = 16 * BLOCK_SIZE;
     constexpr int memory_decay_factor = MEMORY_BLOCK + 0;
     constexpr int memory_importance = MEMORY_BLOCK + 1;
@@ -292,7 +292,7 @@ namespace GenomeParamTable {
     constexpr int memory_flow_lenia_dt = MEMORY_BLOCK + 4;
     constexpr int memory_default_decay_rate = MEMORY_BLOCK + 5;
 
-    // Block 18-19: Chemical field init
+    
     constexpr int CHEM_INIT_BLOCK = 18 * BLOCK_SIZE;
     constexpr int chem_diffusivity = CHEM_INIT_BLOCK + 0;
     constexpr int chem_reaction_order = CHEM_INIT_BLOCK + 1;
@@ -302,19 +302,19 @@ namespace GenomeParamTable {
     constexpr int chem_init_genome_influence = CHEM_INIT_BLOCK + 5;
     constexpr int chem_init_noise_scale = CHEM_INIT_BLOCK + 6;
 
-    // Block 20-21: Agent params
+    
     constexpr int AGENT_BLOCK = 20 * BLOCK_SIZE;
     constexpr int max_agent_velocity = AGENT_BLOCK + 0;
     constexpr int fourier_base_freq = AGENT_BLOCK + 1;
     constexpr int fourier_num_octaves = AGENT_BLOCK + 2;
     constexpr int fourier_spectrum_exponent = AGENT_BLOCK + 3;
 
-    // Block 22-23: Resource params
+    
     constexpr int RESOURCE_BLOCK = 22 * BLOCK_SIZE;
     constexpr int resource_density_initial = RESOURCE_BLOCK + 0;
     constexpr int resource_density_noise = RESOURCE_BLOCK + 1;
 
-    // Block 24-25: Spawn/Mutation
+    
     constexpr int SPAWN_BLOCK = 24 * BLOCK_SIZE;
     constexpr int spawn_fitness_threshold = SPAWN_BLOCK + 0;
     constexpr int spawn_ctx_metabolic = SPAWN_BLOCK + 1;
@@ -325,44 +325,44 @@ namespace GenomeParamTable {
     constexpr int mutation_ctx_morphogen = SPAWN_BLOCK + 6;
     constexpr int metalearning_mutation_rate = SPAWN_BLOCK + 7;
 
-    // Block 26-27: Curriculum
+    
     constexpr int CURRICULUM_BLOCK = 26 * BLOCK_SIZE;
     constexpr int curriculum_accuracy_threshold = CURRICULUM_BLOCK + 0;
     constexpr int curriculum_diversity_threshold = CURRICULUM_BLOCK + 1;
     constexpr int curriculum_min_generations = CURRICULUM_BLOCK + 2;
 
-    // Block 28-29: Convergence
+    
     constexpr int CONVERGENCE_BLOCK = 28 * BLOCK_SIZE;
     constexpr int convergence_fitness_threshold = CONVERGENCE_BLOCK + 0;
     constexpr int convergence_coherence_threshold = CONVERGENCE_BLOCK + 1;
 
-    // Block 30: Delta encoding
+    
     constexpr int DELTA_BLOCK = 30 * BLOCK_SIZE;
     constexpr int delta_threshold = DELTA_BLOCK + 0;
 
-    // Block 31: Voronoi
+    
     constexpr int VORONOI_BLOCK = 31 * BLOCK_SIZE;
     constexpr int voronoi_init_dt = VORONOI_BLOCK + 0;
     constexpr int voronoi_correlation_exponent = VORONOI_BLOCK + 1;
     constexpr int weight_delta_threshold = VORONOI_BLOCK + 2;
 
-    // Block 32: Diversity
+    
     constexpr int DIVERSITY_BLOCK = 32 * BLOCK_SIZE;
     constexpr int diversity_sample_count = DIVERSITY_BLOCK + 0;
 
-    // Block 33: EMA
+    
     constexpr int EMA_BLOCK = 33 * BLOCK_SIZE;
     constexpr int accuracy_ema_smoothing = EMA_BLOCK + 0;
 
-    // Block 34: Fitness inheritance
+    
     constexpr int FITNESS_INHERIT_BLOCK = 34 * BLOCK_SIZE;
     constexpr int fitness_inherit_center = FITNESS_INHERIT_BLOCK + 0;
     constexpr int fitness_inherit_steepness = FITNESS_INHERIT_BLOCK + 1;
 
-    // Block 35: Bounds for context and behavioral dimensions
+    
     constexpr int BOUNDS_BLOCK = 35 * BLOCK_SIZE;
 
-    // Block 37-40: Evolvable parameter bounds (min/max for genome-controlled ranges)
+    
     constexpr int BOUNDS_BLOCK_2 = 37 * BLOCK_SIZE;
     constexpr int memory_decay_factor_min = BOUNDS_BLOCK_2 + 0;
     constexpr int memory_decay_factor_max = BOUNDS_BLOCK_2 + 1;

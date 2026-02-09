@@ -24,29 +24,29 @@ struct TemporalTube;
 
 __device__ int g_block_counter = 0;
 
-// Per-entry buffer offsets computed dynamically based on actual architectures
+
 struct WaveBufferOffsets {
-    int ca_states_offset;       // batch_size * cells * channels - for batch_ca_states_pool, batch_prev_concentration, batch_reintegration_buffer
-    int ca_output_offset;       // batch_size * num_heads * cells * channels - for batched_ca_output, ca_output_grad_buffer
-    int activations_offset;     // batch_size * num_heads * cells * head_dim - for perception/interaction/pregelu saved, dL_dperception/dL_dinteraction
-    int affinity_offset;        // batch_size * cells - for batch_affinity_reduced (grid_size is constant)
-    int flow_offset;            // batch_size * cells * 2 - for batch_flow_field (grid_size is constant)
-    size_t backward_ws_offset;  // byte offset into unified backward workspace buffer
+    int ca_states_offset;       
+    int ca_output_offset;       
+    int activations_offset;     
+    int affinity_offset;        
+    int flow_offset;            
+    size_t backward_ws_offset;  
 };
 
-// Layout of backward workspace components within a single entry's region (byte offsets from entry base)
+
 struct BackwardWorkspaceLayout {
-    size_t fp16_a_offset;       // half elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
-    size_t fp16_b_offset;       // half elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
-    size_t dW_offset;           // float elements: num_heads * hidden_dim * hidden_dim
-    size_t dI_offset;           // float elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
-    size_t W_T_offset;          // half elements: hidden_dim * hidden_dim
-    size_t im2col_offset;       // float elements: channels * cells * 9
-    size_t dpregelu_offset;     // float elements: BACKWARD_CHUNK_SAMPLES * num_heads * cells * head_dim
-    size_t total_bytes;         // total size in bytes for this entry
+    size_t fp16_a_offset;       
+    size_t fp16_b_offset;       
+    size_t dW_offset;           
+    size_t dI_offset;           
+    size_t W_T_offset;          
+    size_t im2col_offset;       
+    size_t dpregelu_offset;     
+    size_t total_bytes;         
 };
 
-// Compute backward workspace layout for a specific entry
+
 __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(PoolEntry* entry) {
     BackwardWorkspaceLayout layout;
     int cells = entry->grid_size * entry->grid_size;
@@ -89,7 +89,7 @@ __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(Po
     return layout;
 }
 
-// Compute buffer offset for a single entry based on its architecture
+
 __device__ __forceinline__ int compute_entry_ca_states_size(PoolEntry* entry, int batch_size) {
     int cells = entry->grid_size * entry->grid_size;
     return batch_size * cells * entry->channels;
@@ -115,7 +115,7 @@ __device__ __forceinline__ int compute_entry_flow_size(PoolEntry* entry, int bat
     return batch_size * cells * 2;
 }
 
-// Compute cumulative offsets for this wave_position by summing sizes of prior entries
+
 __device__ WaveBufferOffsets compute_wave_offsets(
     ComponentPool* pool,
     int wave_start,
@@ -130,7 +130,7 @@ __device__ WaveBufferOffsets compute_wave_offsets(
     offsets.flow_offset = 0;
     offsets.backward_ws_offset = 0;
 
-    // Sum sizes of all entries before this wave_position
+    
     for (int i = 0; i < wave_position; i++) {
         int compact_idx = wave_start + i;
         if (compact_idx >= pool->alive_indices_count) break;
@@ -186,7 +186,7 @@ extern "C" __global__ void load_batch_kernel(
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
 
-    // Compute wave offsets based on actual entry architectures
+    
     __shared__ WaveBufferOffsets s_wave_offsets;
     if (tid == 0) {
         s_wave_offsets = compute_wave_offsets(pool, wave_start, wave_position, training_mode->batch_size);
@@ -303,7 +303,7 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(organism->buffers == nullptr, "load_batch: buffers null");
     DEVICE_FATAL_IF(organism->buffers->batch_prev_concentration == nullptr, "load_batch: batch_prev_concentration null");
 
-    // Use dynamic offsets and actual entry channels
+    
     float* ca_out = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
     int channels_out = entry->channels;
     float* batch_images = training_mode->batch_images;
@@ -313,7 +313,7 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(total_positions <= 0 || total_positions > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch: total_positions OOB");
     if (tid == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
 
-    // Image channels are at fixed positions 11-13 (RGB), rest are from prev_concentration
+    
     constexpr int IMG_CHANNEL_START = 11;
     constexpr int IMG_CHANNEL_COUNT = 3;
 
@@ -322,12 +322,12 @@ extern "C" __global__ void load_batch_kernel(
             int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
             int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
 
-            // Copy all channels from prev_concentration, then overlay image channels
+            
             for (int c = 0; c < channels_out; c++) {
                 ca_out[base_idx + c] = prev_concentration[prev_idx + c];
             }
 
-            // Overlay RGB image into channels 11-13 (if entry has enough channels)
+            
             if (channels_out > IMG_CHANNEL_START + IMG_CHANNEL_COUNT - 1) {
                 int img_base = batch_idx * batch_stride * 3;
                 ca_out[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
@@ -362,7 +362,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
 
-    // Compute wave buffer offsets based on actual entry architectures
+    
     __shared__ WaveBufferOffsets s_wave_offsets;
     if (tid == 0) {
         s_wave_offsets = compute_wave_offsets(pool, wave_start, wave_position, training_mode->batch_size);
@@ -536,7 +536,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
 
-            // Use dynamic offsets computed from actual entry architectures
+            
             float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
             float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
             float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
@@ -668,7 +668,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float flow_sharpness = entry->flow_sharpness;
             float flow_dt = entry->flow_resource_dt;
 
-            // Use dynamic offsets computed from actual entry architectures
+            
             float* wave_ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             float* wave_affinity = organism->buffers->batch_affinity_reduced + s_wave_offsets.affinity_offset;
             float* wave_flow = organism->buffers->batch_flow_field + s_wave_offsets.flow_offset;
@@ -780,7 +780,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
 
-            // Use dynamic offset computed from actual entry architectures
+            
             float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
             float* pooling_weights = training_mode->classifier->pooling_weights;
@@ -991,7 +991,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
 
-            // Use dynamic offset computed from actual entry architectures
+            
             float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             ca_output_grad = organism->buffers->ca_output_grad_buffer + s_wave_offsets.ca_output_offset;
 
@@ -1088,18 +1088,18 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_cells = arch.grid_size * arch.grid_size;
             int total_samples = training_mode->batch_size * num_cells;
 
-            // Use dynamic offsets computed from actual entry architectures
+            
             float* dL_dperception = organism->buffers->dL_dperception_buffer + s_wave_offsets.activations_offset;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + s_wave_offsets.activations_offset;
             if (tid == 0) printf("V:BWD_ENTER blk=%d\n", blockIdx.x);
 
             {
 
-            // Get backward workspace base for this entry and compute component layout
+            
             char* backward_ws_base = organism->buffers->backward_workspace + s_wave_offsets.backward_ws_offset;
             BackwardWorkspaceLayout ws_layout = compute_backward_ws_layout(entry);
 
-            // Get pointers to each workspace component within this entry's region
+            
             half* ws_fp16_a = (half*)(backward_ws_base + ws_layout.fp16_a_offset);
             half* ws_fp16_b = (half*)(backward_ws_base + ws_layout.fp16_b_offset);
             float* ws_dW = (float*)(backward_ws_base + ws_layout.dW_offset);
@@ -1108,7 +1108,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_im2col = (float*)(backward_ws_base + ws_layout.im2col_offset);
             float* ws_dpregelu = (float*)(backward_ws_base + ws_layout.dpregelu_offset);
 
-            // Use dynamic offsets for saved activations
+            
             float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
             float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
             float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
@@ -1126,11 +1126,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int lane_id = tid % WARP_SIZE;
             int num_warps = blockDim.x / WARP_SIZE;
 
-            // Chunked workspace strides (sized for BACKWARD_CHUNK_SAMPLES)
+            
             int chunk_ws_a_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_b_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
 
-            // Zero ws_dW for accumulation across chunks
+            
             {
                 int total_dW = arch.num_heads * arch.head_dim * arch.channels;
                 for (int idx = tid; idx < total_dW; idx += blockDim.x) {
@@ -1139,16 +1139,16 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Process samples in chunks of BACKWARD_CHUNK_SAMPLES
+            
             int num_chunks = (total_samples + BACKWARD_CHUNK_SAMPLES - 1) / BACKWARD_CHUNK_SAMPLES;
             for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
                 int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
                 int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
-                // Round down to WMMA_TILE_DIM for valid WMMA operations
+                
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                // Convert chunk of interaction_saved to ws_fp16_a
+                
                 {
                     int total_I = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_I; idx += blockDim.x) {
@@ -1166,7 +1166,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Convert chunk of ca_output_grad to ws_fp16_b
+                
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_V; idx += blockDim.x) {
@@ -1184,7 +1184,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // WMMA matmul: dW_value += I^T * dL/dOutput for this chunk
+                
                 {
                     int tiles_M = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1208,7 +1208,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-                            // Load existing accumulated value
+                            
                             nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.channels + tile_col, arch.channels, nvcuda::wmma::mem_row_major);
 
                             for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
@@ -1221,9 +1221,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     }
                 }
                 __syncthreads();
-            } // end chunk loop
+            } 
 
-            // Copy accumulated gradients to tape
+            
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.channels;
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
@@ -1236,7 +1236,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Transpose value weights (small, no chunking needed)
+            
             {
                 int t_tiles_x = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int t_tiles_y = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1268,7 +1268,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Transpose interaction weights (small, no chunking needed)
+            
             {
                 int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int total_tile_elements = dW_tiles * dW_tiles * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
@@ -1299,7 +1299,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Zero gradient accumulators for interaction and perception weights
+            
             {
                 int total_interaction = arch.num_heads * arch.head_dim * arch.head_dim;
                 int total_perception = arch.num_heads * arch.channels * arch.head_dim;
@@ -1311,7 +1311,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Chunk strides for workspace
+            
             int chunk_ws_dI_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_dpregelu_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_pooled_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
@@ -1319,7 +1319,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_dW_perception = ws_dW_interaction + arch.num_heads * ws_dW_interaction_stride;
             half* ws_W_T_interaction = ws_W_T + arch.num_heads * ws_W_T_value_stride;
 
-            // Define d_ca_input before chunk loop and zero-initialize for atomicAdd accumulation
+            
             float* d_ca_input = organism->batch_ca_input_grads ?
                 organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset : nullptr;
             if (d_ca_input != nullptr) {
@@ -1329,15 +1329,15 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 __syncthreads();
             }
 
-            // Process backward pass in chunks
+            
             for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
                 int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
                 int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                // === STEP 1: dL_dI[chunk] = dL/dOutput[chunk] * W_T ===
-                // Load dL/dOutput chunk to ws_fp16_b
+                
+                
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_V; idx += blockDim.x) {
@@ -1355,7 +1355,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Compute dL_dI[chunk] = dL/dOutput[chunk] * W_T, store to ws_dI
+                
                 {
                     int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1392,7 +1392,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Copy dL_dI chunk to dL_dinteraction and apply GELU backward -> ws_dpregelu
+                
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_elem; idx += blockDim.x) {
@@ -1416,8 +1416,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // === STEP 2: dW_interaction += P[chunk]^T * dL_dI_gelu[chunk] ===
-                // Load perception_saved chunk to ws_fp16_a
+                
+                
                 {
                     int total_P = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_P; idx += blockDim.x) {
@@ -1433,7 +1433,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         ws_fp16_a[dst_idx] = __float2half(perception_saved[src_idx]);
                     }
                 }
-                // Convert ws_dpregelu to fp16 in ws_fp16_b
+                
                 {
                     int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_D; idx += blockDim.x) {
@@ -1446,7 +1446,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Accumulate dW_interaction += P^T * dL_dI_gelu
+                
                 {
                     int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = dW_tiles * dW_tiles * arch.num_heads;
@@ -1480,7 +1480,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // === STEP 3: dL_dP[chunk] = dL_dI_gelu[chunk] * W_interaction^T ===
+                
                 {
                     int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1517,7 +1517,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Copy dL_dP chunk to dL_dperception and apply ReLU backward -> ws_dpregelu
+                
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_elem; idx += blockDim.x) {
@@ -1541,8 +1541,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // === STEP 4: im2col for this chunk, then dW_perception += pooled^T * dL_dP_relu ===
-                // Compute im2col for chunk
+                
+                
                 {
                     for (int idx = tid; idx < chunk_samples_aligned; idx += blockDim.x) {
                         int global_sample = chunk_start + idx;
@@ -1570,14 +1570,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Convert im2col to fp16 in ws_fp16_a (shared across heads)
+                
                 {
                     int total_conv = chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_conv; idx += blockDim.x) {
                         ws_fp16_a[idx] = __float2half(ws_im2col[idx]);
                     }
                 }
-                // Convert ws_dpregelu (ReLU backward) to fp16 in ws_fp16_b
+                
                 {
                     int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_D; idx += blockDim.x) {
@@ -1586,7 +1586,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // Accumulate dW_perception += pooled^T * dL_dP_relu
+                
                 {
                     int ws_dW_perception_stride = arch.channels * arch.head_dim;
                     int dW_tiles_c = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1622,10 +1622,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
 
-                // === STEP 5: Compute d_pooled_input for this chunk and scatter to d_ca_input ===
-                // d_ca_input was defined and zero-initialized before the chunk loop
+                
+                
                 if (d_ca_input != nullptr) {
-                    // Compute d_pooled_input = sum over heads of dL_dP_relu * W_perception
+                    
                     for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
                         int sample_in_chunk = idx / arch.channels;
                         int channel_idx = idx % arch.channels;
@@ -1643,7 +1643,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     }
                     __syncthreads();
 
-                    // Scatter d_pooled_input to d_ca_input
+                    
                     for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
                         int sample_in_chunk = idx / arch.channels;
                         int channel_idx = idx % arch.channels;
@@ -1668,11 +1668,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     }
                     __syncthreads();
                 }
-            } // end chunk loop
+            } 
 
             if (tid == 0) printf("V:BWD_CHUNKS_DONE blk=%d\n", blockIdx.x);
 
-            // Copy accumulated interaction gradients to tape
+            
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.head_dim;
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
@@ -1685,7 +1685,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Copy accumulated perception gradients to tape
+            
             {
                 int ws_dW_perception_stride = arch.channels * arch.head_dim;
                 int weights_per_head = arch.channels * arch.head_dim;
@@ -1700,8 +1700,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            // Prepare grad_concentration_buffer for diffusion backward
-            // d_ca_input was defined and populated before the chunk loop
+            
+            
             if (d_ca_input != nullptr) {
                 float* grad_conc = organism->buffers->grad_concentration_buffer;
                 for (int cell = tid; cell < num_cells; cell += blockDim.x) {

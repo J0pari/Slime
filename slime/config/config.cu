@@ -570,31 +570,31 @@ constexpr float LIFECYCLE_CRISIS_THRESHOLD_CENTER_MAX = 0.6f;
 constexpr float LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MIN = 5.0f;
 constexpr float LIFECYCLE_CRISIS_THRESHOLD_STEEPNESS_MAX = 20.0f;
 
-// Stress fitness penalty - multiplier applied when organism is stressed
+
 constexpr float LIFECYCLE_STRESS_FITNESS_PENALTY_MIN = 0.85f;
 constexpr float LIFECYCLE_STRESS_FITNESS_PENALTY_MAX = 0.99f;
 
-// Sigmoid decision thresholds - genome controls where sigmoid outputs trigger actions
+
 constexpr float LIFECYCLE_SIGMOID_THRESHOLD_MIN = 0.3f;
 constexpr float LIFECYCLE_SIGMOID_THRESHOLD_MAX = 0.7f;
 
-// Density comparison multiplier for sparse neighbor detection
+
 constexpr float LIFECYCLE_DENSITY_MULTIPLIER_MIN = 0.5f;
 constexpr float LIFECYCLE_DENSITY_MULTIPLIER_MAX = 0.9f;
 
-// Fitness ratio threshold for boost eligibility
+
 constexpr float LIFECYCLE_BOOST_FITNESS_RATIO_MIN = 0.3f;
 constexpr float LIFECYCLE_BOOST_FITNESS_RATIO_MAX = 0.7f;
 
-// Coherence boost amount when organism is below avg in high-performing block
+
 constexpr float LIFECYCLE_COHERENCE_BOOST_MIN = 0.05f;
 constexpr float LIFECYCLE_COHERENCE_BOOST_MAX = 0.2f;
 
-// Crisis detection: minimum fraction of block that must be active
+
 constexpr float LIFECYCLE_CRISIS_ACTIVE_RATIO_MIN = 0.15f;
 constexpr float LIFECYCLE_CRISIS_ACTIVE_RATIO_MAX = 0.4f;
 
-// EMA smoothing factor for accuracy tracking (higher = more weight to history)
+
 constexpr float EMA_SMOOTHING_MIN = 0.7f;
 constexpr float EMA_SMOOTHING_MAX = 0.95f;
 
@@ -690,7 +690,7 @@ constexpr int NUM_HEADS_MAX = 8;
 constexpr int WMMA_ALIGNMENT = 8;
 constexpr int HEAD_DIM_TILES_MIN = 1;
 constexpr int HEAD_DIM_TILES_MAX = 4;
-constexpr int CHANNELS_OCTETS_MIN = 2;  // Must be >= 2 so CHANNELS_MIN >= WMMA_TILE_DIM (16)
+constexpr int CHANNELS_OCTETS_MIN = 2;  
 constexpr int CHANNELS_OCTETS_MAX = 2;
 
 constexpr int HEAD_DIM_MIN = HEAD_DIM_TILES_MIN * WMMA_TILE_DIM;
@@ -705,7 +705,7 @@ constexpr int GRID_SIZE_MAX = 64;
 constexpr int MAX_HEAD_DIM = HEAD_DIM_MAX;
 constexpr int MAX_CHANNELS = CHANNELS_MAX;
 
-// Per-entry task stride - input is num_heads * channels (max: NUM_HEADS_MAX * CHANNELS_MAX)
+
 constexpr int DIRESA_TASK_INPUT_DIM_MAX = NUM_HEADS_MAX * CHANNELS_MAX;
 constexpr size_t DIRESA_TASK_STRIDE_PER_ENTRY =
     DIRESA_TASK_INPUT_DIM_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
@@ -1164,7 +1164,7 @@ constexpr uint32_t AUDIT_RING_SLOTS = 4;
 typedef RingBuffer<StateExportEntry, AUDIT_RING_SLOTS> StateExportBuffer;
 typedef HostRingBufferReader<StateExportEntry, AUDIT_RING_SLOTS> StateExportBufferReader;
 
-// Legacy aliases for backwards compatibility with telemetry_probes.cu
+
 typedef StateExportBuffer AuditBuffer;
 typedef StateExportEntry TelemetryAuditEntry;
 

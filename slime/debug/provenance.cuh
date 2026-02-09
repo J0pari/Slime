@@ -437,9 +437,9 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
     } \
 } while(0)
 
-// ============================================================================
-// AUDIT ENTRY [per architecture.md - append-only, cryptographically chained]
-// ============================================================================
+
+
+
 
 enum class AuditEventType : uint16_t {
     SPAWN,
@@ -473,7 +473,7 @@ struct ArchiveData {
     int niche_id;
     float distance_to_centroid;
     float fitness_at_insertion;
-    int evicted_idx;  // -1 if no eviction
+    int evicted_idx;  
 };
 
 struct EpochData {
@@ -484,18 +484,18 @@ struct EpochData {
 };
 
 struct ViolationData {
-    char message[120];  // Sized to fit in union
-    int severity;       // 0=warning, 1=error, 2=fatal
+    char message[120];  
+    int severity;       
 };
 
-// Architecture.md compliant AuditEntry
+
 struct AuditEntry {
-    uint64_t timestamp_ns;          // Nanosecond timestamp
-    uint64_t prev_entry_hash;       // Hash of previous entry (cryptographic chain)
-    int generation;                 // Generation when event occurred
-    int entry_idx;                  // Which pool entry (if applicable)
+    uint64_t timestamp_ns;          
+    uint64_t prev_entry_hash;       
+    int generation;                 
+    int entry_idx;                  
     AuditEventType event_type;
-    uint16_t reserved;              // Alignment padding
+    uint16_t reserved;              
 
     union {
         SpawnData spawn_data;
@@ -505,17 +505,17 @@ struct AuditEntry {
         ViolationData violation_data;
     };
 
-    uint32_t entry_crc;             // CRC of this entry
+    uint32_t entry_crc;             
 };
 
 __device__ __forceinline__ void audit_entry_init(AuditEntry* entry, AuditEventType type, int gen, int idx) {
     entry->timestamp_ns = clock64();
-    entry->prev_entry_hash = PROVENANCE_UNINITIALIZED_HASH;  // Set by caller from chain
+    entry->prev_entry_hash = PROVENANCE_UNINITIALIZED_HASH;  
     entry->generation = gen;
     entry->entry_idx = idx;
     entry->event_type = type;
     entry->reserved = 0;
-    entry->entry_crc = 0;  // Computed after payload is set
+    entry->entry_crc = 0;  
 }
 
 __device__ __forceinline__ void audit_entry_finalize(AuditEntry* entry, uint64_t prev_hash) {
@@ -523,7 +523,7 @@ __device__ __forceinline__ void audit_entry_finalize(AuditEntry* entry, uint64_t
     entry->entry_crc = crc32_compute(entry, sizeof(AuditEntry) - sizeof(uint32_t));
 }
 
-// Legacy AuditRecord for backwards compatibility with existing telemetry
+
 struct AuditRecord {
     RecordHeader header;
 

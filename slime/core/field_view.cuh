@@ -5,14 +5,14 @@
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
-// Unified field channel indices
+
 enum FieldChannel {
-    // CA neural state (16 channels)
+    
     CH_CA_0 = 0,
     CH_CA_1, CH_CA_2, CH_CA_3, CH_CA_4, CH_CA_5, CH_CA_6, CH_CA_7,
     CH_CA_8, CH_CA_9, CH_CA_10, CH_CA_11, CH_CA_12, CH_CA_13, CH_CA_14, CH_CA_15,
 
-    // Chemical field (6 channels)
+    
     CH_CHEM_CONCENTRATION,
     CH_CHEM_GRADIENT_X,
     CH_CHEM_GRADIENT_Y,
@@ -20,52 +20,52 @@ enum FieldChannel {
     CH_CHEM_SOURCES,
     CH_CHEM_DECAY,
 
-    // Resource dynamics (5 channels)
+    
     CH_RESOURCE_DENSITY,
     CH_RESOURCE_NEXT,
     CH_FITNESS_LANDSCAPE,
     CH_RESOURCE_GRAD_X,
     CH_RESOURCE_GRAD_Y,
 
-    // Behavioral embedding (32 channels - unified hw/task/gen)
+    
     CH_BEHAVIORAL_START,
     CH_BEHAVIORAL_END = CH_BEHAVIORAL_START + 31,
 
-    // Lifecycle state (4 channels)
-    CH_STRESS,              // Continuous stress signal from gradient stagnation
-    CH_DORMANCY,            // Continuous dormancy signal
-    CH_REACTIVATION,        // Archive seeding perturbation strength
-    CH_PHASE_INDICATOR,     // Continuous phase indicator
+    
+    CH_STRESS,              
+    CH_DORMANCY,            
+    CH_REACTIVATION,        
+    CH_PHASE_INDICATOR,     
 
-    // CA output recurrence (1 channel)
+    
     CH_CA_OUTPUT_RECURRENCE,
 
     CH_COUNT
 };
 
-// Compile-time channel layout assertions
+
 static_assert(CH_CA_15 < CH_CHEM_CONCENTRATION, "CA channels must be contiguous");
 static_assert(CH_CHEM_DECAY < CH_RESOURCE_DENSITY, "Chemical channels must be contiguous");
 static_assert(CH_RESOURCE_GRAD_Y < CH_BEHAVIORAL_START, "Resource channels must be contiguous");
 static_assert(CH_BEHAVIORAL_END < CH_STRESS, "Behavioral channels must be contiguous");
 static_assert(CH_COUNT <= 128, "Total channel count must fit in reasonable bounds");
 
-// FieldView: flexible view into field tensor without forcing physical colocation
-// Allows different subsystems to have different backing memory or share aliased memory
+
+
 struct FieldView {
-    float* base;            // Base pointer to backing memory
-    int stride_x;           // Stride between adjacent x coordinates
-    int stride_y;           // Stride between adjacent y coordinates
-    int stride_channel;     // Stride between channels (usually 1 for channel-major layout)
-    int channel_offset;     // Starting channel index in backing memory
-    int num_channels;       // Number of channels this view covers
-    int grid_size;          // Spatial grid dimensions (grid_size x grid_size)
+    float* base;            
+    int stride_x;           
+    int stride_y;           
+    int stride_channel;     
+    int channel_offset;     
+    int num_channels;       
+    int grid_size;          
 
-    // ============================================================
-    // BASIC ACCESS OPERATIONS
-    // ============================================================
+    
+    
+    
 
-    // Bounds-checked read
+    
     __device__ __forceinline__ float read(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::read");
@@ -89,7 +89,7 @@ struct FieldView {
         return val;
     }
 
-    // Read-only cache optimized read
+    
     __device__ __forceinline__ float read_ldg(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::read_ldg");
@@ -113,7 +113,7 @@ struct FieldView {
         return val;
     }
 
-    // Bounds-checked write
+    
     __device__ __forceinline__ void write(int x, int y, int channel, float value) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::write");
@@ -132,7 +132,7 @@ struct FieldView {
         base[idx] = value;
     }
 
-    // Atomic add for concurrent writes
+    
     __device__ __forceinline__ void atomic_add(int x, int y, int channel, float value) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::atomic_add");
@@ -151,7 +151,7 @@ struct FieldView {
         atomicAdd(&base[idx], value);
     }
 
-    // Direct pointer access for kernel optimization (use with care)
+    
     __device__ __forceinline__ float* ptr_at(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::ptr_at");
@@ -169,7 +169,7 @@ struct FieldView {
         return &base[idx];
     }
 
-    // Get base pointer for channel-contiguous access
+    
     __device__ __forceinline__ float* channel_base(int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_RANGE(channel, 0, num_channels - 1, "FieldView::channel_base");
@@ -182,11 +182,11 @@ struct FieldView {
         return &base[(channel_offset + channel) * stride_channel];
     }
 
-    // ============================================================
-    // STENCIL OPERATIONS - Wrapping Stencils namespace
-    // ============================================================
+    
+    
+    
 
-    // Load 3x3 neighborhood for a channel using boundary clamping
+    
     __device__ __forceinline__ void load_3x3(
         float (&stencil)[3][3],
         int x, int y,
@@ -212,7 +212,7 @@ struct FieldView {
         Stencils::load_3x3(stencil, channel_ptr, x, y, grid_size, stride_x);
     }
 
-    // Compute Laplacian at (x, y) for a channel
+    
     __device__ __forceinline__ float laplacian_at(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::laplacian_at");
@@ -233,7 +233,7 @@ struct FieldView {
         return lap;
     }
 
-    // Compute x-gradient at (x, y) for a channel
+    
     __device__ __forceinline__ float gradient_x_at(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::gradient_x_at");
@@ -254,7 +254,7 @@ struct FieldView {
         return grad_x;
     }
 
-    // Compute y-gradient at (x, y) for a channel
+    
     __device__ __forceinline__ float gradient_y_at(int x, int y, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::gradient_y_at");
@@ -275,7 +275,7 @@ struct FieldView {
         return grad_y;
     }
 
-    // Compute both gradients simultaneously at (x, y) for a channel
+    
     __device__ __forceinline__ void gradients_at(
         float& grad_x,
         float& grad_y,
@@ -302,7 +302,7 @@ struct FieldView {
         #endif
     }
 
-    // Compute all spatial operators at once: gradients, Laplacian, and center value
+    
     __device__ __forceinline__ void all_operators(
         float& grad_x,
         float& grad_y,
@@ -335,12 +335,12 @@ struct FieldView {
         #endif
     }
 
-    // ============================================================
-    // INTERPOLATION - Wrapping Interpolation namespace
-    // ============================================================
+    
+    
+    
 
-    // Bilinear interpolation at fractional coordinates (fx, fy) for a channel
-    // fx, fy are in [0, grid_size-1]
+    
+    
     __device__ __forceinline__ float bilinear_read(float fx, float fy, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_RANGE(channel, 0, num_channels - 1, "FieldView::bilinear_read channel");
@@ -377,8 +377,8 @@ struct FieldView {
         return result;
     }
 
-    // Bilinear interpolation with gradients at fractional coordinates
-    // Returns float3: (value, grad_x, grad_y)
+    
+    
     __device__ __forceinline__ float3 bilinear_with_grad(float fx, float fy, int channel) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_RANGE(channel, 0, num_channels - 1, "FieldView::bilinear_with_grad channel");
@@ -417,7 +417,7 @@ struct FieldView {
         return result;
     }
 
-    // Compute bilinear weights for fractional coordinates
+    
     __device__ __forceinline__ float4 bilinear_weights(float fx, float fy) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_FINITE(fx, "FieldView::bilinear_weights fx");
@@ -436,11 +436,11 @@ struct FieldView {
         return Interpolation::bilinear_weights(tx, ty);
     }
 
-    // ============================================================
-    // NEIGHBORHOOD ITERATION
-    // ============================================================
+    
+    
+    
 
-    // Sample average over a neighborhood with given radius
+    
     __device__ __forceinline__ float sample_neighborhood_avg(
         int x, int y,
         int channel,
@@ -478,7 +478,7 @@ struct FieldView {
         return result;
     }
 
-    // Sample maximum over a neighborhood with given radius
+    
     __device__ __forceinline__ float sample_neighborhood_max(
         int x, int y,
         int channel,
@@ -514,14 +514,14 @@ struct FieldView {
         return result;
     }
 
-    // ============================================================
-    // TILED LOADING - Integrating TiledSection2D
-    // ============================================================
+    
+    
+    
 
-    // Load a tile with halo into shared memory for a specific channel
-    // TILE_DIM: dimension of the tile (e.g., 16 for 16x16)
-    // HALO: halo width (e.g., 1 for 3x3 stencils)
-    // BANK_OFFSET: padding to avoid bank conflicts
+    
+    
+    
+    
     template<int TILE_DIM, int HALO, int BANK_OFFSET>
     __device__ __forceinline__ void load_tile_with_halo(
         float (&tile)[TILE_DIM + 2 * HALO + BANK_OFFSET][TILE_DIM + 2 * HALO + BANK_OFFSET],
@@ -539,7 +539,7 @@ struct FieldView {
         TiledSection2D<TILE_DIM, HALO, BANK_OFFSET>::load_with_halo(tile, channel_ptr, grid_size);
     }
 
-    // Store a tile from shared memory back to global memory for a specific channel
+    
     template<int TILE_DIM, int HALO, int BANK_OFFSET>
     __device__ __forceinline__ void store_from_tile(
         const float (&tile)[TILE_DIM + 2 * HALO + BANK_OFFSET][TILE_DIM + 2 * HALO + BANK_OFFSET],
@@ -557,12 +557,12 @@ struct FieldView {
         TiledSection2D<TILE_DIM, HALO, BANK_OFFSET>::store_from_tile(channel_ptr, tile, grid_size);
     }
 
-    // ============================================================
-    // MULTI-CHANNEL OPERATIONS
-    // ============================================================
+    
+    
+    
 
-    // Vectorized multi-channel read at (x, y)
-    // Reads up to 4 consecutive channels starting at channel_start
+    
+    
     __device__ __forceinline__ float4 read_float4(int x, int y, int channel_start) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::read_float4");
@@ -576,12 +576,12 @@ struct FieldView {
             return make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
 
-        // Only use vectorized load if channels are contiguous in memory
+        
         if (stride_channel == 1) {
             int idx = y * stride_y + x * stride_x + (channel_offset + channel_start) * stride_channel;
             return ldg_float4((const float4*)&base[idx]);
         } else {
-            // Fall back to scalar reads
+            
             return make_float4(
                 read_ldg(x, y, channel_start + 0),
                 read_ldg(x, y, channel_start + 1),
@@ -591,7 +591,7 @@ struct FieldView {
         }
     }
 
-    // Vectorized multi-channel write at (x, y)
+    
     __device__ __forceinline__ void write_float4(int x, int y, int channel_start, float4 values) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::write_float4");
@@ -609,12 +609,12 @@ struct FieldView {
             return;
         }
 
-        // Only use vectorized store if channels are contiguous in memory
+        
         if (stride_channel == 1) {
             int idx = y * stride_y + x * stride_x + (channel_offset + channel_start) * stride_channel;
             ((float4*)base)[idx / 4] = values;
         } else {
-            // Fall back to scalar writes
+            
             write(x, y, channel_start + 0, values.x);
             write(x, y, channel_start + 1, values.y);
             write(x, y, channel_start + 2, values.z);
@@ -622,7 +622,7 @@ struct FieldView {
         }
     }
 
-    // Copy all channels from (src_x, src_y) to (dst_x, dst_y)
+    
     __device__ __forceinline__ void copy_all_channels(
         int src_x, int src_y,
         int dst_x, int dst_y
@@ -639,7 +639,7 @@ struct FieldView {
             return;
         }
 
-        // Vectorized copy when possible
+        
         int c = 0;
         if (stride_channel == 1) {
             for (; c + 3 < num_channels; c += 4) {
@@ -648,14 +648,14 @@ struct FieldView {
             }
         }
 
-        // Scalar copy for remaining channels
+        
         for (; c < num_channels; c++) {
             float val = read_ldg(src_x, src_y, c);
             write(dst_x, dst_y, c, val);
         }
     }
 
-    // Clear all channels at (x, y) to zero
+    
     __device__ __forceinline__ void clear_all_channels(int x, int y) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::clear_all_channels");
@@ -665,7 +665,7 @@ struct FieldView {
             return;
         }
 
-        // Vectorized clear when possible
+        
         int c = 0;
         if (stride_channel == 1) {
             for (; c + 3 < num_channels; c += 4) {
@@ -673,13 +673,13 @@ struct FieldView {
             }
         }
 
-        // Scalar clear for remaining channels
+        
         for (; c < num_channels; c++) {
             write(x, y, c, 0.0f);
         }
     }
 
-    // Compute L2 norm across all channels at (x, y)
+    
     __device__ __forceinline__ float channel_norm_l2(int x, int y) const {
         #ifdef __CUDA_ARCH__
         VALIDATE_GRID_COORDINATES(x, y, grid_size, "FieldView::channel_norm_l2");
@@ -705,9 +705,9 @@ struct FieldView {
     }
 };
 
-// ============================================================
-// FACTORY FUNCTIONS - Creating standard views
-// ============================================================
+
+
+
 
 __device__ __host__ __forceinline__ FieldView make_ca_view(float* backing_memory, int grid_size) {
     FieldView view;
