@@ -8,6 +8,7 @@
 
 struct GPUElite;
 struct MultiHeadCAState;
+struct DIRESAWeights;
 
 struct PoolEntry {
     int id;
@@ -103,6 +104,12 @@ struct PoolEntry {
     float flow_resource_dt;
 
     MultiHeadCAState* ca_state;
+
+    // Per-entry diresa weights (each entry has its own architecture)
+    DIRESAWeights* diresa_task_weights;
+    DIRESAWeights* diresa_hw_weights;
+    DIRESAWeights* diresa_gen_weights;
+    int diresa_task_input_dim;  // num_heads * channels for this entry
 };
 
 namespace GenomeParamTable {
@@ -231,6 +238,13 @@ namespace GenomeParamTable {
     constexpr int diresa_temp_scale = DIRESA_BLOCK_2 + 6;
     constexpr int diresa_gradient_clip = DIRESA_BLOCK_2 + 7;
 
+    // Block 36: DIRESA context extended
+    constexpr int DIRESA_BLOCK_3 = 36 * BLOCK_SIZE;
+    constexpr int diresa_ctx_complexity = DIRESA_BLOCK_3 + 0;
+    constexpr int diresa_ctx_niche = DIRESA_BLOCK_3 + 1;
+    constexpr int diresa_ctx_learning = DIRESA_BLOCK_3 + 2;
+    constexpr int diresa_ctx_performance = DIRESA_BLOCK_3 + 3;
+
     // Block 12-15: Lifecycle
     constexpr int LIFECYCLE_BLOCK = 12 * BLOCK_SIZE;
     constexpr int lifecycle_coherence_stressed = LIFECYCLE_BLOCK + 0;
@@ -347,6 +361,56 @@ namespace GenomeParamTable {
 
     // Block 35: Bounds for context and behavioral dimensions
     constexpr int BOUNDS_BLOCK = 35 * BLOCK_SIZE;
+
+    // Block 37-40: Evolvable parameter bounds (min/max for genome-controlled ranges)
+    constexpr int BOUNDS_BLOCK_2 = 37 * BLOCK_SIZE;
+    constexpr int memory_decay_factor_min = BOUNDS_BLOCK_2 + 0;
+    constexpr int memory_decay_factor_max = BOUNDS_BLOCK_2 + 1;
+    constexpr int memory_importance_min = BOUNDS_BLOCK_2 + 2;
+    constexpr int memory_importance_max = BOUNDS_BLOCK_2 + 3;
+    constexpr int agent_embedding_scale_min = BOUNDS_BLOCK_2 + 4;
+    constexpr int agent_embedding_scale_max = BOUNDS_BLOCK_2 + 5;
+    constexpr int init_exploration_min = BOUNDS_BLOCK_2 + 6;
+    constexpr int init_exploration_max = BOUNDS_BLOCK_2 + 7;
+
+    constexpr int BOUNDS_BLOCK_3 = 38 * BLOCK_SIZE;
+    constexpr int init_sensitivity_min = BOUNDS_BLOCK_3 + 0;
+    constexpr int init_sensitivity_max = BOUNDS_BLOCK_3 + 1;
+    constexpr int levy_alpha_min = BOUNDS_BLOCK_3 + 2;
+    constexpr int levy_alpha_max = BOUNDS_BLOCK_3 + 3;
+    constexpr int resource_density_initial_min = BOUNDS_BLOCK_3 + 4;
+    constexpr int resource_density_initial_max = BOUNDS_BLOCK_3 + 5;
+    constexpr int resource_density_noise_min = BOUNDS_BLOCK_3 + 6;
+    constexpr int resource_density_noise_max = BOUNDS_BLOCK_3 + 7;
+
+    constexpr int BOUNDS_BLOCK_4 = 39 * BLOCK_SIZE;
+    constexpr int chem_init_base_value_min = BOUNDS_BLOCK_4 + 0;
+    constexpr int chem_init_base_value_max = BOUNDS_BLOCK_4 + 1;
+    constexpr int chem_init_genome_influence_min = BOUNDS_BLOCK_4 + 2;
+    constexpr int chem_init_genome_influence_max = BOUNDS_BLOCK_4 + 3;
+    constexpr int chem_init_noise_scale_min = BOUNDS_BLOCK_4 + 4;
+    constexpr int chem_init_noise_scale_max = BOUNDS_BLOCK_4 + 5;
+    constexpr int diversity_normalization_min = BOUNDS_BLOCK_4 + 6;
+    constexpr int diversity_normalization_max = BOUNDS_BLOCK_4 + 7;
+
+    constexpr int BOUNDS_BLOCK_5 = 40 * BLOCK_SIZE;
+    constexpr int diversity_sample_count_min = BOUNDS_BLOCK_5 + 0;
+    constexpr int diversity_sample_count_max = BOUNDS_BLOCK_5 + 1;
+    constexpr int diversity_sample_count_base = BOUNDS_BLOCK_5 + 2;
+    constexpr int diversity_sample_count_range = BOUNDS_BLOCK_5 + 3;
+    constexpr int genome_mutation_scale_min = BOUNDS_BLOCK_5 + 4;
+    constexpr int genome_mutation_scale_max = BOUNDS_BLOCK_5 + 5;
+    constexpr int initial_hunger_min = BOUNDS_BLOCK_5 + 6;
+    constexpr int initial_hunger_max = BOUNDS_BLOCK_5 + 7;
+
+    constexpr int BOUNDS_BLOCK_6 = 41 * BLOCK_SIZE;
+    constexpr int weight_delta_threshold_min = BOUNDS_BLOCK_6 + 0;
+    constexpr int weight_delta_threshold_max = BOUNDS_BLOCK_6 + 1;
+    constexpr int convergence_fitness_min = BOUNDS_BLOCK_6 + 2;
+    constexpr int convergence_fitness_max = BOUNDS_BLOCK_6 + 3;
+    constexpr int convergence_coherence_min = BOUNDS_BLOCK_6 + 4;
+    constexpr int convergence_coherence_max = BOUNDS_BLOCK_6 + 5;
+    constexpr int genome_slot = BOUNDS_BLOCK_6 + 6;
 
     constexpr int EPIGENETIC_SENSITIVITY_BLOCK = 64 * BLOCK_SIZE;
     constexpr int ENHANCER_BLOCK = 80 * BLOCK_SIZE;

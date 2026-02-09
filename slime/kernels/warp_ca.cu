@@ -335,7 +335,6 @@ __global__ void warp_ca_kernel(
     float growth = avg * expf(-avg * avg * 2.0f);
 
     CAParams ca_params;
-    ca_params.derive_from_genome_hash(genome_hash);
     float warp_ca_growth_rate = ca_params.get_warp_ca_growth_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
     float total_mass = WarpReduce<WARP_SIZE>::sum(my_state);

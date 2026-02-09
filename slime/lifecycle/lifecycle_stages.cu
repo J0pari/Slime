@@ -50,17 +50,17 @@ struct LocalOrganismState {
         float coherence = local_coherence[idx];
 
         
-        int coherence_stressed_slot = derive_param_slot(genome_hash, "lifecycle_coherence_stressed");
-        int coherence_recover_slot = derive_param_slot(genome_hash, "lifecycle_coherence_recover");
-        int stress_accum_rate_slot = derive_param_slot(genome_hash, "lifecycle_stress_accum_rate");
-        int stress_decay_rate_slot = derive_param_slot(genome_hash, "lifecycle_stress_decay_rate");
-        int stress_threshold_slot = derive_param_slot(genome_hash, "lifecycle_stress_threshold");
-        int fitness_multiplier_slot = derive_param_slot(genome_hash, "lifecycle_fitness_multiplier");
-        int gradient_stagnation_slot = derive_param_slot(genome_hash, "lifecycle_gradient_stagnation");
-        int dormant_stress_mult_slot = derive_param_slot(genome_hash, "lifecycle_dormant_stress_mult");
-        int fitness_threshold_center_slot = derive_param_slot(genome_hash, "lifecycle_fitness_threshold_center");
-        int fitness_threshold_steepness_slot = derive_param_slot(genome_hash, "lifecycle_fitness_threshold_steepness");
-        int sigmoid_threshold_slot = derive_param_slot(genome_hash, "lifecycle_sigmoid_threshold");
+        int coherence_stressed_slot = GenomeParamTable::lifecycle_coherence_stressed;
+        int coherence_recover_slot = GenomeParamTable::lifecycle_coherence_recover;
+        int stress_accum_rate_slot = GenomeParamTable::lifecycle_stress_accum_rate;
+        int stress_decay_rate_slot = GenomeParamTable::lifecycle_stress_decay_rate;
+        int stress_threshold_slot = GenomeParamTable::lifecycle_stress_threshold;
+        int fitness_multiplier_slot = GenomeParamTable::lifecycle_fitness_multiplier;
+        int gradient_stagnation_slot = GenomeParamTable::lifecycle_gradient_stagnation;
+        int dormant_stress_mult_slot = GenomeParamTable::lifecycle_dormant_stress_mult;
+        int fitness_threshold_center_slot = GenomeParamTable::lifecycle_fitness_threshold_center;
+        int fitness_threshold_steepness_slot = GenomeParamTable::lifecycle_fitness_threshold_steepness;
+        int sigmoid_threshold_slot = GenomeParamTable::lifecycle_sigmoid_threshold;
 
 
         float coherence_stressed = genome_to_param(genome, gradients, coherence_stressed_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_COHERENCE_STRESSED_MIN, LIFECYCLE_COHERENCE_STRESSED_MAX);
@@ -243,9 +243,9 @@ extern "C" __global__ void lifecycle_transition_kernel(
     LifecyclePhase new_phase = local_state.decide_transition(local_idx, true, entry->genome_hash, entry_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
     if (new_phase == LifecyclePhase::DORMANT) {
-        int archive_threshold_center_slot = derive_param_slot(entry->genome_hash, "lifecycle_archive_threshold_center");
-        int archive_threshold_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_archive_threshold_steepness");
-        int sigmoid_threshold_slot = derive_param_slot(entry->genome_hash, "lifecycle_sigmoid_threshold");
+        int archive_threshold_center_slot = GenomeParamTable::lifecycle_archive_threshold_center;
+        int archive_threshold_steepness_slot = GenomeParamTable::lifecycle_archive_threshold_steepness;
+        int sigmoid_threshold_slot = GenomeParamTable::lifecycle_sigmoid_threshold;
         float archive_threshold_center = genome_to_param(entry_genome, entry->gradients, archive_threshold_center_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_THRESHOLD_CENTER_MIN, LIFECYCLE_FITNESS_THRESHOLD_CENTER_MAX);
         float archive_threshold_steepness = genome_to_param(entry_genome, entry->gradients, archive_threshold_steepness_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_FITNESS_THRESHOLD_STEEPNESS_MAX);
         float sigmoid_threshold = genome_to_param(entry_genome, entry->gradients, sigmoid_threshold_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_SIGMOID_THRESHOLD_MIN, LIFECYCLE_SIGMOID_THRESHOLD_MAX);
@@ -264,7 +264,7 @@ extern "C" __global__ void lifecycle_transition_kernel(
         curandState rand_state;
         curand_init(generation * pool->capacity + idx, 0, 0, &rand_state);
 
-        int density_mult_slot = derive_param_slot(entry->genome_hash, "lifecycle_density_multiplier");
+        int density_mult_slot = GenomeParamTable::lifecycle_density_multiplier;
         float density_multiplier = genome_to_param(entry_genome, entry->gradients, density_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_DENSITY_MULTIPLIER_MIN, LIFECYCLE_DENSITY_MULTIPLIER_MAX);
 
         int elite_idx = sample_from_niche_aware(
@@ -307,7 +307,7 @@ extern "C" __global__ void lifecycle_transition_kernel(
     }
 
     if (new_phase == LifecyclePhase::STRESSED) {
-        int stress_penalty_slot = derive_param_slot(entry->genome_hash, "lifecycle_stress_fitness_penalty");
+        int stress_penalty_slot = GenomeParamTable::lifecycle_stress_fitness_penalty;
         float stress_penalty = genome_to_param(entry_genome, entry->gradients, stress_penalty_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_STRESS_FITNESS_PENALTY_MIN, LIFECYCLE_STRESS_FITNESS_PENALTY_MAX);
         float new_fitness = entry->fitness.value * stress_penalty;
         uint64_t mod_hash = entry->fitness.input_hash;
@@ -446,18 +446,18 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
     float block_ctx_stress = block_avg_stress;
     float block_ctx_morphogen = block_avg_morphogen;
 
-    int boost_threshold_center_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_center");
-    int boost_threshold_steepness_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_threshold_steepness");
-    int crisis_fitness_mult_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_fitness_mult");
-    int crisis_coherence_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_coherence");
-    int crisis_threshold_center_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_threshold_center");
-    int crisis_threshold_steepness_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_threshold_steepness");
-    int elite_fitness_inherit_slot = derive_param_slot(block_genome_hash, "lifecycle_elite_fitness_inherit");
-    int elite_coherence_reset_slot = derive_param_slot(block_genome_hash, "lifecycle_elite_coherence_reset");
-    int sigmoid_threshold_slot = derive_param_slot(block_genome_hash, "lifecycle_sigmoid_threshold");
-    int boost_fitness_ratio_slot = derive_param_slot(block_genome_hash, "lifecycle_boost_fitness_ratio");
-    int coherence_boost_slot = derive_param_slot(block_genome_hash, "lifecycle_coherence_boost");
-    int crisis_active_ratio_slot = derive_param_slot(block_genome_hash, "lifecycle_crisis_active_ratio");
+    int boost_threshold_center_slot = GenomeParamTable::lifecycle_boost_threshold_center;
+    int boost_threshold_steepness_slot = GenomeParamTable::lifecycle_boost_threshold_steepness;
+    int crisis_fitness_mult_slot = GenomeParamTable::lifecycle_crisis_fitness_mult;
+    int crisis_coherence_slot = GenomeParamTable::lifecycle_crisis_coherence;
+    int crisis_threshold_center_slot = GenomeParamTable::lifecycle_crisis_threshold_center;
+    int crisis_threshold_steepness_slot = GenomeParamTable::lifecycle_crisis_threshold_steepness;
+    int elite_fitness_inherit_slot = GenomeParamTable::lifecycle_elite_fitness_inherit;
+    int elite_coherence_reset_slot = GenomeParamTable::lifecycle_elite_coherence_reset;
+    int sigmoid_threshold_slot = GenomeParamTable::lifecycle_sigmoid_threshold;
+    int boost_fitness_ratio_slot = GenomeParamTable::lifecycle_boost_fitness_ratio;
+    int coherence_boost_slot = GenomeParamTable::lifecycle_coherence_boost;
+    int crisis_active_ratio_slot = GenomeParamTable::lifecycle_crisis_active_ratio;
 
     float boost_threshold_center = genome_to_param(block_genome, block_gradients, boost_threshold_center_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_CENTER_MIN, LIFECYCLE_BOOST_THRESHOLD_CENTER_MAX);
     float boost_threshold_steepness = genome_to_param(block_genome, block_gradients, boost_threshold_steepness_slot, block_ctx_metabolic, block_ctx_stress, block_ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MIN, LIFECYCLE_BOOST_THRESHOLD_STEEPNESS_MAX);
@@ -518,9 +518,15 @@ extern "C" __global__ void hierarchical_lifecycle_kernel(
         int worst_actual = shared_actual_idx[worst_tid];
         local_state.phases[worst_tid] = LifecyclePhase::REACTIVATING;
         float new_fitness = archive->fitness[sample_idx] * elite_fitness_inherit;
+        // Modulated fitness from archive - set proper provenance
         pool->entries[worst_actual].fitness.value = new_fitness;
+        pool->entries[worst_actual].fitness.state = ComputeState::COMPUTED;
+        pool->entries[worst_actual].fitness.computed_at_generation = generation;
+        pool->entries[worst_actual].fitness.input_hash = archive->fitness_input_hash[sample_idx];
         pool->fitness_values[worst_actual] = new_fitness;
         pool->entries[worst_actual].coherence.value = elite_coherence_reset;
+        pool->entries[worst_actual].coherence.state = ComputeState::COMPUTED;
+        pool->entries[worst_actual].coherence.computed_at_generation = generation;
     }
 
     __syncthreads();

@@ -8,7 +8,7 @@ extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, cons
 #include <cmath>
 #include <cstring>
 
-int write_sample_images(const char* session_dir, int gen, AuditEntry* audit) {
+int write_sample_images(const char* session_dir, int gen, TelemetryAuditEntry* audit) {
     int img_size = audit->grid_size * audit->grid_size;
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
         char png_path[256];
@@ -21,7 +21,7 @@ int write_sample_images(const char* session_dir, int gen, AuditEntry* audit) {
     return 0;
 }
 
-int write_ca_snapshot(const char* path, int gen, AuditEntry* audit) {
+int write_ca_snapshot(const char* path, int gen, TelemetryAuditEntry* audit) {
     int ca_size = audit->grid_size * audit->grid_size;
     unsigned char* pixels = (unsigned char*)malloc(ca_size);
     if (!pixels) {
@@ -51,7 +51,7 @@ int write_ca_snapshot(const char* path, int gen, AuditEntry* audit) {
     return 0;
 }
 
-int write_predictions_csv(const char* path, int gen, AuditEntry* audit) {
+int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit) {
     FILE* f = fopen(path, "w");
     if (!f) {
         fprintf(stderr, "FATAL: Cannot create predictions %s\n", path);
@@ -95,7 +95,7 @@ void append_to_manifest(const char* manifest_path, const char* predictions_path,
     }
 }
 
-int write_generation_summary(const char* session_dir, int gen, AuditEntry* audit) {
+int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEntry* audit) {
     char path[256];
     snprintf(path, sizeof(path), "%s/metrics.csv", session_dir);
 
@@ -148,7 +148,7 @@ int write_generation_summary(const char* session_dir, int gen, AuditEntry* audit
     return 0;
 }
 
-int write_pool_state(const char* session_dir, int gen, AuditEntry* audit) {
+int write_pool_state(const char* session_dir, int gen, TelemetryAuditEntry* audit) {
     if (!audit) return 1;
 
     char path[256];
@@ -221,7 +221,7 @@ int write_chemical_field(const char* session_dir, int gen, float* concentration,
     return 0;
 }
 
-int write_state_json(FILE* json_file, double elapsed_time, AuditEntry* audit) {
+int write_state_json(FILE* json_file, double elapsed_time, TelemetryAuditEntry* audit) {
     if (!json_file || !audit) return 1;
 
     if (audit->provenance_source == PROVENANCE_SOURCE_NONE) {

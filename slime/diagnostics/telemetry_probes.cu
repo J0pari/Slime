@@ -523,7 +523,7 @@ __device__ void populate_audit_buffer(
     MultiHeadCAState* ca_state,
     HardwareGeometry* hardware_geom
 ) {
-    AuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
+    TelemetryAuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
 
     printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
            generation, (void*)logits, (void*)labels, (void*)batch_images,
@@ -621,9 +621,9 @@ __device__ void populate_audit_buffer(
 
     for (int i = 0; i < pool->capacity && i < POOL_CAPACITY_MAX; i++) {
         PoolEntry* e = &pool->entries[i];
-        audit->pool_entry_alive[i] = e->alive ? 1 : 0;
-        audit->pool_entry_fitness[i] = e->fitness;
-        audit->pool_entry_hunger[i] = e->hunger;
+        audit->pool_entry_alive[i] = pool->alive_flags[i] ? 1 : 0;
+        audit->pool_entry_fitness[i] = e->fitness.value;
+        audit->pool_entry_hunger[i] = e->hunger.value;
         audit->pool_entry_age[i] = e->age;
         audit->pool_entry_num_deltas[i] = e->num_deltas;
         audit->pool_entry_genome_hash[i] = e->genome_hash;
@@ -701,7 +701,7 @@ __device__ void populate_audit_buffer(
     audit->memory_archive_size = telemetry->memory_allocation.archive_pools_size;
 
     DEVICE_FATAL_IF(pool == nullptr, "populate_audit_buffer: pool is null");
-    DEVICE_FATAL_IF(!pool->entries[0].alive, "populate_audit_buffer: pool entry 0 not alive");
+    DEVICE_FATAL_IF(!pool->alive_flags[0], "populate_audit_buffer: pool entry 0 not alive");
     PoolEntry* e0 = &pool->entries[0];
     audit->fitness_alpha = e0->fitness_task_exponent;
     audit->fitness_beta = e0->fitness_gen_exponent;

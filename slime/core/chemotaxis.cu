@@ -63,12 +63,12 @@ __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, fl
     __syncthreads();
 
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        int decay_slot = derive_param_slot(genome_hash, "memory_decay_factor");
-        int importance_slot = derive_param_slot(genome_hash, "memory_importance");
-        int decay_min_slot = derive_param_slot(genome_hash, "memory_decay_factor_min");
-        int decay_max_slot = derive_param_slot(genome_hash, "memory_decay_factor_max");
-        int importance_min_slot = derive_param_slot(genome_hash, "memory_importance_min");
-        int importance_max_slot = derive_param_slot(genome_hash, "memory_importance_max");
+        int decay_slot = GenomeParamTable::memory_decay_factor;
+        int importance_slot = GenomeParamTable::memory_importance;
+        int decay_min_slot = GenomeParamTable::memory_decay_factor_min;
+        int decay_max_slot = GenomeParamTable::memory_decay_factor_max;
+        int importance_min_slot = GenomeParamTable::memory_importance_min;
+        int importance_max_slot = GenomeParamTable::memory_importance_max;
 
         float decay_min = genome_slot_to_unit(genome, decay_min_slot);
         float decay_max = decay_min + genome_slot_to_unit(genome, decay_max_slot) * (NORMALIZED_MAX - decay_min);
@@ -100,7 +100,7 @@ __global__ void update_field_from_ca_kernel(
     DEVICE_FATAL_IF(entry_idx >= pool->capacity, "update_field_from_ca_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!entry->alive, "update_field_from_ca_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_field_from_ca_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -138,7 +138,7 @@ __global__ void initialize_ca_from_field_kernel(
     DEVICE_FATAL_IF(entry_idx >= pool->capacity, "initialize_ca_from_field_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!entry->alive, "initialize_ca_from_field_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "initialize_ca_from_field_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -221,16 +221,16 @@ __global__ void diffusion_reaction_kernel(
 
     float source_contribution = sources[idx];
 
-    int diffusivity_slot = derive_param_slot(genome_hash, "chem_diffusivity");
+    int diffusivity_slot = GenomeParamTable::chem_diffusivity;
     float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
 
-    int reaction_order_slot = derive_param_slot(genome_hash, "chem_reaction_order");
+    int reaction_order_slot = GenomeParamTable::chem_reaction_order;
     float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
 
-    int reaction_rate_slot = derive_param_slot(genome_hash, "chem_reaction_rate");
+    int reaction_rate_slot = GenomeParamTable::chem_reaction_rate;
     float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
 
-    int decay_rate_slot = derive_param_slot(genome_hash, "chem_decay_rate");
+    int decay_rate_slot = GenomeParamTable::chem_decay_rate;
     float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
 
     float diffusion = diffusivity * laplacian[idx];
@@ -269,16 +269,16 @@ __global__ void diffusion_reaction_backward_kernel(
     float c_center = concentration[idx];
     float lap = laplacian[idx];
 
-    int diffusivity_slot = derive_param_slot(genome_hash, "chem_diffusivity");
+    int diffusivity_slot = GenomeParamTable::chem_diffusivity;
     float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
 
-    int reaction_order_slot = derive_param_slot(genome_hash, "chem_reaction_order");
+    int reaction_order_slot = GenomeParamTable::chem_reaction_order;
     float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
 
-    int reaction_rate_slot = derive_param_slot(genome_hash, "chem_reaction_rate");
+    int reaction_rate_slot = GenomeParamTable::chem_reaction_rate;
     float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
 
-    int decay_rate_slot = derive_param_slot(genome_hash, "chem_decay_rate");
+    int decay_rate_slot = GenomeParamTable::chem_decay_rate;
     float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
 
     float c_safe = fmaxf(fabsf(c_center), safe_epsilon(c_center));
@@ -334,7 +334,6 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     float context_morphogen = chemical_field[idx_temp];
 
     ChemotaxisParams params;
-    params.derive_from_genome_hash(agent->genome_hash);
 
     float theta = params.get_theta(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
     float sigma = params.get_sigma(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
@@ -501,7 +500,7 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     float vel_magnitude = sqrtf(agent->velocity[0] * agent->velocity[0] +
                                 agent->velocity[1] * agent->velocity[1]);
 
-    int max_vel_slot = derive_param_slot(agent->genome_hash, "max_agent_velocity");
+    int max_vel_slot = GenomeParamTable::max_agent_velocity;
     float max_agent_velocity = genome_to_param(genome, gradients, max_vel_slot, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, MAX_AGENT_VELOCITY_BASE_MIN, MAX_AGENT_VELOCITY_BASE_MAX);
 
     if (vel_magnitude > max_agent_velocity) {
@@ -555,7 +554,6 @@ __global__ void create_attractors_kernel(
     float context_morphogen = attractor_strengths[2];
 
     ChemotaxisParams params;
-    params.derive_from_genome_hash(genome_hash);
 
     float attractor_sigma = params.get_attractor_sigma(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
@@ -592,14 +590,14 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
     int cy = (int)(agent->position[1] * grid_size) % grid_size;
     float context_morphogen = chemical_concentration[cy * grid_size + cx];
 
-    int base_freq_slot = derive_param_slot(agent->genome_hash, "fourier_base_freq");
+    int base_freq_slot = GenomeParamTable::fourier_base_freq;
     float fourier_base_freq = genome_to_param(genome, gradients, base_freq_slot, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, FOURIER_BASE_FREQ_MIN, FOURIER_BASE_FREQ_MAX);
 
-    int num_octaves_slot = derive_param_slot(agent->genome_hash, "fourier_num_octaves");
+    int num_octaves_slot = GenomeParamTable::fourier_num_octaves;
     int fourier_num_octaves_raw = (int)genome_to_param(genome, gradients, num_octaves_slot, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, (float)FOURIER_NUM_OCTAVES_MIN, (float)FOURIER_NUM_OCTAVES_MAX);
     int fourier_num_octaves = min(fourier_num_octaves_raw, behavioral_dim - 4);
 
-    int spectrum_exp_slot = derive_param_slot(agent->genome_hash, "fourier_spectrum_exponent");
+    int spectrum_exp_slot = GenomeParamTable::fourier_spectrum_exponent;
     float fourier_spectrum_exponent = genome_to_param(genome, gradients, spectrum_exp_slot, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, FOURIER_SPECTRUM_EXPONENT_MIN, FOURIER_SPECTRUM_EXPONENT_MAX);
 
     features[0] = sqrtf(agent->velocity[0] * agent->velocity[0] +
@@ -704,28 +702,28 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     BehavioralState* agent = &agents[agent_id];
 
     InitContext ctx;
-    ctx.derive_from_genome(genome_hash, genome, epigenetic);
+    ctx.derive_from_genome(genome, epigenetic);
 
-    int embedding_scale_min_slot = derive_param_slot(genome_hash, "agent_embedding_scale_min");
-    int embedding_scale_max_slot = derive_param_slot(genome_hash, "agent_embedding_scale_max");
+    int embedding_scale_min_slot = GenomeParamTable::agent_embedding_scale_min;
+    int embedding_scale_max_slot = GenomeParamTable::agent_embedding_scale_max;
     float embedding_scale_min = genome_slot_to_unit(genome, embedding_scale_min_slot) * AGENT_EMBEDDING_SCALE_BASE_MAX;
     float embedding_scale_max = embedding_scale_min + genome_slot_to_unit(genome, embedding_scale_max_slot) * (AGENT_EMBEDDING_SCALE_BASE_MAX - embedding_scale_min);
 
     float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, embedding_scale_min, embedding_scale_max);
-    int exploration_min_slot = derive_param_slot(genome_hash, "init_exploration_min");
-    int exploration_max_slot = derive_param_slot(genome_hash, "init_exploration_max");
+    int exploration_min_slot = GenomeParamTable::init_exploration_min;
+    int exploration_max_slot = GenomeParamTable::init_exploration_max;
     float exploration_min = genome_slot_to_unit(genome, exploration_min_slot) * INIT_EXPLORATION_BASE_MAX;
     float exploration_max = exploration_min + genome_slot_to_unit(genome, exploration_max_slot) * (INIT_EXPLORATION_BASE_MAX - exploration_min);
     float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, exploration_min, exploration_max);
 
-    int sensitivity_min_slot = derive_param_slot(genome_hash, "init_sensitivity_min");
-    int sensitivity_max_slot = derive_param_slot(genome_hash, "init_sensitivity_max");
+    int sensitivity_min_slot = GenomeParamTable::init_sensitivity_min;
+    int sensitivity_max_slot = GenomeParamTable::init_sensitivity_max;
     float sensitivity_min = genome_slot_to_unit(genome, sensitivity_min_slot) * INIT_SENSITIVITY_BASE_MAX;
     float sensitivity_max = sensitivity_min + genome_slot_to_unit(genome, sensitivity_max_slot) * (INIT_SENSITIVITY_BASE_MAX - sensitivity_min);
     float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, sensitivity_min, sensitivity_max);
 
-    int levy_alpha_min_slot = derive_param_slot(genome_hash, "levy_alpha_min");
-    int levy_alpha_max_slot = derive_param_slot(genome_hash, "levy_alpha_max");
+    int levy_alpha_min_slot = GenomeParamTable::levy_alpha_min;
+    int levy_alpha_max_slot = GenomeParamTable::levy_alpha_max;
     float levy_alpha_min = genome_slot_to_unit(genome, levy_alpha_min_slot) * CHEMOTAXIS_LEVY_ALPHA_MAX;
     float levy_alpha_max = levy_alpha_min + genome_slot_to_unit(genome, levy_alpha_max_slot) * (CHEMOTAXIS_LEVY_ALPHA_MAX - levy_alpha_min);
     float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, levy_alpha_min, levy_alpha_max);
@@ -789,9 +787,8 @@ __global__ void init_chemical_field_kernel(
     int idx = y * grid_size + x;
 
     ChemotaxisParams params;
-    params.derive_from_genome_hash(genome_hash);
     InitContext ctx;
-    ctx.derive_from_genome(genome_hash, genome, gradients);
+    ctx.derive_from_genome(genome, gradients);
     float chemical_decay = params.get_chemical_decay(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
     field->concentration[idx] = 0.0f;
@@ -875,7 +872,6 @@ __global__ void set_chemical_sources_from_agents_kernel(
     BehavioralState* agent = &agents[agent_id];
 
     ChemotaxisParams params;
-    params.derive_from_genome_hash(agent->genome_hash);
 
     int grid_x_temp = (int)(agent->position[0] * grid_size);
     int grid_y_temp = (int)(agent->position[1] * grid_size);
@@ -922,10 +918,9 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
     if (x >= grid_size || y >= grid_size) return;
 
     ChemotaxisParams params;
-    params.derive_from_genome_hash(genome_hash);
 
     InitContext ctx;
-    ctx.derive_from_genome(genome_hash, genome, gradients);
+    ctx.derive_from_genome(genome, gradients);
 
     float behavioral_field_sigma = params.get_behavioral_field_sigma(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
@@ -1031,16 +1026,16 @@ __global__ void init_resource_fields_kernel(
     curandState_t state;
     curand_init(seed, idx, 0, &state);
 
-    int resource_init_slot = derive_param_slot(genome_hash, "resource_density_initial");
-    int resource_init_min_slot = derive_param_slot(genome_hash, "resource_density_initial_min");
-    int resource_init_max_slot = derive_param_slot(genome_hash, "resource_density_initial_max");
+    int resource_init_slot = GenomeParamTable::resource_density_initial;
+    int resource_init_min_slot = GenomeParamTable::resource_density_initial_min;
+    int resource_init_max_slot = GenomeParamTable::resource_density_initial_max;
     float resource_init_min = genome_slot_to_unit(genome, resource_init_min_slot) * RESOURCE_INIT_MAX;
     float resource_init_max = resource_init_min + genome_slot_to_unit(genome, resource_init_max_slot) * (RESOURCE_INIT_MAX - resource_init_min);
     float resource_init = genome_to_bootstrap_param(genome, epigenetic, resource_init_slot, resource_init_min, resource_init_max);
 
-    int resource_noise_slot = derive_param_slot(genome_hash, "resource_density_noise");
-    int resource_noise_min_slot = derive_param_slot(genome_hash, "resource_density_noise_min");
-    int resource_noise_max_slot = derive_param_slot(genome_hash, "resource_density_noise_max");
+    int resource_noise_slot = GenomeParamTable::resource_density_noise;
+    int resource_noise_min_slot = GenomeParamTable::resource_density_noise_min;
+    int resource_noise_max_slot = GenomeParamTable::resource_density_noise_max;
     float resource_noise_min = genome_slot_to_unit(genome, resource_noise_min_slot) * RESOURCE_NOISE_MAX;
     float resource_noise_max = resource_noise_min + genome_slot_to_unit(genome, resource_noise_max_slot) * (RESOURCE_NOISE_MAX - resource_noise_min);
     float resource_noise = genome_to_bootstrap_param(genome, epigenetic, resource_noise_slot, resource_noise_min, resource_noise_max);
@@ -1069,16 +1064,16 @@ __global__ void initialize_chemical_field_kernel(
     curandState state;
     curand_init(seed, idx, 0, &state);
 
-    int base_slot = derive_param_slot(genome_hash, "chem_init_base_value");
-    int base_min_slot = derive_param_slot(genome_hash, "chem_init_base_value_min");
-    int base_max_slot = derive_param_slot(genome_hash, "chem_init_base_value_max");
+    int base_slot = GenomeParamTable::chem_init_base_value;
+    int base_min_slot = GenomeParamTable::chem_init_base_value_min;
+    int base_max_slot = GenomeParamTable::chem_init_base_value_max;
     float base_min = genome_slot_to_unit(genome, base_min_slot) * CHEM_INIT_BASE_MAX;
     float base_max = base_min + genome_slot_to_unit(genome, base_max_slot) * (CHEM_INIT_BASE_MAX - base_min);
     float base_value = genome_to_bootstrap_param(genome, epigenetic, base_slot, base_min, base_max);
 
-    int influence_slot = derive_param_slot(genome_hash, "chem_init_genome_influence");
-    int influence_min_slot = derive_param_slot(genome_hash, "chem_init_genome_influence_min");
-    int influence_max_slot = derive_param_slot(genome_hash, "chem_init_genome_influence_max");
+    int influence_slot = GenomeParamTable::chem_init_genome_influence;
+    int influence_min_slot = GenomeParamTable::chem_init_genome_influence_min;
+    int influence_max_slot = GenomeParamTable::chem_init_genome_influence_max;
     float influence_min = genome_slot_to_unit(genome, influence_min_slot) * CHEM_INIT_GENOME_INFLUENCE_MAX;
     float influence_max = influence_min + genome_slot_to_unit(genome, influence_max_slot) * (CHEM_INIT_GENOME_INFLUENCE_MAX - influence_min);
     float influence_scale = genome_to_bootstrap_param(genome, epigenetic, influence_slot, influence_min, influence_max);
@@ -1086,9 +1081,9 @@ __global__ void initialize_chemical_field_kernel(
     int genome_idx = (x + y * grid_size) % GENOME_SIZE;
     float genome_influence = genome[genome_idx] * influence_scale;
 
-    int noise_slot = derive_param_slot(genome_hash, "chem_init_noise_scale");
-    int noise_min_slot = derive_param_slot(genome_hash, "chem_init_noise_scale_min");
-    int noise_max_slot = derive_param_slot(genome_hash, "chem_init_noise_scale_max");
+    int noise_slot = GenomeParamTable::chem_init_noise_scale;
+    int noise_min_slot = GenomeParamTable::chem_init_noise_scale_min;
+    int noise_max_slot = GenomeParamTable::chem_init_noise_scale_max;
     float noise_min = genome_slot_to_unit(genome, noise_min_slot) * CHEM_INIT_NOISE_MAX;
     float noise_max = noise_min + genome_slot_to_unit(genome, noise_max_slot) * (CHEM_INIT_NOISE_MAX - noise_min);
     float noise_scale = genome_to_bootstrap_param(genome, epigenetic, noise_slot, noise_min, noise_max);

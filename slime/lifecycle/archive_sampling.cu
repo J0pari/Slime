@@ -42,7 +42,7 @@ __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, Vo
     return result;
 }
 
-__device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
+__device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, int generation, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
     DEVICE_FATAL_IF(archive_size <= 0, "replace_from_archive_device: empty archive");
     DEVICE_FATAL_IF(num_cells <= 0, "replace_from_archive_device: no voronoi cells");
 
@@ -57,7 +57,8 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     entry->id = atomicAdd((int*)&pool->total_spawned, 1);
     entry->age = 0;
     entry->genome_hash = archive->genome_hash[elite_idx];
-    entry->alive = true;
+    entry->phase = LifecyclePhase::ACTIVE;
+    pool->alive_flags[pool_idx] = true;
     entry->parent_idx = -1;
     entry->parent_hash = archive->genome_hash[elite_idx];
     entry->num_deltas = 0;
@@ -66,10 +67,10 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     diresa_decode(&archive->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX], elite_genome, diresa_genome_weights);
 
     InitContext ctx;
-    ctx.derive_from_genome(entry->genome_hash, elite_genome, entry->gradients);
+    ctx.derive_from_genome(elite_genome, entry->gradients);
 
-    int fitness_inherit_center_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_center");
-    int fitness_inherit_steepness_slot = derive_param_slot(entry->genome_hash, "lifecycle_fitness_inherit_steepness");
+    int fitness_inherit_center_slot = GenomeParamTable::lifecycle_fitness_inherit_center;
+    int fitness_inherit_steepness_slot = GenomeParamTable::lifecycle_fitness_inherit_steepness;
     float fitness_inherit_center = genome_to_param(elite_genome, entry->gradients, fitness_inherit_center_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
     float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
     float fitness_modulation = NORMALIZED_MAX / (NORMALIZED_MAX + expf(-fitness_inherit_steepness * (archive->fitness[elite_idx] - fitness_inherit_center)));
@@ -78,22 +79,21 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     uint64_t mod_hash = archive->fitness_input_hash[elite_idx];
     mod_hash ^= __float_as_uint(fitness_modulation) + 0x9e3779b9 + (mod_hash << 6) + (mod_hash >> 2);
     entry->fitness.set_computed(modulated_fitness, generation, mod_hash);
-    entry->coherence.value = archive->coherence[elite_idx];
-    entry->coherence.state = ComputeState::COMPUTED;
-    entry->coherence.computed_at_generation = archive->fitness_computed_at_generation[elite_idx];
+    entry->coherence.set_computed(archive->coherence[elite_idx], generation, entry->genome_hash);
     entry->task_accuracy.set_uncomputed();
     entry->generalization_gap.set_uncomputed();
     entry->hardware_efficiency.set_uncomputed();  
-    entry->hunger = NORMALIZED_MAX - archive->coherence[elite_idx];
-    entry->generation = archive->generation[elite_idx];
+    float hunger_val = NORMALIZED_MAX - archive->coherence[elite_idx];
+    entry->hunger.set_computed(hunger_val, generation, entry->genome_hash);
+    entry->generation = generation;
 
     for (int g = 0; g < GENOME_SIZE; g++) {
         entry->gradients[g] = 0.0f;
     }
 
-    derive_architecture(entry->genome_hash, elite_genome, entry);
-    derive_diresa(entry->genome_hash, elite_genome, entry);
-    derive_fitness_exponents(entry->genome_hash, elite_genome, entry);
+    derive_architecture(elite_genome, entry);
+    derive_diresa(elite_genome, entry);
+    derive_fitness_exponents(elite_genome, entry);
 
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;

@@ -211,7 +211,6 @@ __global__ void init_training_mode_kernel(
 ) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         TrainingParams training_params;
-        training_params.derive_from_genome_hash(genome_hash);
 
         mode->use_gradients = true;
         mode->use_selection = true;
@@ -306,9 +305,9 @@ __global__ void init_curriculum_kernel(
         curriculum->curriculum_progress = 0.0f;
         curriculum->stats[0].activation_threshold_met = true;
 
-        int acc_slot = derive_param_slot(genome_hash, "curriculum_accuracy_threshold");
-        int div_slot = derive_param_slot(genome_hash, "curriculum_diversity_threshold");
-        int gen_slot = derive_param_slot(genome_hash, "curriculum_min_generations");
+        int acc_slot = GenomeParamTable::curriculum_accuracy_threshold;
+        int div_slot = GenomeParamTable::curriculum_diversity_threshold;
+        int gen_slot = GenomeParamTable::curriculum_min_generations;
 
         curriculum->accuracy_threshold = genome_to_param(
             genome, gradients, acc_slot,

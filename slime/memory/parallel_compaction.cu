@@ -728,9 +728,9 @@ __global__ void memory_update_params_kernel(
     DEVICE_FATAL_IF(generation < 1, "memory_update_params_kernel: generation < 1 - no previous data exists for fitness_trend");
     DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_kernel: fitness_history is null");
 
-    int decay_threshold_slot = derive_param_slot(genome_hash, "memory_decay_threshold");
-    int consolidation_threshold_slot = derive_param_slot(genome_hash, "memory_consolidation_threshold");
-    int flow_dt_slot = derive_param_slot(genome_hash, "memory_flow_lenia_dt");
+    int decay_threshold_slot = GenomeParamTable::memory_decay_threshold;
+    int consolidation_threshold_slot = GenomeParamTable::memory_consolidation_threshold;
+    int flow_dt_slot = GenomeParamTable::memory_flow_lenia_dt;
 
     params->decay_threshold = genome_to_param(
         genome, gradients, decay_threshold_slot,

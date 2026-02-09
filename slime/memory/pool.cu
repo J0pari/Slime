@@ -201,17 +201,18 @@ __device__ void spawn_component_device(
     PoolInitParams params;
     int use_latent;
 
-    int count = Atomics::load_int(pool->active_count);
-    if (count < pool->capacity) {
-        new_id = atomicAdd((int*)&pool->total_spawned, 1);
-    } else {
+    // Atomically reserve a slot first - prevents race where multiple threads pass capacity check
+    int reserved_count = Atomics::increment_int(pool->active_count);
+    if (reserved_count > pool->capacity) {
+        // Over capacity - undo reservation and exit
+        Atomics::decrement_int(pool->active_count);
         return;
     }
 
+    // Find a free slot using atomicCAS
     for (int i = 0; i < pool->capacity; i++) {
-        
         if (pool->entries[i].id == INT_MAX) {
-            int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);  
+            int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);
             if (old_id == INT_MAX) {
                 slot_idx = i;
                 break;
@@ -219,7 +220,14 @@ __device__ void spawn_component_device(
         }
     }
 
-    DEVICE_FATAL_IF(slot_idx < 0, "spawn_component_device: no free slot found despite count < capacity");
+    if (slot_idx < 0) {
+        // No slot found despite reservation - undo and exit (shouldn't happen)
+        Atomics::decrement_int(pool->active_count);
+        return;
+    }
+
+    // Now safe to get the ID
+    new_id = atomicAdd((int*)&pool->total_spawned, 1);
     int i = slot_idx;
 
     pool->entries[i].id = new_id;
@@ -344,7 +352,6 @@ __device__ void spawn_component_device(
     pool->entries[i].inst_issued = 0;
     pool->entries[i].cycles_elapsed = 0;
     pool->entries[i].tensor_core_cycles = 0;
-    Atomics::increment_int(pool->active_count);
 }
 
 __global__ void cull_weak_kernel(
@@ -371,8 +378,8 @@ __global__ void cull_hungry_kernel(
 
     if (idx < pool->capacity) {
         
-        if (pool->alive_flags[idx] && pool->entries[idx].hunger > hunger_threshold) {
-            pool->entries[idx].alive = false;
+        if (pool->alive_flags[idx] && pool->entries[idx].hunger.value > hunger_threshold) {
+            pool->entries[idx].phase = LifecyclePhase::DEAD;
             pool->alive_flags[idx] = false;  
             Atomics::decrement_int(pool->active_count);
             Atomics::increment_int(pool->total_culled);
@@ -389,12 +396,13 @@ __global__ void age_components_kernel(ComponentPool* pool) {
     }
 }
 
-__global__ void update_hunger_kernel(ComponentPool* pool) {
+__global__ void update_hunger_kernel(ComponentPool* pool, int generation) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    
+
     if (idx < pool->capacity && pool->alive_flags[idx]) {
-        pool->entries[idx].hunger = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence);
+        float hunger_val = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence.value);
+        pool->entries[idx].hunger.set_computed(hunger_val, generation, pool->entries[idx].genome_hash);
     }
 }
 
@@ -416,8 +424,8 @@ __global__ void sort_by_fitness_kernel(
         PoolEntry right = pool->entries[right_id];
 
         bool ascending = ((block_id >> stage) & 1) == 0;
-        bool swap = ascending ? (left.fitness > right.fitness) :
-                               (left.fitness < right.fitness);
+        bool swap = ascending ? (left.fitness.value > right.fitness.value) :
+                               (left.fitness.value < right.fitness.value);
 
         if (swap) {
             pool->entries[left_id] = right;
@@ -570,7 +578,8 @@ __global__ void init_pool_kernel(
     int capacity,
     uint16_t* delta_indices_buffer,
     float* delta_values_buffer,
-    float* gradients_buffer
+    float* gradients_buffer,
+    int generation
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx == 0) printf("V:init_pool_enter cap=%d pool=%p\n", capacity, (void*)pool);
@@ -593,7 +602,7 @@ __global__ void init_pool_kernel(
         if (idx < POOL_CAPACITY_MIN) {
             if (idx == 0) printf("V:init_pool_idx0_E\n");
             pool->entries[idx].id = idx;
-            pool->entries[idx].alive = true;
+            pool->entries[idx].phase = LifecyclePhase::ACTIVE;
             if (idx == 0) printf("V:init_pool_idx0_F\n");
             pool->alive_flags[idx] = true;
             if (idx == 0) printf("V:init_pool_idx0_G\n");
@@ -616,35 +625,35 @@ __global__ void init_pool_kernel(
             if (idx == 0) printf("V:init_pool_post_sha256\n");
 
             PoolInitParams init_params;
-            init_params.derive_from_genome(pool->entries[idx].genome_hash, temp_genome, pool->entries[idx].gradients);
-            pool->entries[idx].hunger = init_params.initial_hunger;
+            init_params.derive_from_genome(temp_genome, pool->entries[idx].gradients);
+            pool->entries[idx].hunger.set_computed(init_params.initial_hunger, generation, pool->entries[idx].genome_hash);
 
-            derive_architecture(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-            derive_diresa(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-            derive_fitness_exponents(pool->entries[idx].genome_hash, temp_genome, &pool->entries[idx]);
-            pool->entries[idx].fitness = NAN;
+            derive_architecture(temp_genome, &pool->entries[idx]);
+            derive_diresa(temp_genome, &pool->entries[idx]);
+            derive_fitness_exponents(temp_genome, &pool->entries[idx]);
+            pool->entries[idx].fitness.set_uncomputed();
             pool->fitness_values[idx] = NAN;
-            pool->entries[idx].coherence = NAN;
-            pool->entries[idx].task_accuracy = NAN;  
-            pool->entries[idx].generalization_gap = NAN;  
-            pool->entries[idx].hardware_efficiency = NAN;  
-            pool->entries[idx].effective_rank = NAN;  
+            pool->entries[idx].coherence.set_uncomputed();
+            pool->entries[idx].task_accuracy.set_uncomputed();
+            pool->entries[idx].generalization_gap.set_uncomputed();
+            pool->entries[idx].hardware_efficiency.set_uncomputed();
+            pool->entries[idx].effective_rank.set_uncomputed();
         } else {
-            pool->entries[idx].id = INT_MAX;  
-            pool->entries[idx].alive = false;
-            pool->alive_flags[idx] = false;  
-            pool->entries[idx].fitness = NAN;
-            pool->fitness_values[idx] = NAN;  
-            pool->entries[idx].coherence = NAN;
-            pool->entries[idx].task_accuracy = NAN;
-            pool->entries[idx].generalization_gap = NAN;
-            pool->entries[idx].hardware_efficiency = NAN;
-            pool->entries[idx].effective_rank = NAN;
-            pool->entries[idx].hunger = NAN;
-            pool->entries[idx].age = INT_MAX;  
-            pool->entries[idx].parent_hash = UINT64_MAX;  
-            pool->entries[idx].parent_idx = INT_MAX;  
-            pool->entries[idx].num_deltas = UINT16_MAX;  
+            pool->entries[idx].id = INT_MAX;
+            pool->entries[idx].phase = LifecyclePhase::DEAD;
+            pool->alive_flags[idx] = false;
+            pool->entries[idx].fitness.set_uncomputed();
+            pool->fitness_values[idx] = NAN;
+            pool->entries[idx].coherence.set_uncomputed();
+            pool->entries[idx].task_accuracy.set_uncomputed();
+            pool->entries[idx].generalization_gap.set_uncomputed();
+            pool->entries[idx].hardware_efficiency.set_uncomputed();
+            pool->entries[idx].effective_rank.set_uncomputed();
+            pool->entries[idx].hunger.set_uncomputed();
+            pool->entries[idx].age = INT_MAX;
+            pool->entries[idx].parent_hash = UINT64_MAX;
+            pool->entries[idx].parent_idx = INT_MAX;
+            pool->entries[idx].num_deltas = UINT16_MAX;
 
             for (int i = 0; i < GENOME_SIZE; i++) {
                 pool->entries[idx].gradients[i] = NAN;
@@ -652,12 +661,17 @@ __global__ void init_pool_kernel(
         }
     }
 
+    if (idx < POOL_CAPACITY_MIN) {
+        pool->alive_indices[idx] = idx;
+    }
+
     if (idx == 0) {
         pool->capacity = capacity;
         pool->active_count = POOL_CAPACITY_MIN;
         pool->total_spawned = POOL_CAPACITY_MIN;
         pool->total_culled = 0;
-        printf("V:init_pool_done cap=%d\n", capacity);
+        pool->alive_indices_count = POOL_CAPACITY_MIN;
+        printf("V:init_pool_done cap=%d alive_indices_count=%d\n", capacity, POOL_CAPACITY_MIN);
     }
 }
 
@@ -682,7 +696,7 @@ __global__ void compute_pool_stats_kernel(
     
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         local_fitness = pool->fitness_values[idx];
-        local_coherence = pool->entries[idx].coherence;
+        local_coherence = pool->entries[idx].coherence.value;
         local_age = (float)pool->entries[idx].age;
     }
 
@@ -707,22 +721,22 @@ __global__ void compute_pool_stats_kernel(
         PoolInitParams params;
         uint64_t genome_hash = pool->entries[idx].genome_hash;
 
-        int hunger_slot = derive_param_slot(genome_hash, "initial_hunger");
-        int mutation_slot = derive_param_slot(genome_hash, "genome_mutation_scale");
-        int levy_alpha_slot = derive_param_slot(genome_hash, "mutation_levy_alpha");
-        int diversity_slot = derive_param_slot(genome_hash, "diversity_normalization");
-        int diversity_samples_slot = derive_param_slot(genome_hash, "diversity_sample_count");
+        int hunger_slot = GenomeParamTable::initial_hunger;
+        int mutation_slot = GenomeParamTable::genome_mutation_scale;
+        int levy_alpha_slot = GenomeParamTable::mutation_levy_alpha;
+        int diversity_slot = GenomeParamTable::diversity_normalization;
+        int diversity_samples_slot = GenomeParamTable::diversity_sample_count;
 
-        int hunger_min_slot = derive_param_slot(genome_hash, "initial_hunger_min");
-        int hunger_max_slot = derive_param_slot(genome_hash, "initial_hunger_max");
-        int mutation_min_slot = derive_param_slot(genome_hash, "genome_mutation_scale_min");
-        int mutation_max_slot = derive_param_slot(genome_hash, "genome_mutation_scale_max");
-        int diversity_min_slot = derive_param_slot(genome_hash, "diversity_normalization_min");
-        int diversity_max_slot = derive_param_slot(genome_hash, "diversity_normalization_max");
-        int samples_min_slot = derive_param_slot(genome_hash, "diversity_sample_count_min");
-        int samples_max_slot = derive_param_slot(genome_hash, "diversity_sample_count_max");
-        int samples_base_slot = derive_param_slot(genome_hash, "diversity_sample_count_base");
-        int samples_range_slot = derive_param_slot(genome_hash, "diversity_sample_count_range");
+        int hunger_min_slot = GenomeParamTable::initial_hunger_min;
+        int hunger_max_slot = GenomeParamTable::initial_hunger_max;
+        int mutation_min_slot = GenomeParamTable::genome_mutation_scale_min;
+        int mutation_max_slot = GenomeParamTable::genome_mutation_scale_max;
+        int diversity_min_slot = GenomeParamTable::diversity_normalization_min;
+        int diversity_max_slot = GenomeParamTable::diversity_normalization_max;
+        int samples_min_slot = GenomeParamTable::diversity_sample_count_min;
+        int samples_max_slot = GenomeParamTable::diversity_sample_count_max;
+        int samples_base_slot = GenomeParamTable::diversity_sample_count_base;
+        int samples_range_slot = GenomeParamTable::diversity_sample_count_range;
 
 
         float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * 2];
@@ -1019,7 +1033,7 @@ __global__ void seed_archive_from_pool_kernel(
     float* temp_genome = &workspace_genomes[idx * GENOME_SIZE];
 
     for (int i = 0; i < GENOME_SIZE; i++) {
-        int slot = derive_param_slot(entry->genome_hash, "genome_slot");
+        int slot = GenomeParamTable::genome_slot;
         slot = (slot + i) % GENOME_SIZE;
         temp_genome[i] = entry->gradients[slot];
     }

@@ -175,7 +175,7 @@ int main() {
         printf("[H-ERR] cudaHostGetDevicePointer audit buffer failed: %s\n", cudaGetErrorString(err));
         return 1;
     }
-    audit_buffer_init_sentinel(h_audit);
+    state_export_buffer_init_sentinel(h_audit);
     printf("[H-AUDIT] Mapped audit buffer: host=%p device=%p size=%zu\n",
            (void*)h_audit, (void*)d_audit, sizeof(AuditBuffer));
 
@@ -264,14 +264,16 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.all_rd_fields, sizeof(float) * RD_FIELD_COUNT * CA_FIELD_SIZE, "all_rd_fields");
     CUDA_ALLOC_CHECK(buffers_host.shared_workspace, sizeof(float) * POOL_CAPACITY_MAX * POOL_CAPACITY_MAX, "shared_workspace");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_states, sizeof(LocalOrganismState<BLOCK_SIZE>) * ((POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "lifecycle_states");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_hw_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_hw_weights");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_task_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_task_weights");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_gen_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_gen_weights");
+    // diresa_genome_weights is shared (GENOME_SIZE is fixed for all entries)
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_genome_weights");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_hw_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_HW_STRIDE, "diresa_hw_weight_pool");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_task_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_TASK_STRIDE, "diresa_task_weight_pool");
-    CUDA_ALLOC_CHECK(buffers_host.diresa_gen_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_GEN_STRIDE, "diresa_gen_weight_pool");
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_GENOME_STRIDE, "diresa_genome_weight_pool");
+    // Per-entry diresa weights - each pool entry has its own weights with its own input_dim
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_task_weights");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_hw_weights");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_gen_weights");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_TASK_STRIDE_PER_ENTRY, "per_entry_diresa_task_weight_pool");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_HW_STRIDE, "per_entry_diresa_hw_weight_pool");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_GEN_STRIDE, "per_entry_diresa_gen_weight_pool");
     CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (NUM_HEADS_MAX + 1) * HEAD_DIM_MAX, "fp32_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.fp16_ca_workspace, sizeof(half) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (CHANNELS_MAX + HEAD_DIM_MAX), "fp16_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.latent_genome_pool, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX, "latent_genome_pool");
@@ -364,13 +366,11 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
     CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_a, BACKWARD_WS_FP16_A_SIZE, "backward_ws_fp16_a");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_fp16_b, BACKWARD_WS_FP16_B_SIZE, "backward_ws_fp16_b");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dW, BACKWARD_WS_DW_SIZE, "backward_ws_dW");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dI, BACKWARD_WS_DI_SIZE, "backward_ws_dI");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_W_T, BACKWARD_WS_W_T_SIZE, "backward_ws_W_T");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_im2col, BACKWARD_WS_IM2COL_SIZE, "backward_ws_im2col");
-    CUDA_ALLOC_CHECK(buffers_host.backward_ws_dpregelu, BACKWARD_WS_DPREGELU_SIZE, "backward_ws_dpregelu");
+    // Unified backward workspace - all components contiguous per entry
+    constexpr size_t BACKWARD_WS_TOTAL_SIZE = BACKWARD_WS_FP16_A_SIZE + BACKWARD_WS_FP16_B_SIZE +
+        BACKWARD_WS_DW_SIZE + BACKWARD_WS_DI_SIZE + BACKWARD_WS_W_T_SIZE +
+        BACKWARD_WS_IM2COL_SIZE + BACKWARD_WS_DPREGELU_SIZE;
+    CUDA_ALLOC_CHECK(buffers_host.backward_workspace, BACKWARD_WS_TOTAL_SIZE, "backward_workspace");
 
     cudaMemcpy(buffers, &buffers_host, sizeof(OrganismPreallocatedBuffers), cudaMemcpyHostToDevice);
 
@@ -398,21 +398,21 @@ int main() {
         return 1;
     }
 
-    AuditBufferReader reader;
+    StateExportBufferReader reader;
     reader.init(h_audit);
 
     auto start_time = std::chrono::steady_clock::now();
     int last_gen = -1;
 
     while (true) {
-        AuditEntry entry;
+        TelemetryAuditEntry entry;
         RecordHeader hdr;
 
         while (reader.read_next(&entry, &hdr)) {
             auto now_time = std::chrono::steady_clock::now();
             double elapsed_sec = std::chrono::duration<double>(now_time - start_time).count();
 
-            if (!audit_entry_field_valid(&entry, AUDIT_MASK_GENERATION)) {
+            if (!state_export_field_valid(&entry, AUDIT_MASK_GENERATION)) {
                 fprintf(stderr, "E_NOGEN seq=%llu\n", (unsigned long long)hdr.sequence_number);
                 continue;
             }

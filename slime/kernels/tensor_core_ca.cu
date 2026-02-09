@@ -153,7 +153,7 @@ __global__ void prepare_ca_fp16_kernel(
     DEVICE_FATAL_IF(entry_idx >= pool->capacity, "prepare_ca_fp16_kernel: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!entry->alive, "prepare_ca_fp16_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "prepare_ca_fp16_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;
@@ -180,7 +180,7 @@ __global__ void multi_head_ca_tensor_kernel(
     if (head >= arch.num_heads) return;
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!entry->alive, "multi_head_ca_tensor_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "multi_head_ca_tensor_kernel: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;

@@ -319,7 +319,7 @@ __global__ void update_voronoi_density_kernel(
         }
         density_variance /= num_cells;
 
-        int correlation_exponent_slot = derive_param_slot(genome_hash, "voronoi_correlation_exponent");
+        int correlation_exponent_slot = GenomeParamTable::voronoi_correlation_exponent;
         float correlation_exponent = genome_to_param(
             genome, gradients, correlation_exponent_slot,
             ctx_metabolic, ctx_stress, ctx_morphogen,
@@ -560,9 +560,9 @@ __global__ void store_elite_weight_deltas_kernel(
         archive->archived_head_dim[elite_idx] = head_dim;
     }
 
-    int delta_threshold_slot = derive_param_slot(genome_hash, "weight_delta_threshold");
-    int delta_threshold_min_slot = derive_param_slot(genome_hash, "weight_delta_threshold_min");
-    int delta_threshold_max_slot = derive_param_slot(genome_hash, "weight_delta_threshold_max");
+    int delta_threshold_slot = GenomeParamTable::weight_delta_threshold;
+    int delta_threshold_min_slot = GenomeParamTable::weight_delta_threshold_min;
+    int delta_threshold_max_slot = GenomeParamTable::weight_delta_threshold_max;
     float delta_threshold_min = genome_slot_to_unit(genome, delta_threshold_min_slot) * DELTA_THRESHOLD_BASE_MAX;
     float delta_threshold_max = delta_threshold_min + genome_slot_to_unit(genome, delta_threshold_max_slot) * (DELTA_THRESHOLD_BASE_MAX - delta_threshold_min);
     float delta_threshold = genome_to_bootstrap_param(genome, epigenetic, delta_threshold_slot, delta_threshold_min, delta_threshold_max);

@@ -95,14 +95,16 @@ struct OrganismPreallocatedBuffers {
     float* all_rd_fields;
     float* shared_workspace;
     LocalOrganismState<BLOCK_SIZE>* lifecycle_states;
-    DIRESAWeights* diresa_hw_weights;
-    DIRESAWeights* diresa_task_weights;
-    DIRESAWeights* diresa_gen_weights;
+    // diresa_genome_weights is shared because GENOME_SIZE is fixed for all entries
     DIRESAWeights* diresa_genome_weights;
-    float* diresa_hw_weight_pool;
-    float* diresa_task_weight_pool;
-    float* diresa_gen_weight_pool;
     float* diresa_genome_weight_pool;
+    // Per-entry diresa weights - each entry has its own because input_dim varies per entry
+    DIRESAWeights* per_entry_diresa_task_weights;  // [POOL_CAPACITY_MAX]
+    DIRESAWeights* per_entry_diresa_hw_weights;    // [POOL_CAPACITY_MAX]
+    DIRESAWeights* per_entry_diresa_gen_weights;   // [POOL_CAPACITY_MAX]
+    float* per_entry_diresa_task_weight_pool;
+    float* per_entry_diresa_hw_weight_pool;
+    float* per_entry_diresa_gen_weight_pool;
     float* fp32_ca_workspace;
     half* fp16_ca_workspace;
     float* latent_genome_pool;
@@ -179,13 +181,7 @@ struct OrganismPreallocatedBuffers {
     int* weight_inherit_child_indices;
     int* weight_inherit_parent_indices;
     int* weight_inherit_num_pending;
-    half* backward_ws_fp16_a;
-    half* backward_ws_fp16_b;
-    float* backward_ws_dW;
-    float* backward_ws_dI;
-    half* backward_ws_W_T;
-    float* backward_ws_im2col;
-    float* backward_ws_dpregelu;
+    char* backward_workspace;  // Unified backward workspace - all components per entry contiguous
     curandState* rng_states;
     TapeEntry* ad_tape_entries_pool;
     float* ad_tape_values_pool;
@@ -198,9 +194,9 @@ struct OrganismPreallocatedBuffers {
     float* batch_affinity_reduced;      
     float* batch_flow_field;            
     float* batch_reintegration_buffer;  
-    float* batch_prev_concentration;    
-    float flow_beta_A_grad;             
-    float flow_n_grad;                  
+    float* batch_prev_concentration;
+    float flow_beta_A_grad;
+    float flow_n_grad;
 };
 
 struct Dataset;
@@ -236,14 +232,16 @@ struct Organism {
     float* prediction_error_history;
     float* fitness_workspace_pool;
 
-    DIRESAWeights* diresa_hw_weights;
-    DIRESAWeights* diresa_task_weights;
-    DIRESAWeights* diresa_gen_weights;
+    // diresa_genome_weights is shared because GENOME_SIZE is fixed for all entries
     DIRESAWeights* diresa_genome_weights;
-    float* diresa_hw_weight_pool;
-    float* diresa_task_weight_pool;
-    float* diresa_gen_weight_pool;
     float* diresa_genome_weight_pool;
+    // Per-entry diresa weights - each entry has its own because input_dim varies per entry
+    DIRESAWeights* per_entry_diresa_task_weights;  // [POOL_CAPACITY_MAX]
+    DIRESAWeights* per_entry_diresa_hw_weights;    // [POOL_CAPACITY_MAX]
+    DIRESAWeights* per_entry_diresa_gen_weights;   // [POOL_CAPACITY_MAX]
+    float* per_entry_diresa_task_weight_pool;
+    float* per_entry_diresa_hw_weight_pool;
+    float* per_entry_diresa_gen_weight_pool;
 
     float* hw_coords_pool;     
     float* task_coords_pool;   
@@ -421,14 +419,15 @@ __global__ void component_evolution_kernel(
 
     float current_task_accuracy = organism->telemetry->task_performance.accuracy;
     DEVICE_FATAL_IF(isnan(current_task_accuracy), "component_evolution: task_accuracy is NaN");
-    pool->entries[tid].task_accuracy = current_task_accuracy;
-    pool->entries[tid].generalization_gap = fabsf(organism->telemetry->task_performance.train_accuracy - organism->telemetry->task_performance.test_accuracy);
+    pool->entries[tid].task_accuracy.set_computed(current_task_accuracy, organism->generation, pool->entries[tid].genome_hash);
+    float gen_gap = fabsf(organism->telemetry->task_performance.train_accuracy - organism->telemetry->task_performance.test_accuracy);
+    pool->entries[tid].generalization_gap.set_computed(gen_gap, organism->generation, pool->entries[tid].genome_hash);
 
     if (tid == 0) {
     }
 
-    organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].task_accuracy;
-    organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].coherence;
+    organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].task_accuracy.value;
+    organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].coherence.value;
 
     if (tid == 0) {
     }
@@ -522,7 +521,7 @@ __global__ void selection_kernel(
 
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!entry->alive, "selection_kernel: dead entry in alive_indices");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_kernel: dead entry in alive_indices");
 
     float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
     float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
@@ -538,13 +537,13 @@ __global__ void selection_kernel(
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
-    float hw_features[1] = {entry->hardware_efficiency};
+    float hw_features[1] = {entry->hardware_efficiency.value};
     float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
-    diresa_encode(hw_features, hw_coords_component, organism->diresa_hw_weights);
+    diresa_encode(hw_features, hw_coords_component, entry->diresa_hw_weights);
 
-    float gen_features[1] = {entry->generalization_gap};
+    float gen_features[1] = {entry->generalization_gap.value};
     float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
-    diresa_encode(gen_features, gen_coords_component, &organism->diresa_gen_weights[0]);
+    diresa_encode(gen_features, gen_coords_component, entry->diresa_gen_weights);
 
     float* entry_genome = organism_genome;
 
@@ -607,7 +606,7 @@ __global__ void spawn_wave_kernel(
 
     for (int compact = tid; compact < alive_count; compact += blockDim.x) {
         int i = pool->alive_indices[compact];
-        DEVICE_FATAL_IF(!pool->entries[i].alive, "spawn_wave_kernel: dead entry in alive_indices");
+        DEVICE_FATAL_IF(!pool->alive_flags[i], "spawn_wave_kernel: dead entry in alive_indices");
 
         float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_GENOME];
         float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_TEMP_PARENT];
@@ -618,14 +617,14 @@ __global__ void spawn_wave_kernel(
             spawn_entry->max_deltas, temp_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
 
         uint64_t temp_hash = pool->entries[i].genome_hash;
-        int fitness_threshold_slot = derive_param_slot(temp_hash, "spawn_fitness_threshold");
+        int fitness_threshold_slot = GenomeParamTable::spawn_fitness_threshold;
         float local_morphogen = sample_neighborhood(
             organism->chemical_field->concentration, i, pool->entries[i].grid_size);
 
         float entry_fitness = pool->fitness_values[i];
-        float entry_hunger = pool->entries[i].hunger;
+        float entry_hunger = pool->entries[i].hunger.value;
 
-        int ctx_metabolic_slot = derive_param_slot(temp_hash, "spawn_ctx_metabolic");
+        int ctx_metabolic_slot = GenomeParamTable::spawn_ctx_metabolic;
         float ctx_metabolic = genome_to_param(temp_genome, pool->entries[i].gradients, ctx_metabolic_slot,
             entry_fitness, entry_hunger, local_morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
@@ -634,7 +633,7 @@ __global__ void spawn_wave_kernel(
             organism->telemetry->task_performance.accuracy,
             NORMALIZED_MIN, NORMALIZED_MAX);
 
-        int ctx_stress_slot = derive_param_slot(temp_hash, "spawn_ctx_stress");
+        int ctx_stress_slot = GenomeParamTable::spawn_ctx_stress;
         float ctx_stress = genome_to_param(temp_genome, pool->entries[i].gradients, ctx_stress_slot,
             entry_fitness, entry_hunger, local_morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
@@ -643,7 +642,7 @@ __global__ void spawn_wave_kernel(
             organism->telemetry->task_performance.accuracy,
             NORMALIZED_MIN, NORMALIZED_MAX);
 
-        int ctx_morphogen_slot = derive_param_slot(temp_hash, "spawn_ctx_morphogen");
+        int ctx_morphogen_slot = GenomeParamTable::spawn_ctx_morphogen;
         float ctx_morphogen = genome_to_param(temp_genome, pool->entries[i].gradients, ctx_morphogen_slot,
             entry_fitness, entry_hunger, local_morphogen,
             organism->telemetry->genome_complexity.hash_entropy,
@@ -696,9 +695,9 @@ __global__ void spawn_wave_kernel(
         organism->chemical_field->concentration, parent_idx, pool->entries[parent_idx].grid_size);
 
     float parent_fitness = pool->fitness_values[parent_idx];
-    float parent_hunger = pool->entries[parent_idx].hunger;
+    float parent_hunger = pool->entries[parent_idx].hunger.value;
 
-    int ctx_metabolic_slot = derive_param_slot(parent_hash, "mutation_ctx_metabolic");
+    int ctx_metabolic_slot = GenomeParamTable::mutation_ctx_metabolic;
     float ctx_metabolic = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_metabolic_slot,
         parent_fitness, parent_hunger, parent_morphogen,
         organism->telemetry->genome_complexity.hash_entropy,
@@ -707,7 +706,7 @@ __global__ void spawn_wave_kernel(
         organism->telemetry->task_performance.accuracy,
         NORMALIZED_MIN, NORMALIZED_MAX);
 
-    int ctx_stress_slot = derive_param_slot(parent_hash, "mutation_ctx_stress");
+    int ctx_stress_slot = GenomeParamTable::mutation_ctx_stress;
     float ctx_stress = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_stress_slot,
         parent_fitness, parent_hunger, parent_morphogen,
         organism->telemetry->genome_complexity.hash_entropy,
@@ -716,7 +715,7 @@ __global__ void spawn_wave_kernel(
         organism->telemetry->task_performance.accuracy,
         NORMALIZED_MIN, NORMALIZED_MAX);
 
-    int ctx_morphogen_slot = derive_param_slot(parent_hash, "mutation_ctx_morphogen");
+    int ctx_morphogen_slot = GenomeParamTable::mutation_ctx_morphogen;
     float ctx_morphogen = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_morphogen_slot,
         parent_fitness, parent_hunger, parent_morphogen,
         organism->telemetry->genome_complexity.hash_entropy,
@@ -725,7 +724,7 @@ __global__ void spawn_wave_kernel(
         organism->telemetry->task_performance.accuracy,
         NORMALIZED_MIN, NORMALIZED_MAX);
 
-    int mutation_rate_slot = derive_param_slot(parent_hash, "metalearning_mutation_rate");
+    int mutation_rate_slot = GenomeParamTable::metalearning_mutation_rate;
     float mutation_rate = genome_to_param(
         workspace_parent_genome,
         pool->entries[parent_idx].gradients,
@@ -744,6 +743,7 @@ __global__ void spawn_wave_kernel(
         organism->archive_size,
         parent_idx,
         mutation_rate,
+        organism->generation,
         workspace_parent_genome,
         workspace_child_genome,
         workspace_parent_parent_temp,
@@ -780,7 +780,7 @@ __global__ void culling_kernel(
 
         float ctx_morphogen = chemical_field->cached_mean;
 
-        int fitness_cull_mult_slot = derive_param_slot(entry_genome_hash, "lifecycle_fitness_culling_mult");
+        int fitness_cull_mult_slot = GenomeParamTable::lifecycle_fitness_culling_mult;
         float fitness_cull_mult = genome_to_param(entry_genome, entry->gradients, fitness_cull_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, FITNESS_CULLING_MULT_MIN, FITNESS_CULLING_MULT_MAX);
 
         if (entry->fitness.value < fitness_threshold * fitness_cull_mult) {
@@ -839,6 +839,7 @@ __global__ void archive_driven_lifecycle_kernel(
             behavioral_agents,
             idx,
             organism->generation * pool->capacity + idx,
+            organism->generation,
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
             organism->telemetry->diresa_evolution.behavioral_drift_rate,
@@ -878,7 +879,7 @@ __global__ void populate_organism_flow_params_kernel(
     uint64_t genome_hash = entry->genome_hash;
 
     float context_metabolic = entry->fitness.value;
-    int stress_numerator_slot = derive_param_slot(genome_hash, "context_stress_numerator");
+    int stress_numerator_slot = GenomeParamTable::context_stress_numerator;
     float stress_numerator = genome_to_param(
         genome, epigenetic, stress_numerator_slot,
         entry->fitness.value,
@@ -895,7 +896,7 @@ __global__ void populate_organism_flow_params_kernel(
 
     float context_morphogen = chemical_field->cached_mean;
 
-    int s_param_slot = derive_param_slot(genome_hash, "flow_lenia_s");
+    int s_param_slot = GenomeParamTable::flow_lenia_s;
     entry->flow_s = genome_to_param(
         genome, epigenetic, s_param_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -906,7 +907,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_S_MIN, FLOW_LENIA_S_MAX
     );
 
-    int beta_A_slot = derive_param_slot(genome_hash, "flow_lenia_beta_a");
+    int beta_A_slot = GenomeParamTable::flow_lenia_beta_A;
     entry->flow_beta_A = genome_to_param(
         genome, epigenetic, beta_A_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -917,7 +918,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_BETA_A_MIN, FLOW_LENIA_BETA_A_MAX
     );
 
-    int n_param_slot = derive_param_slot(genome_hash, "flow_lenia_n");
+    int n_param_slot = GenomeParamTable::flow_lenia_n;
     entry->flow_n = genome_to_param(
         genome, epigenetic, n_param_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -928,7 +929,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_N_MIN, FLOW_LENIA_N_MAX
     );
 
-    int alpha_min_slot = derive_param_slot(genome_hash, "flow_lenia_alpha_min");
+    int alpha_min_slot = GenomeParamTable::flow_alpha_min;
     entry->flow_alpha_min = genome_to_param(
         genome, epigenetic, alpha_min_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -939,7 +940,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_ALPHA_MIN_MIN, FLOW_LENIA_ALPHA_MIN_MAX
     );
 
-    int alpha_max_slot = derive_param_slot(genome_hash, "flow_lenia_alpha_max");
+    int alpha_max_slot = GenomeParamTable::flow_alpha_max;
     entry->flow_alpha_max = genome_to_param(
         genome, epigenetic, alpha_max_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -950,7 +951,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_ALPHA_MAX_MIN, FLOW_LENIA_ALPHA_MAX_MAX
     );
 
-    int sharpness_slot = derive_param_slot(genome_hash, "flow_lenia_sharpness");
+    int sharpness_slot = GenomeParamTable::flow_sharpness;
     entry->flow_sharpness = genome_to_param(
         genome, epigenetic, sharpness_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -961,7 +962,7 @@ __global__ void populate_organism_flow_params_kernel(
         FLOW_LENIA_SHARPNESS_MIN, FLOW_LENIA_SHARPNESS_MAX
     );
 
-    int resource_flow_dt_slot = derive_param_slot(genome_hash, "flow_lenia_resource_dt");
+    int resource_flow_dt_slot = GenomeParamTable::flow_resource_dt;
     entry->flow_resource_dt = genome_to_param(
         genome, epigenetic, resource_flow_dt_slot,
         context_metabolic, context_stress, context_morphogen,
@@ -1120,7 +1121,6 @@ __global__ void behavioral_update_kernel(
         int lane_id = threadIdx.x % WARP_SIZE;
 
         CAParams ca_params;
-        ca_params.derive_from_genome_hash(genome_hash);
         float warp_ca_growth_rate = ca_params.get_warp_ca_growth_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
 
         for (int tile = 0; tile < num_tiles; tile++) {
@@ -1186,7 +1186,7 @@ __global__ void behavioral_update_kernel(
     }
     if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", organism->generation);
 
-    int chemotaxis_dt_slot = derive_param_slot(genome_hash, "chemotaxis_dt");
+    int chemotaxis_dt_slot = GenomeParamTable::chemotaxis_dt;
     float chemotaxis_dt = genome_to_param(genome, gradients, chemotaxis_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMOTAXIS_DT_MIN, CHEMOTAXIS_DT_MAX);
 
     {
@@ -1207,7 +1207,6 @@ __global__ void behavioral_update_kernel(
             float context_morphogen_agent = concentration[idx];
 
             ChemotaxisParams chem_params;
-            chem_params.derive_from_genome_hash(agent->genome_hash);
 
             float theta = chem_params.get_theta(primary_genome, entry->gradients, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
             float sigma = chem_params.get_sigma(primary_genome, entry->gradients, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
@@ -1258,7 +1257,7 @@ __global__ void behavioral_update_kernel(
             agent->velocity[1] += chemotaxis_dt * (agent->sensitivity * mixed_grad_y - theta * agent->velocity[1] + noise_y);
 
             float vel_magnitude = sqrtf(agent->velocity[0] * agent->velocity[0] + agent->velocity[1] * agent->velocity[1]);
-            int max_vel_slot = derive_param_slot(agent->genome_hash, "max_agent_velocity");
+            int max_vel_slot = GenomeParamTable::max_agent_velocity;
             float max_agent_velocity = genome_to_param(primary_genome, entry->gradients, max_vel_slot, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, MAX_AGENT_VELOCITY_BASE_MIN, MAX_AGENT_VELOCITY_BASE_MAX);
             if (vel_magnitude > max_agent_velocity) {
                 agent->velocity[0] *= (max_agent_velocity / vel_magnitude);
@@ -1389,7 +1388,7 @@ __global__ void init_behavioral_dimensions_kernel(
             entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
+        dims.derive_from_genome(primary_genome, entry->gradients);
 
         organism->archive->hw_dim = dims.hw_dim;
         organism->archive->task_dim = dims.task_dim;
@@ -1430,7 +1429,7 @@ __global__ void init_organism_kernel(
         float* organism_seed_genome = &workspace_genomes[0];
         uint64_t organism_genome_hash = gpu_sha256(organism_seed_genome, GENOME_SIZE);
 
-        int initial_pool_size_slot = derive_param_slot(organism_genome_hash, "initial_pool_size");
+        int initial_pool_size_slot = GenomeParamTable::initial_pool_size;
         float initial_pool_size_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism_seed_genome, initial_pool_size_slot)));
         int initial_pool_size = 1 + (int)(initial_pool_size_norm * (pool_capacity - 1));
 
@@ -1471,8 +1470,8 @@ __global__ void init_organism_kernel(
 
         int pool_blocks = (pool_capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
         printf("V:init_org_pre_pool blocks=%d alive_flags=%p fitness_values=%p\n", pool_blocks, (void*)organism->pool->alive_flags, (void*)organism->pool->fitness_values);
-        __threadfence();  
-        init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(organism->pool, pool_capacity, delta_indices_buffer, delta_values_buffer, gradients_buffer);
+        __threadfence();
+        init_pool_kernel<<<pool_blocks, BLOCK_SIZE>>>(organism->pool, pool_capacity, delta_indices_buffer, delta_values_buffer, gradients_buffer, organism->generation);
         err = cudaGetLastError();
         printf("V:init_org_post_pool err=%d\n", (int)err);
         DEVICE_FATAL_IF(err != cudaSuccess, "init_pool_kernel launch failed");
@@ -1509,14 +1508,16 @@ __global__ void init_organism_phase2_kernel(
         cudaError_t err;
         printf("V:p2_enter seed=%u\n", seed);
 
-        organism->diresa_hw_weights = buffers->diresa_hw_weights;
-        organism->diresa_task_weights = buffers->diresa_task_weights;
-        organism->diresa_gen_weights = buffers->diresa_gen_weights;
+        // Shared genome weights (GENOME_SIZE is fixed for all entries)
         organism->diresa_genome_weights = buffers->diresa_genome_weights;
-        organism->diresa_hw_weight_pool = buffers->diresa_hw_weight_pool;
-        organism->diresa_task_weight_pool = buffers->diresa_task_weight_pool;
-        organism->diresa_gen_weight_pool = buffers->diresa_gen_weight_pool;
         organism->diresa_genome_weight_pool = buffers->diresa_genome_weight_pool;
+        // Per-entry diresa weights (input_dim varies per entry)
+        organism->per_entry_diresa_task_weights = buffers->per_entry_diresa_task_weights;
+        organism->per_entry_diresa_hw_weights = buffers->per_entry_diresa_hw_weights;
+        organism->per_entry_diresa_gen_weights = buffers->per_entry_diresa_gen_weights;
+        organism->per_entry_diresa_task_weight_pool = buffers->per_entry_diresa_task_weight_pool;
+        organism->per_entry_diresa_hw_weight_pool = buffers->per_entry_diresa_hw_weight_pool;
+        organism->per_entry_diresa_gen_weight_pool = buffers->per_entry_diresa_gen_weight_pool;
 
         float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
         float* primary_parent_temp = &workspace_genomes[GENOME_SIZE * 3];
@@ -1527,7 +1528,7 @@ __global__ void init_organism_phase2_kernel(
             entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
 
         BehavioralDimensions dims;
-        dims.derive_from_genome(entry->genome_hash, primary_genome, entry->gradients);
+        dims.derive_from_genome(primary_genome, entry->gradients);
 
         organism->archive->hw_dim = dims.hw_dim;
         organism->archive->task_dim = dims.task_dim;
@@ -1610,7 +1611,7 @@ __global__ void init_organism_phase2_kernel(
         );
         err = cudaGetLastError();
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 voronoi_cells failed");
-        int default_decay_rate_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "memory_default_decay_rate");
+        int default_decay_rate_slot = GenomeParamTable::memory_default_decay_rate;
         float default_decay_rate_norm = genome_slot_to_unit(primary_genome, default_decay_rate_slot);
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
 
@@ -1768,55 +1769,76 @@ __global__ void init_organism_phase2_kernel(
         organism->telemetry->memory_allocation.device_heap_limit = DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
-        size_t diresa_struct_size = sizeof(DIRESAWeights);
-        int num_replicas = first_entry->num_tempering_replicas;
-        size_t diresa_size = diresa_struct_size * num_replicas;
-        size_t diresa_mb = diresa_size / BYTES_PER_MB;
-
-        size_t hw_stride = HARDWARE_FEATURES_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                           DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                           DIRESA_HIDDEN2_MAX * dims.hw_dim + dims.hw_dim +
-                           dims.hw_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                           DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                           DIRESA_HIDDEN1_MAX * HARDWARE_FEATURES_DIM + HARDWARE_FEATURES_DIM;
-
-        int task_input_dim = first_entry->num_heads * first_entry->channels;
-        size_t task_stride = task_input_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                             DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                             DIRESA_HIDDEN2_MAX * dims.task_dim + dims.task_dim +
-                             dims.task_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                             DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                             DIRESA_HIDDEN1_MAX * task_input_dim + task_input_dim;
-
-        size_t gen_stride = 1 * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                            DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                            DIRESA_HIDDEN2_MAX * dims.gen_dim + dims.gen_dim +
-                            dims.gen_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                            DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                            DIRESA_HIDDEN1_MAX * 1 + 1;
-
+        // Shared genome weights (GENOME_SIZE is fixed for all entries)
         size_t genome_stride = GENOME_SIZE * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                                DIRESA_HIDDEN2_MAX * GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX +
                                GENOME_LATENT_DIM_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
                                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
                                DIRESA_HIDDEN1_MAX * GENOME_SIZE + GENOME_SIZE;
-
-        init_diresa_kernel<<<num_replicas, 1024>>>(
-            organism->diresa_hw_weights, organism->diresa_hw_weight_pool, hw_stride,
-            HARDWARE_FEATURES_DIM, dims.hw_dim, first_entry, seed + 999999, primary_genome);
-        init_diresa_kernel<<<num_replicas, 1024>>>(
-            organism->diresa_task_weights, organism->diresa_task_weight_pool, task_stride,
-            task_input_dim, dims.task_dim, first_entry, seed + 888888, primary_genome);
-        init_diresa_kernel<<<num_replicas, 1024>>>(
-            organism->diresa_gen_weights, organism->diresa_gen_weight_pool, gen_stride,
-            1, dims.gen_dim, first_entry, seed + 777777, primary_genome);
+        int num_replicas = first_entry->num_tempering_replicas;
         init_diresa_kernel<<<num_replicas, 1024>>>(
             organism->diresa_genome_weights, organism->diresa_genome_weight_pool, genome_stride,
             GENOME_SIZE, GENOME_LATENT_DIM_MAX, first_entry, seed + 666666, primary_genome);
-
         err = cudaGetLastError();
-        DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa failed");
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 diresa_genome failed");
+
+        // Per-entry diresa weights - each entry gets its own with its real input_dim
+        for (int entry_idx = 0; entry_idx < pool_capacity; entry_idx++) {
+            PoolEntry* e = &organism->pool->entries[entry_idx];
+            if (!organism->pool->alive_flags[entry_idx]) continue;
+
+            // Entry's real input dimension for task weights
+            int entry_task_input_dim = e->num_heads * e->channels;
+            e->diresa_task_input_dim = entry_task_input_dim;
+
+            // Compute entry's task stride using its real dimensions
+            size_t entry_task_stride =
+                entry_task_input_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * dims.task_dim + dims.task_dim +
+                dims.task_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * entry_task_input_dim + entry_task_input_dim;
+
+            size_t entry_hw_stride =
+                HARDWARE_FEATURES_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * dims.hw_dim + dims.hw_dim +
+                dims.hw_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * HARDWARE_FEATURES_DIM + HARDWARE_FEATURES_DIM;
+
+            size_t entry_gen_stride =
+                1 * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * dims.gen_dim + dims.gen_dim +
+                dims.gen_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                DIRESA_HIDDEN1_MAX * 1 + 1;
+
+            // Wire entry's diresa weights to per-entry arrays
+            e->diresa_task_weights = &organism->per_entry_diresa_task_weights[entry_idx];
+            e->diresa_hw_weights = &organism->per_entry_diresa_hw_weights[entry_idx];
+            e->diresa_gen_weights = &organism->per_entry_diresa_gen_weights[entry_idx];
+
+            // Initialize entry's diresa weights with entry's real dimensions
+            float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + entry_idx * DIRESA_TASK_STRIDE_PER_ENTRY;
+            float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + entry_idx * DIRESA_HW_STRIDE;
+            float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + entry_idx * DIRESA_GEN_STRIDE;
+
+            init_diresa_kernel<<<1, 1024>>>(
+                e->diresa_task_weights, entry_task_pool, entry_task_stride,
+                entry_task_input_dim, dims.task_dim, e, seed + 888888 + entry_idx, primary_genome);
+            init_diresa_kernel<<<1, 1024>>>(
+                e->diresa_hw_weights, entry_hw_pool, entry_hw_stride,
+                HARDWARE_FEATURES_DIM, dims.hw_dim, e, seed + 999999 + entry_idx, primary_genome);
+            init_diresa_kernel<<<1, 1024>>>(
+                e->diresa_gen_weights, entry_gen_pool, entry_gen_stride,
+                1, dims.gen_dim, e, seed + 777777 + entry_idx, primary_genome);
+        }
+        err = cudaDeviceSynchronize();
+        DEVICE_FATAL_IF(err != cudaSuccess, "init2 per_entry_diresa sync failed");
 
         printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, num_classes);
         int seed_blocks = (POOL_CAPACITY_MIN + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1955,12 +1977,12 @@ __global__ void init_organism_phase2_kernel(
         DEVICE_FATAL_IF(err != cudaSuccess, "init2 dataset failed");
 
         BehavioralInitSlots behavioral_slots;
-        behavioral_slots.agent_embedding_scale = derive_param_slot(organism->pool->entries[0].genome_hash, "chemotaxis_agent_embedding_scale");
-        behavioral_slots.init_exploration = derive_param_slot(organism->pool->entries[0].genome_hash, "chemotaxis_init_exploration");
-        behavioral_slots.init_sensitivity = derive_param_slot(organism->pool->entries[0].genome_hash, "chemotaxis_init_sensitivity");
-        behavioral_slots.ctx_metabolic = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_metabolic");
-        behavioral_slots.ctx_stress = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_stress");
-        behavioral_slots.ctx_morphogen = derive_param_slot(organism->pool->entries[0].genome_hash, "init_context_morphogen");
+        behavioral_slots.agent_embedding_scale = GenomeParamTable::chemotaxis_agent_embedding_scale;
+        behavioral_slots.init_exploration = GenomeParamTable::chemotaxis_init_exploration;
+        behavioral_slots.init_sensitivity = GenomeParamTable::chemotaxis_init_sensitivity;
+        behavioral_slots.ctx_metabolic = GenomeParamTable::init_context_metabolic;
+        behavioral_slots.ctx_stress = GenomeParamTable::init_context_stress;
+        behavioral_slots.ctx_morphogen = GenomeParamTable::init_context_morphogen;
 
         init_behavioral_state_kernel<<<(POOL_CAPACITY_MAX + (BLOCK_SIZE - 1)) / BLOCK_SIZE, BLOCK_SIZE>>>(organism->behavioral_agents,
             POOL_CAPACITY_MAX,
@@ -2022,14 +2044,14 @@ __global__ void init_organism_phase2_kernel(
         err = cudaDeviceSynchronize();
         printf("V:p2_sync5_post err=%d\n", (int)err);
 
-        int voronoi_init_dt_slot = derive_param_slot(organism->pool->entries[0].genome_hash, "voronoi_init_dt");
+        int voronoi_init_dt_slot = GenomeParamTable::voronoi_init_dt;
         float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
         float voronoi_init_dt = VORONOI_INIT_DT_MIN + voronoi_init_dt_norm * (VORONOI_INIT_DT_MAX - VORONOI_INIT_DT_MIN);
 
         uint64_t init_genome_hash = organism->pool->entries[0].genome_hash;
-        int ctx_metabolic_slot = derive_param_slot(init_genome_hash, "init_ctx_metabolic");
-        int ctx_stress_slot = derive_param_slot(init_genome_hash, "init_ctx_stress");
-        int ctx_morphogen_slot = derive_param_slot(init_genome_hash, "init_ctx_morphogen");
+        int ctx_metabolic_slot = GenomeParamTable::init_context_metabolic;
+        int ctx_stress_slot = GenomeParamTable::init_context_stress;
+        int ctx_morphogen_slot = GenomeParamTable::init_context_morphogen;
 
         float ctx_metabolic = genome_slot_to_unit(primary_genome, ctx_metabolic_slot);
         float ctx_stress = genome_slot_to_unit(primary_genome, ctx_stress_slot);
@@ -2130,12 +2152,12 @@ __global__ void check_convergence_kernel(
         uint64_t genome_hash = organism->pool->entries[0].genome_hash;
         float* genome = convergence_genome;
 
-        int fitness_conv_slot = derive_param_slot(genome_hash, "convergence_fitness_threshold");
-        int coherence_conv_slot = derive_param_slot(genome_hash, "convergence_coherence_threshold");
-        int fitness_min_slot = derive_param_slot(genome_hash, "convergence_fitness_min");
-        int fitness_max_slot = derive_param_slot(genome_hash, "convergence_fitness_max");
-        int coherence_min_slot = derive_param_slot(genome_hash, "convergence_coherence_min");
-        int coherence_max_slot = derive_param_slot(genome_hash, "convergence_coherence_max");
+        int fitness_conv_slot = GenomeParamTable::convergence_fitness_threshold;
+        int coherence_conv_slot = GenomeParamTable::convergence_coherence_threshold;
+        int fitness_min_slot = GenomeParamTable::convergence_fitness_min;
+        int fitness_max_slot = GenomeParamTable::convergence_fitness_max;
+        int coherence_min_slot = GenomeParamTable::convergence_coherence_min;
+        int coherence_max_slot = GenomeParamTable::convergence_coherence_max;
 
         float fitness_min = genome_slot_to_unit(genome, fitness_min_slot);
         float fitness_max = genome_slot_to_unit(genome, fitness_max_slot);
@@ -2143,7 +2165,7 @@ __global__ void check_convergence_kernel(
         float coherence_max = genome_slot_to_unit(genome, coherence_max_slot);
 
         InitContext conv_ctx;
-        conv_ctx.derive_from_genome(genome_hash, genome, organism->pool->entries[0].gradients);
+        conv_ctx.derive_from_genome(genome, organism->pool->entries[0].gradients);
 
         float fitness_threshold = genome_to_param(
             genome,
@@ -2201,7 +2223,7 @@ __global__ void persistent_evolution_kernel(
 
     uint64_t organism_genome_hash = gpu_sha256(organism_workspace_genomes, GENOME_SIZE);
 
-    int pool_capacity_slot = derive_param_slot(organism_genome_hash, "pool_capacity");
+    int pool_capacity_slot = GenomeParamTable::pool_capacity;
     float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism_workspace_genomes, pool_capacity_slot)));
     int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
     init_organism_kernel<<<1, 1>>>(organism, dataset_array, test_dataset_array, pool_capacity, organism_workspace_genomes, buffers);
@@ -2236,14 +2258,6 @@ __global__ void persistent_evolution_kernel(
         ArchitectureParams arch_p1 = get_arch_from_pool(organism->pool, 0);
 
         printf("V:TRAIN_start gen=%d\n", organism->generation);
-        load_batch_kernel<<<WAVE_SIZE, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size);
-        cudaError_t err_load = cudaGetLastError();
-        if (err_load != cudaSuccess) {
-            printf("!E:load_batch_launch gen=%d err=%d\n", organism->generation, (int)err_load);
-            return;
-        }
-        cudaDeviceSynchronize();
-        printf("V:TRAIN_load_done\n");
 
         reset_trace_buffer_kernel<<<1, 1>>>(organism->trace_buffer);
         cudaDeviceSynchronize();
@@ -2254,6 +2268,16 @@ __global__ void persistent_evolution_kernel(
         for (int wave = 0; wave < num_waves; wave++) {
             int wave_start = wave * WAVE_SIZE;
             int wave_blocks = min(WAVE_SIZE, alive_count - wave_start);
+
+            // Load batch for this wave
+            load_batch_kernel<<<wave_blocks, BLOCK_SIZE>>>(organism, organism->training_mode, organism->generation, arch_p1.grid_size, wave_start);
+            cudaError_t err_load = cudaGetLastError();
+            if (err_load != cudaSuccess) {
+                printf("!E:load_batch_launch gen=%d wave=%d err=%d\n", organism->generation, wave, (int)err_load);
+                return;
+            }
+            cudaDeviceSynchronize();
+
             hybrid_organism_lifecycle_kernel<<<wave_blocks, BLOCK_SIZE, BLOCK_SIZE * sizeof(float)>>>(
                 organism, organism->training_mode, organism->param_map, organism->generation,
                 organism_workspace_genomes, audit, wave_start);
@@ -2306,8 +2330,8 @@ __global__ void persistent_evolution_kernel(
             organism_workspace_genomes,
             organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash,
-            organism->pool->entries[0].fitness,
-            organism->pool->entries[0].hunger,
+            organism->pool->entries[0].fitness.value,
+            organism->pool->entries[0].hunger.value,
             organism->chemical_field->concentration[0],
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,
@@ -2380,8 +2404,8 @@ __global__ void persistent_evolution_kernel(
                 organism_workspace_genomes,
                 organism->pool->entries[0].gradients,
                 organism->pool->entries[0].genome_hash,
-                organism->pool->entries[0].fitness,
-                organism->pool->entries[0].hunger,
+                organism->pool->entries[0].fitness.value,
+                organism->pool->entries[0].hunger.value,
                 organism->chemical_field->cached_mean,
                 organism->telemetry->genome_complexity.hash_entropy,
                 organism->telemetry->archive_topology.novelty_gradient,
@@ -2400,7 +2424,7 @@ __global__ void persistent_evolution_kernel(
             organism->chemical_field->sources, arch_p1.grid_size, CHEMICAL_DIFFUSION_DT_MAX,
             organism_workspace_genomes, organism->pool->entries[0].gradients,
             organism->pool->entries[0].genome_hash,
-            organism->pool->entries[0].fitness, organism->pool->entries[0].hunger,
+            organism->pool->entries[0].fitness.value, organism->pool->entries[0].hunger.value,
             organism->chemical_field->cached_mean,
             organism->telemetry->genome_complexity.hash_entropy,
             organism->telemetry->archive_topology.novelty_gradient,

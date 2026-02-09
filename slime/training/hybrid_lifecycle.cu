@@ -24,6 +24,132 @@ struct TemporalTube;
 
 __device__ int g_block_counter = 0;
 
+// Per-entry buffer offsets computed dynamically based on actual architectures
+struct WaveBufferOffsets {
+    int ca_states_offset;       // batch_size * cells * channels - for batch_ca_states_pool, batch_prev_concentration, batch_reintegration_buffer
+    int ca_output_offset;       // batch_size * num_heads * cells * channels - for batched_ca_output, ca_output_grad_buffer
+    int activations_offset;     // batch_size * num_heads * cells * head_dim - for perception/interaction/pregelu saved, dL_dperception/dL_dinteraction
+    int affinity_offset;        // batch_size * cells - for batch_affinity_reduced (grid_size is constant)
+    int flow_offset;            // batch_size * cells * 2 - for batch_flow_field (grid_size is constant)
+    size_t backward_ws_offset;  // byte offset into unified backward workspace buffer
+};
+
+// Layout of backward workspace components within a single entry's region (byte offsets from entry base)
+struct BackwardWorkspaceLayout {
+    size_t fp16_a_offset;       // half elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
+    size_t fp16_b_offset;       // half elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
+    size_t dW_offset;           // float elements: num_heads * hidden_dim * hidden_dim
+    size_t dI_offset;           // float elements: num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim
+    size_t W_T_offset;          // half elements: hidden_dim * hidden_dim
+    size_t im2col_offset;       // float elements: channels * cells * 9
+    size_t dpregelu_offset;     // float elements: BACKWARD_CHUNK_SAMPLES * num_heads * cells * head_dim
+    size_t total_bytes;         // total size in bytes for this entry
+};
+
+// Compute backward workspace layout for a specific entry
+__device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(PoolEntry* entry) {
+    BackwardWorkspaceLayout layout;
+    int cells = entry->grid_size * entry->grid_size;
+    int num_heads = entry->num_heads;
+    int hidden_dim = entry->hidden_dim;
+    int channels = entry->channels;
+    int head_dim = entry->head_dim;
+
+    size_t fp16_a_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim;
+    size_t fp16_b_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim;
+    size_t dW_elements = (size_t)num_heads * hidden_dim * hidden_dim;
+    size_t dI_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * hidden_dim;
+    size_t W_T_elements = (size_t)hidden_dim * hidden_dim;
+    size_t im2col_elements = (size_t)channels * cells * 9;
+    size_t dpregelu_elements = (size_t)BACKWARD_CHUNK_SAMPLES * num_heads * cells * head_dim;
+
+    size_t offset = 0;
+    layout.fp16_a_offset = offset;
+    offset += fp16_a_elements * sizeof(half);
+
+    layout.fp16_b_offset = offset;
+    offset += fp16_b_elements * sizeof(half);
+
+    layout.dW_offset = offset;
+    offset += dW_elements * sizeof(float);
+
+    layout.dI_offset = offset;
+    offset += dI_elements * sizeof(float);
+
+    layout.W_T_offset = offset;
+    offset += W_T_elements * sizeof(half);
+
+    layout.im2col_offset = offset;
+    offset += im2col_elements * sizeof(float);
+
+    layout.dpregelu_offset = offset;
+    offset += dpregelu_elements * sizeof(float);
+
+    layout.total_bytes = offset;
+    return layout;
+}
+
+// Compute buffer offset for a single entry based on its architecture
+__device__ __forceinline__ int compute_entry_ca_states_size(PoolEntry* entry, int batch_size) {
+    int cells = entry->grid_size * entry->grid_size;
+    return batch_size * cells * entry->channels;
+}
+
+__device__ __forceinline__ int compute_entry_ca_output_size(PoolEntry* entry, int batch_size) {
+    int cells = entry->grid_size * entry->grid_size;
+    return batch_size * entry->num_heads * cells * entry->channels;
+}
+
+__device__ __forceinline__ int compute_entry_activations_size(PoolEntry* entry, int batch_size) {
+    int cells = entry->grid_size * entry->grid_size;
+    return batch_size * entry->num_heads * cells * entry->head_dim;
+}
+
+__device__ __forceinline__ int compute_entry_affinity_size(PoolEntry* entry, int batch_size) {
+    int cells = entry->grid_size * entry->grid_size;
+    return batch_size * cells;
+}
+
+__device__ __forceinline__ int compute_entry_flow_size(PoolEntry* entry, int batch_size) {
+    int cells = entry->grid_size * entry->grid_size;
+    return batch_size * cells * 2;
+}
+
+// Compute cumulative offsets for this wave_position by summing sizes of prior entries
+__device__ WaveBufferOffsets compute_wave_offsets(
+    ComponentPool* pool,
+    int wave_start,
+    int wave_position,
+    int batch_size
+) {
+    WaveBufferOffsets offsets;
+    offsets.ca_states_offset = 0;
+    offsets.ca_output_offset = 0;
+    offsets.activations_offset = 0;
+    offsets.affinity_offset = 0;
+    offsets.flow_offset = 0;
+    offsets.backward_ws_offset = 0;
+
+    // Sum sizes of all entries before this wave_position
+    for (int i = 0; i < wave_position; i++) {
+        int compact_idx = wave_start + i;
+        if (compact_idx >= pool->alive_indices_count) break;
+        int entry_idx = pool->alive_indices[compact_idx];
+        PoolEntry* entry = &pool->entries[entry_idx];
+
+        offsets.ca_states_offset += compute_entry_ca_states_size(entry, batch_size);
+        offsets.ca_output_offset += compute_entry_ca_output_size(entry, batch_size);
+        offsets.activations_offset += compute_entry_activations_size(entry, batch_size);
+        offsets.affinity_offset += compute_entry_affinity_size(entry, batch_size);
+        offsets.flow_offset += compute_entry_flow_size(entry, batch_size);
+
+        BackwardWorkspaceLayout ws_layout = compute_backward_ws_layout(entry);
+        offsets.backward_ws_offset += ws_layout.total_bytes;
+    }
+
+    return offsets;
+}
+
 __global__ void zero_scalar_kernel(float* ptr) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         *ptr = 0.0f;
@@ -41,10 +167,12 @@ extern "C" __global__ void load_batch_kernel(
     Organism* organism,
     HybridTrainingMode* training_mode,
     int generation,
-    int grid_size
+    int grid_size,
+    int wave_start
 ) {
     int tid = threadIdx.x;
     int wave_position = blockIdx.x;
+    int compact_idx = wave_start + blockIdx.x;
 
     __syncthreads();
 
@@ -52,6 +180,18 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(training_mode == nullptr, "load_batch_kernel: training_mode is null");
     DEVICE_FATAL_IF(training_mode->batch_images == nullptr, "load_batch_kernel: batch_images is null");
     DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "load_batch_kernel: batch_labels is null");
+
+    ComponentPool* pool = organism->pool;
+    if (compact_idx >= pool->alive_indices_count) return;
+    int entry_idx = pool->alive_indices[compact_idx];
+    PoolEntry* entry = &pool->entries[entry_idx];
+
+    // Compute wave offsets based on actual entry architectures
+    __shared__ WaveBufferOffsets s_wave_offsets;
+    if (tid == 0) {
+        s_wave_offsets = compute_wave_offsets(pool, wave_start, wave_position, training_mode->batch_size);
+    }
+    __syncthreads();
 
     Dataset* dataset = organism->current_dataset;
     DEVICE_FATAL_IF(dataset == nullptr, "load_batch_kernel: dataset is null");
@@ -163,40 +303,37 @@ extern "C" __global__ void load_batch_kernel(
     DEVICE_FATAL_IF(organism->buffers == nullptr, "load_batch: buffers null");
     DEVICE_FATAL_IF(organism->buffers->batch_prev_concentration == nullptr, "load_batch: batch_prev_concentration null");
 
-    constexpr int wave_pool_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
-    float* ca_out = organism->batch_ca_states_pool + wave_position * wave_pool_stride;
-    int channels_out = CHANNELS_MAX;
+    // Use dynamic offsets and actual entry channels
+    float* ca_out = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+    int channels_out = entry->channels;
     float* batch_images = training_mode->batch_images;
-    float* prev_concentration = organism->buffers->batch_prev_concentration + wave_position * wave_pool_stride;
+    float* prev_concentration = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
 
     int total_positions = batch_size * batch_stride;
     DEVICE_FATAL_IF(total_positions <= 0 || total_positions > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch: total_positions OOB");
     if (tid == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
+
+    // Image channels are at fixed positions 11-13 (RGB), rest are from prev_concentration
+    constexpr int IMG_CHANNEL_START = 11;
+    constexpr int IMG_CHANNEL_COUNT = 3;
 
     for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
         for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
             int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
             int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
 
-            ca_out[base_idx + 0] = prev_concentration[prev_idx + 0];
-            ca_out[base_idx + 1] = prev_concentration[prev_idx + 1];
-            ca_out[base_idx + 2] = prev_concentration[prev_idx + 2];
-            ca_out[base_idx + 3] = prev_concentration[prev_idx + 3];
-            ca_out[base_idx + 4] = prev_concentration[prev_idx + 4];
-            ca_out[base_idx + 5] = prev_concentration[prev_idx + 5];
-            ca_out[base_idx + 6] = prev_concentration[prev_idx + 6];
-            ca_out[base_idx + 7] = prev_concentration[prev_idx + 7];
-            ca_out[base_idx + 8] = prev_concentration[prev_idx + 8];
-            ca_out[base_idx + 9] = prev_concentration[prev_idx + 9];
-            ca_out[base_idx + 10] = prev_concentration[prev_idx + 10];
+            // Copy all channels from prev_concentration, then overlay image channels
+            for (int c = 0; c < channels_out; c++) {
+                ca_out[base_idx + c] = prev_concentration[prev_idx + c];
+            }
 
-            int img_base = batch_idx * batch_stride * 3;
-            ca_out[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
-            ca_out[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
-            ca_out[base_idx + 13] = batch_images[img_base + 2 * batch_stride + spatial_idx];
-
-            ca_out[base_idx + 14] = prev_concentration[prev_idx + 14];
-            ca_out[base_idx + 15] = prev_concentration[prev_idx + 15];
+            // Overlay RGB image into channels 11-13 (if entry has enough channels)
+            if (channels_out > IMG_CHANNEL_START + IMG_CHANNEL_COUNT - 1) {
+                int img_base = batch_idx * batch_stride * 3;
+                ca_out[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
+                ca_out[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
+                ca_out[base_idx + 13] = batch_images[img_base + 2 * batch_stride + spatial_idx];
+            }
         }
         __syncthreads();
     }
@@ -224,6 +361,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
+
+    // Compute wave buffer offsets based on actual entry architectures
+    __shared__ WaveBufferOffsets s_wave_offsets;
+    if (tid == 0) {
+        s_wave_offsets = compute_wave_offsets(pool, wave_start, wave_position, training_mode->batch_size);
+    }
+    __syncthreads();
 
     __shared__ bool s_entry_alive;
     if (tid == 0) s_entry_alive = pool->alive_flags[entry_idx];
@@ -392,10 +536,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
             }
 
-            constexpr int wave_saved_stride = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
-            float* perception_saved = ca_state->perception_saved + wave_position * wave_saved_stride;
-            float* interaction_saved = ca_state->interaction_saved + wave_position * wave_saved_stride;
-            float* pre_gelu_saved = ca_state->pre_gelu_saved + wave_position * wave_saved_stride;
+            // Use dynamic offsets computed from actual entry architectures
+            float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
+            float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
+            float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
 
             int batch_size = training_mode->batch_size;
             int grid_size = arch.grid_size;
@@ -404,10 +548,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int head_dim = arch.head_dim;
             int cells_per_grid = grid_size * grid_size;
 
-            constexpr int wave_pool_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
-            float* ca_input = organism->batch_ca_states_pool + wave_position * wave_pool_stride;
-            int wave_ca_stride = batch_size * num_heads * cells_per_grid * channels;
-            float* ca_output = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
+            float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+            float* ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
 
             int total_cells = batch_size * num_heads * cells_per_grid;
             if (tid == 0) printf("V:CA_LOOP_ENTER blk=%d total=%d batch=%d heads=%d cells=%d\n", blockIdx.x, total_cells, batch_size, num_heads, cells_per_grid);
@@ -526,18 +668,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float flow_sharpness = entry->flow_sharpness;
             float flow_dt = entry->flow_resource_dt;
 
-            int wave_ca_stride = batch_size * num_heads * total_cells * channels;
-            int wave_affinity_stride = batch_size * total_cells;
-            int wave_flow_stride = batch_size * total_cells * 2;
-            int wave_reint_stride = batch_size * total_cells * channels;
-            constexpr int wave_pool_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
-
-            float* wave_ca_output = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
-            float* wave_affinity = organism->buffers->batch_affinity_reduced + wave_position * wave_affinity_stride;
-            float* wave_flow = organism->buffers->batch_flow_field + wave_position * wave_flow_stride;
-            float* wave_reint = organism->buffers->batch_reintegration_buffer + wave_position * wave_reint_stride;
-            float* wave_ca_pool = organism->batch_ca_states_pool + wave_position * wave_pool_stride;
-            float* wave_prev_conc = organism->buffers->batch_prev_concentration + wave_position * wave_pool_stride;
+            // Use dynamic offsets computed from actual entry architectures
+            float* wave_ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
+            float* wave_affinity = organism->buffers->batch_affinity_reduced + s_wave_offsets.affinity_offset;
+            float* wave_flow = organism->buffers->batch_flow_field + s_wave_offsets.flow_offset;
+            float* wave_reint = organism->buffers->batch_reintegration_buffer + s_wave_offsets.ca_states_offset;
+            float* wave_ca_pool = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+            float* wave_prev_conc = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
 
             int total_affinity_work = batch_size * total_cells;
             for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
@@ -643,8 +780,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
 
-            int wave_ca_stride = batch_size * num_heads_local * spatial_size * channels;
-            float* ca_out = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
+            // Use dynamic offset computed from actual entry architectures
+            float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
             float* pooling_weights = training_mode->classifier->pooling_weights;
 
@@ -680,10 +817,10 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 dims.derive_from_genome(primary_genome, entry->gradients);
                 int task_dim = dims.task_dim;
 
-                DEVICE_FATAL_IF(organism->diresa_task_weights->input_dim != num_features,
-                    "hybrid_lifecycle: diresa_task_weights->input_dim mismatch with num_features");
+                DEVICE_FATAL_IF(entry->diresa_task_weights->input_dim != num_features,
+                    "hybrid_lifecycle: diresa_task_weights->input_dim mismatch with num_features (entry %d)", entry_idx);
                 for (int b = 0; b < batch_size; b++) {
-                    diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], organism->diresa_task_weights);
+                    diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], entry->diresa_task_weights);
                 }
             }
             __syncthreads();
@@ -824,7 +961,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 float accuracy = (float)correct / batch_size;
                 avg_confidence /= batch_size;
 
-                int ema_slot = derive_param_slot(entry->genome_hash, "accuracy_ema_smoothing");
+                int ema_slot = GenomeParamTable::accuracy_ema_smoothing;
                 float ema_smoothing = genome_slot_to_unit(primary_genome, ema_slot);
                 ema_smoothing = EMA_SMOOTHING_MIN + ema_smoothing * (EMA_SMOOTHING_MAX - EMA_SMOOTHING_MIN);
 
@@ -854,9 +991,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
 
-            int wave_ca_stride = batch_size * num_heads_local * spatial_size * channels;
-            float* ca_out = organism->buffers->batched_ca_output + wave_position * wave_ca_stride;
-            ca_output_grad = organism->buffers->ca_output_grad_buffer + wave_position * wave_ca_stride;
+            // Use dynamic offset computed from actual entry architectures
+            float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
+            ca_output_grad = organism->buffers->ca_output_grad_buffer + s_wave_offsets.ca_output_offset;
 
             float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
             float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
@@ -950,110 +1087,143 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
             int num_cells = arch.grid_size * arch.grid_size;
             int total_samples = training_mode->batch_size * num_cells;
-            int wave_dL_stride = training_mode->batch_size * arch.num_heads * num_cells * arch.head_dim;
 
-            float* dL_dperception = organism->buffers->dL_dperception_buffer + wave_position * wave_dL_stride;
-            float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + wave_position * wave_dL_stride;
+            // Use dynamic offsets computed from actual entry architectures
+            float* dL_dperception = organism->buffers->dL_dperception_buffer + s_wave_offsets.activations_offset;
+            float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + s_wave_offsets.activations_offset;
             if (tid == 0) printf("V:BWD_ENTER blk=%d\n", blockIdx.x);
 
             {
 
+            // Get backward workspace base for this entry and compute component layout
+            char* backward_ws_base = organism->buffers->backward_workspace + s_wave_offsets.backward_ws_offset;
+            BackwardWorkspaceLayout ws_layout = compute_backward_ws_layout(entry);
 
-            half* ws_fp16_a = organism->buffers->backward_ws_fp16_a + wave_position * (BACKWARD_WS_FP16_A_BLOCK / sizeof(half));
-            half* ws_fp16_b = organism->buffers->backward_ws_fp16_b + wave_position * (BACKWARD_WS_FP16_B_BLOCK / sizeof(half));
-            float* ws_dW = organism->buffers->backward_ws_dW + wave_position * (BACKWARD_WS_DW_BLOCK / sizeof(float));
-            float* ws_dI = organism->buffers->backward_ws_dI + wave_position * (BACKWARD_WS_DI_BLOCK / sizeof(float));
-            half* ws_W_T = organism->buffers->backward_ws_W_T + wave_position * (BACKWARD_WS_W_T_BLOCK / sizeof(half));
-            float* ws_im2col = organism->buffers->backward_ws_im2col + wave_position * (BACKWARD_WS_IM2COL_BLOCK / sizeof(float));
-            float* ws_dpregelu = organism->buffers->backward_ws_dpregelu + wave_position * (BACKWARD_WS_DPREGELU_BLOCK / sizeof(float));
+            // Get pointers to each workspace component within this entry's region
+            half* ws_fp16_a = (half*)(backward_ws_base + ws_layout.fp16_a_offset);
+            half* ws_fp16_b = (half*)(backward_ws_base + ws_layout.fp16_b_offset);
+            float* ws_dW = (float*)(backward_ws_base + ws_layout.dW_offset);
+            float* ws_dI = (float*)(backward_ws_base + ws_layout.dI_offset);
+            half* ws_W_T = (half*)(backward_ws_base + ws_layout.W_T_offset);
+            float* ws_im2col = (float*)(backward_ws_base + ws_layout.im2col_offset);
+            float* ws_dpregelu = (float*)(backward_ws_base + ws_layout.dpregelu_offset);
 
-            constexpr int bwd_wave_saved_stride = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
-            float* perception_saved = ca_state->perception_saved + wave_position * bwd_wave_saved_stride;
-            float* interaction_saved = ca_state->interaction_saved + wave_position * bwd_wave_saved_stride;
-            float* pre_gelu_saved = ca_state->pre_gelu_saved + wave_position * bwd_wave_saved_stride;
+            // Use dynamic offsets for saved activations
+            float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
+            float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
+            float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
 
-            int I_head_stride = num_cells * arch.head_dim;  
+            int I_head_stride = num_cells * arch.head_dim;
             int I_batch_stride = arch.num_heads * I_head_stride;
-            int V_head_stride = num_cells * arch.channels;  
+            int V_head_stride = num_cells * arch.channels;
             int V_batch_stride = arch.num_heads * V_head_stride;
-            int ws_fp16_a_stride = total_samples * arch.head_dim;  
-            int ws_fp16_b_stride = total_samples * arch.channels;  
             int ws_dW_value_stride = arch.head_dim * arch.channels;
             int ws_W_T_value_stride = arch.channels * arch.head_dim;
             int ws_dW_interaction_stride = arch.head_dim * arch.head_dim;
             int ws_W_T_interaction_stride = arch.head_dim * arch.head_dim;
-            int ws_dI_stride = total_samples * arch.head_dim;
 
             int warp_id = tid / WARP_SIZE;
             int lane_id = tid % WARP_SIZE;
             int num_warps = blockDim.x / WARP_SIZE;
 
+            // Chunked workspace strides (sized for BACKWARD_CHUNK_SAMPLES)
+            int chunk_ws_a_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
+            int chunk_ws_b_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
+
+            // Zero ws_dW for accumulation across chunks
             {
-                int total_I = arch.num_heads * total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_I; idx += blockDim.x) {
-                    int head_id = idx / (training_mode->batch_size * I_head_stride);
-                    int remainder = idx % (training_mode->batch_size * I_head_stride);
-                    int batch_id = remainder / I_head_stride;
-                    int local_idx = remainder % I_head_stride;
-                    int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + local_idx;
-                    int dst_idx = head_id * ws_fp16_a_stride + batch_id * I_head_stride + local_idx;
-                    ws_fp16_a[dst_idx] = __float2half(interaction_saved[src_idx]);
+                int total_dW = arch.num_heads * arch.head_dim * arch.channels;
+                for (int idx = tid; idx < total_dW; idx += blockDim.x) {
+                    ws_dW[idx] = 0.0f;
                 }
             }
             __syncthreads();
 
-            {
-                int total_V = arch.num_heads * total_samples * arch.channels;
-                for (int idx = tid; idx < total_V; idx += blockDim.x) {
-                    int head_id = idx / (training_mode->batch_size * V_head_stride);
-                    int remainder = idx % (training_mode->batch_size * V_head_stride);
-                    int batch_id = remainder / V_head_stride;
-                    int local_idx = remainder % V_head_stride;
-                    int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + local_idx;
-                    int dst_idx = head_id * ws_fp16_b_stride + batch_id * V_head_stride + local_idx;
-                    ws_fp16_b[dst_idx] = __float2half(ca_output_grad[src_idx]);
+            // Process samples in chunks of BACKWARD_CHUNK_SAMPLES
+            int num_chunks = (total_samples + BACKWARD_CHUNK_SAMPLES - 1) / BACKWARD_CHUNK_SAMPLES;
+            for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
+                int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
+                int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
+                // Round down to WMMA_TILE_DIM for valid WMMA operations
+                int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
+                if (chunk_samples_aligned == 0) continue;
+
+                // Convert chunk of interaction_saved to ws_fp16_a
+                {
+                    int total_I = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_I; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int sample_in_chunk = remainder / arch.head_dim;
+                        int dim_idx = remainder % arch.head_dim;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+                        int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
+                        int dst_idx = head_id * chunk_ws_a_stride + sample_in_chunk * arch.head_dim + dim_idx;
+                        ws_fp16_a[dst_idx] = __float2half(interaction_saved[src_idx]);
+                    }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            {
-                int tiles_M = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int tiles_N = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tiles = tiles_M * tiles_N * arch.num_heads;
+                // Convert chunk of ca_output_grad to ws_fp16_b
+                {
+                    int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    for (int idx = tid; idx < total_V; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.channels);
+                        int remainder = idx % (chunk_samples_aligned * arch.channels);
+                        int sample_in_chunk = remainder / arch.channels;
+                        int ch_idx = remainder % arch.channels;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+                        int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
+                        int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
+                        ws_fp16_b[dst_idx] = __float2half(ca_output_grad[src_idx]);
+                    }
+                }
+                __syncthreads();
 
-                for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                    int head_id = tile_idx / (tiles_M * tiles_N);
-                    int tile_flat = tile_idx % (tiles_M * tiles_N);
-                    int warpM = tile_flat / tiles_N;
-                    int warpN = tile_flat % tiles_N;
+                // WMMA matmul: dW_value += I^T * dL/dOutput for this chunk
+                {
+                    int tiles_M = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int tiles_N = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int total_tiles = tiles_M * tiles_N * arch.num_heads;
 
-                    int tile_row = warpM * WMMA_TILE_DIM;
-                    int tile_col = warpN * WMMA_TILE_DIM;
+                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
+                        int head_id = tile_idx / (tiles_M * tiles_N);
+                        int tile_flat = tile_idx % (tiles_M * tiles_N);
+                        int warpM = tile_flat / tiles_N;
+                        int warpN = tile_flat % tiles_N;
 
-                    if (tile_row < arch.head_dim && tile_col < arch.channels) {
-                        const half* A_head = ws_fp16_a + head_id * ws_fp16_a_stride;
-                        const half* B_head = ws_fp16_b + head_id * ws_fp16_b_stride;
-                        float* C_head = ws_dW + head_id * ws_dW_value_stride;
+                        int tile_row = warpM * WMMA_TILE_DIM;
+                        int tile_col = warpN * WMMA_TILE_DIM;
 
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                        if (tile_row < arch.head_dim && tile_col < arch.channels) {
+                            const half* A_head = ws_fp16_a + head_id * chunk_ws_a_stride;
+                            const half* B_head = ws_fp16_b + head_id * chunk_ws_b_stride;
+                            float* C_head = ws_dW + head_id * ws_dW_value_stride;
 
-                        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-                        for (int k_tile = 0; k_tile < total_samples; k_tile += WMMA_TILE_DIM) {
-                            if (k_tile + WMMA_TILE_DIM <= total_samples) {
+                            // Load existing accumulated value
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.channels + tile_col, arch.channels, nvcuda::wmma::mem_row_major);
+
+                            for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
                                 nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * arch.head_dim + tile_row, arch.head_dim);
                                 nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.channels + tile_col, arch.channels);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
+                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.channels + tile_col, c_frag, arch.channels, nvcuda::wmma::mem_row_major);
                         }
-                        nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.channels + tile_col, c_frag, arch.channels, nvcuda::wmma::mem_row_major);
                     }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
+            } // end chunk loop
 
+            // Copy accumulated gradients to tape
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.channels;
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
@@ -1066,6 +1236,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
+            // Transpose value weights (small, no chunking needed)
             {
                 int t_tiles_x = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int t_tiles_y = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1085,8 +1256,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                     int bx = tile_x * WMMA_TILE_DIM;
                     int by = tile_y * WMMA_TILE_DIM;
-                    int h = bx + local_x;  
-                    int c = by + local_y;  
+                    int h = bx + local_x;
+                    int c = by + local_y;
 
                     if (c < arch.channels && h < arch.head_dim) {
                         const half* W_head = ca_state->value_weights + head_id * arch.head_dim * arch.channels;
@@ -1097,151 +1268,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            {
-                int tiles_M = (total_samples + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tiles = tiles_M * tiles_N * arch.num_heads;
-
-                for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                    int head_id = tile_idx / (tiles_M * tiles_N);
-                    int tile_flat = tile_idx % (tiles_M * tiles_N);
-                    int warpM = tile_flat / tiles_N;
-                    int warpN = tile_flat % tiles_N;
-
-                    int tile_row = warpM * WMMA_TILE_DIM;
-                    int tile_col = warpN * WMMA_TILE_DIM;
-
-                    if (tile_row < total_samples && tile_col < arch.head_dim) {
-                        const half* A_head = ws_fp16_b + head_id * ws_fp16_b_stride;  
-                        const half* B_head = ws_W_T + head_id * ws_W_T_value_stride;  
-                        float* C_head = ws_dI + head_id * ws_dI_stride;               
-
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-
-                        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                        for (int k_tile = 0; k_tile < arch.channels; k_tile += WMMA_TILE_DIM) {
-                            if (k_tile + WMMA_TILE_DIM <= arch.channels) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.channels + k_tile, arch.channels);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
-                                nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                            }
-                        }
-                        nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
-                    }
-                }
-            }
-            __syncthreads();
-
-            {
-                int total_copy = arch.num_heads * total_samples * arch.head_dim;
-                if (tid == 0) printf("V:copy_start blk=%d blocks_alive=%d total=%d\n", blockIdx.x, g_block_counter, total_copy);
-                for (int idx = tid; idx < total_copy; idx += blockDim.x) {
-                    int head_id = idx / (training_mode->batch_size * I_head_stride);
-                    int remainder = idx % (training_mode->batch_size * I_head_stride);
-                    int batch_id = remainder / I_head_stride;
-                    int local_idx = remainder % I_head_stride;
-                    int src_idx = head_id * ws_dI_stride + batch_id * I_head_stride + local_idx;
-                    int dst_idx = head_id * I_head_stride + batch_id * I_batch_stride + local_idx;
-                    dL_dinteraction[dst_idx] = ws_dI[src_idx];
-                }
-            }
-            __syncthreads();
-            if (tid == 0 && blockIdx.x == 0) printf("V:HYB_copy_done\n");
-
-            int ws_dpregelu_stride = total_samples * arch.head_dim;
-
-            {
-                int total_gelu = arch.num_heads * total_samples * arch.head_dim;
-                int elements_per_head = total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_gelu; idx += blockDim.x) {
-                    int head_id = idx / elements_per_head;
-                    int remainder = idx % elements_per_head;
-                    int batch_id = remainder / I_head_stride;
-                    int within_batch = remainder % I_head_stride;
-                    int src_idx = batch_id * I_batch_stride + head_id * I_head_stride + within_batch;
-                    int dst_idx = head_id * ws_dpregelu_stride + remainder;
-
-                    ws_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu_saved[src_idx], dL_dinteraction[src_idx]);
-                }
-            }
-            __syncthreads();
-            if (tid == 0 && blockIdx.x == 0) printf("V:HYB_wmma2b_done\n");
-
-            {
-                int total_conv = arch.num_heads * total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_conv; idx += blockDim.x) {
-                    int head_id = idx / (training_mode->batch_size * I_head_stride);
-                    int remainder = idx % (training_mode->batch_size * I_head_stride);
-                    int batch_id = remainder / I_head_stride;
-                    int local_idx = remainder % I_head_stride;
-                    int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + local_idx;
-                    int dst_idx = head_id * ws_fp16_a_stride + batch_id * I_head_stride + local_idx;
-                    ws_fp16_a[dst_idx] = __float2half(perception_saved[src_idx]);
-                }
-            }
-            __syncthreads();
-
-            {
-                int total_conv = arch.num_heads * total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_conv; idx += blockDim.x) {
-                    ws_fp16_b[idx] = __float2half(ws_dpregelu[idx]);
-                }
-            }
-            __syncthreads();
-
-            {
-                int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tiles = dW_tiles * dW_tiles * arch.num_heads;
-
-                for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                    int head_id = tile_idx / (dW_tiles * dW_tiles);
-                    int tile_flat = tile_idx % (dW_tiles * dW_tiles);
-                    int warpM = tile_flat / dW_tiles;
-                    int warpN = tile_flat % dW_tiles;
-
-                    int tile_row = warpM * WMMA_TILE_DIM;
-                    int tile_col = warpN * WMMA_TILE_DIM;
-
-                    if (tile_row < arch.head_dim && tile_col < arch.head_dim) {
-                        const half* A_head = ws_fp16_a + head_id * ws_fp16_a_stride;
-                        const half* B_head = ws_fp16_b + head_id * ws_fp16_a_stride;
-                        float* C_head = ws_dW + head_id * ws_dW_interaction_stride;
-
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-
-                        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                        for (int k_tile = 0; k_tile < total_samples; k_tile += WMMA_TILE_DIM) {
-                            if (k_tile + WMMA_TILE_DIM <= total_samples) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * arch.head_dim + tile_row, arch.head_dim);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
-                                nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                            }
-                        }
-                        nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
-                    }
-                }
-            }
-            __syncthreads();
-            if (tid == 0 && blockIdx.x == 0) printf("V:HYB_wmma2c_done\n");
-
-            {
-                int total_grads = arch.num_heads * arch.head_dim * arch.head_dim;
-                for (int idx = tid; idx < total_grads; idx += blockDim.x) {
-                    int head_id = idx / (arch.head_dim * arch.head_dim);
-                    int local_idx = idx % (arch.head_dim * arch.head_dim);
-                    int src_idx = head_id * ws_dW_interaction_stride + local_idx;
-                    int dst_idx = param_map->interaction_start[head_id] + local_idx;
-                    ca_state->tape.grad_buffer[dst_idx] = ws_dW[src_idx];
-                }
-            }
-            __syncthreads();
-
+            // Transpose interaction weights (small, no chunking needed)
             {
                 int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int total_tile_elements = dW_tiles * dW_tiles * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
@@ -1265,167 +1292,400 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                     if (y < arch.head_dim && x < arch.head_dim) {
                         const half* W_head = ca_state->interaction_weights + head_id * arch.head_dim * arch.head_dim;
-                        half* W_T_head = ws_W_T + head_id * ws_W_T_interaction_stride;
+                        half* W_T_head = ws_W_T + arch.num_heads * ws_W_T_value_stride + head_id * ws_W_T_interaction_stride;
                         W_T_head[x * arch.head_dim + y] = W_head[y * arch.head_dim + x];
                     }
                 }
             }
             __syncthreads();
-            if (tid == 0 && blockIdx.x == 0) printf("V:HYB_wmma2d_done\n");
 
+            // Zero gradient accumulators for interaction and perception weights
             {
-                int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int tiles_M_int = (total_samples + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tiles = tiles_M_int * dW_tiles * arch.num_heads;
+                int total_interaction = arch.num_heads * arch.head_dim * arch.head_dim;
+                int total_perception = arch.num_heads * arch.channels * arch.head_dim;
+                int total_zero = total_interaction + total_perception;
+                float* ws_dW_interaction = ws_dW + arch.num_heads * ws_dW_value_stride;
+                for (int idx = tid; idx < total_zero; idx += blockDim.x) {
+                    ws_dW_interaction[idx] = 0.0f;
+                }
+            }
+            __syncthreads();
 
-                for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                    int head_id = tile_idx / (tiles_M_int * dW_tiles);
-                    int tile_flat = tile_idx % (tiles_M_int * dW_tiles);
-                    int warpM = tile_flat / dW_tiles;
-                    int warpN = tile_flat % dW_tiles;
+            // Chunk strides for workspace
+            int chunk_ws_dI_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
+            int chunk_ws_dpregelu_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
+            int chunk_ws_pooled_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
+            float* ws_dW_interaction = ws_dW + arch.num_heads * ws_dW_value_stride;
+            float* ws_dW_perception = ws_dW_interaction + arch.num_heads * ws_dW_interaction_stride;
+            half* ws_W_T_interaction = ws_W_T + arch.num_heads * ws_W_T_value_stride;
 
-                    int tile_row = warpM * WMMA_TILE_DIM;
-                    int tile_col = warpN * WMMA_TILE_DIM;
+            // Define d_ca_input before chunk loop and zero-initialize for atomicAdd accumulation
+            float* d_ca_input = organism->batch_ca_input_grads ?
+                organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset : nullptr;
+            if (d_ca_input != nullptr) {
+                for (int idx = tid; idx < total_samples * arch.channels; idx += blockDim.x) {
+                    d_ca_input[idx] = 0.0f;
+                }
+                __syncthreads();
+            }
 
-                    if (tile_row < total_samples && tile_col < arch.head_dim) {
-                        const half* A_head = ws_fp16_b + head_id * ws_fp16_a_stride;
-                        const half* B_head = ws_W_T + head_id * ws_W_T_interaction_stride;
-                        float* C_head = ws_dI + head_id * ws_dI_stride;
+            // Process backward pass in chunks
+            for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
+                int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
+                int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
+                int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
+                if (chunk_samples_aligned == 0) continue;
 
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                // === STEP 1: dL_dI[chunk] = dL/dOutput[chunk] * W_T ===
+                // Load dL/dOutput chunk to ws_fp16_b
+                {
+                    int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    for (int idx = tid; idx < total_V; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.channels);
+                        int remainder = idx % (chunk_samples_aligned * arch.channels);
+                        int sample_in_chunk = remainder / arch.channels;
+                        int ch_idx = remainder % arch.channels;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+                        int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
+                        int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
+                        ws_fp16_b[dst_idx] = __float2half(ca_output_grad[src_idx]);
+                    }
+                }
+                __syncthreads();
 
-                        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+                // Compute dL_dI[chunk] = dL/dOutput[chunk] * W_T, store to ws_dI
+                {
+                    int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int total_tiles = tiles_M * tiles_N * arch.num_heads;
 
-                        for (int k_tile = 0; k_tile < arch.head_dim; k_tile += WMMA_TILE_DIM) {
-                            if (k_tile + WMMA_TILE_DIM <= arch.head_dim) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.head_dim + k_tile, arch.head_dim);
+                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
+                        int head_id = tile_idx / (tiles_M * tiles_N);
+                        int tile_flat = tile_idx % (tiles_M * tiles_N);
+                        int warpM = tile_flat / tiles_N;
+                        int warpN = tile_flat % tiles_N;
+                        int tile_row = warpM * WMMA_TILE_DIM;
+                        int tile_col = warpN * WMMA_TILE_DIM;
+
+                        if (tile_row < chunk_samples_aligned && tile_col < arch.head_dim) {
+                            const half* A_head = ws_fp16_b + head_id * chunk_ws_b_stride;
+                            const half* B_head = ws_W_T + head_id * ws_W_T_value_stride;
+                            float* C_head = ws_dI + head_id * chunk_ws_dI_stride;
+
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                            nvcuda::wmma::fill_fragment(c_frag, 0.0f);
+
+                            for (int k_tile = 0; k_tile < arch.channels; k_tile += WMMA_TILE_DIM) {
+                                if (k_tile + WMMA_TILE_DIM <= arch.channels) {
+                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.channels + k_tile, arch.channels);
+                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                    nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                                }
+                            }
+                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
+                        }
+                    }
+                }
+                __syncthreads();
+
+                // Copy dL_dI chunk to dL_dinteraction and apply GELU backward -> ws_dpregelu
+                {
+                    int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_elem; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int sample_in_chunk = remainder / arch.head_dim;
+                        int dim_idx = remainder % arch.head_dim;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+
+                        int ws_idx = head_id * chunk_ws_dI_stride + sample_in_chunk * arch.head_dim + dim_idx;
+                        int out_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
+                        int saved_idx = batch_id * I_batch_stride + head_id * I_head_stride + cell_id * arch.head_dim + dim_idx;
+
+                        float dL_dI_val = ws_dI[ws_idx];
+                        dL_dinteraction[out_idx] = dL_dI_val;
+                        ws_dpregelu[head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx] =
+                            activation_gelu_backward(pre_gelu_saved[saved_idx], dL_dI_val);
+                    }
+                }
+                __syncthreads();
+
+                // === STEP 2: dW_interaction += P[chunk]^T * dL_dI_gelu[chunk] ===
+                // Load perception_saved chunk to ws_fp16_a
+                {
+                    int total_P = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_P; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int sample_in_chunk = remainder / arch.head_dim;
+                        int dim_idx = remainder % arch.head_dim;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+                        int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
+                        int dst_idx = head_id * chunk_ws_a_stride + sample_in_chunk * arch.head_dim + dim_idx;
+                        ws_fp16_a[dst_idx] = __float2half(perception_saved[src_idx]);
+                    }
+                }
+                // Convert ws_dpregelu to fp16 in ws_fp16_b
+                {
+                    int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_D; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int src_idx = head_id * chunk_ws_dpregelu_stride + remainder;
+                        int dst_idx = head_id * chunk_ws_a_stride + remainder;
+                        ws_fp16_b[dst_idx] = __float2half(ws_dpregelu[src_idx]);
+                    }
+                }
+                __syncthreads();
+
+                // Accumulate dW_interaction += P^T * dL_dI_gelu
+                {
+                    int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int total_tiles = dW_tiles * dW_tiles * arch.num_heads;
+
+                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
+                        int head_id = tile_idx / (dW_tiles * dW_tiles);
+                        int tile_flat = tile_idx % (dW_tiles * dW_tiles);
+                        int warpM = tile_flat / dW_tiles;
+                        int warpN = tile_flat % dW_tiles;
+                        int tile_row = warpM * WMMA_TILE_DIM;
+                        int tile_col = warpN * WMMA_TILE_DIM;
+
+                        if (tile_row < arch.head_dim && tile_col < arch.head_dim) {
+                            const half* A_head = ws_fp16_a + head_id * chunk_ws_a_stride;
+                            const half* B_head = ws_fp16_b + head_id * chunk_ws_a_stride;
+                            float* C_head = ws_dW_interaction + head_id * ws_dW_interaction_stride;
+
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.head_dim + tile_col, arch.head_dim, nvcuda::wmma::mem_row_major);
+
+                            for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
+                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * arch.head_dim + tile_row, arch.head_dim);
                                 nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
+                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
-                        nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                     }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            {
-                int total_copy = arch.num_heads * total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_copy; idx += blockDim.x) {
-                    int head_id = idx / (training_mode->batch_size * I_head_stride);
-                    int remainder = idx % (training_mode->batch_size * I_head_stride);
-                    int batch_id = remainder / I_head_stride;
-                    int local_idx = remainder % I_head_stride;
-                    int src_idx = head_id * ws_dI_stride + batch_id * I_head_stride + local_idx;
-                    int dst_idx = head_id * I_head_stride + batch_id * I_batch_stride + local_idx;
-                    dL_dperception[dst_idx] = ws_dI[src_idx];
-                }
-            }
-            __syncthreads();
-            if (tid == 0 && blockIdx.x == 0) printf("V:HYB_bwd1_done\n");
+                // === STEP 3: dL_dP[chunk] = dL_dI_gelu[chunk] * W_interaction^T ===
+                {
+                    int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int total_tiles = tiles_M * tiles_N * arch.num_heads;
 
-            int ws_dprerelu_stride = total_samples * arch.head_dim;  
-            {
-                int total_relu = arch.num_heads * total_samples * arch.head_dim;
-                int elements_per_head = total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_relu; idx += blockDim.x) {
-                    int head_id = idx / elements_per_head;
-                    int local_idx = idx % elements_per_head;
-                    int src_idx = head_id * I_head_stride + local_idx;
-                    int dst_idx = head_id * ws_dprerelu_stride + local_idx;
-                    ws_dpregelu[dst_idx] = dL_dperception[src_idx] * ((perception_saved[src_idx] > 0.0f) ? 1.0f : 0.0f);
-                }
-            }
-            __syncthreads();
+                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
+                        int head_id = tile_idx / (tiles_M * tiles_N);
+                        int tile_flat = tile_idx % (tiles_M * tiles_N);
+                        int warpM = tile_flat / tiles_N;
+                        int warpN = tile_flat % tiles_N;
+                        int tile_row = warpM * WMMA_TILE_DIM;
+                        int tile_col = warpN * WMMA_TILE_DIM;
 
-            int ws_pooled_stride = total_samples * arch.channels;  
-            {
-                int num_cells_local = arch.grid_size * arch.grid_size;
-                int total_pool = training_mode->batch_size * num_cells_local;
-                for (int idx = tid; idx < total_pool; idx += blockDim.x) {
-                    int batch_id = idx / num_cells_local;
-                    int cell_idx = idx % num_cells_local;
-                    int cell_y = cell_idx / arch.grid_size;
-                    int cell_x = cell_idx % arch.grid_size;
+                        if (tile_row < chunk_samples_aligned && tile_col < arch.head_dim) {
+                            const half* A_head = ws_fp16_b + head_id * chunk_ws_a_stride;
+                            const half* B_head = ws_W_T_interaction + head_id * ws_W_T_interaction_stride;
+                            float* C_head = ws_dI + head_id * chunk_ws_dI_stride;
 
-                    int out_row = batch_id * num_cells_local + cell_idx;
-                    constexpr int wave_pool_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
-                    const float* input_batch = organism->batch_ca_states_pool + wave_position * wave_pool_stride;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                            nvcuda::wmma::fill_fragment(c_frag, 0.0f);
 
-                    for (int c = 0; c < arch.channels; c++) {
-                        float sum = 0.0f;
-                        for (int dy = -1; dy <= 1; dy++) {
-                            for (int dx = -1; dx <= 1; dx++) {
-                                int ny = max(0, min(arch.grid_size - 1, cell_y + dy));
-                                int nx = max(0, min(arch.grid_size - 1, cell_x + dx));
-                                int input_idx = batch_id * arch.grid_size * arch.grid_size * arch.channels +
-                                               ny * arch.grid_size * arch.channels + nx * arch.channels + c;
-                                sum += input_batch[input_idx];
+                            for (int k_tile = 0; k_tile < arch.head_dim; k_tile += WMMA_TILE_DIM) {
+                                if (k_tile + WMMA_TILE_DIM <= arch.head_dim) {
+                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.head_dim + k_tile, arch.head_dim);
+                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                    nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                                }
                             }
+                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
-                        ws_im2col[out_row * arch.channels + c] = sum;
                     }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            {
-                int total_conv = total_samples * arch.channels;
-                for (int idx = tid; idx < total_conv; idx += blockDim.x) {
-                    ws_fp16_a[idx] = __float2half(ws_im2col[idx]);
+                // Copy dL_dP chunk to dL_dperception and apply ReLU backward -> ws_dpregelu
+                {
+                    int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_elem; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int sample_in_chunk = remainder / arch.head_dim;
+                        int dim_idx = remainder % arch.head_dim;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_id = global_sample % num_cells;
+
+                        int ws_idx = head_id * chunk_ws_dI_stride + sample_in_chunk * arch.head_dim + dim_idx;
+                        int out_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
+
+                        float dL_dP_val = ws_dI[ws_idx];
+                        dL_dperception[out_idx] = dL_dP_val;
+                        float perc_val = perception_saved[out_idx];
+                        ws_dpregelu[head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx] =
+                            dL_dP_val * ((perc_val > 0.0f) ? 1.0f : 0.0f);
+                    }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            {
-                int total_conv = arch.num_heads * total_samples * arch.head_dim;
-                for (int idx = tid; idx < total_conv; idx += blockDim.x) {
-                    ws_fp16_b[idx] = __float2half(ws_dpregelu[idx]);
+                // === STEP 4: im2col for this chunk, then dW_perception += pooled^T * dL_dP_relu ===
+                // Compute im2col for chunk
+                {
+                    for (int idx = tid; idx < chunk_samples_aligned; idx += blockDim.x) {
+                        int global_sample = chunk_start + idx;
+                        int batch_id = global_sample / num_cells;
+                        int cell_idx = global_sample % num_cells;
+                        int cell_y = cell_idx / arch.grid_size;
+                        int cell_x = cell_idx % arch.grid_size;
+
+                        const float* input_batch = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+
+                        for (int c = 0; c < arch.channels; c++) {
+                            float sum = 0.0f;
+                            for (int dy = -1; dy <= 1; dy++) {
+                                for (int dx = -1; dx <= 1; dx++) {
+                                    int ny = max(0, min(arch.grid_size - 1, cell_y + dy));
+                                    int nx = max(0, min(arch.grid_size - 1, cell_x + dx));
+                                    int input_idx = batch_id * arch.grid_size * arch.grid_size * arch.channels +
+                                                   ny * arch.grid_size * arch.channels + nx * arch.channels + c;
+                                    sum += input_batch[input_idx];
+                                }
+                            }
+                            ws_im2col[idx * arch.channels + c] = sum;
+                        }
+                    }
                 }
-            }
-            __syncthreads();
+                __syncthreads();
 
-            {
-                int ws_dW_perception_stride = arch.channels * arch.head_dim;
-                int dW_tiles_c = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int dW_tiles_h = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tiles = dW_tiles_c * dW_tiles_h * arch.num_heads;
+                // Convert im2col to fp16 in ws_fp16_a (shared across heads)
+                {
+                    int total_conv = chunk_samples_aligned * arch.channels;
+                    for (int idx = tid; idx < total_conv; idx += blockDim.x) {
+                        ws_fp16_a[idx] = __float2half(ws_im2col[idx]);
+                    }
+                }
+                // Convert ws_dpregelu (ReLU backward) to fp16 in ws_fp16_b
+                {
+                    int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    for (int idx = tid; idx < total_D; idx += blockDim.x) {
+                        ws_fp16_b[idx] = __float2half(ws_dpregelu[idx]);
+                    }
+                }
+                __syncthreads();
 
-                for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                    int head_id = tile_idx / (dW_tiles_c * dW_tiles_h);
-                    int tile_flat = tile_idx % (dW_tiles_c * dW_tiles_h);
-                    int warpM = tile_flat / dW_tiles_h;
-                    int warpN = tile_flat % dW_tiles_h;
+                // Accumulate dW_perception += pooled^T * dL_dP_relu
+                {
+                    int ws_dW_perception_stride = arch.channels * arch.head_dim;
+                    int dW_tiles_c = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int dW_tiles_h = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                    int total_tiles = dW_tiles_c * dW_tiles_h * arch.num_heads;
 
-                    int tile_row = warpM * WMMA_TILE_DIM;  
-                    int tile_col = warpN * WMMA_TILE_DIM;  
+                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
+                        int head_id = tile_idx / (dW_tiles_c * dW_tiles_h);
+                        int tile_flat = tile_idx % (dW_tiles_c * dW_tiles_h);
+                        int warpM = tile_flat / dW_tiles_h;
+                        int warpN = tile_flat % dW_tiles_h;
+                        int tile_row = warpM * WMMA_TILE_DIM;
+                        int tile_col = warpN * WMMA_TILE_DIM;
 
-                    if (tile_row < arch.channels && tile_col < arch.head_dim) {
-                        const half* A_ptr = ws_fp16_a;  
-                        const half* B_head = ws_fp16_b + head_id * ws_dprerelu_stride;  
-                        float* C_head = ws_dW + head_id * ws_dW_perception_stride;
+                        if (tile_row < arch.channels && tile_col < arch.head_dim) {
+                            const half* A_ptr = ws_fp16_a;
+                            const half* B_head = ws_fp16_b + head_id * chunk_samples_aligned * arch.head_dim;
+                            float* C_head = ws_dW_perception + head_id * ws_dW_perception_stride;
 
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.head_dim + tile_col, arch.head_dim, nvcuda::wmma::mem_row_major);
 
-                        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                        for (int k_tile = 0; k_tile < total_samples; k_tile += WMMA_TILE_DIM) {
-                            if (k_tile + WMMA_TILE_DIM <= total_samples) {
+                            for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
                                 nvcuda::wmma::load_matrix_sync(a_frag, A_ptr + k_tile * arch.channels + tile_row, arch.channels);
                                 nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
+                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
-                        nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                     }
+                }
+                __syncthreads();
+
+                // === STEP 5: Compute d_pooled_input for this chunk and scatter to d_ca_input ===
+                // d_ca_input was defined and zero-initialized before the chunk loop
+                if (d_ca_input != nullptr) {
+                    // Compute d_pooled_input = sum over heads of dL_dP_relu * W_perception
+                    for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
+                        int sample_in_chunk = idx / arch.channels;
+                        int channel_idx = idx % arch.channels;
+
+                        float d_input_accum = 0.0f;
+                        for (int h = 0; h < arch.num_heads; h++) {
+                            for (int hd = 0; hd < arch.head_dim; hd++) {
+                                int W_idx = param_map->perception_start[h] + channel_idx * arch.head_dim + hd;
+                                float W_val = __half2float(ca_state->perception_weights[W_idx]);
+                                float dprerelu_val = ws_dpregelu[h * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd];
+                                d_input_accum += W_val * dprerelu_val;
+                            }
+                        }
+                        ws_im2col[idx] = d_input_accum;
+                    }
+                    __syncthreads();
+
+                    // Scatter d_pooled_input to d_ca_input
+                    for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
+                        int sample_in_chunk = idx / arch.channels;
+                        int channel_idx = idx % arch.channels;
+                        int global_sample = chunk_start + sample_in_chunk;
+                        int batch_id = global_sample / num_cells;
+                        int cell_idx = global_sample % num_cells;
+                        int cell_y = cell_idx / arch.grid_size;
+                        int cell_x = cell_idx % arch.grid_size;
+                        float d_pooled_val = ws_im2col[idx];
+
+                        for (int dy = -1; dy <= 1; dy++) {
+                            for (int dx = -1; dx <= 1; dx++) {
+                                int ny = cell_y + dy;
+                                int nx = cell_x + dx;
+                                if (ny >= 0 && ny < arch.grid_size && nx >= 0 && nx < arch.grid_size) {
+                                    int out_cell_idx = ny * arch.grid_size + nx;
+                                    int out_idx = batch_id * num_cells * arch.channels + out_cell_idx * arch.channels + channel_idx;
+                                    atomicAdd(&d_ca_input[out_idx], d_pooled_val);
+                                }
+                            }
+                        }
+                    }
+                    __syncthreads();
+                }
+            } // end chunk loop
+
+            if (tid == 0) printf("V:BWD_CHUNKS_DONE blk=%d\n", blockIdx.x);
+
+            // Copy accumulated interaction gradients to tape
+            {
+                int total_grads = arch.num_heads * arch.head_dim * arch.head_dim;
+                for (int idx = tid; idx < total_grads; idx += blockDim.x) {
+                    int head_id = idx / (arch.head_dim * arch.head_dim);
+                    int local_idx = idx % (arch.head_dim * arch.head_dim);
+                    int src_idx = head_id * ws_dW_interaction_stride + local_idx;
+                    int dst_idx = param_map->interaction_start[head_id] + local_idx;
+                    ca_state->tape.grad_buffer[dst_idx] = ws_dW_interaction[src_idx];
                 }
             }
             __syncthreads();
 
+            // Copy accumulated perception gradients to tape
             {
                 int ws_dW_perception_stride = arch.channels * arch.head_dim;
                 int weights_per_head = arch.channels * arch.head_dim;
@@ -1435,80 +1695,16 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int local_idx = idx % weights_per_head;
                     int src_idx = head_id * ws_dW_perception_stride + local_idx;
                     int dst_idx = param_map->perception_start[head_id] + local_idx;
-                    ca_state->tape.grad_buffer[dst_idx] = ws_dW[src_idx];
+                    ca_state->tape.grad_buffer[dst_idx] = ws_dW_perception[src_idx];
                 }
             }
             __syncthreads();
 
-            float* d_pooled_input = ws_im2col;  
-            {
-                int num_cells_local = arch.grid_size * arch.grid_size;
-                int total_inputs = training_mode->batch_size * num_cells_local * arch.channels;
-                for (int idx = tid; idx < total_inputs; idx += blockDim.x) {
-                    d_pooled_input[idx] = 0.0f;
-                }
-            }
-            __syncthreads();
-
-            {
-                int num_cells_local = arch.grid_size * arch.grid_size;
-                int total_samples_local = training_mode->batch_size * num_cells_local;
-                int total_work = total_samples_local * arch.channels;
-
-                for (int work_idx = tid; work_idx < total_work; work_idx += blockDim.x) {
-                    int sample_idx = work_idx / arch.channels;
-                    int channel_idx = work_idx % arch.channels;
-
-                    float d_input_accum = 0.0f;
-                    for (int h = 0; h < arch.num_heads; h++) {
-                        for (int hd = 0; hd < arch.head_dim; hd++) {
-                            int W_idx = param_map->perception_start[h] + channel_idx * arch.head_dim + hd;
-                            float W_val = __half2float(ca_state->perception_weights[W_idx]);
-                            int dprerelu_idx = h * ws_dprerelu_stride + sample_idx * arch.head_dim + hd;
-                            d_input_accum += W_val * ws_dpregelu[dprerelu_idx];
-                        }
-                    }
-                    d_pooled_input[work_idx] = d_input_accum;
-                }
-            }
-            __syncthreads();
-
-            constexpr int wave_input_grad_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
-            float* d_ca_input = organism->batch_ca_input_grads ?
-                organism->batch_ca_input_grads + wave_position * wave_input_grad_stride : nullptr;
+            // Prepare grad_concentration_buffer for diffusion backward
+            // d_ca_input was defined and populated before the chunk loop
             if (d_ca_input != nullptr) {
-                int num_cells_local = arch.grid_size * arch.grid_size;
-                int total_inputs = training_mode->batch_size * num_cells_local * arch.channels;
-                for (int idx = tid; idx < total_inputs; idx += blockDim.x) {
-                    int batch_id = idx / (num_cells_local * arch.channels);
-                    int remainder = idx % (num_cells_local * arch.channels);
-                    int cell_idx = remainder / arch.channels;
-                    int channel_idx = remainder % arch.channels;
-                    int cell_y = cell_idx / arch.grid_size;
-                    int cell_x = cell_idx % arch.grid_size;
-
-                    float grad_accum = 0.0f;
-                    for (int dy = -1; dy <= 1; dy++) {
-                        for (int dx = -1; dx <= 1; dx++) {
-                            int ny = cell_y + dy;
-                            int nx = cell_x + dx;
-                            if (ny >= 0 && ny < arch.grid_size && nx >= 0 && nx < arch.grid_size) {
-                                int pooled_cell_idx = ny * arch.grid_size + nx;
-                                int pooled_idx = batch_id * num_cells_local + pooled_cell_idx;
-                                grad_accum += d_pooled_input[pooled_idx * arch.channels + channel_idx];
-                            }
-                        }
-                    }
-                    d_ca_input[idx] = grad_accum;
-                }
-            }
-            __syncthreads();
-
-            if (d_ca_input != nullptr) {
-                int num_cells_local = arch.grid_size * arch.grid_size;
                 float* grad_conc = organism->buffers->grad_concentration_buffer;
-
-                for (int cell = tid; cell < num_cells_local; cell += blockDim.x) {
+                for (int cell = tid; cell < num_cells; cell += blockDim.x) {
                     grad_conc[cell] = d_ca_input[cell * arch.channels];
                 }
             }
@@ -1578,14 +1774,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int source_y = cell_idx / grid_size;
 
                     int batch_offset = batch_idx * total_cells;
-                    int wave_flow_stride = batch_size * total_cells * 2;
                     int flow_idx = batch_offset * 2 + cell_idx * 2;
-                    float Fx = organism->buffers->batch_flow_field[wave_position * wave_flow_stride + flow_idx + 0];
-                    float Fy = organism->buffers->batch_flow_field[wave_position * wave_flow_stride + flow_idx + 1];
+                    float Fx = organism->buffers->batch_flow_field[s_wave_offsets.flow_offset + flow_idx + 0];
+                    float Fy = organism->buffers->batch_flow_field[s_wave_offsets.flow_offset + flow_idx + 1];
 
-                    constexpr int wave_pool_stride = BATCH_SIZE_MAX * CA_FIELD_SIZE * CHANNELS_MAX;
                     int conc_batch_offset = batch_idx * total_cells * channels;
-                    const float* batch_conc = organism->batch_ca_states_pool + wave_position * wave_pool_stride + conc_batch_offset;
+                    const float* batch_conc = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset + conc_batch_offset;
 
                     float d_flow_x_accum = 0.0f;
                     float d_flow_y_accum = 0.0f;
@@ -1662,7 +1856,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     float ctx_performance = organism->telemetry->task_performance.accuracy;
 
                     TrainingParams train_params;
-                    train_params.derive_from_genome_hash(entry->genome_hash);
                     float flow_lr = train_params.get_flow_lenia_lr(primary_genome, entry->gradients,
                         ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity,
                         ctx_niche, ctx_learning, ctx_performance);
@@ -1771,7 +1964,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float ctx_morphogen = local_ca_mean;
 
             TrainingParams train_params;
-            train_params.derive_from_genome_hash(entry->genome_hash);
             float adam_beta1 = train_params.get_adam_beta1(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
             float adam_beta2 = train_params.get_adam_beta2(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
             float adam_epsilon = train_params.get_adam_epsilon(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
@@ -1871,7 +2063,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         int alive_ct = pool->alive_indices_count;
         for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
             int eid = pool->alive_indices[compact];
-            DEVICE_FATAL_IF(!pool->entries[eid].alive, "hybrid_lifecycle: dead entry in alive_indices (metrics loop)");
+            DEVICE_FATAL_IF(!pool->alive_flags[eid], "hybrid_lifecycle: dead entry in alive_indices (metrics loop)");
 
             PoolEntry* ent = &pool->entries[eid];
             float* eid_primary_genome = &component_workspace_genomes[eid * 2 * GENOME_SIZE];
@@ -1881,7 +2073,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 ent->delta_indices, ent->delta_values, ent->num_deltas,
                 ent->max_deltas, eid_primary_genome, GENOME_SIZE, eid_parent_temp, organism->diresa_genome_weights);
 
-            ent->generalization_gap = fabsf(ent->train_accuracy - ent->test_accuracy);
+            float gen_gap_val = fabsf(ent->train_accuracy.value - ent->test_accuracy.value);
+            ent->generalization_gap.set_computed(gen_gap_val, generation, ent->genome_hash);
 
             DEVICE_FATAL_IF(ent->cycles_elapsed == 0, "cycles_elapsed is 0 - no execution data");
             DEVICE_FATAL_IF(ent->total_branches == 0, "total_branches is 0 - no branch data");
@@ -1889,24 +2082,26 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float ipc = (float)ent->inst_executed / (float)ent->cycles_elapsed;
             float tensor_util = (float)ent->tensor_core_cycles / (float)ent->cycles_elapsed;
             float branch_efficiency = (float)(ent->total_branches - ent->divergent_branches) / (float)ent->total_branches;
-            ent->hardware_efficiency = ipc * tensor_util * branch_efficiency;
+            float hw_eff_val = ipc * tensor_util * branch_efficiency;
+            ent->hardware_efficiency.set_computed(hw_eff_val, generation, ent->genome_hash);
 
             DEVICE_FATAL_IF(generation == 0, "coherence requires previous generation");
             float prev_acc = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
-            ent->coherence = ent->task_accuracy - prev_acc;
+            float coherence_val = ent->task_accuracy.value - prev_acc;
+            ent->coherence.set_computed(coherence_val, generation, ent->genome_hash);
 
-            DEVICE_VALIDATE_FINITE(ent->task_accuracy);
-            DEVICE_VALIDATE_FINITE(ent->coherence);
-            DEVICE_VALIDATE_FINITE(ent->hardware_efficiency);
-            DEVICE_VALIDATE_FINITE(ent->generalization_gap);
-            DEVICE_VALIDATE_PROBABILITY(ent->task_accuracy);
+            DEVICE_VALIDATE_FINITE(ent->task_accuracy.value);
+            DEVICE_VALIDATE_FINITE(ent->coherence.value);
+            DEVICE_VALIDATE_FINITE(ent->hardware_efficiency.value);
+            DEVICE_VALIDATE_FINITE(ent->generalization_gap.value);
+            DEVICE_VALIDATE_PROBABILITY(ent->task_accuracy.value);
             DEVICE_VALIDATE_HW_COUNTER(ent->cycles_elapsed, 1ULL, 0xFFFFFFFFFFFFULL);
             DEVICE_VALIDATE_HW_COUNTER(ent->inst_executed, 1ULL, 0xFFFFFFFFFFFFULL);
             DEVICE_VALIDATE_HW_COUNTER(ent->tensor_core_cycles, 0ULL, ent->cycles_elapsed);
-            device_validate_fitness_components(pool->fitness_values[eid], ent->coherence, ent->effective_rank, "pool_entry_fitness");
+            device_validate_fitness_components(pool->fitness_values[eid], ent->coherence.value, ent->effective_rank.value, "pool_entry_fitness");
 
-            organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy;
-            organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence;
+            organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy.value;
+            organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence.value;
         }
         __syncthreads();
 
@@ -2051,15 +2246,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
             float ctx_performance = organism->telemetry->task_performance.accuracy;
 
-            int embed_ctx_metabolic_slot = derive_param_slot(entry->genome_hash, "embed_ctx_metabolic");
-            int embed_ctx_stress_slot = derive_param_slot(entry->genome_hash, "embed_ctx_stress");
-            int embed_ctx_morphogen_slot = derive_param_slot(entry->genome_hash, "embed_ctx_morphogen");
+            int embed_ctx_metabolic_slot = GenomeParamTable::embed_ctx_metabolic;
+            int embed_ctx_stress_slot = GenomeParamTable::embed_ctx_stress;
+            int embed_ctx_morphogen_slot = GenomeParamTable::embed_ctx_morphogen;
             float embed_ctx_metabolic = genome_slot_to_unit(primary_genome, embed_ctx_metabolic_slot);
             float embed_ctx_stress = genome_slot_to_unit(primary_genome, embed_ctx_stress_slot);
             float embed_ctx_morphogen = genome_slot_to_unit(primary_genome, embed_ctx_morphogen_slot);
 
             TrainingParams embed_training_params;
-            embed_training_params.derive_from_genome_hash(entry->genome_hash);
             float learning_rate = embed_training_params.get_behavioral_learning_rate(
                 primary_genome, entry->gradients,
                 embed_ctx_metabolic, embed_ctx_stress, embed_ctx_morphogen,
@@ -2077,20 +2271,20 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int cy = (int)(agent->position[1] * grid_size) % grid_size;
                 float context_morphogen = chemical_concentration[cy * grid_size + cx];
 
-                int base_freq_slot = derive_param_slot(agent->genome_hash, "fourier_base_freq");
+                int base_freq_slot = GenomeParamTable::fourier_base_freq;
                 float fourier_base_freq = genome_to_param(primary_genome, entry->gradients, base_freq_slot,
                     context_metabolic, context_stress, context_morphogen,
                     ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
                     FOURIER_BASE_FREQ_MIN, FOURIER_BASE_FREQ_MAX);
 
-                int num_octaves_slot = derive_param_slot(agent->genome_hash, "fourier_num_octaves");
+                int num_octaves_slot = GenomeParamTable::fourier_num_octaves;
                 int fourier_num_octaves_raw = (int)genome_to_param(primary_genome, entry->gradients, num_octaves_slot,
                     context_metabolic, context_stress, context_morphogen,
                     ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
                     (float)FOURIER_NUM_OCTAVES_MIN, (float)FOURIER_NUM_OCTAVES_MAX);
                 int fourier_num_octaves = min(fourier_num_octaves_raw, embed_behavioral_dim - 4);
 
-                int spectrum_exp_slot = derive_param_slot(agent->genome_hash, "fourier_spectrum_exponent");
+                int spectrum_exp_slot = GenomeParamTable::fourier_spectrum_exponent;
                 float fourier_spectrum_exponent = genome_to_param(primary_genome, entry->gradients, spectrum_exp_slot,
                     context_metabolic, context_stress, context_morphogen,
                     ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
