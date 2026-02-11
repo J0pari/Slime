@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
-#include "../debug/provenance.cuh"
 
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
@@ -38,14 +37,16 @@
 
 #define DEVICE_FATAL(msg) \
     do { \
-        printf("!FATAL [%s:%d] %s\n", __FILE__, __LINE__, msg); \
+        printf("!FATAL [%s:%d] b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
+        __threadfence_system(); \
         __trap(); \
     } while(0)
 
 #define DEVICE_FATAL_IF(cond, msg) \
     do { \
         if (cond) { \
-            printf("!FATAL [%s:%d] %s\n", __FILE__, __LINE__, msg); \
+            printf("!FATAL [%s:%d] b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
+            __threadfence_system(); \
             __trap(); \
         } \
     } while(0)
@@ -108,6 +109,36 @@ constexpr int TILE_N = WMMA_TILE_DIM;
 constexpr int TILE_K = WMMA_TILE_DIM;
 constexpr int TILE_SIZE = WMMA_TILE_DIM;
 constexpr int TILE_DIM = 2 * WMMA_TILE_DIM;
+
+constexpr int32_t PROVENANCE_UNINITIALIZED_INT = INT_MIN;
+constexpr float PROVENANCE_UNINITIALIZED_FLOAT = NAN;
+constexpr uint64_t PROVENANCE_UNINITIALIZED_HASH = UINT64_MAX;
+constexpr int32_t PROVENANCE_INVALID_INDEX = -1;
+
+constexpr uint32_t PROVENANCE_SOURCE_NONE = 0;
+constexpr uint32_t PROVENANCE_SOURCE_INIT = 1;
+constexpr uint32_t PROVENANCE_SOURCE_POOL = 2;
+constexpr uint32_t PROVENANCE_SOURCE_ARCHIVE = 3;
+constexpr uint32_t PROVENANCE_SOURCE_TRAINING = 4;
+constexpr uint32_t PROVENANCE_SOURCE_TELEMETRY = 5;
+constexpr uint32_t PROVENANCE_SOURCE_CLASSIFICATION = 6;
+constexpr uint32_t PROVENANCE_SOURCE_FLOW = 7;
+constexpr uint32_t PROVENANCE_SOURCE_CHEMOTAXIS = 8;
+constexpr uint32_t PROVENANCE_SOURCE_LIFECYCLE = 9;
+constexpr uint32_t PROVENANCE_SOURCE_DIRESA = 10;
+constexpr uint32_t PROVENANCE_SOURCE_BACKWARD = 11;
+constexpr uint32_t PROVENANCE_SOURCE_HOST = 12;
+
+constexpr uint32_t RING_BUFFER_SLOTS = 8;
+constexpr uint32_t CRC32_POLYNOMIAL = 0xEDB88320;
+
+constexpr uint32_t AUDIT_FIELD_GENERATION = (1 << 0);
+constexpr uint32_t AUDIT_FIELD_BATCH = (1 << 1);
+constexpr uint32_t AUDIT_FIELD_ACCURACY = (1 << 2);
+constexpr uint32_t AUDIT_FIELD_POOL = (1 << 3);
+constexpr uint32_t AUDIT_FIELD_ARCHIVE = (1 << 4);
+constexpr uint32_t AUDIT_FIELD_CHEMICAL = (1 << 5);
+constexpr uint32_t AUDIT_FIELD_FLOW = (1 << 6);
 
 
 

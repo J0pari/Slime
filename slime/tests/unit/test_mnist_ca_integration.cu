@@ -1,5 +1,6 @@
 
 #include "../../config/config.cu"
+#include "../../core/organism.cu"
 #include "../../runtime.cu"
 #include "../../data/dataset_loader.cu"
 #include "../../training/training_types.cu"

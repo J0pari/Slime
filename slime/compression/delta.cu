@@ -3,6 +3,7 @@
 #define DELTA_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../memory/genome_ops.cuh"
 #include <cuda_runtime.h>
@@ -35,7 +36,15 @@ __device__ void compute_genome_deltas(
     }
 }
 
-__global__ void compute_delta_kernel(float* child_genome, float* parent_genome, uint16_t* delta_indices, float* delta_values, uint16_t* num_deltas, int genome_length, uint64_t child_genome_hash) {
+__device__ void compute_delta_device(
+    Organism* organism,
+    float* child_genome,
+    float* parent_genome,
+    uint16_t* delta_indices,
+    float* delta_values,
+    uint16_t* num_deltas,
+    int genome_length
+) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= genome_length) return;
 

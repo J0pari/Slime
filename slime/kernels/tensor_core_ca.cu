@@ -3,6 +3,7 @@
 #define TENSOR_CORE_CA_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/genome_params.cuh"
 #include "../core/pseudopod.cu"
 #include "../memory/pool.cu"

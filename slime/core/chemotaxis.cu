@@ -2,6 +2,7 @@
 #ifndef CHEMOTAXIS_CU
 #define CHEMOTAXIS_CU
 #include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/genome_params.cuh"
 #include "pseudopod.cu"
 #include "../memory/pool.cu"
@@ -241,26 +242,30 @@ __global__ void diffusion_reaction_kernel(
     concentration[idx] = clamp(concentration[idx], NORMALIZED_MIN, NORMALIZED_MAX);
 }
 
-__global__ void diffusion_reaction_backward_kernel(
-    const float* __restrict__ grad_concentration,
-    const float* __restrict__ concentration,
-    const float* __restrict__ laplacian,
-    float* __restrict__ grad_genome,
-    int grid_size,
-    float dt,
-    const float* genome,
-    const float* epigenetic,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void diffusion_reaction_backward_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int entry_idx = organism->lifecycle_entry_idx;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    Architecture arch = Architecture::fromConfig();
+
+    const float* grad_concentration = organism->buffers->grad_concentration_buffer;
+    const float* concentration = organism->chemical_field->concentration;
+    const float* laplacian = organism->chemical_field->laplacian;
+    float* grad_genome = entry->gradients;
+    int grid_size = arch.grid_size;
+    float dt = CHEMICAL_DIFFUSION_DT_MAX;
+    const float* genome = &organism->lifecycle_workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    const float* epigenetic = entry->gradients;
+
+    float ctx_metabolic = entry->fitness.value;
+    float ctx_stress = entry->hunger.value;
+    float ctx_morphogen = organism->chemical_field->cached_mean;
+    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
+    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
+    float ctx_learning = organism->training_mode->learning_rate;
+    float ctx_performance = entry->task_accuracy.value;
 
     if (x >= grid_size || y >= grid_size) return;
 

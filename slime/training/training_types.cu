@@ -3,6 +3,7 @@
 #define TRAINING_TYPES_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/genome_params.cuh"
 #include <curand_kernel.h>
 
@@ -12,6 +13,7 @@ struct ClassificationHead {
     float* pooling_weights;
     float* fc_weights;
     float* fc_bias;
+    volatile int pointers_ready;
 };
 
 struct CAParameterMap {
@@ -233,6 +235,11 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
         classifier->pooling_weights = workspace;
         classifier->fc_weights = workspace + input_dim;
         classifier->fc_bias = workspace + input_dim + (input_dim * num_classes);
+        __threadfence();
+        classifier->pointers_ready = 1;
+    }
+    while (classifier->pointers_ready == 0) {
+        __threadfence();
     }
     __syncthreads();
 

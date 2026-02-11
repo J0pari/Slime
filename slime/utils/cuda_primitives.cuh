@@ -6,6 +6,7 @@
 #include <cuda/atomic>
 #include <curand_kernel.h>
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../debug/param_validator.cu"
 
 struct PoolEntry;

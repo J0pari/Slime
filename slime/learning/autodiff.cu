@@ -2,6 +2,7 @@
 #ifndef AUTODIFF_CU
 #define AUTODIFF_CU
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 

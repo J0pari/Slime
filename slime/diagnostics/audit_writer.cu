@@ -2,6 +2,7 @@
 #define AUDIT_WRITER_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../debug/provenance.cuh"
 extern "C" int stbi_write_png(char const *filename, int x, int y, int comp, const void *data, int stride_bytes);
 #include <cstdio>

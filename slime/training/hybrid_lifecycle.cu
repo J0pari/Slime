@@ -3,6 +3,8 @@
 #define HYBRID_LIFECYCLE_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
+#include "../debug/provenance.cuh"
 #include "../training/training_types.cu"
 #include "../data/dataset_loader.cu"
 #include "../core/chemotaxis.cu"
@@ -23,7 +25,26 @@ struct BehavioralState;
 struct TemporalTube;
 
 __device__ int g_block_counter = 0;
+__device__ int g_grid_barrier_count = 0;
+__device__ int g_grid_barrier_sense = 0;
 
+__device__ __forceinline__ void grid_barrier(int num_blocks) {
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        int sense = g_grid_barrier_sense;
+        int arrived = atomicAdd(&g_grid_barrier_count, 1) + 1;
+        if (arrived == num_blocks) {
+            g_grid_barrier_count = 0;
+            __threadfence();
+            g_grid_barrier_sense = 1 - sense;
+        } else {
+            while (g_grid_barrier_sense == sense) {
+                __threadfence();
+            }
+        }
+    }
+    __syncthreads();
+}
 
 struct WaveBufferOffsets {
     int ca_states_offset;       
@@ -150,36 +171,33 @@ __device__ WaveBufferOffsets compute_wave_offsets(
     return offsets;
 }
 
-__global__ void zero_scalar_kernel(float* ptr) {
+__device__ void zero_scalar_device(Organism* organism, float* ptr) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         *ptr = 0.0f;
     }
 }
 
-__global__ void zero_buffer_kernel(float* buffer, int n) {
+__device__ void zero_buffer_device(Organism* organism, float* buffer, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         buffer[idx] = 0.0f;
     }
 }
 
-extern "C" __global__ void load_batch_kernel(
-    Organism* organism,
-    HybridTrainingMode* training_mode,
-    int generation,
-    int grid_size,
-    int wave_start
-) {
+__device__ void load_batch_device(Organism* organism, int wave_start) {
+    HybridTrainingMode* training_mode = organism->training_mode;
+    int generation = organism->generation;
+
     int tid = threadIdx.x;
     int wave_position = blockIdx.x;
     int compact_idx = wave_start + blockIdx.x;
 
     __syncthreads();
 
-    DEVICE_FATAL_IF(organism == nullptr, "load_batch_kernel: organism is null");
-    DEVICE_FATAL_IF(training_mode == nullptr, "load_batch_kernel: training_mode is null");
-    DEVICE_FATAL_IF(training_mode->batch_images == nullptr, "load_batch_kernel: batch_images is null");
-    DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "load_batch_kernel: batch_labels is null");
+    DEVICE_FATAL_IF(organism == nullptr, "load_batch_device: organism is null");
+    DEVICE_FATAL_IF(training_mode == nullptr, "load_batch_device: training_mode is null");
+    DEVICE_FATAL_IF(training_mode->batch_images == nullptr, "load_batch_device: batch_images is null");
+    DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "load_batch_device: batch_labels is null");
 
     ComponentPool* pool = organism->pool;
     if (compact_idx >= pool->alive_indices_count) return;
@@ -340,7 +358,7 @@ extern "C" __global__ void load_batch_kernel(
     if (tid == 0) printf("V:L3_loop_done\n");
 }
 
-extern "C" __global__ void hybrid_organism_lifecycle_kernel(
+__device__ void hybrid_organism_lifecycle_device(
     Organism* organism,
     HybridTrainingMode* training_mode,
     CAParameterMap* param_map,
@@ -362,6 +380,13 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
 
+    if (tid == 0) {
+        organism->lifecycle_entry_idx = entry_idx;
+        organism->lifecycle_workspace_genomes = workspace_genomes;
+        organism->lifecycle_wave_start = wave_start;
+    }
+    __syncthreads();
+
     
     __shared__ WaveBufferOffsets s_wave_offsets;
     if (tid == 0) {
@@ -375,9 +400,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
     DEVICE_FATAL_IF(!s_entry_alive, "hybrid_organism_lifecycle_kernel: dead entry in alive_indices");
     if (tid == 0) atomicAdd(&g_block_counter, 1);
 
+    DEVICE_FATAL_IF(entry->ca_state == nullptr, "LIFECYCLE: entry->ca_state is null");
     MultiHeadCAState* ca_state = entry->ca_state;
+    DEVICE_FATAL_IF(ca_state->ca_concentration == nullptr, "LIFECYCLE: ca_concentration is null");
 
     int local_cells = entry->channels * entry->grid_size * entry->grid_size;
+    DEVICE_FATAL_IF(local_cells <= 0, "LIFECYCLE: local_cells <= 0");
     float thread_sum = 0.0f;
     for (int i = tid; i < local_cells; i += blockDim.x) {
         thread_sum += ca_state->ca_concentration[i];
@@ -548,16 +576,157 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int head_dim = arch.head_dim;
             int cells_per_grid = grid_size * grid_size;
 
+            DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "CA_FWD: batch_ca_states_pool is null");
+            DEVICE_FATAL_IF(organism->buffers->batched_ca_output == nullptr, "CA_FWD: batched_ca_output is null");
+            DEVICE_FATAL_IF(s_wave_offsets.ca_states_offset < 0, "CA_FWD: ca_states_offset negative");
+            DEVICE_FATAL_IF(s_wave_offsets.ca_output_offset < 0, "CA_FWD: ca_output_offset negative");
             float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
             float* ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
 
             int total_cells = batch_size * num_heads * cells_per_grid;
-            if (tid == 0) printf("V:CA_LOOP_ENTER blk=%d total=%d batch=%d heads=%d cells=%d\n", blockIdx.x, total_cells, batch_size, num_heads, cells_per_grid);
+            DEVICE_FATAL_IF(total_cells <= 0, "CA_LOOP: total_cells <= 0");
+            DEVICE_FATAL_IF(ca_input == nullptr, "CA_LOOP: ca_input is null");
+            DEVICE_FATAL_IF(ca_output == nullptr, "CA_LOOP: ca_output is null");
+            DEVICE_FATAL_IF(ca_state == nullptr, "CA_LOOP: ca_state is null");
+            DEVICE_FATAL_IF(ca_state->perception_weights == nullptr, "CA_LOOP: perception_weights is null");
+            DEVICE_FATAL_IF(ca_state->interaction_weights == nullptr, "CA_LOOP: interaction_weights is null");
+            DEVICE_FATAL_IF(ca_state->value_weights == nullptr, "CA_LOOP: value_weights is null");
+            DEVICE_FATAL_IF(perception_saved == nullptr, "CA_LOOP: perception_saved is null");
+            DEVICE_FATAL_IF(interaction_saved == nullptr, "CA_LOOP: interaction_saved is null");
+            DEVICE_FATAL_IF(pre_gelu_saved == nullptr, "CA_LOOP: pre_gelu_saved is null");
+            int my_act_size = batch_size * num_heads * cells_per_grid * head_dim;
+            int my_max_abs_idx = s_wave_offsets.activations_offset + my_act_size - 1;
+            if (tid == 0) printf("V:CA_LOOP_ENTER blk=%d hdim=%d act_off=%d my_size=%d max_abs=%d\n", blockIdx.x, head_dim, s_wave_offsets.activations_offset, my_act_size, my_max_abs_idx);
 
-            for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x) {
-                int cells_per_batch_head = cells_per_grid;
+            PROVENANCE_FATAL_IF(total_cells <= 0, "CA_LOOP total_cells<=0");
+            PROVENANCE_FATAL_IF(total_cells > 1000000, "CA_LOOP total_cells>1M");
+            PROVENANCE_FATAL_IF(blockDim.x <= 0, "CA_LOOP blockDim.x<=0");
+            PROVENANCE_FATAL_IF(grid_size <= 0, "CA_LOOP grid_size<=0");
+            PROVENANCE_FATAL_IF(channels <= 0, "CA_LOOP channels<=0");
+            PROVENANCE_FATAL_IF(head_dim <= 0, "CA_LOOP head_dim<=0");
+            PROVENANCE_FATAL_IF(num_heads <= 0, "CA_LOOP num_heads<=0");
+
+            // ==================================================================================
+            // EXHAUSTIVE DIAGNOSTIC SYSTEM - RULES OUT EVERY POSSIBLE CAUSE
+            // ==================================================================================
+            //
+            // POSSIBLE CAUSES TO DIAGNOSE:
+            // 1. TDR timeout - timing shows if we're approaching 60s
+            // 2. Infinite loop - iteration counter with max bounds
+            // 3. Memory read hang - checkpoint before/after every read
+            // 4. Memory write hang - checkpoint before/after every write
+            // 5. NaN/Inf propagation - check EVERY value at EVERY step
+            // 6. Warp divergence - track ALL threads not just tid==0
+            // 7. __syncthreads deadlock - checkpoint before/after all syncs
+            // 8. Stack overflow - check stack marker values
+            // 9. Integer overflow in indices - validate all index calculations
+            // 10. Pointer arithmetic overflow - validate all pointer math
+            // 11. Half precision issues - check every __half2float result
+            // 12. Activation function hang - checkpoint each activation
+            // 13. Weight pointer validity - check weight addresses
+            // 14. Loop variable corruption - verify loop vars each iteration
+            // 15. Thread index corruption - verify tid/blockIdx
+            // 16. The interaction loop (16x more work for hdim=64 vs hdim=16)
+            // 17. Memory coalescing issues - check access patterns
+            // 18. Register pressure - implicit in timing differences
+            // 19. Specific iteration that hangs - track exact last good iteration
+            // 20. Per-thread completion tracking - not just warp level
+            //
+            // ==================================================================================
+
+            // Stack canary to detect overflow
+            volatile float stack_canary_start = 3.14159265f;
+
+            // Compute expected iterations
+            int expected_iters = (total_cells + blockDim.x - 1) / blockDim.x;
+            long long kernel_start_clock = clock64();
+
+            // DIAG 1: Initial state dump for this block
+            if (tid == 0) {
+                printf("DIAG1_INIT blk=%d hdim=%d heads=%d cells=%d batch=%d grid=%d chan=%d\n",
+                       blockIdx.x, head_dim, num_heads, cells_per_grid, batch_size, grid_size, channels);
+                printf("DIAG1_SIZES blk=%d total_cells=%d expected_iters=%d blockDim=%d\n",
+                       blockIdx.x, total_cells, expected_iters, blockDim.x);
+                printf("DIAG1_PTRS blk=%d ca_in=%p ca_out=%p perc_w=%p inter_w=%p val_w=%p\n",
+                       blockIdx.x, (void*)ca_input, (void*)ca_output,
+                       (void*)ca_state->perception_weights, (void*)ca_state->interaction_weights,
+                       (void*)ca_state->value_weights);
+                printf("DIAG1_SAVE blk=%d perc_s=%p inter_s=%p gelu_s=%p\n",
+                       blockIdx.x, (void*)perception_saved, (void*)interaction_saved, (void*)pre_gelu_saved);
+            }
+
+            // DIAG 2: Validate all pointer addresses are in reasonable range (not null, not obviously bad)
+            PROVENANCE_FATAL_IF(ca_input == nullptr, "DIAG2: ca_input null");
+            PROVENANCE_FATAL_IF(ca_output == nullptr, "DIAG2: ca_output null");
+            PROVENANCE_FATAL_IF(ca_state->perception_weights == nullptr, "DIAG2: perception_weights null");
+            PROVENANCE_FATAL_IF(ca_state->interaction_weights == nullptr, "DIAG2: interaction_weights null");
+            PROVENANCE_FATAL_IF(ca_state->value_weights == nullptr, "DIAG2: value_weights null");
+            PROVENANCE_FATAL_IF(perception_saved == nullptr, "DIAG2: perception_saved null");
+            PROVENANCE_FATAL_IF(interaction_saved == nullptr, "DIAG2: interaction_saved null");
+            PROVENANCE_FATAL_IF(pre_gelu_saved == nullptr, "DIAG2: pre_gelu_saved null");
+
+            // DIAG 3: Validate dimension sanity
+            PROVENANCE_FATAL_IF(head_dim <= 0 || head_dim > 128, "DIAG3: head_dim insane");
+            PROVENANCE_FATAL_IF(num_heads <= 0 || num_heads > 64, "DIAG3: num_heads insane");
+            PROVENANCE_FATAL_IF(channels <= 0 || channels > 64, "DIAG3: channels insane");
+            PROVENANCE_FATAL_IF(grid_size <= 0 || grid_size > 256, "DIAG3: grid_size insane");
+            PROVENANCE_FATAL_IF(batch_size <= 0 || batch_size > 128, "DIAG3: batch_size insane");
+            PROVENANCE_FATAL_IF(cells_per_grid <= 0 || cells_per_grid > 65536, "DIAG3: cells_per_grid insane");
+            PROVENANCE_FATAL_IF(total_cells <= 0 || total_cells > 10000000, "DIAG3: total_cells insane");
+
+            // DIAG 4: Per-thread initial state (sample threads)
+            if (tid == 0 || tid == 1 || tid == 127 || tid == 128 || tid == 255) {
+                printf("DIAG4_THREAD blk=%d tid=%d start_work_idx=%d\n", blockIdx.x, tid, tid);
+            }
+
+            int loop_iter = 0;
+            int max_iter_safety = expected_iters + 100; // Safety bound
+            long long prev_iter_end = kernel_start_clock;
+            int last_completed_iter = -1;
+            int stuck_detection_counter = 0;
+
+            // Track per-warp completion for divergence detection
+            __shared__ int s_warp_last_iter[8]; // 256 threads = 8 warps
+            if (tid < 8) s_warp_last_iter[tid] = -1;
+            __syncthreads();
+
+            for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x, loop_iter++) {
+
+                // DIAG 5: Infinite loop protection
+                if (loop_iter > max_iter_safety) {
+                    printf("DIAG5_INFINITE_LOOP blk=%d tid=%d iter=%d max=%d\n",
+                           blockIdx.x, tid, loop_iter, max_iter_safety);
+                    break;
+                }
+
+                long long iter_start = clock64();
+                long long iter_since_start_ms = (iter_start - kernel_start_clock) / 1000000;
+
+                // DIAG 6: Progress tracking every 5 iterations (more frequent)
+                if (tid == 0 && (loop_iter % 5 == 0)) {
+                    printf("DIAG6_PROG blk=%d iter=%d/%d ms=%lld hdim=%d\n",
+                           blockIdx.x, loop_iter, expected_iters, iter_since_start_ms, head_dim);
+                }
+
+                // DIAG 7: TDR warning - approaching 60 second timeout
+                if (iter_since_start_ms > 50000 && tid == 0 && loop_iter % 10 == 0) {
+                    printf("DIAG7_TDR_WARNING blk=%d iter=%d ms=%lld APPROACHING_TIMEOUT\n",
+                           blockIdx.x, loop_iter, iter_since_start_ms);
+                }
+
+                // DIAG 8: Verify loop variables not corrupted
+                PROVENANCE_FATAL_IF(work_idx < 0, "DIAG8: work_idx negative");
+                PROVENANCE_FATAL_IF(work_idx >= total_cells + blockDim.x, "DIAG8: work_idx overflow");
+                PROVENANCE_FATAL_IF(loop_iter < 0, "DIAG8: loop_iter negative");
+
+                // DIAG 9: Verify thread index not corrupted
+                int check_tid = threadIdx.x;
+                int check_blk = blockIdx.x;
+                PROVENANCE_FATAL_IF(check_tid != tid, "DIAG9: tid corrupted");
+                PROVENANCE_FATAL_IF(check_blk < 0 || check_blk > 7, "DIAG9: blockIdx corrupted");
+
+                // Index calculations
                 int heads_times_cells = num_heads * cells_per_grid;
-
                 int batch_id = work_idx / heads_times_cells;
                 int remainder = work_idx % heads_times_cells;
                 int head_id = remainder / cells_per_grid;
@@ -565,11 +734,49 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int cell_y = cell_idx / grid_size;
                 int cell_x = cell_idx % grid_size;
 
-                half* perc_w = &ca_state->perception_weights[head_id * channels * head_dim];
-                half* inter_w = &ca_state->interaction_weights[head_id * head_dim * head_dim];
-                half* val_w = &ca_state->value_weights[head_id * head_dim * channels];
+                // DIAG 10: Validate all computed indices
+                PROVENANCE_FATAL_IF(batch_id < 0 || batch_id >= batch_size, "DIAG10: batch_id OOB");
+                PROVENANCE_FATAL_IF(head_id < 0 || head_id >= num_heads, "DIAG10: head_id OOB");
+                PROVENANCE_FATAL_IF(cell_idx < 0 || cell_idx >= cells_per_grid, "DIAG10: cell_idx OOB");
+                PROVENANCE_FATAL_IF(cell_x < 0 || cell_x >= grid_size, "DIAG10: cell_x OOB");
+                PROVENANCE_FATAL_IF(cell_y < 0 || cell_y >= grid_size, "DIAG10: cell_y OOB");
+
+                // Weight pointer calculations
+                int perc_w_offset = head_id * channels * head_dim;
+                int inter_w_offset = head_id * head_dim * head_dim;
+                int val_w_offset = head_id * head_dim * channels;
+
+                // DIAG 11: Validate weight offsets
+                int max_perc_w = num_heads * channels * head_dim;
+                int max_inter_w = num_heads * head_dim * head_dim;
+                int max_val_w = num_heads * head_dim * channels;
+                PROVENANCE_FATAL_IF(perc_w_offset < 0 || perc_w_offset >= max_perc_w, "DIAG11: perc_w_offset OOB");
+                PROVENANCE_FATAL_IF(inter_w_offset < 0 || inter_w_offset >= max_inter_w, "DIAG11: inter_w_offset OOB");
+                PROVENANCE_FATAL_IF(val_w_offset < 0 || val_w_offset >= max_val_w, "DIAG11: val_w_offset OOB");
+
+                half* perc_w = &ca_state->perception_weights[perc_w_offset];
+                half* inter_w = &ca_state->interaction_weights[inter_w_offset];
+                half* val_w = &ca_state->value_weights[val_w_offset];
+
+                // DIAG 12: Print weight pointers on first iteration per block
+                if (tid == 0 && loop_iter == 0) {
+                    printf("DIAG12_WEIGHTS blk=%d perc=%p inter=%p val=%p\n",
+                           blockIdx.x, (void*)perc_w, (void*)inter_w, (void*)val_w);
+                }
 
                 float neighborhood[3][3][MAX_CHANNELS];
+
+                // Stack canary check mid-allocation
+                volatile float stack_canary_mid1 = 2.71828f;
+
+                // ============ NEIGHBORHOOD READ ============
+                long long t_neigh_start = clock64();
+
+                // DIAG 13: Before neighborhood read
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG13_PRE_NEIGH blk=%d iter=%d\n", blockIdx.x, loop_iter);
+                }
+
                 for (int dy = -1; dy <= 1; dy++) {
                     for (int dx = -1; dx <= 1; dx++) {
                         int nx = min(max(cell_x + dx, 0), grid_size - 1);
@@ -577,77 +784,428 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int state_idx = batch_id * cells_per_grid * channels +
                                        ny * grid_size * channels +
                                        nx * channels;
+
+                        // DIAG 14: Validate neighborhood read index
+                        int max_ca_input_idx = batch_size * cells_per_grid * channels;
+                        PROVENANCE_FATAL_IF(state_idx < 0 || state_idx + channels > max_ca_input_idx,
+                                           "DIAG14: ca_input read OOB");
+
                         for (int c = 0; c < channels; c++) {
-                            neighborhood[dy + 1][dx + 1][c] = ca_input[state_idx + c];
+                            float val = ca_input[state_idx + c];
+                            neighborhood[dy + 1][dx + 1][c] = val;
+
+                            // DIAG 15: Check for NaN/Inf in input (first few iterations)
+                            if (loop_iter < 2 && (isnan(val) || isinf(val))) {
+                                printf("DIAG15_INPUT_BAD blk=%d iter=%d dy=%d dx=%d c=%d val=%f\n",
+                                       blockIdx.x, loop_iter, dy, dx, c, val);
+                            }
                         }
                     }
                 }
 
+                long long t_neigh_end = clock64();
+
+                // DIAG 16: After neighborhood read
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG16_POST_NEIGH blk=%d iter=%d us=%lld\n",
+                           blockIdx.x, loop_iter, (t_neigh_end - t_neigh_start)/1000);
+                }
+
+                // ============ PERCEPTION COMPUTATION ============
                 float perception[MAX_HEAD_DIM];
+
+                // Stack canary check
+                volatile float stack_canary_mid2 = 1.41421f;
+
+                long long t_perc_start = clock64();
+
+                // DIAG 17: Before perception loop
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG17_PRE_PERC blk=%d iter=%d hdim=%d macs=%d\n",
+                           blockIdx.x, loop_iter, head_dim, head_dim * 9 * channels);
+                }
+
                 for (int h = 0; h < head_dim; h++) {
+                    // DIAG 18: Check perception loop variable
+                    PROVENANCE_FATAL_IF(h < 0 || h >= MAX_HEAD_DIM, "DIAG18: perception h OOB");
+
                     float acc = 0.0f;
                     for (int dy = 0; dy < 3; dy++) {
                         for (int dx = 0; dx < 3; dx++) {
                             for (int c = 0; c < channels; c++) {
-                                acc += neighborhood[dy][dx][c] * __half2float(perc_w[c * head_dim + h]);
+                                int w_idx = c * head_dim + h;
+                                PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= channels * head_dim,
+                                                   "DIAG18: perc_w index OOB");
+
+                                float neigh_val = neighborhood[dy][dx][c];
+                                half w_half = perc_w[w_idx];
+                                float w_float = __half2float(w_half);
+
+                                // DIAG 19: Check half conversion
+                                if (isnan(w_float) || isinf(w_float)) {
+                                    if (tid == 0 && loop_iter < 2) {
+                                        printf("DIAG19_PERC_W_BAD blk=%d h=%d c=%d w=%.6f\n",
+                                               blockIdx.x, h, c, w_float);
+                                    }
+                                }
+
+                                acc += neigh_val * w_float;
                             }
                         }
                     }
-                    perception[h] = activation_relu(acc);
-                }
-                if (tid == 0 && work_idx == 0) printf("V:CA_PERC_DONE blk=%d\n", blockIdx.x);
 
+                    // DIAG 20: Check accumulator before activation
+                    if (isnan(acc) || isinf(acc)) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG20_PERC_ACC_BAD blk=%d h=%d acc=%.6f\n", blockIdx.x, h, acc);
+                        }
+                    }
+
+                    perception[h] = activation_relu(acc);
+
+                    // DIAG 21: Check perception value after activation
+                    if (isnan(perception[h]) || isinf(perception[h])) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG21_PERC_BAD blk=%d h=%d perc=%.6f\n", blockIdx.x, h, perception[h]);
+                        }
+                    }
+                }
+
+                long long t_perc_end = clock64();
+
+                // DIAG 22: After perception
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG22_POST_PERC blk=%d iter=%d us=%lld p0=%.4f\n",
+                           blockIdx.x, loop_iter, (t_perc_end - t_perc_start)/1000, perception[0]);
+                }
+
+                // ============ INTERACTION COMPUTATION (THE BIG ONE - hdim^2 MACs) ============
                 float interaction[MAX_HEAD_DIM];
                 float pre_gelu_vals[MAX_HEAD_DIM];
                 float interaction_sum = 0.0f;
+
+                // Stack canary
+                volatile float stack_canary_mid3 = 1.73205f;
+
+                long long t_inter_start = clock64();
+
+                // DIAG 23: Before interaction - THIS IS THE 16x DIFFERENCE
+                // hdim=16: 16*16=256 MACs, hdim=64: 64*64=4096 MACs
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG23_PRE_INTER blk=%d iter=%d hdim=%d macs=%d\n",
+                           blockIdx.x, loop_iter, head_dim, head_dim * head_dim);
+                }
+
+                // DIAG 24: Detailed interaction loop tracking for hdim=64
+                int inter_checkpoint = head_dim / 4; // Report every 25%
+
                 for (int h = 0; h < head_dim; h++) {
+                    PROVENANCE_FATAL_IF(h < 0 || h >= MAX_HEAD_DIM, "DIAG24: interaction h OOB");
+
+                    // DIAG 25: Track progress through interaction for large hdim
+                    if (head_dim >= 32 && tid == 0 && loop_iter % 50 == 0 &&
+                        inter_checkpoint > 0 && h % inter_checkpoint == 0) {
+                        printf("DIAG25_INTER_PROG blk=%d iter=%d h=%d/%d\n",
+                               blockIdx.x, loop_iter, h, head_dim);
+                    }
+
                     float acc = 0.0f;
                     for (int j = 0; j < head_dim; j++) {
-                        acc += perception[j] * __half2float(inter_w[j * head_dim + h]);
+                        PROVENANCE_FATAL_IF(j < 0 || j >= MAX_HEAD_DIM, "DIAG24: interaction j OOB");
+
+                        int w_idx = j * head_dim + h;
+                        PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= head_dim * head_dim,
+                                           "DIAG24: inter_w index OOB");
+
+                        float p_val = perception[j];
+                        half w_half = inter_w[w_idx];
+                        float w_float = __half2float(w_half);
+
+                        // DIAG 26: Check values in inner loop (sample)
+                        if (h == 0 && j == 0 && loop_iter == 0 && tid == 0) {
+                            printf("DIAG26_INTER_SAMPLE blk=%d p=%.4f w=%.4f\n",
+                                   blockIdx.x, p_val, w_float);
+                        }
+
+                        acc += p_val * w_float;
                     }
+
                     pre_gelu_vals[h] = acc;
+
+                    // DIAG 27: Check pre-gelu value
+                    if (isnan(acc) || isinf(acc)) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG27_PREGELU_BAD blk=%d h=%d acc=%.6f\n", blockIdx.x, h, acc);
+                        }
+                    }
+
                     float gelu = activation_gelu(acc);
+
+                    // DIAG 28: Check gelu result
+                    if (isnan(gelu) || isinf(gelu)) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG28_GELU_BAD blk=%d h=%d gelu=%.6f\n", blockIdx.x, h, gelu);
+                        }
+                    }
+
                     interaction[h] = gelu;
                     interaction_sum += fabsf(gelu);
                 }
-                if (tid == 0 && work_idx == 0) printf("V:CA_INTER_DONE blk=%d\n", blockIdx.x);
 
+                long long t_inter_end = clock64();
+                long long inter_time_us = (t_inter_end - t_inter_start) / 1000;
+
+                // DIAG 29: After interaction - KEY TIMING FOR hdim COMPARISON
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG29_POST_INTER blk=%d iter=%d us=%lld hdim=%d i0=%.4f sum=%.4f\n",
+                           blockIdx.x, loop_iter, inter_time_us, head_dim, interaction[0], interaction_sum);
+                }
+
+                // DIAG 30: Warn if interaction taking too long (potential hang indicator)
+                if (inter_time_us > 100000 && tid == 0) { // > 100ms
+                    printf("DIAG30_INTER_SLOW blk=%d iter=%d us=%lld hdim=%d\n",
+                           blockIdx.x, loop_iter, inter_time_us, head_dim);
+                }
+
+                // ============ OUTPUT COMPUTATION ============
                 float output[MAX_CHANNELS];
+
+                long long t_out_start = clock64();
+
+                // DIAG 31: Before output
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG31_PRE_OUT blk=%d iter=%d\n", blockIdx.x, loop_iter);
+                }
+
                 for (int c = 0; c < channels; c++) {
+                    PROVENANCE_FATAL_IF(c < 0 || c >= MAX_CHANNELS, "DIAG31: output c OOB");
+
                     float acc = 0.0f;
                     for (int h = 0; h < head_dim; h++) {
-                        acc += interaction[h] * __half2float(val_w[h * channels + c]);
+                        int w_idx = h * channels + c;
+                        PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= head_dim * channels,
+                                           "DIAG31: val_w index OOB");
+
+                        float i_val = interaction[h];
+                        half w_half = val_w[w_idx];
+                        float w_float = __half2float(w_half);
+                        acc += i_val * w_float;
                     }
                     output[c] = acc;
-                }
-                if (tid == 0 && work_idx == 0) printf("V:CA_VAL_DONE blk=%d\n", blockIdx.x);
 
-                float gate = activation_sigmoid(interaction_sum / (float)head_dim - arch.ca_gate_center);
+                    // DIAG 32: Check output value
+                    if (isnan(output[c]) || isinf(output[c])) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG32_OUT_BAD blk=%d c=%d out=%.6f\n", blockIdx.x, c, output[c]);
+                        }
+                    }
+                }
+
+                // DIAG 33: Gate computation
+                float gate_input = interaction_sum / (float)head_dim - arch.ca_gate_center;
+                float gate = activation_sigmoid(gate_input);
+
+                if (isnan(gate) || isinf(gate)) {
+                    if (tid == 0 && loop_iter < 2) {
+                        printf("DIAG33_GATE_BAD blk=%d gate_in=%.6f gate=%.6f\n",
+                               blockIdx.x, gate_input, gate);
+                    }
+                }
+
+                long long t_out_end = clock64();
+
+                // DIAG 34: After output
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG34_POST_OUT blk=%d iter=%d us=%lld o0=%.4f gate=%.4f\n",
+                           blockIdx.x, loop_iter, (t_out_end - t_out_start)/1000, output[0], gate);
+                }
+
+                // ============ SAVE ACTIVATIONS ============
+                long long t_save_start = clock64();
 
                 int saved_base = batch_id * num_heads * cells_per_grid * head_dim +
                                 head_id * cells_per_grid * head_dim +
                                 cell_y * grid_size * head_dim +
                                 cell_x * head_dim;
-                for (int h = 0; h < head_dim; h++) {
-                    perception_saved[saved_base + h] = perception[h];
-                    interaction_saved[saved_base + h] = interaction[h];
-                    pre_gelu_saved[saved_base + h] = pre_gelu_vals[h];
+                int max_saved_idx = saved_base + head_dim - 1;
+                int expected_saved_size = batch_size * num_heads * cells_per_grid * head_dim;
+
+                // DIAG 35: Validate save indices
+                PROVENANCE_FATAL_IF(saved_base < 0, "DIAG35: saved_base negative");
+                PROVENANCE_FATAL_IF(max_saved_idx >= expected_saved_size, "DIAG35: saved OOB");
+
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG35_PRE_SAVE blk=%d iter=%d base=%d max=%d exp=%d\n",
+                           blockIdx.x, loop_iter, saved_base, max_saved_idx, expected_saved_size);
                 }
-                if (tid == 0 && work_idx == 0) printf("V:CA_SAVE_DONE blk=%d\n", blockIdx.x);
+
+                // DIAG 36: Save perception
+                for (int h = 0; h < head_dim; h++) {
+                    int idx = saved_base + h;
+                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG36: perc_save idx OOB");
+                    perception_saved[idx] = perception[h];
+                }
+
+                // DIAG 37: Verify perception save
+                if (tid == 0 && loop_iter == 0) {
+                    float verify = perception_saved[saved_base];
+                    printf("DIAG37_PERC_SAVE_VERIFY blk=%d wrote=%.4f read=%.4f\n",
+                           blockIdx.x, perception[0], verify);
+                }
+
+                // DIAG 38: Save interaction
+                for (int h = 0; h < head_dim; h++) {
+                    int idx = saved_base + h;
+                    interaction_saved[idx] = interaction[h];
+                }
+
+                // DIAG 39: Save pre_gelu
+                for (int h = 0; h < head_dim; h++) {
+                    int idx = saved_base + h;
+                    pre_gelu_saved[idx] = pre_gelu_vals[h];
+                }
+
+                long long t_save_end = clock64();
+
+                // DIAG 40: After saves
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG40_POST_SAVE blk=%d iter=%d us=%lld\n",
+                           blockIdx.x, loop_iter, (t_save_end - t_save_start)/1000);
+                }
+
+                // ============ WRITE CA OUTPUT ============
+                long long t_caout_start = clock64();
 
                 int out_idx = batch_id * num_heads * cells_per_grid * channels +
                              head_id * cells_per_grid * channels +
                              cell_y * grid_size * channels +
                              cell_x * channels;
-                for (int c = 0; c < channels; c++) {
-                    float input_val = neighborhood[1][1][c];
-                    ca_output[out_idx + c] = input_val * (1.0f - gate) + output[c] * gate;
+                int max_out_idx = out_idx + channels - 1;
+                int expected_out_size = batch_size * num_heads * cells_per_grid * channels;
+
+                // DIAG 41: Validate output indices
+                PROVENANCE_FATAL_IF(out_idx < 0, "DIAG41: out_idx negative");
+                PROVENANCE_FATAL_IF(max_out_idx >= expected_out_size, "DIAG41: ca_out OOB");
+
+                // DIAG 42: Before ca_output write
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG42_PRE_CAOUT blk=%d iter=%d idx=%d max=%d exp=%d\n",
+                           blockIdx.x, loop_iter, out_idx, max_out_idx, expected_out_size);
                 }
-                if (tid == 0 && work_idx == 0) printf("V:CA_OUT_DONE blk=%d\n", blockIdx.x);
+
+                for (int c = 0; c < channels; c++) {
+                    int idx = out_idx + c;
+                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_out_size, "DIAG42: ca_out write OOB");
+
+                    float input_val = neighborhood[1][1][c];
+                    float out_val = input_val * (1.0f - gate) + output[c] * gate;
+
+                    // DIAG 43: Check output value
+                    if (isnan(out_val) || isinf(out_val)) {
+                        if (tid == 0 && loop_iter < 2) {
+                            printf("DIAG43_CAOUT_BAD blk=%d c=%d in=%.4f out=%.4f gate=%.4f\n",
+                                   blockIdx.x, c, input_val, output[c], gate);
+                        }
+                    }
+
+                    ca_output[idx] = out_val;
+                }
+
+                long long t_caout_end = clock64();
+
+                // DIAG 44: After ca_output write
+                if (tid == 0 && loop_iter % 20 == 0) {
+                    printf("DIAG44_POST_CAOUT blk=%d iter=%d us=%lld\n",
+                           blockIdx.x, loop_iter, (t_caout_end - t_caout_start)/1000);
+                }
+
+                // ============ ITERATION COMPLETE ============
+                long long iter_end = clock64();
+                long long iter_total_us = (iter_end - iter_start) / 1000;
+                long long total_ms = (iter_end - kernel_start_clock) / 1000000;
+
+                // DIAG 45: Comprehensive timing breakdown every 10 iterations
+                if (tid == 0 && loop_iter % 10 == 0) {
+                    long long neigh_us = (t_neigh_end - t_neigh_start) / 1000;
+                    long long perc_us = (t_perc_end - t_perc_start) / 1000;
+                    long long out_us = (t_out_end - t_out_start) / 1000;
+                    long long save_us = (t_save_end - t_save_start) / 1000;
+                    long long caout_us = (t_caout_end - t_caout_start) / 1000;
+                    printf("DIAG45_TIMING blk=%d iter=%d neigh=%lld perc=%lld inter=%lld out=%lld save=%lld caout=%lld total=%lld ms=%lld\n",
+                           blockIdx.x, loop_iter, neigh_us, perc_us, inter_time_us, out_us, save_us, caout_us, iter_total_us, total_ms);
+                }
+
+                // DIAG 46: Warn if iteration took too long
+                if (iter_total_us > 500000 && tid == 0) { // > 500ms
+                    printf("DIAG46_ITER_SLOW blk=%d iter=%d us=%lld hdim=%d\n",
+                           blockIdx.x, loop_iter, iter_total_us, head_dim);
+                }
+
+                // DIAG 47: Stack canary check
+                if (stack_canary_start != 3.14159265f || stack_canary_mid1 != 2.71828f ||
+                    stack_canary_mid2 != 1.41421f || stack_canary_mid3 != 1.73205f) {
+                    printf("DIAG47_STACK_CORRUPT blk=%d tid=%d iter=%d\n", blockIdx.x, tid, loop_iter);
+                }
+
+                // DIAG 48: Check for NaN/Inf summary
+                int any_nan = isnan(perception[0]) || isnan(interaction[0]) || isnan(output[0]) || isnan(gate);
+                int any_inf = isinf(perception[0]) || isinf(interaction[0]) || isinf(output[0]) || isinf(gate);
+                if (any_nan || any_inf) {
+                    printf("DIAG48_NANCHECK blk=%d tid=%d iter=%d nan=%d inf=%d\n",
+                           blockIdx.x, tid, loop_iter, any_nan, any_inf);
+                }
+
+                // Update warp progress tracking
+                s_warp_last_iter[tid / 32] = loop_iter;
+
+                last_completed_iter = loop_iter;
+                prev_iter_end = iter_end;
+
+                // DIAG 49: Per-thread completion tracking (sample threads)
+                if ((tid == 0 || tid == 127 || tid == 255) && loop_iter % 50 == 0) {
+                    printf("DIAG49_THREAD_PROG blk=%d tid=%d iter=%d work_idx=%d next=%d\n",
+                           blockIdx.x, tid, loop_iter, work_idx, work_idx + blockDim.x);
+                }
             }
-            if (tid == 0) printf("V:CA_LOOP_EXIT blk=%d\n", blockIdx.x);
+
+            // ============ LOOP EXIT ============
+            long long loop_end = clock64();
+            long long total_loop_ms = (loop_end - kernel_start_clock) / 1000000;
+
+            // DIAG 50: Loop exit for this thread
+            if (tid == 0 || tid == 127 || tid == 255) {
+                printf("DIAG50_THREAD_EXIT blk=%d tid=%d final_iter=%d expected=%d ms=%lld hdim=%d\n",
+                       blockIdx.x, tid, last_completed_iter, expected_iters - 1, total_loop_ms, head_dim);
+            }
+
+            // DIAG 51: Warp-level completion
+            unsigned int completed_mask = __ballot_sync(0xFFFFFFFF, 1);
+            if (tid % 32 == 0) {
+                printf("DIAG51_WARP blk=%d warp=%d mask=0x%08X last_iter=%d\n",
+                       blockIdx.x, tid/32, completed_mask, s_warp_last_iter[tid/32]);
+            }
+
+            // DIAG 52: Block-level summary (only tid 0)
+            if (tid == 0) {
+                printf("DIAG52_BLOCK_DONE blk=%d iters=%d expected=%d ms=%lld hdim=%d SUCCESS\n",
+                       blockIdx.x, last_completed_iter + 1, expected_iters, total_loop_ms, head_dim);
+            }
+
+            // Final stack canary check
+            PROVENANCE_FATAL_IF(stack_canary_start != 3.14159265f, "DIAG_FINAL: stack canary start corrupted");
+        }
+
+        // DIAG 53: Before first __syncthreads() after loop
+        if (tid == 0) {
+            long long sync1_start = clock64();
+            printf("DIAG53_PRE_SYNC1 blk=%d clock=%lld\n", blockIdx.x, sync1_start);
         }
         __syncthreads();
+        if (tid == 0) {
+            long long sync1_end = clock64();
+            printf("DIAG53_POST_SYNC1 blk=%d clock=%lld\n", blockIdx.x, sync1_end);
+        }
+
         if (tid == 0) printf("V:CA_FWD_DONE blk=%d\n", blockIdx.x);
 
         __syncthreads();
@@ -770,6 +1328,9 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
         }
         __syncthreads();
         if (tid == 0) printf("V:FLOW_DONE blk=%d\n", blockIdx.x);
+
+        grid_barrier(gridDim.x);
+        if (tid == 0) printf("V:POST_FLOW_BARRIER blk=%d\n", blockIdx.x);
 
         float* ca_output_grad = nullptr;
 
@@ -991,10 +1552,20 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_heads_local = arch.num_heads;
             int spatial_size = grid_size * grid_size;
 
-            
+            DEVICE_FATAL_IF(organism->buffers->batched_ca_output == nullptr, "GRAD: batched_ca_output is null");
+            DEVICE_FATAL_IF(organism->buffers->ca_output_grad_buffer == nullptr, "GRAD: ca_output_grad_buffer is null");
+            DEVICE_FATAL_IF(s_wave_offsets.ca_output_offset < 0, "GRAD: ca_output_offset negative");
             float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             ca_output_grad = organism->buffers->ca_output_grad_buffer + s_wave_offsets.ca_output_offset;
 
+            DEVICE_FATAL_IF(organism->gradient_features_pool == nullptr, "GRAD: gradient_features_pool is null");
+            DEVICE_FATAL_IF(organism->gradient_logit_grads_pool == nullptr, "GRAD: gradient_logit_grads_pool is null");
+            DEVICE_FATAL_IF(organism->features_grad == nullptr, "GRAD: features_grad is null");
+            DEVICE_FATAL_IF(training_mode->classifier->fc_weights == nullptr, "GRAD: fc_weights is null");
+            DEVICE_FATAL_IF(organism->fc_weights_grad == nullptr, "GRAD: fc_weights_grad is null");
+            DEVICE_FATAL_IF(organism->fc_bias_grad == nullptr, "GRAD: fc_bias_grad is null");
+            DEVICE_FATAL_IF(training_mode->classifier->pooling_weights == nullptr, "GRAD: pooling_weights is null");
+            DEVICE_FATAL_IF(organism->pooling_weights_grad == nullptr, "GRAD: pooling_weights_grad is null");
             float* features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
             float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
             float* features_grad = organism->features_grad + entry_idx * batch_size * num_features;
@@ -1088,18 +1659,29 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int num_cells = arch.grid_size * arch.grid_size;
             int total_samples = training_mode->batch_size * num_cells;
 
-            
+            DEVICE_FATAL_IF(organism->buffers == nullptr, "BWD: organism->buffers is null");
+            DEVICE_FATAL_IF(organism->buffers->dL_dperception_buffer == nullptr, "BWD: dL_dperception_buffer is null");
+            DEVICE_FATAL_IF(organism->buffers->dL_dinteraction_buffer == nullptr, "BWD: dL_dinteraction_buffer is null");
+            DEVICE_FATAL_IF(s_wave_offsets.activations_offset < 0, "BWD: activations_offset negative");
             float* dL_dperception = organism->buffers->dL_dperception_buffer + s_wave_offsets.activations_offset;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + s_wave_offsets.activations_offset;
             if (tid == 0) printf("V:BWD_ENTER blk=%d\n", blockIdx.x);
 
             {
 
-            
+            if (tid == 0) printf("V:BWD_FATAL_CHECKS_START blk=%d\n", blockIdx.x);
+            DEVICE_FATAL_IF(organism->buffers->backward_workspace == nullptr, "BWD: backward_workspace is null");
+            DEVICE_FATAL_IF(s_wave_offsets.backward_ws_offset < 0, "BWD: backward_ws_offset negative");
             char* backward_ws_base = organism->buffers->backward_workspace + s_wave_offsets.backward_ws_offset;
             BackwardWorkspaceLayout ws_layout = compute_backward_ws_layout(entry);
+            DEVICE_FATAL_IF(ws_layout.fp16_a_offset < 0, "BWD: ws_layout.fp16_a_offset negative");
+            DEVICE_FATAL_IF(ws_layout.fp16_b_offset < 0, "BWD: ws_layout.fp16_b_offset negative");
+            DEVICE_FATAL_IF(ws_layout.dW_offset < 0, "BWD: ws_layout.dW_offset negative");
+            DEVICE_FATAL_IF(ws_layout.dI_offset < 0, "BWD: ws_layout.dI_offset negative");
+            DEVICE_FATAL_IF(ws_layout.W_T_offset < 0, "BWD: ws_layout.W_T_offset negative");
+            DEVICE_FATAL_IF(ws_layout.im2col_offset < 0, "BWD: ws_layout.im2col_offset negative");
+            DEVICE_FATAL_IF(ws_layout.dpregelu_offset < 0, "BWD: ws_layout.dpregelu_offset negative");
 
-            
             half* ws_fp16_a = (half*)(backward_ws_base + ws_layout.fp16_a_offset);
             half* ws_fp16_b = (half*)(backward_ws_base + ws_layout.fp16_b_offset);
             float* ws_dW = (float*)(backward_ws_base + ws_layout.dW_offset);
@@ -1108,7 +1690,19 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_im2col = (float*)(backward_ws_base + ws_layout.im2col_offset);
             float* ws_dpregelu = (float*)(backward_ws_base + ws_layout.dpregelu_offset);
 
-            
+            DEVICE_FATAL_IF(ca_state == nullptr, "BWD: ca_state is null");
+            DEVICE_FATAL_IF(ca_state->perception_saved == nullptr, "BWD: perception_saved is null");
+            DEVICE_FATAL_IF(ca_state->interaction_saved == nullptr, "BWD: interaction_saved is null");
+            DEVICE_FATAL_IF(ca_state->pre_gelu_saved == nullptr, "BWD: pre_gelu_saved is null");
+            DEVICE_FATAL_IF(ca_state->value_weights == nullptr, "BWD: value_weights is null");
+            DEVICE_FATAL_IF(ca_state->interaction_weights == nullptr, "BWD: interaction_weights is null");
+            DEVICE_FATAL_IF(ca_state->perception_weights == nullptr, "BWD: perception_weights is null");
+            DEVICE_FATAL_IF(ca_state->tape.grad_buffer == nullptr, "BWD: tape.grad_buffer is null");
+            DEVICE_FATAL_IF(param_map == nullptr, "BWD: param_map is null");
+            DEVICE_FATAL_IF(param_map->value_start == nullptr, "BWD: param_map->value_start is null");
+            DEVICE_FATAL_IF(param_map->interaction_start == nullptr, "BWD: param_map->interaction_start is null");
+            DEVICE_FATAL_IF(param_map->perception_start == nullptr, "BWD: param_map->perception_start is null");
+            DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "BWD: batch_ca_states_pool is null");
             float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
             float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
             float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
@@ -1126,21 +1720,27 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             int lane_id = tid % WARP_SIZE;
             int num_warps = blockDim.x / WARP_SIZE;
 
-            
+            DEVICE_FATAL_IF(arch.num_heads <= 0, "BWD: arch.num_heads <= 0");
+            DEVICE_FATAL_IF(arch.head_dim <= 0, "BWD: arch.head_dim <= 0");
+            DEVICE_FATAL_IF(arch.channels <= 0, "BWD: arch.channels <= 0");
+            DEVICE_FATAL_IF(total_samples <= 0, "BWD: total_samples <= 0");
+            DEVICE_FATAL_IF(ca_output_grad == nullptr, "BWD: ca_output_grad is null");
+            if (tid == 0) printf("V:BWD_FATAL_CHECKS_DONE blk=%d heads=%d hdim=%d ch=%d\n", blockIdx.x, arch.num_heads, arch.head_dim, arch.channels);
+
             int chunk_ws_a_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_b_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
 
-            
             {
                 int total_dW = arch.num_heads * arch.head_dim * arch.channels;
+                DEVICE_FATAL_IF(total_dW <= 0, "BWD: total_dW overflow or zero");
                 for (int idx = tid; idx < total_dW; idx += blockDim.x) {
                     ws_dW[idx] = 0.0f;
                 }
             }
             __syncthreads();
 
-            
             int num_chunks = (total_samples + BACKWARD_CHUNK_SAMPLES - 1) / BACKWARD_CHUNK_SAMPLES;
+            DEVICE_FATAL_IF(num_chunks <= 0, "BWD: num_chunks <= 0");
             for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
                 int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
                 int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
@@ -1148,9 +1748,12 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CHUNK0 blk=%d aligned=%d\n", blockIdx.x, chunk_samples_aligned);
+
                 {
                     int total_I = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_src_I = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
+                    int max_dst_I = arch.num_heads * chunk_ws_a_stride;
                     for (int idx = tid; idx < total_I; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.head_dim);
                         int remainder = idx % (chunk_samples_aligned * arch.head_dim);
@@ -1161,14 +1764,21 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int cell_id = global_sample % num_cells;
                         int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
                         int dst_idx = head_id * chunk_ws_a_stride + sample_in_chunk * arch.head_dim + dim_idx;
-                        ws_fp16_a[dst_idx] = __float2half(interaction_saved[src_idx]);
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_I, "BWD interaction_saved OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_I, "BWD ws_fp16_a OOB");
+                        float src_val = interaction_saved[src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD interaction_saved NaN/Inf");
+                        ws_fp16_a[dst_idx] = __float2half(src_val);
                     }
                 }
                 __syncthreads();
 
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_I_DONE blk=%d\n", blockIdx.x);
+
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    int max_src_V = arch.num_heads * training_mode->batch_size * num_cells * arch.channels;
+                    int max_dst_V = arch.num_heads * chunk_ws_b_stride;
                     for (int idx = tid; idx < total_V; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.channels);
                         int remainder = idx % (chunk_samples_aligned * arch.channels);
@@ -1179,16 +1789,36 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int cell_id = global_sample % num_cells;
                         int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
                         int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
-                        ws_fp16_b[dst_idx] = __float2half(ca_output_grad[src_idx]);
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_V, "BWD ca_output_grad OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_V, "BWD ws_fp16_b OOB");
+                        float src_val = ca_output_grad[src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD ca_output_grad NaN/Inf");
+                        ws_fp16_b[dst_idx] = __float2half(src_val);
                     }
                 }
                 __syncthreads();
 
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_V_DONE blk=%d\n", blockIdx.x);
+
                 
                 {
+                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.head_dim, "arch.head_dim");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.channels, "arch.channels");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.num_heads, "arch.num_heads");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_ws_a_stride, "chunk_ws_a_stride");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_ws_b_stride, "chunk_ws_b_stride");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(ws_dW_value_stride, "ws_dW_value_stride");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_samples_aligned, "chunk_samples_aligned");
+                    PROVENANCE_FATAL_IF(ws_fp16_a == nullptr, "ws_fp16_a null");
+                    PROVENANCE_FATAL_IF(ws_fp16_b == nullptr, "ws_fp16_b null");
+                    PROVENANCE_FATAL_IF(ws_dW == nullptr, "ws_dW null");
+
                     int tiles_M = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = tiles_M * tiles_N * arch.num_heads;
+                    int max_ws_fp16_a = arch.num_heads * chunk_ws_a_stride;
+                    int max_ws_fp16_b = arch.num_heads * chunk_ws_b_stride;
+                    int max_ws_dW = arch.num_heads * ws_dW_value_stride;
 
                     for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
                         int head_id = tile_idx / (tiles_M * tiles_N);
@@ -1199,48 +1829,78 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int tile_row = warpM * WMMA_TILE_DIM;
                         int tile_col = warpN * WMMA_TILE_DIM;
 
+                        PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "head_id OOB");
+
                         if (tile_row < arch.head_dim && tile_col < arch.channels) {
-                            const half* A_head = ws_fp16_a + head_id * chunk_ws_a_stride;
-                            const half* B_head = ws_fp16_b + head_id * chunk_ws_b_stride;
-                            float* C_head = ws_dW + head_id * ws_dW_value_stride;
+                            int A_base_offset = head_id * chunk_ws_a_stride;
+                            int B_base_offset = head_id * chunk_ws_b_stride;
+                            int C_base_offset = head_id * ws_dW_value_stride;
+                            PROVENANCE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_a, "A_base OOB");
+                            PROVENANCE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_fp16_b, "B_base OOB");
+                            PROVENANCE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dW, "C_base OOB");
+
+                            const half* A_head = ws_fp16_a + A_base_offset;
+                            const half* B_head = ws_fp16_b + B_base_offset;
+                            float* C_head = ws_dW + C_base_offset;
+
+                            int C_tile_offset = tile_row * arch.channels + tile_col;
+                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.channels + (tile_col + WMMA_TILE_DIM - 1);
+                            PROVENANCE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= ws_dW_value_stride, "C_tile OOB");
 
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-                            
-                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.channels + tile_col, arch.channels, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + C_tile_offset, arch.channels, nvcuda::wmma::mem_row_major);
 
                             for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * arch.head_dim + tile_row, arch.head_dim);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.channels + tile_col, arch.channels);
+                                int A_tile_offset = k_tile * arch.head_dim + tile_row;
+                                int A_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_row + WMMA_TILE_DIM - 1);
+                                int B_tile_offset = k_tile * arch.channels + tile_col;
+                                int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.channels + (tile_col + WMMA_TILE_DIM - 1);
+                                PROVENANCE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_a_stride, "A_tile OOB");
+                                PROVENANCE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= chunk_ws_b_stride, "B_tile OOB");
+                                PROVENANCE_FATAL_IF(A_base_offset + A_tile_max >= max_ws_fp16_a, "A_abs OOB");
+                                PROVENANCE_FATAL_IF(B_base_offset + B_tile_max >= max_ws_fp16_b, "B_abs OOB");
+                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.head_dim);
+                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.channels);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.channels + tile_col, c_frag, arch.channels, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.channels, nvcuda::wmma::mem_row_major);
                         }
                     }
                 }
                 __syncthreads();
-            } 
+            }
 
-            
+            if (tid == 0) printf("V:BWD_VALUE_GRAD_COPY blk=%d\n", blockIdx.x);
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.channels;
+                int max_ws_dW = arch.num_heads * ws_dW_value_stride;
+                int max_grad_buffer = ca_state->tape.capacity;
+                PROVENANCE_FATAL_IF(total_grads <= 0, "BWD value grad: total_grads overflow");
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
                     int head_id = idx / (arch.head_dim * arch.channels);
                     int local_idx = idx % (arch.head_dim * arch.channels);
                     int src_idx = head_id * ws_dW_value_stride + local_idx;
                     int dst_idx = param_map->value_start[head_id] + local_idx;
-                    ca_state->tape.grad_buffer[dst_idx] = ws_dW[src_idx];
+                    PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD value grad: head_id OOB");
+                    PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_ws_dW, "BWD value grad: src_idx OOB");
+                    PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_grad_buffer, "BWD value grad: dst_idx OOB");
+                    float src_val = ws_dW[src_idx];
+                    PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD value grad: ws_dW NaN/Inf");
+                    ca_state->tape.grad_buffer[dst_idx] = src_val;
                 }
             }
             __syncthreads();
 
-            
+            if (tid == 0) printf("V:BWD_VALUE_TRANSPOSE blk=%d\n", blockIdx.x);
             {
                 int t_tiles_x = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int t_tiles_y = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int total_tile_elements = t_tiles_x * t_tiles_y * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
+                int max_W_per_head = arch.head_dim * arch.channels;
+                int max_W_T_per_head = ws_W_T_value_stride;
 
                 for (int work_idx = tid; work_idx < total_tile_elements; work_idx += blockDim.x) {
                     int elements_per_tile = WMMA_TILE_DIM * WMMA_TILE_DIM;
@@ -1260,18 +1920,27 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int c = by + local_y;
 
                     if (c < arch.channels && h < arch.head_dim) {
+                        int W_src_idx = h * arch.channels + c;
+                        int W_T_dst_idx = c * arch.head_dim + h;
+                        PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD val transpose: head_id OOB");
+                        PROVENANCE_FATAL_IF(W_src_idx < 0 || W_src_idx >= max_W_per_head, "BWD val transpose: src OOB");
+                        PROVENANCE_FATAL_IF(W_T_dst_idx < 0 || W_T_dst_idx >= max_W_T_per_head, "BWD val transpose: dst OOB");
                         const half* W_head = ca_state->value_weights + head_id * arch.head_dim * arch.channels;
                         half* W_T_head = ws_W_T + head_id * ws_W_T_value_stride;
-                        W_T_head[c * arch.head_dim + h] = W_head[h * arch.channels + c];
+                        half w_val = W_head[W_src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(__half2float(w_val)), "BWD val transpose: W NaN/Inf");
+                        W_T_head[W_T_dst_idx] = w_val;
                     }
                 }
             }
             __syncthreads();
 
-            
+            if (tid == 0) printf("V:BWD_INTER_TRANSPOSE blk=%d\n", blockIdx.x);
             {
                 int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int total_tile_elements = dW_tiles * dW_tiles * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
+                int max_W_per_head = arch.head_dim * arch.head_dim;
+                int max_W_T_per_head = ws_W_T_interaction_stride;
 
                 for (int work_idx = tid; work_idx < total_tile_elements; work_idx += blockDim.x) {
                     int elements_per_tile = WMMA_TILE_DIM * WMMA_TILE_DIM;
@@ -1291,19 +1960,27 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     int y = by + local_y;
 
                     if (y < arch.head_dim && x < arch.head_dim) {
+                        int W_src_idx = y * arch.head_dim + x;
+                        int W_T_dst_idx = x * arch.head_dim + y;
+                        PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD inter transpose: head_id OOB");
+                        PROVENANCE_FATAL_IF(W_src_idx < 0 || W_src_idx >= max_W_per_head, "BWD inter transpose: src OOB");
+                        PROVENANCE_FATAL_IF(W_T_dst_idx < 0 || W_T_dst_idx >= max_W_T_per_head, "BWD inter transpose: dst OOB");
                         const half* W_head = ca_state->interaction_weights + head_id * arch.head_dim * arch.head_dim;
                         half* W_T_head = ws_W_T + arch.num_heads * ws_W_T_value_stride + head_id * ws_W_T_interaction_stride;
-                        W_T_head[x * arch.head_dim + y] = W_head[y * arch.head_dim + x];
+                        half w_val = W_head[W_src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(__half2float(w_val)), "BWD inter transpose: W NaN/Inf");
+                        W_T_head[W_T_dst_idx] = w_val;
                     }
                 }
             }
             __syncthreads();
 
-            
+            if (tid == 0) printf("V:BWD_ZERO_DW blk=%d\n", blockIdx.x);
             {
                 int total_interaction = arch.num_heads * arch.head_dim * arch.head_dim;
                 int total_perception = arch.num_heads * arch.channels * arch.head_dim;
                 int total_zero = total_interaction + total_perception;
+                PROVENANCE_FATAL_IF(total_zero <= 0, "BWD zero dW: total_zero overflow");
                 float* ws_dW_interaction = ws_dW + arch.num_heads * ws_dW_value_stride;
                 for (int idx = tid; idx < total_zero; idx += blockDim.x) {
                     ws_dW_interaction[idx] = 0.0f;
@@ -1311,7 +1988,6 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-            
             int chunk_ws_dI_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_dpregelu_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_pooled_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
@@ -1319,27 +1995,31 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float* ws_dW_perception = ws_dW_interaction + arch.num_heads * ws_dW_interaction_stride;
             half* ws_W_T_interaction = ws_W_T + arch.num_heads * ws_W_T_value_stride;
 
-            
             float* d_ca_input = organism->batch_ca_input_grads ?
                 organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset : nullptr;
             if (d_ca_input != nullptr) {
-                for (int idx = tid; idx < total_samples * arch.channels; idx += blockDim.x) {
+                int max_d_ca = total_samples * arch.channels;
+                PROVENANCE_FATAL_IF(max_d_ca <= 0, "BWD d_ca_input: max_d_ca overflow");
+                for (int idx = tid; idx < max_d_ca; idx += blockDim.x) {
                     d_ca_input[idx] = 0.0f;
                 }
                 __syncthreads();
             }
+            if (tid == 0) printf("V:BWD_SETUP_DONE blk=%d d_ca=%p\n", blockIdx.x, d_ca_input);
 
-            
             for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
                 int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
                 int chunk_samples = min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start);
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CHUNK2_ENTER blk=%d\n", blockIdx.x);
+
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    int max_src_V = arch.num_heads * training_mode->batch_size * num_cells * arch.channels;
+                    int max_dst_V = arch.num_heads * chunk_ws_b_stride;
+                    PROVENANCE_FATAL_IF(total_V <= 0, "BWD chunk2 V: total overflow");
                     for (int idx = tid; idx < total_V; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.channels);
                         int remainder = idx % (chunk_samples_aligned * arch.channels);
@@ -1350,16 +2030,23 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int cell_id = global_sample % num_cells;
                         int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
                         int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
-                        ws_fp16_b[dst_idx] = __float2half(ca_output_grad[src_idx]);
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_V, "BWD chunk2: src_idx OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_V, "BWD chunk2: dst_idx OOB");
+                        float val = ca_output_grad[src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD chunk2: ca_output_grad NaN/Inf");
+                        ws_fp16_b[dst_idx] = __float2half(val);
                     }
                 }
                 __syncthreads();
 
-                
+
                 {
                     int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = tiles_M * tiles_N * arch.num_heads;
+                    int max_ws_fp16_b_dI = arch.num_heads * chunk_ws_b_stride;
+                    int max_ws_W_T = arch.num_heads * ws_W_T_value_stride;
+                    int max_ws_dI_total = arch.num_heads * chunk_ws_dI_stride;
 
                     for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
                         int head_id = tile_idx / (tiles_M * tiles_N);
@@ -1369,10 +2056,23 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int tile_row = warpM * WMMA_TILE_DIM;
                         int tile_col = warpN * WMMA_TILE_DIM;
 
+                        DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA dI: head_id OOB");
+
                         if (tile_row < chunk_samples_aligned && tile_col < arch.head_dim) {
-                            const half* A_head = ws_fp16_b + head_id * chunk_ws_b_stride;
-                            const half* B_head = ws_W_T + head_id * ws_W_T_value_stride;
-                            float* C_head = ws_dI + head_id * chunk_ws_dI_stride;
+                            int A_base_offset = head_id * chunk_ws_b_stride;
+                            int B_base_offset = head_id * ws_W_T_value_stride;
+                            int C_base_offset = head_id * chunk_ws_dI_stride;
+                            DEVICE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_b_dI, "WMMA dI: A_base OOB");
+                            DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_W_T, "WMMA dI: B_base OOB");
+                            DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dI_total, "WMMA dI: C_base OOB");
+
+                            const half* A_head = ws_fp16_b + A_base_offset;
+                            const half* B_head = ws_W_T + B_base_offset;
+                            float* C_head = ws_dI + C_base_offset;
+
+                            int C_tile_offset = tile_row * arch.head_dim + tile_col;
+                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                            DEVICE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= chunk_ws_dI_stride, "WMMA dI: C_tile OOB");
 
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
@@ -1381,20 +2081,30 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                             for (int k_tile = 0; k_tile < arch.channels; k_tile += WMMA_TILE_DIM) {
                                 if (k_tile + WMMA_TILE_DIM <= arch.channels) {
-                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.channels + k_tile, arch.channels);
-                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                    int A_tile_offset = tile_row * arch.channels + k_tile;
+                                    int A_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.channels + (k_tile + WMMA_TILE_DIM - 1);
+                                    int B_tile_offset = k_tile * arch.head_dim + tile_col;
+                                    int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                                    DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_b_stride, "WMMA dI: A_tile OOB");
+                                    DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= ws_W_T_value_stride, "WMMA dI: B_tile OOB");
+                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.channels);
+                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
                                     nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                                 }
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
                     }
                 }
                 __syncthreads();
 
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_DI_WRITE blk=%d\n", blockIdx.x);
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_ws_dI = arch.num_heads * chunk_ws_dI_stride;
+                    int max_out = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
+                    int max_saved = training_mode->batch_size * I_batch_stride + arch.num_heads * I_head_stride;
+                    int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
                     for (int idx = tid; idx < total_elem; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.head_dim);
                         int remainder = idx % (chunk_samples_aligned * arch.head_dim);
@@ -1407,19 +2117,30 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int ws_idx = head_id * chunk_ws_dI_stride + sample_in_chunk * arch.head_dim + dim_idx;
                         int out_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
                         int saved_idx = batch_id * I_batch_stride + head_id * I_head_stride + cell_id * arch.head_dim + dim_idx;
+                        int dpregelu_idx = head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx;
+
+                        PROVENANCE_FATAL_IF(ws_idx < 0 || ws_idx >= max_ws_dI, "BWD dI: ws_idx OOB");
+                        PROVENANCE_FATAL_IF(out_idx < 0 || out_idx >= max_out, "BWD dI: out_idx OOB");
+                        PROVENANCE_FATAL_IF(saved_idx < 0 || saved_idx >= max_saved, "BWD dI: saved_idx OOB");
+                        PROVENANCE_FATAL_IF(dpregelu_idx < 0 || dpregelu_idx >= max_dpregelu, "BWD dI: dpregelu_idx OOB");
 
                         float dL_dI_val = ws_dI[ws_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(dL_dI_val), "BWD dI: ws_dI NaN/Inf");
                         dL_dinteraction[out_idx] = dL_dI_val;
-                        ws_dpregelu[head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx] =
-                            activation_gelu_backward(pre_gelu_saved[saved_idx], dL_dI_val);
+                        float pre_val = pre_gelu_saved[saved_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(pre_val), "BWD dI: pre_gelu_saved NaN/Inf");
+                        float gelu_bwd = activation_gelu_backward(pre_val, dL_dI_val);
+                        PROVENANCE_FATAL_IF(!isfinite(gelu_bwd), "BWD dI: gelu_bwd NaN/Inf");
+                        ws_dpregelu[dpregelu_idx] = gelu_bwd;
                     }
                 }
                 __syncthreads();
 
-                
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_PERC_LOAD blk=%d\n", blockIdx.x);
                 {
                     int total_P = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_src_P = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
+                    int max_dst_P = arch.num_heads * chunk_ws_a_stride;
                     for (int idx = tid; idx < total_P; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.head_dim);
                         int remainder = idx % (chunk_samples_aligned * arch.head_dim);
@@ -1430,26 +2151,37 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int cell_id = global_sample % num_cells;
                         int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
                         int dst_idx = head_id * chunk_ws_a_stride + sample_in_chunk * arch.head_dim + dim_idx;
-                        ws_fp16_a[dst_idx] = __float2half(perception_saved[src_idx]);
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_P, "BWD perc: src_idx OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_P, "BWD perc: dst_idx OOB");
+                        float val = perception_saved[src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD perc: perception_saved NaN/Inf");
+                        ws_fp16_a[dst_idx] = __float2half(val);
                     }
                 }
-                
                 {
                     int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
+                    int max_dst_D = arch.num_heads * chunk_ws_a_stride;
                     for (int idx = tid; idx < total_D; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.head_dim);
                         int remainder = idx % (chunk_samples_aligned * arch.head_dim);
                         int src_idx = head_id * chunk_ws_dpregelu_stride + remainder;
                         int dst_idx = head_id * chunk_ws_a_stride + remainder;
-                        ws_fp16_b[dst_idx] = __float2half(ws_dpregelu[src_idx]);
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_dpregelu, "BWD D: src_idx OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_D, "BWD D: dst_idx OOB");
+                        float val = ws_dpregelu[src_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD D: ws_dpregelu NaN/Inf");
+                        ws_fp16_b[dst_idx] = __float2half(val);
                     }
                 }
                 __syncthreads();
 
-                
+
                 {
                     int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = dW_tiles * dW_tiles * arch.num_heads;
+                    int max_ws_fp16_a_inter = arch.num_heads * chunk_ws_a_stride;
+                    int max_ws_dW_inter = arch.num_heads * ws_dW_interaction_stride;
 
                     for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
                         int head_id = tile_idx / (dW_tiles * dW_tiles);
@@ -1459,32 +2191,54 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int tile_row = warpM * WMMA_TILE_DIM;
                         int tile_col = warpN * WMMA_TILE_DIM;
 
+                        DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA inter dW: head_id OOB");
+
                         if (tile_row < arch.head_dim && tile_col < arch.head_dim) {
-                            const half* A_head = ws_fp16_a + head_id * chunk_ws_a_stride;
-                            const half* B_head = ws_fp16_b + head_id * chunk_ws_a_stride;
-                            float* C_head = ws_dW_interaction + head_id * ws_dW_interaction_stride;
+                            int A_base_offset = head_id * chunk_ws_a_stride;
+                            int B_base_offset = head_id * chunk_ws_a_stride;
+                            int C_base_offset = head_id * ws_dW_interaction_stride;
+                            DEVICE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_a_inter, "WMMA inter dW: A_base OOB");
+                            DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_fp16_a_inter, "WMMA inter dW: B_base OOB");
+                            DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dW_inter, "WMMA inter dW: C_base OOB");
+
+                            const half* A_head = ws_fp16_a + A_base_offset;
+                            const half* B_head = ws_fp16_b + B_base_offset;
+                            float* C_head = ws_dW_interaction + C_base_offset;
+
+                            int C_tile_offset = tile_row * arch.head_dim + tile_col;
+                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                            DEVICE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= ws_dW_interaction_stride, "WMMA inter dW: C_tile OOB");
 
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.head_dim + tile_col, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + C_tile_offset, arch.head_dim, nvcuda::wmma::mem_row_major);
 
                             for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * arch.head_dim + tile_row, arch.head_dim);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                int A_tile_offset = k_tile * arch.head_dim + tile_row;
+                                int A_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_row + WMMA_TILE_DIM - 1);
+                                int B_tile_offset = k_tile * arch.head_dim + tile_col;
+                                int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                                DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_a_stride, "WMMA inter dW: A_tile OOB");
+                                DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= chunk_ws_a_stride, "WMMA inter dW: B_tile OOB");
+                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.head_dim);
+                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
                     }
                 }
                 __syncthreads();
 
-                
+
                 {
                     int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = tiles_M * tiles_N * arch.num_heads;
+                    int max_ws_fp16_b_dP = arch.num_heads * chunk_ws_a_stride;
+                    int max_ws_W_T_inter = arch.num_heads * ws_W_T_interaction_stride;
+                    int max_ws_dI_dP = arch.num_heads * chunk_ws_dI_stride;
 
                     for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
                         int head_id = tile_idx / (tiles_M * tiles_N);
@@ -1494,10 +2248,23 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int tile_row = warpM * WMMA_TILE_DIM;
                         int tile_col = warpN * WMMA_TILE_DIM;
 
+                        DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA dP: head_id OOB");
+
                         if (tile_row < chunk_samples_aligned && tile_col < arch.head_dim) {
-                            const half* A_head = ws_fp16_b + head_id * chunk_ws_a_stride;
-                            const half* B_head = ws_W_T_interaction + head_id * ws_W_T_interaction_stride;
-                            float* C_head = ws_dI + head_id * chunk_ws_dI_stride;
+                            int A_base_offset = head_id * chunk_ws_a_stride;
+                            int B_base_offset = head_id * ws_W_T_interaction_stride;
+                            int C_base_offset = head_id * chunk_ws_dI_stride;
+                            DEVICE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_b_dP, "WMMA dP: A_base OOB");
+                            DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_W_T_inter, "WMMA dP: B_base OOB");
+                            DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dI_dP, "WMMA dP: C_base OOB");
+
+                            const half* A_head = ws_fp16_b + A_base_offset;
+                            const half* B_head = ws_W_T_interaction + B_base_offset;
+                            float* C_head = ws_dI + C_base_offset;
+
+                            int C_tile_offset = tile_row * arch.head_dim + tile_col;
+                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                            DEVICE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= chunk_ws_dI_stride, "WMMA dP: C_tile OOB");
 
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
@@ -1506,20 +2273,29 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                             for (int k_tile = 0; k_tile < arch.head_dim; k_tile += WMMA_TILE_DIM) {
                                 if (k_tile + WMMA_TILE_DIM <= arch.head_dim) {
-                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * arch.head_dim + k_tile, arch.head_dim);
-                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                    int A_tile_offset = tile_row * arch.head_dim + k_tile;
+                                    int A_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (k_tile + WMMA_TILE_DIM - 1);
+                                    int B_tile_offset = k_tile * arch.head_dim + tile_col;
+                                    int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                                    DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_a_stride, "WMMA dP: A_tile OOB");
+                                    DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= ws_W_T_interaction_stride, "WMMA dP: B_tile OOB");
+                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.head_dim);
+                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
                                     nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                                 }
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
                     }
                 }
                 __syncthreads();
 
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_DP_WRITE blk=%d\n", blockIdx.x);
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_ws_dI = arch.num_heads * chunk_ws_dI_stride;
+                    int max_out = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
+                    int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
                     for (int idx = tid; idx < total_elem; idx += blockDim.x) {
                         int head_id = idx / (chunk_samples_aligned * arch.head_dim);
                         int remainder = idx % (chunk_samples_aligned * arch.head_dim);
@@ -1531,25 +2307,38 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
 
                         int ws_idx = head_id * chunk_ws_dI_stride + sample_in_chunk * arch.head_dim + dim_idx;
                         int out_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
+                        int dpregelu_idx = head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx;
+
+                        PROVENANCE_FATAL_IF(ws_idx < 0 || ws_idx >= max_ws_dI, "BWD dP: ws_idx OOB");
+                        PROVENANCE_FATAL_IF(out_idx < 0 || out_idx >= max_out, "BWD dP: out_idx OOB");
+                        PROVENANCE_FATAL_IF(dpregelu_idx < 0 || dpregelu_idx >= max_dpregelu, "BWD dP: dpregelu_idx OOB");
 
                         float dL_dP_val = ws_dI[ws_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(dL_dP_val), "BWD dP: ws_dI NaN/Inf");
                         dL_dperception[out_idx] = dL_dP_val;
                         float perc_val = perception_saved[out_idx];
-                        ws_dpregelu[head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx] =
-                            dL_dP_val * ((perc_val > 0.0f) ? 1.0f : 0.0f);
+                        PROVENANCE_FATAL_IF(!isfinite(perc_val), "BWD dP: perception_saved NaN/Inf");
+                        float relu_grad = dL_dP_val * ((perc_val > 0.0f) ? 1.0f : 0.0f);
+                        PROVENANCE_FATAL_IF(!isfinite(relu_grad), "BWD dP: relu_grad NaN/Inf");
+                        ws_dpregelu[dpregelu_idx] = relu_grad;
                     }
                 }
                 __syncthreads();
 
-                
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_IM2COL blk=%d\n", blockIdx.x);
                 {
+                    int max_input = training_mode->batch_size * arch.grid_size * arch.grid_size * arch.channels;
+                    int max_im2col = chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < chunk_samples_aligned; idx += blockDim.x) {
                         int global_sample = chunk_start + idx;
                         int batch_id = global_sample / num_cells;
                         int cell_idx = global_sample % num_cells;
                         int cell_y = cell_idx / arch.grid_size;
                         int cell_x = cell_idx % arch.grid_size;
+
+                        PROVENANCE_FATAL_IF(batch_id < 0 || batch_id >= training_mode->batch_size, "BWD im2col: batch_id OOB");
+                        PROVENANCE_FATAL_IF(cell_y < 0 || cell_y >= arch.grid_size, "BWD im2col: cell_y OOB");
+                        PROVENANCE_FATAL_IF(cell_x < 0 || cell_x >= arch.grid_size, "BWD im2col: cell_x OOB");
 
                         const float* input_batch = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
 
@@ -1561,37 +2350,50 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                                     int nx = max(0, min(arch.grid_size - 1, cell_x + dx));
                                     int input_idx = batch_id * arch.grid_size * arch.grid_size * arch.channels +
                                                    ny * arch.grid_size * arch.channels + nx * arch.channels + c;
-                                    sum += input_batch[input_idx];
+                                    PROVENANCE_FATAL_IF(input_idx < 0 || input_idx >= max_input, "BWD im2col: input_idx OOB");
+                                    float in_val = input_batch[input_idx];
+                                    PROVENANCE_FATAL_IF(!isfinite(in_val), "BWD im2col: input NaN/Inf");
+                                    sum += in_val;
                                 }
                             }
-                            ws_im2col[idx * arch.channels + c] = sum;
+                            int im2col_idx = idx * arch.channels + c;
+                            PROVENANCE_FATAL_IF(im2col_idx < 0 || im2col_idx >= max_im2col, "BWD im2col: im2col_idx OOB");
+                            PROVENANCE_FATAL_IF(!isfinite(sum), "BWD im2col: sum NaN/Inf");
+                            ws_im2col[im2col_idx] = sum;
                         }
                     }
                 }
                 __syncthreads();
 
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CONV_FP16 blk=%d\n", blockIdx.x);
                 {
                     int total_conv = chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_conv; idx += blockDim.x) {
-                        ws_fp16_a[idx] = __float2half(ws_im2col[idx]);
+                        float val = ws_im2col[idx];
+                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD conv fp16: ws_im2col NaN/Inf");
+                        ws_fp16_a[idx] = __float2half(val);
                     }
                 }
-                
                 {
                     int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     for (int idx = tid; idx < total_D; idx += blockDim.x) {
-                        ws_fp16_b[idx] = __float2half(ws_dpregelu[idx]);
+                        float val = ws_dpregelu[idx];
+                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD D fp16: ws_dpregelu NaN/Inf");
+                        ws_fp16_b[idx] = __float2half(val);
                     }
                 }
                 __syncthreads();
 
-                
+
                 {
                     int ws_dW_perception_stride = arch.channels * arch.head_dim;
                     int dW_tiles_c = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int dW_tiles_h = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = dW_tiles_c * dW_tiles_h * arch.num_heads;
+                    int max_ws_fp16_a_perc = chunk_samples_aligned * arch.channels;
+                    int chunk_B_stride = chunk_samples_aligned * arch.head_dim;
+                    int max_ws_fp16_b_perc = arch.num_heads * chunk_B_stride;
+                    int max_ws_dW_perc = arch.num_heads * ws_dW_perception_stride;
 
                     for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
                         int head_id = tile_idx / (dW_tiles_c * dW_tiles_h);
@@ -1601,50 +2403,93 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int tile_row = warpM * WMMA_TILE_DIM;
                         int tile_col = warpN * WMMA_TILE_DIM;
 
+                        DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA perc dW: head_id OOB");
+
                         if (tile_row < arch.channels && tile_col < arch.head_dim) {
+                            int B_base_offset = head_id * chunk_B_stride;
+                            int C_base_offset = head_id * ws_dW_perception_stride;
+                            DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_fp16_b_perc, "WMMA perc dW: B_base OOB");
+                            DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dW_perc, "WMMA perc dW: C_base OOB");
+
                             const half* A_ptr = ws_fp16_a;
-                            const half* B_head = ws_fp16_b + head_id * chunk_samples_aligned * arch.head_dim;
-                            float* C_head = ws_dW_perception + head_id * ws_dW_perception_stride;
+                            const half* B_head = ws_fp16_b + B_base_offset;
+                            float* C_head = ws_dW_perception + C_base_offset;
+
+                            int C_tile_offset = tile_row * arch.head_dim + tile_col;
+                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                            DEVICE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= ws_dW_perception_stride, "WMMA perc dW: C_tile OOB");
 
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
                             nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + tile_row * arch.head_dim + tile_col, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + C_tile_offset, arch.head_dim, nvcuda::wmma::mem_row_major);
 
                             for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_ptr + k_tile * arch.channels + tile_row, arch.channels);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * arch.head_dim + tile_col, arch.head_dim);
+                                int A_tile_offset = k_tile * arch.channels + tile_row;
+                                int A_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.channels + (tile_row + WMMA_TILE_DIM - 1);
+                                int B_tile_offset = k_tile * arch.head_dim + tile_col;
+                                int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
+                                DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= max_ws_fp16_a_perc, "WMMA perc dW: A_tile OOB");
+                                DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= chunk_B_stride, "WMMA perc dW: B_tile OOB");
+                                nvcuda::wmma::load_matrix_sync(a_frag, A_ptr + A_tile_offset, arch.channels);
+                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
                                 nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + tile_row * arch.head_dim + tile_col, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
+                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
                         }
                     }
                 }
                 __syncthreads();
 
-                
-                
+                if (tid == 0 && chunk_idx == 0) printf("V:BWD_INPUT_GRAD blk=%d\n", blockIdx.x);
                 if (d_ca_input != nullptr) {
-                    
+                    int weights_per_head = arch.channels * arch.head_dim;
+                    int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
+                    int max_im2col = chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
                         int sample_in_chunk = idx / arch.channels;
                         int channel_idx = idx % arch.channels;
 
                         float d_input_accum = 0.0f;
                         for (int h = 0; h < arch.num_heads; h++) {
+                            int head_start = param_map->perception_start[h];
+                            int head_max = head_start + weights_per_head;
                             for (int hd = 0; hd < arch.head_dim; hd++) {
-                                int W_idx = param_map->perception_start[h] + channel_idx * arch.head_dim + hd;
+                                int local_idx = channel_idx * arch.head_dim + hd;
+                                int W_idx = head_start + local_idx;
+                                int dprerelu_idx = h * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd;
+                                PROVENANCE_FATAL_IF(local_idx < 0 || local_idx >= weights_per_head, "BWD input: local_idx OOB");
+                                PROVENANCE_FATAL_IF(W_idx < head_start || W_idx >= head_max, "BWD input: W_idx OOB");
+                                PROVENANCE_FATAL_IF(dprerelu_idx < 0 || dprerelu_idx >= max_dpregelu, "BWD input: dprerelu_idx OOB");
                                 float W_val = __half2float(ca_state->perception_weights[W_idx]);
-                                float dprerelu_val = ws_dpregelu[h * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd];
+                                PROVENANCE_FATAL_IF(!isfinite(W_val), "BWD input: W_val NaN/Inf");
+                                float dprerelu_val = ws_dpregelu[dprerelu_idx];
+                                PROVENANCE_FATAL_IF(!isfinite(dprerelu_val), "BWD input: dprerelu_val NaN/Inf");
                                 d_input_accum += W_val * dprerelu_val;
                             }
                         }
+                        PROVENANCE_FATAL_IF(idx < 0 || idx >= max_im2col, "BWD input: im2col idx OOB");
+                        PROVENANCE_FATAL_IF(!isfinite(d_input_accum), "BWD input: d_input_accum NaN/Inf");
                         ws_im2col[idx] = d_input_accum;
                     }
                     __syncthreads();
 
-                    
-                    for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
+                    if (tid == 0 && chunk_idx == 0) printf("V:BWD_SCATTER blk=%d\n", blockIdx.x);
+                    PROVENANCE_FATAL_IF(d_ca_input == nullptr, "d_ca_input null");
+                    PROVENANCE_FATAL_IF(ws_im2col == nullptr, "ws_im2col null");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(training_mode->batch_size, "batch_size");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(num_cells, "num_cells");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.grid_size, "grid_size");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_samples_aligned, "chunk_samples_aligned");
+                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.channels, "arch.channels");
+                    PROVENANCE_FATAL_IF(chunk_samples_aligned <= 0, "chunk_samples_aligned <= 0");
+                    PROVENANCE_FATAL_IF(arch.channels <= 0, "arch.channels <= 0");
+                    int scatter_loop_bound = chunk_samples_aligned * arch.channels;
+                    PROVENANCE_FATAL_IF(scatter_loop_bound <= 0, "scatter_loop_bound overflow");
+                    PROVENANCE_FATAL_IF(scatter_loop_bound > 1000000, "scatter_loop_bound huge");
+                    int max_d_ca = training_mode->batch_size * num_cells * arch.channels;
+                    PROVENANCE_FATAL_IF(max_d_ca <= 0, "max_d_ca <= 0");
+                    for (int idx = tid; idx < scatter_loop_bound; idx += blockDim.x) {
                         int sample_in_chunk = idx / arch.channels;
                         int channel_idx = idx % arch.channels;
                         int global_sample = chunk_start + sample_in_chunk;
@@ -1653,6 +2498,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                         int cell_y = cell_idx / arch.grid_size;
                         int cell_x = cell_idx % arch.grid_size;
                         float d_pooled_val = ws_im2col[idx];
+                        PROVENANCE_FATAL_IF(!isfinite(d_pooled_val), "BWD scatter: d_pooled_val NaN/Inf");
 
                         for (int dy = -1; dy <= 1; dy++) {
                             for (int dx = -1; dx <= 1; dx++) {
@@ -1661,6 +2507,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                                 if (ny >= 0 && ny < arch.grid_size && nx >= 0 && nx < arch.grid_size) {
                                     int out_cell_idx = ny * arch.grid_size + nx;
                                     int out_idx = batch_id * num_cells * arch.channels + out_cell_idx * arch.channels + channel_idx;
+                                    PROVENANCE_FATAL_IF(out_idx < 0 || out_idx >= max_d_ca, "BWD scatter: out_idx OOB");
                                     atomicAdd(&d_ca_input[out_idx], d_pooled_val);
                                 }
                             }
@@ -1668,51 +2515,80 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                     }
                     __syncthreads();
                 }
-            } 
+            }
 
             if (tid == 0) printf("V:BWD_CHUNKS_DONE blk=%d\n", blockIdx.x);
 
-            
+            if (tid == 0) printf("V:BWD_INTER_GRAD_COPY blk=%d\n", blockIdx.x);
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.head_dim;
+                int max_src = arch.num_heads * ws_dW_interaction_stride;
+                int max_grad_buffer = ca_state->tape.capacity;
+                PROVENANCE_FATAL_IF(total_grads <= 0, "BWD inter grad: total overflow");
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
                     int head_id = idx / (arch.head_dim * arch.head_dim);
                     int local_idx = idx % (arch.head_dim * arch.head_dim);
                     int src_idx = head_id * ws_dW_interaction_stride + local_idx;
                     int dst_idx = param_map->interaction_start[head_id] + local_idx;
-                    ca_state->tape.grad_buffer[dst_idx] = ws_dW_interaction[src_idx];
+                    PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD inter grad: head_id OOB");
+                    PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src, "BWD inter grad: src_idx OOB");
+                    PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_grad_buffer, "BWD inter grad: dst_idx OOB");
+                    float val = ws_dW_interaction[src_idx];
+                    PROVENANCE_FATAL_IF(!isfinite(val), "BWD inter grad: src NaN/Inf");
+                    ca_state->tape.grad_buffer[dst_idx] = val;
                 }
             }
             __syncthreads();
 
-            
+            if (tid == 0) printf("V:BWD_PERC_GRAD_COPY blk=%d\n", blockIdx.x);
             {
                 int ws_dW_perception_stride = arch.channels * arch.head_dim;
                 int weights_per_head = arch.channels * arch.head_dim;
                 int total_grads = arch.num_heads * weights_per_head;
+                int max_src = arch.num_heads * ws_dW_perception_stride;
+                int max_grad_buffer = ca_state->tape.capacity;
+                PROVENANCE_FATAL_IF(total_grads <= 0, "BWD perc grad: total overflow");
                 for (int idx = tid; idx < total_grads; idx += blockDim.x) {
                     int head_id = idx / weights_per_head;
                     int local_idx = idx % weights_per_head;
                     int src_idx = head_id * ws_dW_perception_stride + local_idx;
                     int dst_idx = param_map->perception_start[head_id] + local_idx;
-                    ca_state->tape.grad_buffer[dst_idx] = ws_dW_perception[src_idx];
+                    PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD perc grad: head_id OOB");
+                    PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src, "BWD perc grad: src_idx OOB");
+                    PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_grad_buffer, "BWD perc grad: dst_idx OOB");
+                    float val = ws_dW_perception[src_idx];
+                    PROVENANCE_FATAL_IF(!isfinite(val), "BWD perc grad: src NaN/Inf");
+                    ca_state->tape.grad_buffer[dst_idx] = val;
                 }
             }
             __syncthreads();
 
-            
-            
+            if (tid == 0) printf("V:BWD_GRAD_CONC blk=%d\n", blockIdx.x);
             if (d_ca_input != nullptr) {
+                DEVICE_FATAL_IF(organism->buffers->grad_concentration_buffer == nullptr, "BWD: grad_concentration_buffer is null");
                 float* grad_conc = organism->buffers->grad_concentration_buffer;
+                int max_d_ca = total_samples * arch.channels;
                 for (int cell = tid; cell < num_cells; cell += blockDim.x) {
-                    grad_conc[cell] = d_ca_input[cell * arch.channels];
+                    int src_idx = cell * arch.channels;
+                    PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_d_ca, "BWD grad_conc: src_idx OOB");
+                    PROVENANCE_FATAL_IF(cell < 0 || cell >= num_cells, "BWD grad_conc: cell OOB");
+                    float val = d_ca_input[src_idx];
+                    PROVENANCE_FATAL_IF(!isfinite(val), "BWD grad_conc: d_ca_input NaN/Inf");
+                    grad_conc[cell] = val;
                 }
             }
             __syncthreads();
 
+            if (tid == 0) printf("V:BWD_DIFFUSION_LAUNCH blk=%d\n", blockIdx.x);
             if (d_ca_input != nullptr && tid == 0) {
                 dim3 diff_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
                 dim3 diff_block(16, 16);
+
+                DEVICE_FATAL_IF(organism->chemical_field == nullptr, "BWD diff: chemical_field is null");
+                DEVICE_FATAL_IF(organism->chemical_field->concentration == nullptr, "BWD diff: concentration is null");
+                DEVICE_FATAL_IF(organism->chemical_field->laplacian == nullptr, "BWD diff: laplacian is null");
+                DEVICE_FATAL_IF(entry->gradients == nullptr, "BWD diff: entry->gradients is null");
+                DEVICE_FATAL_IF(primary_genome == nullptr, "BWD diff: primary_genome is null");
 
                 float ctx_metabolic = entry->fitness.value;
                 float ctx_stress = entry->hunger.value;
@@ -1722,19 +2598,8 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 float ctx_learning = training_mode->learning_rate;
                 float ctx_performance = entry->task_accuracy.value;
 
-                diffusion_reaction_backward_kernel<<<diff_grid, diff_block>>>(
-                    organism->buffers->grad_concentration_buffer,
-                    organism->chemical_field->concentration,
-                    organism->chemical_field->laplacian,
-                    entry->gradients,
-                    arch.grid_size,
-                    CHEMICAL_DIFFUSION_DT_MAX,
-                    primary_genome,
-                    entry->gradients,
-                    entry->genome_hash,
-                    ctx_metabolic, ctx_stress, ctx_morphogen,
-                    ctx_complexity, ctx_niche, ctx_learning, ctx_performance
-                );
+                printf("V:BWD_DIFF_DEVICE blk=%d grid=(%d,%d)\n", blockIdx.x, diff_grid.x, diff_grid.y);
+                diffusion_reaction_backward_device(organism);
             }
             __syncthreads();
             if (tid == 0 && blockIdx.x == 0) printf("V:HYB_diffusion_bwd_done\n");
@@ -1877,7 +2742,7 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
                 }
                 __syncthreads();
             }
-        }  
+        }
 
         {
             int num_heads = arch.num_heads;
@@ -1969,82 +2834,14 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             float adam_epsilon = train_params.get_adam_epsilon(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
             float gradient_clip_norm = train_params.get_gradient_clip_norm(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
 
-            float lr = training_mode->learning_rate;
-            int timestep = training_mode->adam_timestep;
-
-            if (tid == 0) {
-                int ts = timestep + 1;
-
-                int blocks_p = (perception_params + 255) / 256;
-                adam_update_fp16_kernel<<<blocks_p, 256>>>(
-                    ca_state->perception_weights,
-                    ca_state->tape.grad_buffer,
-                    training_mode->adam_m,
-                    training_mode->adam_v,
-                    perception_params,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                int blocks_i = (interaction_params + 255) / 256;
-                adam_update_fp16_kernel<<<blocks_i, 256>>>(
-                    ca_state->interaction_weights,
-                    ca_state->tape.grad_buffer + perception_params,
-                    training_mode->adam_m + training_mode->perception_size,
-                    training_mode->adam_v + training_mode->perception_size,
-                    interaction_params,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                int blocks_v = (value_params + 255) / 256;
-                adam_update_fp16_kernel<<<blocks_v, 256>>>(
-                    ca_state->value_weights,
-                    ca_state->tape.grad_buffer + perception_params + interaction_params,
-                    training_mode->adam_m + training_mode->perception_size + training_mode->interaction_size,
-                    training_mode->adam_v + training_mode->perception_size + training_mode->interaction_size,
-                    value_params,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                cudaDeviceSynchronize();
-            }
+            adam_update_perception_device(organism);
+            adam_update_interaction_device(organism);
+            adam_update_value_device(organism);
             __syncthreads();
 
-            if (tid == 0) {
-                int ts = timestep + 1;
-                int fc_weights_size = num_classes * num_features;
-
-                int blocks_pool = (arch.channels + 255) / 256;
-                adam_update_kernel<<<blocks_pool, 256>>>(
-                    training_mode->classifier->pooling_weights,
-                    organism->pooling_weights_grad,
-                    organism->adam_m_pooling,
-                    organism->adam_v_pooling,
-                    arch.channels,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                int blocks_fc = (fc_weights_size + 255) / 256;
-                adam_update_kernel<<<blocks_fc, 256>>>(
-                    training_mode->classifier->fc_weights,
-                    organism->fc_weights_grad,
-                    organism->adam_m_fc_weights,
-                    organism->adam_v_fc_weights,
-                    fc_weights_size,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                int blocks_bias = (num_classes + 255) / 256;
-                adam_update_kernel<<<blocks_bias, 256>>>(
-                    training_mode->classifier->fc_bias,
-                    organism->fc_bias_grad,
-                    organism->adam_m_fc_bias,
-                    organism->adam_v_fc_bias,
-                    num_classes,
-                    lr, adam_beta1, adam_beta2, adam_epsilon, ts, gradient_clip_norm
-                );
-
-                cudaDeviceSynchronize();
-            }
+            adam_update_pooling_device(organism);
+            adam_update_fc_weights_device(organism);
+            adam_update_fc_bias_device(organism);
             __syncthreads();
 
             if (tid == 0) {
@@ -2052,8 +2849,11 @@ extern "C" __global__ void hybrid_organism_lifecycle_kernel(
             }
             __syncthreads();
 
-        }  
-    }  
+        }
+    }
+
+    grid_barrier(gridDim.x);
+    if (tid == 0) printf("V:POST_BWD_BARRIER blk=%d\n", blockIdx.x);
 
     if (entry_idx == 0) {
         float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;

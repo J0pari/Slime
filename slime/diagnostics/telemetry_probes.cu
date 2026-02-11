@@ -2,6 +2,7 @@
 #define TELEMETRY_PROBES_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../memory/archive.cu"
 #include "../memory/pool.cu"
 #include "../utils/cuda_primitives.cuh"

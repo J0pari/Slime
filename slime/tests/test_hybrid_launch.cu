@@ -1,10 +1,7 @@
+#include "../config/config.cu"
+#include "../core/organism.cu"
 #include <stdio.h>
 #include <cuda_runtime.h>
-
-struct Organism;
-struct HybridTrainingMode;
-struct CAParameterMap;
-struct AuditBuffer;
 
 extern "C" __global__ void hybrid_organism_lifecycle_kernel(Organism*, HybridTrainingMode*, CAParameterMap*, int, float*, bool, AuditBuffer*);
 
@@ -15,17 +12,10 @@ __global__ void test_wrapper_kernel() {
 
 int main() {
     test_wrapper_kernel<<<1, 1>>>();
-    cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        return 1;
-    }
+    CUDA_LAUNCH_CHECK_VAL(cudaDeviceSynchronize());
 
     cudaFuncAttributes attr;
-    err = cudaFuncGetAttributes(&attr, hybrid_organism_lifecycle_kernel);
-    if (err == cudaSuccess) {
-    } else {
-        return 1;
-    }
+    CUDA_LAUNCH_CHECK_VAL(cudaFuncGetAttributes(&attr, hybrid_organism_lifecycle_kernel));
 
     return 0;
 }

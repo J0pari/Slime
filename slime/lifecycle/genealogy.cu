@@ -3,6 +3,7 @@
 #define GENEALOGY_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../debug/param_validator.cu"
 #include <cuda_runtime.h>
 

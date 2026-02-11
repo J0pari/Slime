@@ -2,6 +2,7 @@
 #define DIRESA_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../utils/genome_params.cuh"
 #include "diresa_types.cuh"
@@ -32,7 +33,7 @@ struct DIRESABatch {
     float cov_loss;
 };
 
-__global__ void init_diresa_kernel(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed, float* genome) {
+__device__ void init_diresa_device(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed, float* genome) {
     int replica_id = blockIdx.x;
     int local_tid = threadIdx.x;
 
@@ -334,7 +335,7 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
     }
 }
 
-__global__ void diresa_forward_kernel(DIRESABatch* batch, const DIRESAWeights* weights) {
+__device__ void diresa_forward_device(DIRESABatch* batch, const DIRESAWeights* weights) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
 
@@ -354,7 +355,7 @@ __global__ void diresa_forward_kernel(DIRESABatch* batch, const DIRESAWeights* w
     CooperativeSync::sync_warp();
 }
 
-__global__ void diresa_distance_kernel(DIRESABatch* batch) {
+__device__ void diresa_distance_device(DIRESABatch* batch) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
 
@@ -376,7 +377,7 @@ __global__ void diresa_distance_kernel(DIRESABatch* batch) {
     batch->latent_distances[tid] = sqrtf(latent_dist_sq);
 }
 
-__global__ void diresa_loss_kernel(DIRESABatch* batch, const DIRESAWeights* weights) {
+__device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weights) {
     __shared__ float shared_recon[256];
     __shared__ float shared_orig_mean[1];
     __shared__ float shared_orig_var[1];
@@ -546,7 +547,7 @@ __device__ void update_annealing(DIRESAWeights* weights, float cov_loss, PoolEnt
     }
 }
 
-__global__ void replica_exchange_kernel(DIRESAWeights* replicas, DIRESABatch* batches, PoolEntry* entry, curandState* rand_states) {
+__device__ void replica_exchange_device(DIRESAWeights* replicas, DIRESABatch* batches, PoolEntry* entry, curandState* rand_states) {
     int tid = threadIdx.x;
     if (tid >= entry->num_tempering_replicas - 1) return;
 

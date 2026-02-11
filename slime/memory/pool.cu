@@ -2,6 +2,7 @@
 #ifndef POOL_CU
 #define POOL_CU
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/genome_params.cuh"
 #include "../utils/cuda_primitives.cuh"
 #include "../memory/genome_ops.cuh"
@@ -12,7 +13,8 @@
 #include "pool_types.cuh"
 #include <cuda_runtime.h>
 
-__device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* pool, int idx) {
+__device__ __forceinline__ ArchitectureParams get_arch_from_pool(Organism* organism, int idx) {
+    ComponentPool* pool = organism->pool;
     ArchitectureParams arch;
     arch.num_heads = pool->entries[idx].num_heads;
     arch.channels = pool->entries[idx].channels;
@@ -29,18 +31,21 @@ __device__ __forceinline__ ArchitectureParams get_arch_from_pool(ComponentPool* 
 
 #include "../learning/diresa.cu"
 
-__global__ void init_rng_states_kernel(curandState* states, int count, unsigned long seed) {
+__device__ void init_rng_states_device(Organism* organism, unsigned long seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int count = organism->pool->capacity;
+    curandState* states = organism->rng_states;
     if (idx < count) {
         curand_init(seed, idx, 0, &states[idx]);
     }
 }
 
 
-__global__ void mark_alive_kernel(ComponentPool* pool, int* flags) {
+__device__ void mark_alive_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int* flags = organism->pool_compaction_flags;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < pool->capacity) {
-        
         flags[idx] = pool->alive_flags[idx] ? 1 : 0;
     }
 }
@@ -48,9 +53,10 @@ __global__ void mark_alive_kernel(ComponentPool* pool, int* flags) {
 
 
 
-__global__ void scatter_alive_indices_kernel(
-    ComponentPool* pool, int* flags, int* scan_results
-) {
+__device__ void scatter_alive_indices_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int* flags = organism->pool_compaction_flags;
+    int* scan_results = organism->pool_compaction_scan;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < pool->capacity && flags[idx]) {
         pool->alive_indices[scan_results[idx]] = idx;
@@ -58,9 +64,11 @@ __global__ void scatter_alive_indices_kernel(
 }
 
 
-__global__ void finalize_alive_count_kernel(
-    ComponentPool* pool, int* flags, int* scan_results, int capacity
-) {
+__device__ void finalize_alive_count_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int* flags = organism->pool_compaction_flags;
+    int* scan_results = organism->pool_compaction_scan;
+    int capacity = pool->capacity;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int last_idx = capacity - 1;
         pool->alive_indices_count = scan_results[last_idx] + flags[last_idx];
@@ -182,17 +190,18 @@ struct PRNGState {
 };
 
 __device__ void spawn_component_device(
-    ComponentPool* pool,
-    GPUElite* archive,
-    int archive_size,
+    Organism* organism,
     int parent_id,
     float mutation_rate,
-    int generation,
     float* workspace_parent_genome,
     float* workspace_child_genome,
-    float* workspace_parent_temp,
-    DIRESAWeights* diresa_genome_weights
+    float* workspace_parent_temp
 ) {
+    ComponentPool* pool = organism->pool;
+    GPUElite* archive = organism->archive;
+    int archive_size = organism->archive_size;
+    int generation = organism->generation;
+    DIRESAWeights* diresa_genome_weights = organism->diresa_genome_weights;
     int slot_idx = -1;
     int new_id;
     int parent_archive_idx;
@@ -352,10 +361,8 @@ __device__ void spawn_component_device(
     pool->entries[i].tensor_core_cycles = 0;
 }
 
-__global__ void cull_weak_kernel(
-    ComponentPool* pool,
-    float threshold
-) {
+__device__ void cull_weak_device(Organism* organism, float threshold) {
+    ComponentPool* pool = organism->pool;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
@@ -368,35 +375,33 @@ __global__ void cull_weak_kernel(
     }
 }
 
-__global__ void cull_hungry_kernel(
-    ComponentPool* pool,
-    float hunger_threshold
-) {
+__device__ void cull_hungry_device(Organism* organism, float hunger_threshold) {
+    ComponentPool* pool = organism->pool;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < pool->capacity) {
-        
         if (pool->alive_flags[idx] && pool->entries[idx].hunger.value > hunger_threshold) {
             pool->entries[idx].phase = LifecyclePhase::DEAD;
-            pool->alive_flags[idx] = false;  
+            pool->alive_flags[idx] = false;
             Atomics::decrement_int(pool->active_count);
             Atomics::increment_int(pool->total_culled);
         }
     }
 }
 
-__global__ void age_components_kernel(ComponentPool* pool) {
+__device__ void age_components_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         pool->entries[idx].age++;
     }
 }
 
-__global__ void update_hunger_kernel(ComponentPool* pool, int generation) {
+__device__ void update_hunger_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int generation = organism->generation;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
 
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         float hunger_val = fmaxf(0.01f, 1.0f - pool->entries[idx].coherence.value);
@@ -404,11 +409,8 @@ __global__ void update_hunger_kernel(ComponentPool* pool, int generation) {
     }
 }
 
-__global__ void sort_by_fitness_kernel(
-    ComponentPool* pool,
-    int stage,
-    int step
-) {
+__device__ void sort_by_fitness_device(Organism* organism, int stage, int step) {
+    ComponentPool* pool = organism->pool;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int pair_distance = 1 << step;
     int block_width = pair_distance << 1;
@@ -432,15 +434,11 @@ __global__ void sort_by_fitness_kernel(
     }
 }
 
-__global__ void select_top_k_kernel(
-    ComponentPool* pool,
-    int* selected_indices,
-    int k
-) {
+__device__ void select_top_k_device(Organism* organism, int* selected_indices, int k) {
+    ComponentPool* pool = organism->pool;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < k && tid < pool->capacity) {
-        
         if (pool->alive_flags[tid]) {
             selected_indices[tid] = tid;
         } else {
@@ -449,13 +447,9 @@ __global__ void select_top_k_kernel(
     }
 }
 
-__device__ __noinline__ float compute_genome_distance(
-    PoolEntry* entry1,
-    PoolEntry* entry2,
-    GPUElite* archive,
-    int archive_size
-) {
-    
+__device__ __noinline__ float compute_genome_distance(Organism* organism, PoolEntry* entry1, PoolEntry* entry2) {
+    GPUElite* archive = organism->archive;
+
     int idx1 = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
@@ -467,7 +461,6 @@ __device__ __noinline__ float compute_genome_distance(
         entry2->parent_hash
     );
 
-    
     DEVICE_FATAL_IF(idx1 < 0, "compute_genome_distance: entry1->parent_hash not found in archive");
     DEVICE_FATAL_IF(idx2 < 0, "compute_genome_distance: entry2->parent_hash not found in archive");
 
@@ -478,13 +471,8 @@ __device__ __noinline__ float compute_genome_distance(
     return sqrtf(distance_squared / GENOME_LATENT_DIM_MAX);
 }
 
-__global__ void diversity_selection_kernel(
-    ComponentPool* pool,
-    GPUElite* archive,
-    int archive_size,
-    int* selected_indices,
-    int num_select
-) {
+__device__ void diversity_selection_device(Organism* organism, int* selected_indices, int num_select) {
+    ComponentPool* pool = organism->pool;
     __shared__ float distances[BLOCK_SIZE];
     __shared__ int indices[BLOCK_SIZE];
     __shared__ float warp_max[BLOCK_SIZE / 32];
@@ -571,14 +559,14 @@ __global__ void diversity_selection_kernel(
     }
 }
 
-__global__ void init_pool_kernel(
-    ComponentPool* pool,
-    int capacity,
-    uint16_t* delta_indices_buffer,
-    float* delta_values_buffer,
-    float* gradients_buffer,
-    int generation
-) {
+__device__ void init_pool_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int capacity = pool->capacity;
+    uint16_t* delta_indices_buffer = organism->delta_indices_buffer;
+    float* delta_values_buffer = organism->delta_values_buffer;
+    float* gradients_buffer = organism->gradients_buffer;
+    int generation = organism->generation;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx == 0) printf("V:init_pool_enter cap=%d pool=%p\n", capacity, (void*)pool);
 
@@ -664,7 +652,6 @@ __global__ void init_pool_kernel(
     }
 
     if (idx == 0) {
-        pool->capacity = capacity;
         pool->active_count = POOL_CAPACITY_MIN;
         pool->total_spawned = POOL_CAPACITY_MIN;
         pool->total_culled = 0;
@@ -673,17 +660,17 @@ __global__ void init_pool_kernel(
     }
 }
 
-__global__ void compute_pool_stats_kernel(
-    ComponentPool* pool,
-    GPUElite* archive,
-    int archive_size,
-    float* avg_fitness,
-    float* avg_coherence,
-    float* avg_age,
-    float* genetic_diversity,
-    float* workspace_genomes,
-    DIRESAWeights* diresa_genome_weights
-) {
+__device__ void compute_pool_stats_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    GPUElite* archive = organism->archive;
+    int archive_size = organism->archive_size;
+    float* avg_fitness = organism->stats_avg_fitness;
+    float* avg_coherence = organism->stats_avg_coherence;
+    float* avg_age = organism->stats_avg_age;
+    float* genetic_diversity = organism->stats_genetic_diversity;
+    float* workspace_genomes = organism->workspace_genomes;
+    DIRESAWeights* diresa_genome_weights = organism->diresa_genome_weights;
+
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + tid;
 
@@ -691,7 +678,6 @@ __global__ void compute_pool_stats_kernel(
     float local_coherence = 0.0f;
     float local_age = 0.0f;
 
-    
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         local_fitness = pool->fitness_values[idx];
         local_coherence = pool->entries[idx].coherence.value;
@@ -708,7 +694,6 @@ __global__ void compute_pool_stats_kernel(
         atomicAdd(avg_age, total_age);
     }
 
-    
     if (idx < pool->capacity && pool->alive_flags[idx]) {
         float diversity = 0.0f;
 
@@ -735,7 +720,6 @@ __global__ void compute_pool_stats_kernel(
         int samples_max_slot = GenomeParamTable::diversity_sample_count_max;
         int samples_base_slot = GenomeParamTable::diversity_sample_count_base;
         int samples_range_slot = GenomeParamTable::diversity_sample_count_range;
-
 
         float* temp_genome = &workspace_genomes[tid * GENOME_SIZE * 2];
         float* temp_parent = &workspace_genomes[tid * GENOME_SIZE * 2 + GENOME_SIZE];
@@ -767,12 +751,7 @@ __global__ void compute_pool_stats_kernel(
             int other_idx = (int)(rng.next() * pool->capacity) % pool->capacity;
 
             if (other_idx != idx && pool->alive_flags[other_idx]) {
-                diversity += compute_genome_distance(
-                    &pool->entries[idx],
-                    &pool->entries[other_idx],
-                    archive,
-                    archive_size
-                );
+                diversity += compute_genome_distance(organism, &pool->entries[idx], &pool->entries[other_idx]);
             }
         }
 
@@ -793,14 +772,13 @@ __global__ void compute_pool_stats_kernel(
 }
 
 
-__global__ void compact_pool_alive_indices_kernel(
-    ComponentPool* pool,
-    int* flags,
-    int* scan_workspace,
-    int* scan_recursive_workspace,
-    int capacity
-) {
-    cg::grid_group grid = cg::this_grid();
+__device__ void compact_pool_alive_indices_device(Organism* organism, cg::grid_group& grid) {
+    ComponentPool* pool = organism->pool;
+    int* flags = organism->pool_compaction_flags;
+    int* scan_workspace = organism->pool_compaction_scan;
+    int* scan_recursive_workspace = organism->pool_compaction_scan_recursive;
+    int capacity = pool->capacity;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
     int warp_id = threadIdx.x / WARP_SIZE;
@@ -808,7 +786,6 @@ __global__ void compact_pool_alive_indices_kernel(
     __shared__ int warp_sums[WARP_SIZE];
     __shared__ int alive_count;
 
-    
     int is_alive = 0;
     if (tid < capacity) {
         is_alive = pool->alive_flags[tid] ? 1 : 0;
@@ -817,7 +794,6 @@ __global__ void compact_pool_alive_indices_kernel(
 
     grid.sync();
 
-    
     int val = (tid < capacity) ? flags[tid] : 0;
 
     auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
@@ -851,14 +827,12 @@ __global__ void compact_pool_alive_indices_kernel(
         scan_workspace[tid] = exclusive_val;
     }
 
-    
     if (threadIdx.x == blockDim.x - 1) {
         scan_recursive_workspace[blockIdx.x] = inclusive_val;
     }
 
     grid.sync();
 
-    
     if (blockIdx.x == 0) {
         __shared__ int bsum_shared[WARP_SIZE];
         int num_blocks = gridDim.x;
@@ -898,20 +872,17 @@ __global__ void compact_pool_alive_indices_kernel(
 
     grid.sync();
 
-    
     if (tid < capacity && blockIdx.x > 0) {
         scan_workspace[tid] += scan_recursive_workspace[blockIdx.x];
     }
 
     grid.sync();
 
-    
     if (tid < capacity && flags[tid]) {
         int write_pos = scan_workspace[tid];
         pool->alive_indices[write_pos] = tid;
     }
 
-    
     if (tid == 0) {
         if (capacity > 0) {
             alive_count = scan_workspace[capacity - 1] + flags[capacity - 1];
@@ -927,25 +898,25 @@ __global__ void compact_pool_alive_indices_kernel(
     }
 }
 
-__global__ void collect_pool_task_accuracies_kernel(
-    ComponentPool* pool,
-    float* pool_task_accuracies
-) {
+__device__ void collect_pool_task_accuracies_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    float* pool_task_accuracies = organism->pool_task_accuracies;
+
     int compact_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (compact_idx >= pool->alive_indices_count) return;
 
     int tid = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[tid], "collect_pool_task_accuracies_kernel: dead entry in alive_indices");
+    DEVICE_FATAL_IF(!pool->alive_flags[tid], "collect_pool_task_accuracies_device: dead entry in alive_indices");
 
     pool_task_accuracies[tid] = pool->entries[tid].task_accuracy.value;
 }
 
-__global__ void inherit_ca_weights_kernel(
-    ComponentPool* pool,
-    int num_pending_inherits,
-    int* child_indices,
-    int* parent_indices
-) {
+__device__ void inherit_ca_weights_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int num_pending_inherits = *organism->num_pending_inherits;
+    int* child_indices = organism->inherit_child_indices;
+    int* parent_indices = organism->inherit_parent_indices;
+
     int inherit_idx = blockIdx.y;
     if (inherit_idx >= num_pending_inherits) return;
 
@@ -955,10 +926,10 @@ __global__ void inherit_ca_weights_kernel(
     PoolEntry* child = &pool->entries[child_idx];
     PoolEntry* parent = &pool->entries[parent_idx];
 
-    DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights: child became dead between find and inherit");
-    DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights: parent became dead between find and inherit");
-    DEVICE_FATAL_IF(!child->ca_state, "inherit_ca_weights: child ca_state is null");
-    DEVICE_FATAL_IF(!parent->ca_state, "inherit_ca_weights: parent ca_state is null");
+    DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights_device: child became dead between find and inherit");
+    DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights_device: parent became dead between find and inherit");
+    DEVICE_FATAL_IF(!child->ca_state, "inherit_ca_weights_device: child ca_state is null");
+    DEVICE_FATAL_IF(!parent->ca_state, "inherit_ca_weights_device: parent ca_state is null");
 
     MultiHeadCAState* child_ca = child->ca_state;
     MultiHeadCAState* parent_ca = parent->ca_state;
@@ -981,17 +952,17 @@ __global__ void inherit_ca_weights_kernel(
     }
 }
 
-__global__ void find_pending_weight_inherits_kernel(
-    ComponentPool* pool,
-    int* child_indices,
-    int* parent_indices,
-    int* num_pending
-) {
+__device__ void find_pending_weight_inherits_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int* child_indices = organism->inherit_child_indices;
+    int* parent_indices = organism->inherit_parent_indices;
+    int* num_pending = organism->num_pending_inherits;
+
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (compact_idx >= pool->alive_indices_count) return;
 
     int idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[idx], "find_pending_weight_inherits_kernel: dead entry in alive_indices");
+    DEVICE_FATAL_IF(!pool->alive_flags[idx], "find_pending_weight_inherits_device: dead entry in alive_indices");
 
     PoolEntry* entry = &pool->entries[idx];
     if (entry->age != 0) return;
@@ -1005,26 +976,25 @@ __global__ void find_pending_weight_inherits_kernel(
     }
 }
 
-__global__ void seed_archive_from_pool_kernel(
-    GPUElite* archive,
-    int* archive_size,
-    ComponentPool* pool,
-    int num_to_seed,
-    VoronoiCell* voronoi_cells,
-    int num_voronoi_cells,
-    DIRESAWeights* diresa_genome_weights,
-    float* workspace_genomes,
-    int hw_dim,
-    int task_dim,
-    int gen_dim,
-    int num_classes
-) {
+__device__ void seed_archive_from_pool_device(Organism* organism, int num_to_seed) {
+    GPUElite* archive = organism->archive;
+    int* archive_size = &organism->archive_size;
+    ComponentPool* pool = organism->pool;
+    VoronoiCell* voronoi_cells = organism->voronoi_cells;
+    int num_voronoi_cells = organism->num_voronoi_cells;
+    DIRESAWeights* diresa_genome_weights = organism->diresa_genome_weights;
+    float* workspace_genomes = organism->workspace_genomes;
+    int hw_dim = organism->behavioral_dim_hw;
+    int task_dim = organism->behavioral_dim_task;
+    int gen_dim = organism->behavioral_dim_gen;
+    int num_classes = organism->num_classes;
+
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int actual_num_to_seed = min(num_to_seed, pool->alive_indices_count);
     if (compact_idx >= actual_num_to_seed) return;
 
     int idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[idx], "seed_archive_from_pool_kernel: dead entry in alive_indices");
+    DEVICE_FATAL_IF(!pool->alive_flags[idx], "seed_archive_from_pool_device: dead entry in alive_indices");
 
     PoolEntry* entry = &pool->entries[idx];
 

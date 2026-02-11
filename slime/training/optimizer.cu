@@ -3,85 +3,72 @@
 #define OPTIMIZER_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-__global__ void adam_update_kernel(
-    float* __restrict__ weights,
-    float* __restrict__ gradients,
-    float* __restrict__ m,
-    float* __restrict__ v,
-    int num_params,
-    float lr,
-    float beta1,
-    float beta2,
-    float epsilon,
-    int timestep,
-    float gradient_clip_norm
-) {
+__device__ void adam_update_perception_device(Organism* organism) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    MultiHeadCAState* ca_state = &organism->ca_state_pool[0];
+    HybridTrainingMode* training_mode = organism->training_mode;
+
+    half* weights_fp16 = ca_state->perception_weights;
+    float* gradients = ca_state->tape.grad_buffer;
+    float* m = training_mode->adam_m;
+    float* v = training_mode->adam_v;
+    int num_params = training_mode->perception_size;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
     if (idx >= num_params) return;
-
-    DEVICE_FATAL_IF(weights == nullptr, "adam_update: weights is null");
-    DEVICE_FATAL_IF(gradients == nullptr, "adam_update: gradients is null");
-    DEVICE_FATAL_IF(m == nullptr, "adam_update: m is null");
-    DEVICE_FATAL_IF(v == nullptr, "adam_update: v is null");
-
-    float g = gradients[idx];
-
-    DEVICE_FATAL_IF(isnan(g), "adam_update: gradient is NaN - upstream computation corrupted");
-    DEVICE_FATAL_IF(isinf(g), "adam_update: gradient is Inf - upstream computation corrupted");
-
-    if (fabsf(g) > gradient_clip_norm) {
-        g = copysignf(gradient_clip_norm, g);
-    }
-
-    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
-    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
-
-    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
-    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
-
-    float denom = sqrtf(v_hat) + epsilon;
-    DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_update: denom is NaN/Inf - numerical instability");
-
-    float weight_delta = lr * m_hat / denom;
-    weights[idx] -= weight_delta;
-
-    DEVICE_FATAL_IF(isnan(weights[idx]), "adam_update: weight became NaN after update");
-    DEVICE_FATAL_IF(isinf(weights[idx]), "adam_update: weight became Inf after update");
-
-    gradients[idx] = 0.0f;
-}
-
-__global__ void adam_update_fp16_kernel(
-    half* __restrict__ weights_fp16,
-    float* __restrict__ gradients,
-    float* __restrict__ m,
-    float* __restrict__ v,
-    int num_params,
-    float lr,
-    float beta1,
-    float beta2,
-    float epsilon,
-    int timestep,
-    float gradient_clip_norm
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_params) return;
-
-    DEVICE_FATAL_IF(weights_fp16 == nullptr, "adam_update_fp16: weights_fp16 is null");
-    DEVICE_FATAL_IF(gradients == nullptr, "adam_update_fp16: gradients is null");
-    DEVICE_FATAL_IF(m == nullptr, "adam_update_fp16: m is null");
-    DEVICE_FATAL_IF(v == nullptr, "adam_update_fp16: v is null");
 
     float weight = __half2float(weights_fp16[idx]);
     float g = gradients[idx];
 
-    DEVICE_FATAL_IF(isnan(g), "adam_update_fp16: gradient is NaN - upstream computation corrupted");
-    DEVICE_FATAL_IF(isinf(g), "adam_update_fp16: gradient is Inf - upstream computation corrupted");
-    DEVICE_FATAL_IF(isnan(weight), "adam_update_fp16: weight is NaN - data corrupted");
-    DEVICE_FATAL_IF(isinf(weight), "adam_update_fp16: weight is Inf - data corrupted");
+    if (fabsf(g) > gradient_clip_norm) {
+        g = copysignf(gradient_clip_norm, g);
+    }
+
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
+    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
+
+    weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
+
+    weights_fp16[idx] = __float2half(weight);
+    gradients[idx] = 0.0f;
+}
+
+__device__ void adam_update_interaction_device(Organism* organism) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    MultiHeadCAState* ca_state = &organism->ca_state_pool[0];
+    HybridTrainingMode* training_mode = organism->training_mode;
+
+    int perception_params = training_mode->perception_size;
+    half* weights_fp16 = ca_state->interaction_weights;
+    float* gradients = ca_state->tape.grad_buffer + perception_params;
+    float* m = training_mode->adam_m + perception_params;
+    float* v = training_mode->adam_v + perception_params;
+    int num_params = training_mode->interaction_size;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
+    if (idx >= num_params) return;
+
+    float weight = __half2float(weights_fp16[idx]);
+    float g = gradients[idx];
 
     if (fabsf(g) > gradient_clip_norm) {
         g = copysignf(gradient_clip_norm, g);
@@ -93,15 +80,162 @@ __global__ void adam_update_fp16_kernel(
     float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
     float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
 
-    float denom = sqrtf(v_hat) + epsilon;
-    DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_update_fp16: denom is NaN/Inf - numerical instability");
-
-    weight -= lr * m_hat / denom;
-
-    DEVICE_FATAL_IF(isnan(weight), "adam_update_fp16: weight became NaN after update");
-    DEVICE_FATAL_IF(isinf(weight), "adam_update_fp16: weight became Inf after update");
+    weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
 
     weights_fp16[idx] = __float2half(weight);
+    gradients[idx] = 0.0f;
+}
+
+__device__ void adam_update_value_device(Organism* organism) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    MultiHeadCAState* ca_state = &organism->ca_state_pool[0];
+    HybridTrainingMode* training_mode = organism->training_mode;
+
+    int perception_params = training_mode->perception_size;
+    int interaction_params = training_mode->interaction_size;
+    half* weights_fp16 = ca_state->value_weights;
+    float* gradients = ca_state->tape.grad_buffer + perception_params + interaction_params;
+    float* m = training_mode->adam_m + perception_params + interaction_params;
+    float* v = training_mode->adam_v + perception_params + interaction_params;
+    int num_params = training_mode->value_size;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
+    if (idx >= num_params) return;
+
+    float weight = __half2float(weights_fp16[idx]);
+    float g = gradients[idx];
+
+    if (fabsf(g) > gradient_clip_norm) {
+        g = copysignf(gradient_clip_norm, g);
+    }
+
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
+    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
+
+    weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
+
+    weights_fp16[idx] = __float2half(weight);
+    gradients[idx] = 0.0f;
+}
+
+__device__ void adam_update_pooling_device(Organism* organism) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    ClassificationHead* classifier = organism->classifier;
+    HybridTrainingMode* training_mode = organism->training_mode;
+    Architecture arch = Architecture::fromConfig();
+
+    float* weights = classifier->pooling_weights;
+    float* gradients = organism->pooling_weights_grad;
+    float* m = organism->adam_m_pooling;
+    float* v = organism->adam_v_pooling;
+    int num_params = arch.channels;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
+    if (idx >= num_params) return;
+
+    float g = gradients[idx];
+
+    if (fabsf(g) > gradient_clip_norm) {
+        g = copysignf(gradient_clip_norm, g);
+    }
+
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
+    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
+
+    weights[idx] -= lr * m_hat / (sqrtf(v_hat) + epsilon);
+    gradients[idx] = 0.0f;
+}
+
+__device__ void adam_update_fc_weights_device(Organism* organism) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    ClassificationHead* classifier = organism->classifier;
+    HybridTrainingMode* training_mode = organism->training_mode;
+    int num_classes = organism->current_dataset->num_classes;
+    int num_features = CLASSIFIER_FEATURES;
+
+    float* weights = classifier->fc_weights;
+    float* gradients = organism->fc_weights_grad;
+    float* m = organism->adam_m_fc_weights;
+    float* v = organism->adam_v_fc_weights;
+    int num_params = num_classes * num_features;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
+    if (idx >= num_params) return;
+
+    float g = gradients[idx];
+
+    if (fabsf(g) > gradient_clip_norm) {
+        g = copysignf(gradient_clip_norm, g);
+    }
+
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
+    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
+
+    weights[idx] -= lr * m_hat / (sqrtf(v_hat) + epsilon);
+    gradients[idx] = 0.0f;
+}
+
+__device__ void adam_update_fc_bias_device(Organism* organism) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    ClassificationHead* classifier = organism->classifier;
+    HybridTrainingMode* training_mode = organism->training_mode;
+    int num_classes = organism->current_dataset->num_classes;
+
+    float* weights = classifier->fc_bias;
+    float* gradients = organism->fc_bias_grad;
+    float* m = organism->adam_m_fc_bias;
+    float* v = organism->adam_v_fc_bias;
+    int num_params = num_classes;
+    float lr = training_mode->learning_rate;
+    float beta1 = ADAM_BETA1;
+    float beta2 = ADAM_BETA2;
+    float epsilon = ADAM_EPSILON;
+    int timestep = training_mode->adam_timestep + 1;
+    float gradient_clip_norm = GRADIENT_CLIP_NORM;
+
+    if (idx >= num_params) return;
+
+    float g = gradients[idx];
+
+    if (fabsf(g) > gradient_clip_norm) {
+        g = copysignf(gradient_clip_norm, g);
+    }
+
+    m[idx] = beta1 * m[idx] + (1.0f - beta1) * g;
+    v[idx] = beta2 * v[idx] + (1.0f - beta2) * g * g;
+
+    float m_hat = m[idx] / (1.0f - powf(beta1, (float)timestep));
+    float v_hat = v[idx] / (1.0f - powf(beta2, (float)timestep));
+
+    weights[idx] -= lr * m_hat / (sqrtf(v_hat) + epsilon);
     gradients[idx] = 0.0f;
 }
 

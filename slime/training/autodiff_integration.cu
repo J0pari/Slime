@@ -3,6 +3,7 @@
 #define AUTODIFF_INTEGRATION_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "training_types.cu"
 #include "../learning/autodiff.cu"
 #include "../core/pseudopod.cu"

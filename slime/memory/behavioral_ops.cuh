@@ -2,6 +2,7 @@
 #define BEHAVIORAL_OPS_CUH
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 
 struct GPUElite;
 struct VoronoiCell;

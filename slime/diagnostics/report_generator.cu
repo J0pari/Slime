@@ -3,6 +3,7 @@
 #define REPORT_GENERATOR_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../../external/stb_image_write.h"

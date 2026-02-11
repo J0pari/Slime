@@ -1,5 +1,6 @@
 
 #include "../../config/config.cu"
+#include "../../core/organism.cu"
 #include "../../learning/autodiff.cu"
 #include <cuda_runtime.h>
 #include <stdio.h>

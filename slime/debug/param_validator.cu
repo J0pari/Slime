@@ -1,46 +1,57 @@
 #ifndef PARAM_VALIDATOR_CU
 #define PARAM_VALIDATOR_CU
 
+#include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 #include <stdio.h>
 
 
-inline bool validate_pointer(const char* name, void* ptr, bool must_be_device, const char* file, int line) {
+__device__ __forceinline__ bool validate_pointer(const char* name, void* ptr, bool must_be_device, const char* file, int line) {
     if (ptr == nullptr) {
         return false;
     }
 
-    cudaPointerAttributes attr;
-    cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
-    if (err != cudaSuccess) {
-        cudaGetLastError();
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+
+    if ((addr & 0x3) != 0) {
         return false;
     }
 
-    const char* type_str;
-    bool is_valid = true;
-
-    switch(attr.type) {
-        case cudaMemoryTypeUnregistered: type_str = "unregistered"; is_valid = !must_be_device; break;
-        case cudaMemoryTypeHost: type_str = "host"; is_valid = !must_be_device; break;
-        case cudaMemoryTypeDevice: type_str = "device"; break;
-        case cudaMemoryTypeManaged: type_str = "managed"; break;
-        default: type_str = "unknown"; is_valid = false; break;
-    }
-
-    if (!is_valid) {
+    if (addr == UINTPTR_MAX || addr == 0xDEADBEEF || addr == 0xFEEDFACE ||
+        addr == 0xBADDCAFE || addr == 0xDEADC0DE) {
         return false;
     }
+
+    uint32_t addr_low = static_cast<uint32_t>(addr);
+    uint32_t addr_high = static_cast<uint32_t>(addr >> 32);
+
+    if ((addr_low == 0xFFFFFFFF && addr_high == 0xFFFFFFFF) ||
+        (addr_low == 0x00000000 && addr_high == 0x00000000)) {
+        return false;
+    }
+
+    if (__isGlobal(ptr) == 0 && __isShared(ptr) == 0 && __isConstant(ptr) == 0) {
+        if (must_be_device) {
+            return false;
+        }
+    }
+
+    if (__isGlobal(ptr) != 0) {
+        volatile char test_byte = *reinterpret_cast<volatile char*>(ptr);
+        (void)test_byte;
+    }
+
     return true;
 }
 
 
 template<typename T>
-inline void print_struct_layout(const char* name) {
+__device__ __forceinline__ void print_struct_layout(const char* name) {
 }
 
 
-inline bool validate_int_range(const char* name, int value, int min, int max, const char* file, int line) {
+__device__ __forceinline__ bool validate_int_range(const char* name, int value, int min, int max, const char* file, int line) {
     if (value < min || value > max) {
         return false;
     }

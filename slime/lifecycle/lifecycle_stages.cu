@@ -2,6 +2,7 @@
 #define LIFECYCLE_STAGES_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../memory/pool.cu"
 #include "../memory/archive.cu"

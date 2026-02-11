@@ -3,6 +3,7 @@
 #define ARCHIVE_SAMPLING_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include "../memory/archive.cu"

@@ -2,6 +2,7 @@
 #define CORRELATION_MATRIX_CU
 
 #include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 

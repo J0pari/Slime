@@ -1,7 +1,9 @@
 #ifndef KERNEL_TRACE_CU
 #define KERNEL_TRACE_CU
 
+#include "../config/config.cu"
 #include <cuda_runtime.h>
+#include "../core/organism.cu"
 #include <stdio.h>
 
 struct KernelLaunchInfo {
@@ -82,15 +84,13 @@ inline void init_kernel_trace() {
         exit(1);
     }
 
-    size_t stack_size = 8192;
-    cudaDeviceSetLimit(cudaLimitStackSize, stack_size);
+    cudaDeviceSetLimit(cudaLimitStackSize, CDP_STACK_SIZE);
 
-    size_t malloc_heap = 128 * 1024 * 1024;
-    cudaDeviceSetLimit(cudaLimitMallocHeapSize, malloc_heap);
+    cudaDeviceSetLimit(cudaLimitMallocHeapSize, DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB);
 
-    cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, 4);
+    cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, CDP_SYNC_DEPTH);
 
-    cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, 32768);
+    cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, CDP_PENDING_LAUNCH_COUNT);
 }
 
 #endif

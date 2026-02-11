@@ -3,6 +3,7 @@
 #define PARALLEL_COMPACTION_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../learning/autodiff.cu"
 #include "tubes.cu"

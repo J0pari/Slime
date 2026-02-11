@@ -1,17 +1,14 @@
 #ifndef PROVENANCE_CUH
 #define PROVENANCE_CUH
 
+#include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cfloat>
 #include <cmath>
 #include <atomic>
 #include <cstdio>
-
-constexpr int32_t PROVENANCE_UNINITIALIZED_INT = INT_MIN;
-constexpr float PROVENANCE_UNINITIALIZED_FLOAT = NAN;
-constexpr uint64_t PROVENANCE_UNINITIALIZED_HASH = UINT64_MAX;
-constexpr int32_t PROVENANCE_INVALID_INDEX = -1;
 
 enum class ComputeState : uint8_t {
     UNCOMPUTED,
@@ -174,23 +171,6 @@ struct PhaseTransitionRecord {
         transition_generation(INT_MIN),
         transition_count(0) {}
 };
-
-constexpr uint32_t PROVENANCE_SOURCE_NONE = 0;
-constexpr uint32_t PROVENANCE_SOURCE_INIT = 1;
-constexpr uint32_t PROVENANCE_SOURCE_POOL = 2;
-constexpr uint32_t PROVENANCE_SOURCE_ARCHIVE = 3;
-constexpr uint32_t PROVENANCE_SOURCE_TRAINING = 4;
-constexpr uint32_t PROVENANCE_SOURCE_TELEMETRY = 5;
-constexpr uint32_t PROVENANCE_SOURCE_CLASSIFICATION = 6;
-constexpr uint32_t PROVENANCE_SOURCE_FLOW = 7;
-constexpr uint32_t PROVENANCE_SOURCE_CHEMOTAXIS = 8;
-constexpr uint32_t PROVENANCE_SOURCE_LIFECYCLE = 9;
-constexpr uint32_t PROVENANCE_SOURCE_DIRESA = 10;
-constexpr uint32_t PROVENANCE_SOURCE_BACKWARD = 11;
-constexpr uint32_t PROVENANCE_SOURCE_HOST = 12;
-
-constexpr uint32_t RING_BUFFER_SLOTS = 8;
-constexpr uint32_t CRC32_POLYNOMIAL = 0xEDB88320;
 
 __device__ __host__ __forceinline__ uint32_t crc32_byte(uint32_t crc, uint8_t byte) {
     crc ^= byte;
@@ -386,6 +366,7 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
 
 #define PROVENANCE_FATAL(msg) do { \
     printf("E_PROV %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
+    __threadfence_system(); \
     asm("trap;"); \
 } while(0)
 
@@ -396,6 +377,7 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
 #define PROVENANCE_ASSERT_INITIALIZED_INT(val, name) do { \
     if (is_uninitialized_int(val)) { \
         printf("E_UNINIT %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, name); \
+        __threadfence_system(); \
         asm("trap;"); \
     } \
 } while(0)
@@ -403,6 +385,7 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
 #define PROVENANCE_ASSERT_INITIALIZED_FLOAT(val, name) do { \
     if (is_uninitialized_float(val)) { \
         printf("E_UNINIT %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, name); \
+        __threadfence_system(); \
         asm("trap;"); \
     } \
 } while(0)
@@ -552,14 +535,6 @@ struct AuditRecord {
 
     uint32_t fields_written_mask;
 };
-
-constexpr uint32_t AUDIT_FIELD_GENERATION = (1 << 0);
-constexpr uint32_t AUDIT_FIELD_BATCH = (1 << 1);
-constexpr uint32_t AUDIT_FIELD_ACCURACY = (1 << 2);
-constexpr uint32_t AUDIT_FIELD_POOL = (1 << 3);
-constexpr uint32_t AUDIT_FIELD_ARCHIVE = (1 << 4);
-constexpr uint32_t AUDIT_FIELD_CHEMICAL = (1 << 5);
-constexpr uint32_t AUDIT_FIELD_FLOW = (1 << 6);
 
 __device__ __forceinline__ void audit_record_init(AuditRecord* rec) {
     rec->generation = PROVENANCE_UNINITIALIZED_INT;

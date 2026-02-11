@@ -3,6 +3,7 @@
 #define DATASET_LOADER_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../training/training_types.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>

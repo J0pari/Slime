@@ -1,6 +1,7 @@
 #ifndef GENOME_PARAMS_CUH
 #define GENOME_PARAMS_CUH
 
+#include "../core/organism.cu"
 #include "cuda_primitives.cuh"
 #include "../memory/genome_ops.cuh"
 

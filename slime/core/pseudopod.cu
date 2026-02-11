@@ -3,6 +3,7 @@
 #define PSEUDOPOD_CU
 
 #include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/genome_params.cuh"
 #include "../memory/pool.cu"
 #include "../metrics/hardware_geometry.cu"

@@ -2,6 +2,7 @@
 #ifndef HARDWARE_GEOMETRY_CU
 #define HARDWARE_GEOMETRY_CU
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 
@@ -57,18 +58,20 @@ struct TraceBuffer {
     int current_idx;
 };
 
-__global__ void reset_trace_buffer_kernel(TraceBuffer* buffer) {
+__device__ void reset_trace_buffer_device(Organism* organism) {
+    TraceBuffer* buffer = organism->trace_buffer;
     buffer->current_idx = 0;
 }
 
-__global__ void init_trace_buffer_kernel(TraceBuffer* buffer, int capacity) {
+__device__ void init_trace_buffer_device(Organism* organism, int capacity) {
+    TraceBuffer* buffer = organism->trace_buffer;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid == 0) {
         buffer->capacity = capacity;
         buffer->current_idx = 0;
     }
-    
+
     if (tid < capacity) {
         ExecutionTrace* trace = &buffer->traces[tid];
         trace->active_warps = 0;
@@ -164,10 +167,10 @@ __device__ void compute_hardware_geometry(ExecutionTrace* trace, HardwareGeometr
     geom->memory_bandwidth_saturation = trace->achieved_bandwidth / trace->peak_bandwidth;
 }
 
-__global__ void aggregate_hardware_geometry_kernel(
-    TraceBuffer* buffer,
-    HardwareGeometry* output_geom
-) {
+__device__ void aggregate_hardware_geometry_device(Organism* organism) {
+    TraceBuffer* buffer = organism->trace_buffer;
+    HardwareGeometry* output_geom = organism->hardware_geom;
+
     __shared__ alignas(128) ExecutionTrace aggregate_trace;
 
     int tid = threadIdx.x;

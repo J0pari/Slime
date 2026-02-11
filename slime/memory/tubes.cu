@@ -2,6 +2,7 @@
 #ifndef TUBES_CU
 #define TUBES_CU
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include <cuda_runtime.h>
 
 struct MemoryEntry {
@@ -21,12 +22,13 @@ struct TemporalTube {
     float decay_rate;
 };
 
-__global__ void store_memory_kernel(
-    TemporalTube* tube,
+__device__ void store_memory_device(
+    Organism* organism,
     float* data,
     int size,
     float importance
 ) {
+    TemporalTube* tube = organism->temporal_tube;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int idx = tube->head;
 
@@ -48,13 +50,14 @@ __global__ void store_memory_kernel(
     }
 }
 
-__global__ void recall_memory_kernel(
-    TemporalTube* tube,
+__device__ void recall_memory_device(
+    Organism* organism,
     float* query,
     float* output,
     int query_size,
     int output_size
 ) {
+    TemporalTube* tube = organism->temporal_tube;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < output_size) {
@@ -87,13 +90,14 @@ __global__ void recall_memory_kernel(
     }
 }
 
-__global__ void init_tube_kernel(
-    TemporalTube* tube,
+__device__ void init_tube_device(
+    Organism* organism,
     int capacity,
     float decay_rate,
     float* data_buffer,
     int entry_size
 ) {
+    TemporalTube* tube = organism->temporal_tube;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < capacity) {
@@ -114,12 +118,13 @@ __global__ void init_tube_kernel(
 }
 
 
-__global__ void memory_stats_kernel(
-    TemporalTube* tube,
+__device__ void memory_stats_device(
+    Organism* organism,
     float* avg_decay,
     float* total_importance,
     int* active_memories
 ) {
+    TemporalTube* tube = organism->temporal_tube;
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + tid;
 

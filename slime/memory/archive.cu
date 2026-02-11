@@ -2,6 +2,7 @@
 #ifndef ARCHIVE_CU
 #define ARCHIVE_CU
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "behavioral_ops.cuh"
 #include "genome_ops.cuh"
@@ -149,11 +150,11 @@ __device__ void restore_fitness_from_archive(
     entry->fitness.input_hash = archive->fitness_input_hash[elite_idx];
 }
 
-__global__ void init_hash_table_kernel(
-    uint64_t* keys,
-    int* values,
-    int size
-) {
+__device__ void init_hash_table_device(Organism* organism) {
+    uint64_t* keys = organism->archive->hash_table_keys;
+    int* values = organism->archive->hash_table_values;
+    int size = GENOME_HASH_TABLE_SIZE;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         keys[idx] = HASH_TABLE_EMPTY_KEY;
@@ -161,10 +162,10 @@ __global__ void init_hash_table_kernel(
     }
 }
 
-__global__ void rebuild_hash_table_kernel(
-    GPUElite* archive,
-    int archive_size
-) {
+__device__ void rebuild_hash_table_device(Organism* organism) {
+    GPUElite* archive = organism->archive;
+    int archive_size = organism->archive_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < archive_size) {
         uint64_t genome_hash = archive->genome_hash[idx];
@@ -216,8 +217,8 @@ __device__ uint16_t get_generation() {
     return d_generation_counter;
 }
 
-__global__ void create_elite_kernel(
-    GPUElite* __restrict__ archive,
+__device__ void create_elite_device(
+    Organism* organism,
     int elite_idx,
     float* __restrict__ genome,
     float fitness_val,
@@ -227,6 +228,8 @@ __global__ void create_elite_kernel(
     uint64_t fitness_input_hash,
     int fitness_computed_at_generation
 ) {
+    GPUElite* archive = organism->archive;
+
     if (threadIdx.x == 0) {
         archive->fitness[elite_idx] = fitness_val;
         archive->coherence[elite_idx] = coherence_val;
@@ -239,12 +242,8 @@ __global__ void create_elite_kernel(
 }
 
 
-__global__ void update_voronoi_density_kernel(
-    VoronoiCell* __restrict__ cells,
-    GPUElite* __restrict__ archive,
-    int num_elites,
-    int num_cells,
-    int behavioral_dim_total,
+__device__ void update_voronoi_density_device(
+    Organism* organism,
     const float* genome,
     const float* gradients,
     uint64_t genome_hash,
@@ -256,9 +255,12 @@ __global__ void update_voronoi_density_kernel(
     float ctx_learning,
     float ctx_performance
 ) {
+    VoronoiCell* cells = organism->voronoi_cells;
+    GPUElite* archive = organism->archive;
+    int num_elites = organism->archive_size;
+    int num_cells = organism->num_voronoi_cells;
+
     if (num_cells <= 0) {
-        if (threadIdx.x == 0 && blockIdx.x == 0) {
-        }
         return;
     }
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -443,13 +445,15 @@ __device__ void insert_elite_device(
     cells[closest_cell].best_elite_idx = idx;
 }
 
-__global__ void adapt_embedding_dim_kernel(
-    float* __restrict__ reconstruction_error,
-    int* __restrict__ embedding_dim,
+__device__ void adapt_embedding_dim_device(
+    Organism* organism,
     int current_dim,
     float error_threshold,
     int behavioral_dim_max
 ) {
+    float* reconstruction_error = organism->reconstruction_error;
+    int* embedding_dim = organism->embedding_dim;
+
     float local_error = reconstruction_error[threadIdx.x];
 
     float total_error = BlockReduce<BLOCK_SIZE>::sum(local_error);
@@ -466,14 +470,13 @@ __global__ void adapt_embedding_dim_kernel(
     }
 }
 
-__global__ void init_voronoi_cells_kernel(
-    VoronoiCell* cells,
-    int num_cells,
-    int hw_dim,
-    int task_dim,
-    int gen_dim,
-    unsigned int seed
-) {
+__device__ void init_voronoi_cells_device(Organism* organism, unsigned int seed) {
+    VoronoiCell* cells = organism->voronoi_cells;
+    int num_cells = organism->num_voronoi_cells;
+    int hw_dim = organism->behavioral_dim_hw;
+    int task_dim = organism->behavioral_dim_task;
+    int gen_dim = organism->behavioral_dim_gen;
+
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (cell_id >= num_cells) return;
 
@@ -503,17 +506,14 @@ __global__ void init_voronoi_cells_kernel(
     cell->density = 0;
     cell->best_elite_idx = -1;
     cell->quality_threshold = 0.0f;
-
-    if (cell_id == 0) {
-    }
 }
 
 
-__global__ void compute_voronoi_occupancy_kernel(
-    VoronoiCell* voronoi_cells,
-    int num_voronoi_cells,
-    float* voronoi_occupancy_histogram
-) {
+__device__ void compute_voronoi_occupancy_device(Organism* organism) {
+    VoronoiCell* voronoi_cells = organism->voronoi_cells;
+    int num_voronoi_cells = organism->num_voronoi_cells;
+    float* voronoi_occupancy_histogram = organism->voronoi_occupancy_histogram;
+
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (tid < num_voronoi_cells) {
@@ -526,8 +526,8 @@ __device__ float get_ca_xavier_scale(
     int* out_matrix, int* out_local_idx
 );
 
-__global__ void store_elite_weight_deltas_kernel(
-    GPUElite* archive,
+__device__ void store_elite_weight_deltas_device(
+    Organism* organism,
     int elite_idx,
     const half* perception_weights,
     const half* interaction_weights,
@@ -540,6 +540,8 @@ __global__ void store_elite_weight_deltas_kernel(
     const float* epigenetic,
     int* num_deltas_out
 ) {
+    GPUElite* archive = organism->archive;
+
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
     DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "store_weight_deltas: num_heads invalid");
     DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "store_weight_deltas: channels invalid");
@@ -597,24 +599,28 @@ __global__ void store_elite_weight_deltas_kernel(
     }
 }
 
-__global__ void finalize_weight_deltas_kernel(
-    GPUElite* archive,
+__device__ void finalize_weight_deltas_device(
+    Organism* organism,
     int elite_idx,
     int* num_deltas_out
 ) {
+    GPUElite* archive = organism->archive;
+
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int count = min(*num_deltas_out, MAX_WEIGHT_DELTAS_PER_ELITE);
         archive->num_weight_deltas[elite_idx] = count;
     }
 }
 
-__global__ void restore_elite_weights_kernel(
-    const GPUElite* archive,
+__device__ void restore_elite_weights_device(
+    Organism* organism,
     int elite_idx,
     half* perception_weights,
     half* interaction_weights,
     half* value_weights
 ) {
+    const GPUElite* archive = organism->archive;
+
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "restore_weights: elite_idx invalid");
 
@@ -651,13 +657,15 @@ __global__ void restore_elite_weights_kernel(
     }
 }
 
-__global__ void apply_weight_deltas_kernel(
-    const GPUElite* archive,
+__device__ void apply_weight_deltas_device(
+    Organism* organism,
     int elite_idx,
     half* perception_weights,
     half* interaction_weights,
     half* value_weights
 ) {
+    const GPUElite* archive = organism->archive;
+
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "apply_deltas: elite_idx invalid");
 
@@ -692,11 +700,10 @@ __global__ void apply_weight_deltas_kernel(
     }
 }
 
-__global__ void archive_to_tube_kernel(
-    const GPUElite* __restrict__ archive,
-    int elite_idx,
-    TemporalTube* __restrict__ tube
-) {
+__device__ void archive_to_tube_device(Organism* organism, int elite_idx) {
+    const GPUElite* archive = organism->archive;
+    TemporalTube* tube = organism->temporal_tube;
+
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "archive_to_tube: elite_idx invalid");
@@ -739,16 +746,18 @@ __global__ void archive_to_tube_kernel(
     }
 }
 
-__global__ void tube_to_archive_query_kernel(
-    const GPUElite* __restrict__ archive,
-    int archive_size,
+__device__ void tube_to_archive_query_device(
+    Organism* organism,
     const float* __restrict__ tube_recall,
-    int hw_dim,
-    int task_dim,
-    int gen_dim,
     int* __restrict__ best_elite_idx,
     float* __restrict__ best_distance
 ) {
+    const GPUElite* archive = organism->archive;
+    int archive_size = organism->archive_size;
+    int hw_dim = organism->behavioral_dim_hw;
+    int task_dim = organism->behavioral_dim_task;
+    int gen_dim = organism->behavioral_dim_gen;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int num_threads = blockDim.x * gridDim.x;
 

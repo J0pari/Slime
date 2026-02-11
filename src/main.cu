@@ -1,3 +1,5 @@
+#include "../slime/config/config.cu"
+#include "../slime/core/organism.cu"
 #include "../slime/runtime.cu"
 #include "../slime/diagnostics/report_generator.cu"
 #include "../slime/diagnostics/audit_writer.cu"
@@ -29,9 +31,9 @@
             cudaMemGetInfo(&_free, &_total); \
             fprintf(_ff, "failed_allocation,%s\n", (name)); \
             fprintf(_ff, "requested_bytes,%zu\n", (size_t)(size)); \
-            fprintf(_ff, "requested_mb,%.2f\n", (size_t)(size) / (1024.0 * 1024.0)); \
-            fprintf(_ff, "gpu_free_mb,%zu\n", _free / (1024 * 1024)); \
-            fprintf(_ff, "gpu_total_mb,%zu\n", _total / (1024 * 1024)); \
+            fprintf(_ff, "requested_mb,%.2f\n", (size_t)(size) / (float)BYTES_PER_MB); \
+            fprintf(_ff, "gpu_free_mb,%zu\n", _free / BYTES_PER_MB); \
+            fprintf(_ff, "gpu_total_mb,%zu\n", _total / BYTES_PER_MB); \
             fprintf(_ff, "error_code,%d\n", (int)_err); \
             fprintf(_ff, "error_string,%s\n", cudaGetErrorString(_err)); \
             fclose(_ff); \
@@ -154,11 +156,14 @@ int main() {
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H26] Mem before setting sync_depth: %zu MB free\n", free_mem / BYTES_PER_MB); fflush(stdout);
 
+    cudaDeviceSetLimit(cudaLimitStackSize, CDP_STACK_SIZE);
+    cudaMemGetInfo(&free_mem, &total_mem);
+    printf("[H27] stack_size=%d, %zu MB free\n", CDP_STACK_SIZE, free_mem / BYTES_PER_MB); fflush(stdout);
+
     cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, CDP_SYNC_DEPTH);
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H28] sync_depth=%d, %zu MB free\n", CDP_SYNC_DEPTH, free_mem / BYTES_PER_MB); fflush(stdout);
 
-    constexpr size_t CDP_PENDING_LAUNCH_COUNT = 32768;
     cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, CDP_PENDING_LAUNCH_COUNT);
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H28b] pending_launch_count=%zu, %zu MB free\n", CDP_PENDING_LAUNCH_COUNT, free_mem / BYTES_PER_MB); fflush(stdout);
@@ -221,8 +226,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_scan, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_scan");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_recursive_workspace, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_recursive_workspace");
     CUDA_ALLOC_CHECK(buffers_host.archive, sizeof(GPUElite), "archive");
-    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_keys, sizeof(uint64_t) * 16384, "archive_hash_table_keys");
-    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_values, sizeof(int) * 16384, "archive_hash_table_values");
+    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_keys, sizeof(uint64_t) * GENOME_HASH_TABLE_SIZE, "archive_hash_table_keys");
+    CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_values, sizeof(int) * GENOME_HASH_TABLE_SIZE, "archive_hash_table_values");
     CUDA_ALLOC_CHECK(buffers_host.voronoi_cells, sizeof(VoronoiCell) * POOL_CAPACITY_MAX, "voronoi_cells");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_agents, sizeof(BehavioralState) * POOL_CAPACITY_MAX, "behavioral_agents");
     CUDA_ALLOC_CHECK(buffers_host.delta_indices_buffer, sizeof(uint16_t) * GENOME_SIZE * POOL_CAPACITY_MAX, "delta_indices_buffer");
@@ -344,6 +349,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.total_loss_pool, sizeof(float), "total_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.training_mode, sizeof(HybridTrainingMode), "training_mode");
     CUDA_ALLOC_CHECK(buffers_host.classifier, sizeof(ClassificationHead), "classifier");
+    cudaMemset(buffers_host.classifier, 0, sizeof(ClassificationHead));
     constexpr int CLASSIFIER_INPUT_DIM_MAX = NUM_HEADS_MAX * CHANNELS_MAX;
     CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (CLASSIFIER_INPUT_DIM_MAX + (CLASSIFIER_INPUT_DIM_MAX * NUM_CLASSES_MAX) + NUM_CLASSES_MAX), "classifier_workspace");
     CUDA_ALLOC_CHECK(buffers_host.curriculum, sizeof(AdaptiveCurriculum), "curriculum");
@@ -352,6 +358,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.organism, sizeof(Organism), "organism");
     CUDA_ALLOC_CHECK(buffers_host.reduction_workspace, sizeof(float) * ((CA_FIELD_SIZE * CHANNELS_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_workspace");
     CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
+    CUDA_ALLOC_CHECK(buffers_host.phase_barrier_counter, sizeof(int), "phase_barrier_counter");
+    CUDA_ALLOC_CHECK(buffers_host.phase_barrier_generation, sizeof(int), "phase_barrier_generation");
     CUDA_ALLOC_CHECK(buffers_host.memory_params, sizeof(MemoryUpdateParams), "memory_params");
     CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * BLOCK_SIZE * SPAWN_WS_COUNT * GENOME_SIZE, "organism_workspace_genomes");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_features_buffer, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_MAX, "behavioral_features_buffer");

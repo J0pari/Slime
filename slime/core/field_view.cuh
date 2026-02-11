@@ -2,6 +2,7 @@
 #define FIELD_VIEW_CUH
 
 #include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 

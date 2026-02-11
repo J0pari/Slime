@@ -3,6 +3,7 @@
 #define PSEUDOPOD_TENSOR_CU
 
 #include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../utils/genome_params.cuh"
 #include "pseudopod.cu"

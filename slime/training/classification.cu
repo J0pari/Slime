@@ -3,6 +3,7 @@
 #define CLASSIFICATION_CU
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "training_types.cu"
 #include "losses.cu"

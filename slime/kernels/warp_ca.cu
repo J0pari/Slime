@@ -1,5 +1,6 @@
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -30,7 +31,8 @@ __device__ void jacobi_rotation(float* A, int n, int p, int q, float* s, float* 
     *s = t * (*c);
 }
 
-__global__ void gpu_svd_kernel(
+__device__ void gpu_svd_device(
+    Organism* organism,
     float* __restrict__ A,
     float* __restrict__ U,
     float* __restrict__ S,
@@ -134,7 +136,8 @@ __global__ void gpu_svd_kernel(
     }
 }
 
-__global__ void coherence_kernel(
+__device__ void coherence_device(
+    Organism* organism,
     float* __restrict__ prediction_errors,
     float* __restrict__ coherence_out,
     int history_length
@@ -168,7 +171,8 @@ __global__ void coherence_kernel(
     }
 }
 
-__global__ void hunger_kernel(
+__device__ void hunger_device(
+    Organism* organism,
     float* __restrict__ coherence_values,
     float* __restrict__ hunger_out,
     int n
@@ -176,12 +180,12 @@ __global__ void hunger_kernel(
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (tid < n) {
-
         hunger_out[tid] = 1.0f - coherence_values[tid];
     }
 }
 
-__global__ void neural_ca_tensor_kernel(
+__device__ void neural_ca_tensor_device(
+    Organism* organism,
     half* __restrict__ input,
     half* __restrict__ weights,
     half* __restrict__ output,
@@ -228,7 +232,8 @@ __global__ void neural_ca_tensor_kernel(
     }
 }
 
-__global__ void flow_lenia_kernel(
+__device__ void flow_lenia_device(
+    Organism* organism,
     float* __restrict__ state,
     float* __restrict__ next_state,
     float* __restrict__ kernels,
@@ -289,7 +294,8 @@ __device__ float get_neighbor_2d(
     return __shfl_sync(mask, val, neighbor_lane);
 }
 
-__global__ void warp_ca_kernel(
+__device__ void warp_ca_device(
+    Organism* organism,
     float* __restrict__ state,
     float* __restrict__ next_state,
     int width, int height,

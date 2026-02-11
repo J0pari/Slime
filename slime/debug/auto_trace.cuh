@@ -1,9 +1,7 @@
 #ifndef AUTO_TRACE_CUH
 #define AUTO_TRACE_CUH
 
-
-
-
+#include "../core/organism.cu"
 #include "kernel_trace.cu"
 
 

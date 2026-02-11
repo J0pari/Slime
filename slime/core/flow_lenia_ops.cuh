@@ -1,6 +1,8 @@
 #ifndef FLOW_LENIA_OPS_CUH
 #define FLOW_LENIA_OPS_CUH
 
+#include "../config/config.cu"
+#include "organism.cu"
 #include "../utils/cuda_primitives.cuh"
 
 #ifndef M_PI
@@ -15,18 +17,18 @@ struct FlowLeniaOps {
         int num_heads,
         int head_dim
     ) {
-        int lane = threadIdx.x % 32;
+        int lane = threadIdx.x % WARP_SIZE;
         float affinity = 0.0f;
 
         int total_elements = num_heads * head_dim;
-        for (int i = lane; i < total_elements; i += 32) {
+        for (int i = lane; i < total_elements; i += WARP_SIZE) {
             int head = i / head_dim;
             int dim = i % head_dim;
             int idx = head * grid_size * grid_size * head_dim + cell_idx * head_dim + dim;
             affinity += ldg_float(&ca_output[idx]);
         }
 
-        return WarpReduce<32>::sum(affinity);
+        return WarpReduce<WARP_SIZE>::sum(affinity);
     }
 
     __device__ static float2 compute_flow_at(

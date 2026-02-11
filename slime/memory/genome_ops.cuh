@@ -2,6 +2,7 @@
 #define GENOME_OPS_CUH
 
 #include "../config/config.cu"
+#include "../core/organism.cu"
 #include "../debug/param_validator.cu"
 #include "../debug/provenance.cuh"
 #include <cuda_runtime.h>
