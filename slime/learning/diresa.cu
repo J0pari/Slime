@@ -33,7 +33,16 @@ struct DIRESABatch {
     float cov_loss;
 };
 
-__device__ void init_diresa_device(DIRESAWeights* replicas, float* preallocated_weight_pool, size_t replica_stride, int input_dim, int output_dim, PoolEntry* entry, unsigned int seed, float* genome) {
+__device__ void init_diresa_device(Organism* organism) {
+    DIRESAWeights* replicas = organism->diresa_genome_weights;
+    float* preallocated_weight_pool = organism->diresa_genome_weight_pool;
+    int entry_idx = organism->lifecycle_entry_idx;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    size_t replica_stride = entry->diresa_replica_stride;
+    int input_dim = entry->diresa_input_dim;
+    int output_dim = entry->diresa_output_dim;
+    unsigned int seed = entry->diresa_init_seed;
+    float* genome = organism->genome;
     int replica_id = blockIdx.x;
     int local_tid = threadIdx.x;
 
@@ -335,7 +344,10 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
     }
 }
 
-__device__ void diresa_forward_device(DIRESABatch* batch, const DIRESAWeights* weights) {
+__device__ void diresa_forward_device(Organism* organism) {
+    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
+    DIRESAWeights* weights = organism->diresa_genome_weights;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
 
@@ -355,7 +367,9 @@ __device__ void diresa_forward_device(DIRESABatch* batch, const DIRESAWeights* w
     CooperativeSync::sync_warp();
 }
 
-__device__ void diresa_distance_device(DIRESABatch* batch) {
+__device__ void diresa_distance_device(Organism* organism) {
+    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= batch->batch_size) return;
 
@@ -377,7 +391,9 @@ __device__ void diresa_distance_device(DIRESABatch* batch) {
     batch->latent_distances[tid] = sqrtf(latent_dist_sq);
 }
 
-__device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weights) {
+__device__ void diresa_loss_device(Organism* organism) {
+    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
+    const DIRESAWeights* weights = organism->diresa_genome_weights;
     __shared__ float shared_recon[256];
     __shared__ float shared_orig_mean[1];
     __shared__ float shared_orig_var[1];
@@ -547,7 +563,12 @@ __device__ void update_annealing(DIRESAWeights* weights, float cov_loss, PoolEnt
     }
 }
 
-__device__ void replica_exchange_device(DIRESAWeights* replicas, DIRESABatch* batches, PoolEntry* entry, curandState* rand_states) {
+__device__ void replica_exchange_device(Organism* organism) {
+    DIRESAWeights* replicas = organism->diresa_genome_weights;
+    DIRESABatch* batches = (DIRESABatch*)organism->diresa_batch_context;
+    int entry_idx = organism->lifecycle_entry_idx;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    curandState* rand_states = organism->diresa_rng_states;
     int tid = threadIdx.x;
     if (tid >= entry->num_tempering_replicas - 1) return;
 

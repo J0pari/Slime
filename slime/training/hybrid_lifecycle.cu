@@ -1380,9 +1380,6 @@ __device__ void hybrid_organism_lifecycle_device(
 
                 DEVICE_FATAL_IF(entry->diresa_task_weights->input_dim != num_features,
                     "hybrid_lifecycle: diresa_task_weights->input_dim mismatch with num_features (entry %d)", entry_idx);
-                for (int b = 0; b < batch_size; b++) {
-                    diresa_encode(&features[b * num_features], &organism->task_coords_pool[b * task_dim], entry->diresa_task_weights);
-                }
             }
             __syncthreads();
 
@@ -3013,7 +3010,6 @@ __device__ void hybrid_organism_lifecycle_device(
 
         if (tid == 0) {
             float* temp_latent = primary_parent_temp;
-            diresa_encode(primary_genome, temp_latent, &organism->diresa_genome_weights[0]);
         }
         __syncthreads();
     }

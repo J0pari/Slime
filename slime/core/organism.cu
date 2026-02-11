@@ -334,6 +334,9 @@ struct Organism {
     int lifecycle_entry_idx;
     float* lifecycle_workspace_genomes;
     int lifecycle_wave_start;
+
+    void* diresa_batch_context;
+    curandState* diresa_rng_states;
 };
 
 // Now include all subsystem files - they can use Organism* since it's defined above
