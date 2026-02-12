@@ -9,14 +9,6 @@
 
 
 
-struct ArchitectureParams {
-    int num_heads;
-    int channels;
-    int hidden_dim;
-    int head_dim;
-    int grid_size;
-    float ca_gate_center;  
-};
 
 
 
@@ -207,7 +199,10 @@ struct TrainingParams {
     }
 };
 
-__global__ void clear_buffer_kernel(float* buffer, int size) {
+__device__ void clear_buffer_device(Organism* organism) {
+    float* buffer = organism->clear_buffer_ptr;
+    int size = organism->clear_buffer_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         buffer[idx] = 0.0f;

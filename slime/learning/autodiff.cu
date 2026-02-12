@@ -6,47 +6,15 @@
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
-enum TapeOp {
-    OP_NONE,
-    OP_ADD,
-    OP_MUL,
-    OP_TANH,
-    OP_RELU,
-    OP_EXP,
-    OP_LOG,
-    OP_SQRT,
-    OP_SIN,
-    OP_COS,
-    OP_MATMUL,
-    OP_REDUCE_SUM,
-    OP_REDUCE_MAX
-};
+__device__ void init_ad_tape_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    TapeEntry* entries_pool = organism->ad_entries_pool;
+    float* values_pool = organism->ad_values_pool;
+    float* grads_pool = organism->ad_grads_pool;
+    int* levels_pool = organism->ad_levels_pool;
+    int tape_capacity = organism->ad_tape_capacity;
+    int value_capacity = organism->ad_value_capacity;
 
-struct TapeEntry {
-    TapeOp op;
-    int output_idx;
-    int input1_idx;
-    int input2_idx;
-    float aux_data;
-    int level;
-};
-
-struct ADTape {
-    TapeEntry* entries;
-    int capacity;
-    int current_size;
-    float* value_buffer;
-    float* grad_buffer;
-    int* value_levels;
-    int value_capacity;
-    int current_value_idx;
-    int max_level;
-
-    int needs_weight_restore;
-    int restore_elite_idx;
-};
-
-__global__ void init_ad_tape_kernel(ADTape* tape, TapeEntry* entries_pool, float* values_pool, float* grads_pool, int* levels_pool, int tape_capacity, int value_capacity) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         tape->entries = entries_pool;
         tape->value_buffer = values_pool;
@@ -229,7 +197,11 @@ __device__ void backward_op(TapeEntry* entry, float* value_buffer, float* grad_b
     }
 }
 
-__global__ void ad_backward_kernel(ADTape* tape, int output_idx, float output_grad) {
+__device__ void ad_backward_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    int output_idx = organism->ad_output_idx;
+    float output_grad = organism->ad_output_grad;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int num_threads = blockDim.x * gridDim.x;
     int tape_size = tape->current_size;
@@ -251,7 +223,9 @@ __global__ void ad_backward_kernel(ADTape* tape, int output_idx, float output_gr
     }
 }
 
-__global__ void reset_tape_kernel(ADTape* tape) {
+__device__ void reset_tape_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < tape->value_capacity) {
@@ -266,12 +240,12 @@ __global__ void reset_tape_kernel(ADTape* tape) {
     }
 }
 
-__global__ void extract_genome_gradients_kernel(
-    ADTape* tape,
-    int* genome_param_indices,
-    int num_params,
-    float* output_gradients
-) {
+__device__ void extract_genome_gradients_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    int* genome_param_indices = organism->genome_param_indices;
+    int num_params = organism->num_genome_params;
+    float* output_gradients = organism->output_gradients;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < num_params) {
@@ -280,13 +254,13 @@ __global__ void extract_genome_gradients_kernel(
     }
 }
 
-__global__ void apply_gradients_kernel(
-    float* genome,
-    float* gradients,
-    int genome_size,
-    float learning_rate,
-    float gradient_clip_norm
-) {
+__device__ void apply_gradients_device(Organism* organism) {
+    float* genome = organism->genome;
+    float* gradients = organism->output_gradients;
+    int genome_size = organism->genome_size;
+    float learning_rate = organism->learning_rate;
+    float gradient_clip_norm = organism->gradient_clip_norm;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (tid < genome_size) {

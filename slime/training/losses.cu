@@ -7,13 +7,12 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 
-__global__ void mse_loss_kernel(
-    float* __restrict__ predictions,
-    float* __restrict__ targets,
-    float* __restrict__ loss_out,
-    int batch_size,
-    int dim
-) {
+__device__ void mse_loss_device(Organism* organism) {
+    float* predictions = organism->loss_predictions;
+    float* targets = organism->loss_targets;
+    float* loss_out = organism->loss_out;
+    int batch_size = organism->loss_batch_size;
+    int dim = organism->loss_dim;
     DEVICE_FATAL_IF(predictions == nullptr, "mse_loss: predictions is null");
     DEVICE_FATAL_IF(targets == nullptr, "mse_loss: targets is null");
     DEVICE_FATAL_IF(loss_out == nullptr, "mse_loss: loss_out is null");
@@ -35,14 +34,13 @@ __global__ void mse_loss_kernel(
     atomicAdd(loss_out, squared_error / (float)(batch_size * dim));
 }
 
-__global__ void cross_entropy_loss_kernel(
-    float* __restrict__ logits,
-    int* __restrict__ labels,
-    float* __restrict__ loss_out,
-    float* __restrict__ gradients,  
-    int batch_size,
-    int num_classes
-) {
+__device__ void cross_entropy_loss_device(Organism* organism) {
+    float* logits = organism->loss_logits;
+    int* labels = organism->loss_labels;
+    float* loss_out = organism->loss_out;
+    float* gradients = organism->loss_gradients;
+    int batch_size = organism->loss_batch_size;
+    int num_classes = organism->loss_num_classes;
     DEVICE_FATAL_IF(logits == nullptr, "cross_entropy: logits is null");
     DEVICE_FATAL_IF(labels == nullptr, "cross_entropy: labels is null");
     DEVICE_FATAL_IF(loss_out == nullptr, "cross_entropy: loss_out is null");
@@ -88,15 +86,14 @@ __global__ void cross_entropy_loss_kernel(
     }
 }
 
-__global__ void cross_entropy_label_smoothing_kernel(
-    float* __restrict__ logits,
-    int* __restrict__ labels,
-    float* __restrict__ loss_out,
-    float* __restrict__ gradients,
-    int batch_size,
-    int num_classes,
-    float smoothing  
-) {
+__device__ void cross_entropy_label_smoothing_device(Organism* organism) {
+    float* logits = organism->loss_logits;
+    int* labels = organism->loss_labels;
+    float* loss_out = organism->loss_out;
+    float* gradients = organism->loss_gradients;
+    int batch_size = organism->loss_batch_size;
+    int num_classes = organism->loss_num_classes;
+    float smoothing = organism->loss_smoothing;
     DEVICE_FATAL_IF(logits == nullptr, "cross_entropy_smooth: logits is null");
     DEVICE_FATAL_IF(labels == nullptr, "cross_entropy_smooth: labels is null");
     DEVICE_FATAL_IF(loss_out == nullptr, "cross_entropy_smooth: loss_out is null");

@@ -6,11 +6,11 @@
 #include "../utils/cuda_primitives.cuh"
 #include <cuda_runtime.h>
 
-__global__ void compute_correlation_matrix_kernel(
-    float* genome,
-    float* correlation_matrix,
-    int genome_size
-) {
+__device__ void compute_correlation_matrix_device(Organism* organism) {
+    float* genome = organism->genome;
+    float* correlation_matrix = organism->correlation_matrix;
+    int genome_size = organism->genome_size;
+
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -53,7 +53,7 @@ __global__ void compute_correlation_matrix_kernel(
     }
 
     float denom = sqrtf(var_row * var_col);
-    DEVICE_FATAL_IF(denom <= 0.0f || isnan(denom) || isinf(denom), "correlation_matrix: invalid denominator");
+    DEVICE_FATAL_IF(denom <= 0.0f || isnan(denom) || isinf(denom), "compute_correlation_matrix_device: invalid denominator");
     float correlation = covariance / denom;
     correlation_matrix[row * genome_size + col] = correlation;
 }

@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <math_constants.h>
+#include <cstdio>
 
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
@@ -42,10 +43,12 @@
         __trap(); \
     } while(0)
 
-#define DEVICE_FATAL_IF(cond, msg) \
+#define DEVICE_FATAL_IF(cond, ...) \
     do { \
         if (cond) { \
-            printf("!FATAL [%s:%d] b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
+            printf("!FATAL [%s:%d] b%d t%d ", __FILE__, __LINE__, blockIdx.x, threadIdx.x); \
+            printf(__VA_ARGS__); \
+            printf("\n"); \
             __threadfence_system(); \
             __trap(); \
         } \
@@ -149,7 +152,7 @@ constexpr uint32_t AUDIT_FIELD_FLOW = (1 << 6);
 
 constexpr int GENOME_SIZE = 1024;
 constexpr int POOL_CAPACITY_MIN = 8;
-constexpr int POOL_CAPACITY_MAX = 64;
+constexpr int POOL_CAPACITY_MAX = 16;  // DEBUG: e2e validation (prod: 64)
 constexpr int MAX_ARCHIVE_SIZE = 10000;
 constexpr int PARENT_COUNT = 2;
 constexpr int MAX_CELLS = GENOME_SIZE;
@@ -716,13 +719,13 @@ constexpr float MAX_AGENT_VELOCITY_BASE_MAX = 0.1f;
 
 
 constexpr int NUM_HEADS_MIN = 1;
-constexpr int NUM_HEADS_MAX = 8;
+constexpr int NUM_HEADS_MAX = 2;  // DEBUG: e2e validation (prod: 8)
 
 constexpr int WMMA_ALIGNMENT = 8;
 constexpr int HEAD_DIM_TILES_MIN = 1;
-constexpr int HEAD_DIM_TILES_MAX = 4;
-constexpr int CHANNELS_OCTETS_MIN = 2;  
-constexpr int CHANNELS_OCTETS_MAX = 2;
+constexpr int HEAD_DIM_TILES_MAX = 2;  // DEBUG: e2e validation (prod: 4)
+constexpr int CHANNELS_OCTETS_MIN = 1;
+constexpr int CHANNELS_OCTETS_MAX = 2;  // DEBUG: e2e validation (prod: 2)
 
 constexpr int HEAD_DIM_MIN = HEAD_DIM_TILES_MIN * WMMA_TILE_DIM;
 constexpr int HEAD_DIM_MAX = HEAD_DIM_TILES_MAX * WMMA_TILE_DIM;
@@ -731,8 +734,8 @@ constexpr int CHANNELS_MAX = CHANNELS_OCTETS_MAX * WMMA_ALIGNMENT;
 constexpr int CA_INPUT_CHANNELS = 3;
 constexpr int HIDDEN_DIM_MIN = HEAD_DIM_MIN;
 constexpr int HIDDEN_DIM_MAX = NUM_HEADS_MAX * HEAD_DIM_MAX;
-constexpr int GRID_SIZE_MIN = 64;
-constexpr int GRID_SIZE_MAX = 64;
+constexpr int GRID_SIZE_MIN = 28;  // MNIST constraint
+constexpr int GRID_SIZE_MAX = 32;  // DEBUG: e2e validation (prod: 64)
 constexpr int MAX_HEAD_DIM = HEAD_DIM_MAX;
 constexpr int MAX_CHANNELS = CHANNELS_MAX;
 
@@ -762,8 +765,8 @@ constexpr int CA_INTERACTION_WEIGHT_SIZE = NUM_HEADS_MAX * HEAD_DIM_MAX * HEAD_D
 constexpr int CA_VALUE_WEIGHT_SIZE = NUM_HEADS_MAX * HEAD_DIM_MAX * CHANNELS_MAX;
 constexpr int CA_WEIGHTS_PER_ENTRY_STRIDE = CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE + CA_VALUE_WEIGHT_SIZE;
 
-constexpr int BATCH_SIZE_MIN = 8;
-constexpr int BATCH_SIZE_MAX = 16;
+constexpr int BATCH_SIZE_MIN = 4;
+constexpr int BATCH_SIZE_MAX = 8;  // DEBUG: e2e validation (prod: 16)
 constexpr int DATASET_SIZE_MAX = OPPORTUNITY_TRAIN_SAMPLES;
 
 constexpr int SAVED_ACTIVATION_SIZE = BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX;
@@ -772,7 +775,7 @@ constexpr int TAPE_ENTRIES_PER_ENTRY = TAPE_CAPACITY;
 constexpr int TAPE_VALUES_PER_ENTRY = VALUE_CAPACITY;
 
 constexpr int COL_WIDTH_MAX = 9 * CHANNELS_MAX;
-constexpr int BACKWARD_CHUNK_SAMPLES = 1024;
+constexpr int BACKWARD_CHUNK_SAMPLES = 256;  // DEBUG: e2e validation (prod: 1024)
 constexpr size_t BACKWARD_WS_FP16_A_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
 constexpr size_t BACKWARD_WS_FP16_B_BLOCK = (size_t)NUM_HEADS_MAX * BACKWARD_CHUNK_SAMPLES * HIDDEN_DIM_MAX * sizeof(half);
 constexpr size_t BACKWARD_WS_DW_BLOCK = (size_t)NUM_HEADS_MAX * HIDDEN_DIM_MAX * HIDDEN_DIM_MAX * sizeof(float);
@@ -810,6 +813,11 @@ constexpr float DIVERSITY_NORMALIZATION_MIN = 0.1f;
 constexpr float DIVERSITY_NORMALIZATION_MAX = 10.0f;
 constexpr float GRADIENT_CLIP_MIN = 0.1f;
 constexpr float GRADIENT_CLIP_MAX = 10.0f;
+constexpr float GRADIENT_CLIP_NORM = 1.0f;
+constexpr float ADAM_BETA1 = 0.9f;
+constexpr float ADAM_BETA2 = 0.999f;
+constexpr float ADAM_EPSILON = 1e-8f;
+constexpr int CLASSIFIER_FEATURES = 256;
 constexpr float GRADIENT_FITNESS_WEIGHT_MIN = 0.0f;
 constexpr float GRADIENT_FITNESS_WEIGHT_MAX = 1.0f;
 constexpr float COHERENCE_FITNESS_WEIGHT_MIN = 0.0f;
@@ -894,155 +902,6 @@ constexpr int STATE_EXPORT_VORONOI_COUNT = 16;
 constexpr int STATE_EXPORT_ARCHIVE_COUNT = 16;
 constexpr int STATE_EXPORT_CHEM_SIZE = 16;
 
-struct StateExportEntry {
-    uint32_t provenance_source;
-    uint32_t fields_written_mask;
-    uint64_t sequence_number;
-
-    int generation;
-    int batch_size;
-    int num_classes;
-    int grid_size;
-    int correct_count;
-    float loss;
-    float accuracy;
-
-    unsigned char sample_images[AUDIT_SAMPLE_COUNT * CA_FIELD_SIZE];
-    int sample_labels[AUDIT_SAMPLE_COUNT];
-    float sample_logits[AUDIT_SAMPLE_COUNT * NUM_CLASSES_MAX];
-    int sample_predictions[AUDIT_SAMPLE_COUNT];
-    float sample_confidences[AUDIT_SAMPLE_COUNT];
-
-    float ca_snapshot[CA_FIELD_SIZE];
-
-    float train_accuracy;
-    float test_accuracy;
-    float generalization_gap;
-
-    int pool_alive_count;
-    int pool_capacity;
-
-
-    int archive_occupied_cells;
-    int frontier_cells_gained;
-    int frontier_cells_lost;
-    int sparse_cell_count;
-    float niche_entropy;
-    float novelty_gradient;
-
-    float elite_fitness_best;
-    float elite_fitness_mean;
-    float elite_fitness_delta;
-    float quality_floor;
-    float quality_mean;
-    float quality_range;
-
-    float density_mean;
-    float density_max;
-    float density_variance;
-
-    float hw_axis_min, hw_axis_max, hw_axis_mean;
-    float task_axis_min, task_axis_max, task_axis_mean;
-    float gen_axis_min, gen_axis_max, gen_axis_mean;
-
-    int total_population;
-    int births_this_gen;
-    int deaths_this_gen;
-
-    float diresa_recon_loss_hw;
-    float diresa_recon_loss_task;
-    float diresa_recon_loss_gen;
-    float diresa_recon_loss_total;
-    float diresa_behavioral_drift;
-    float diresa_latent_utilization;
-
-    int genome_unique_hashes;
-    float genome_hash_entropy;
-    float genome_avg_deltas;
-
-    float per_class_correct[NUM_CLASSES_MAX];
-    float per_class_total[NUM_CLASSES_MAX];
-
-    int pool_entry_alive[POOL_CAPACITY_MAX];
-    float pool_entry_fitness[POOL_CAPACITY_MAX];
-    float pool_entry_hunger[POOL_CAPACITY_MAX];
-    int pool_entry_age[POOL_CAPACITY_MAX];
-    int pool_entry_num_deltas[POOL_CAPACITY_MAX];
-    uint64_t pool_entry_genome_hash[POOL_CAPACITY_MAX];
-
-    float axis_corr_hw_task;
-    float axis_corr_hw_gen;
-    float axis_corr_task_gen;
-    float hash_clustering_coefficient;
-
-    float hw_warp_divergence_entropy;
-    float hw_warp_convergence_rate;
-    float hw_active_thread_fraction;
-    float hw_memory_coalescing_efficiency;
-    float hw_cache_line_utilization;
-    float hw_tensor_core_usage;
-    float hw_instruction_throughput;
-    float hw_occupancy_variance;
-    float hw_arithmetic_intensity;
-    float hw_memory_bandwidth_saturation;
-
-    float chemical_concentration_mean;
-    float chemical_concentration_max;
-    float chemical_gradient_magnitude_mean;
-    float chemical_source_activity;
-    float chemical_decay_rate_mean;
-
-    float flow_lenia_mass_total;
-    float flow_lenia_mass_conservation_error;
-    float flow_lenia_affinity_mean;
-    float flow_lenia_flow_magnitude_mean;
-
-    float fitness_alpha;  
-    float fitness_beta;   
-    float fitness_gamma;  
-    float fitness_delta;  
-
-    size_t memory_gpu_allocated;
-    size_t memory_gpu_free;
-    size_t memory_ca_state_size;
-    size_t memory_chemical_field_size;
-    size_t memory_archive_size;
-
-    int state_agent_count;
-    float state_agent_pos_x[STATE_EXPORT_AGENT_COUNT];
-    float state_agent_pos_y[STATE_EXPORT_AGENT_COUNT];
-    float state_agent_vel_x[STATE_EXPORT_AGENT_COUNT];
-    float state_agent_vel_y[STATE_EXPORT_AGENT_COUNT];
-    float state_agent_exploration[STATE_EXPORT_AGENT_COUNT];
-    float state_agent_sensitivity[STATE_EXPORT_AGENT_COUNT];
-
-    int state_voronoi_count;
-    int state_voronoi_density[STATE_EXPORT_VORONOI_COUNT];
-    float state_voronoi_radius[STATE_EXPORT_VORONOI_COUNT];
-    float state_voronoi_hw_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_HW_MAX];
-    float state_voronoi_task_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_TASK_MAX];
-    float state_voronoi_gen_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_GEN_MAX];
-    int state_voronoi_best_elite_idx[STATE_EXPORT_VORONOI_COUNT];
-
-    int state_archive_count;
-    float state_archive_fitness[STATE_EXPORT_ARCHIVE_COUNT];
-    float state_archive_coherence[STATE_EXPORT_ARCHIVE_COUNT];
-    float state_archive_effective_rank[STATE_EXPORT_ARCHIVE_COUNT];
-    uint16_t state_archive_generation[STATE_EXPORT_ARCHIVE_COUNT];
-    uint64_t state_archive_genome_hash[STATE_EXPORT_ARCHIVE_COUNT];
-    uint32_t state_archive_parent_id_0[STATE_EXPORT_ARCHIVE_COUNT];
-    uint32_t state_archive_parent_id_1[STATE_EXPORT_ARCHIVE_COUNT];
-    float state_archive_hw_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_HW_MAX];
-    float state_archive_task_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_TASK_MAX];
-    float state_archive_gen_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_GEN_MAX];
-    float state_archive_hardware_features[STATE_EXPORT_ARCHIVE_COUNT * HARDWARE_FEATURES_DIM];
-
-    float state_chemical_sample[STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE];
-
-    int pool_total_spawned;
-    int pool_total_culled;
-};
-
 constexpr uint32_t AUDIT_MASK_GENERATION = (1 << 0);
 constexpr uint32_t AUDIT_MASK_BATCH = (1 << 1);
 constexpr uint32_t AUDIT_MASK_ACCURACY = (1 << 2);
@@ -1057,159 +916,8 @@ constexpr uint32_t AUDIT_MASK_SAMPLES = (1 << 10);
 constexpr uint32_t AUDIT_MASK_CA_SNAPSHOT = (1 << 11);
 constexpr uint32_t AUDIT_MASK_STATE_EXPORT = (1 << 12);
 
-__host__ __forceinline__ void state_export_init_sentinel(StateExportEntry* buf) {
-    buf->provenance_source = PROVENANCE_SOURCE_NONE;
-    buf->fields_written_mask = 0;
-    buf->sequence_number = 0;
-
-    buf->generation = PROVENANCE_UNINITIALIZED_INT;
-    buf->batch_size = PROVENANCE_UNINITIALIZED_INT;
-    buf->num_classes = PROVENANCE_UNINITIALIZED_INT;
-    buf->grid_size = PROVENANCE_UNINITIALIZED_INT;
-    buf->correct_count = PROVENANCE_UNINITIALIZED_INT;
-    buf->loss = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->train_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->test_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->generalization_gap = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->pool_alive_count = PROVENANCE_UNINITIALIZED_INT;
-    buf->pool_capacity = PROVENANCE_UNINITIALIZED_INT;
-
-    buf->archive_occupied_cells = PROVENANCE_UNINITIALIZED_INT;
-    buf->frontier_cells_gained = PROVENANCE_UNINITIALIZED_INT;
-    buf->frontier_cells_lost = PROVENANCE_UNINITIALIZED_INT;
-    buf->sparse_cell_count = PROVENANCE_UNINITIALIZED_INT;
-    buf->niche_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->novelty_gradient = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->elite_fitness_best = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->elite_fitness_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->elite_fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->quality_floor = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->quality_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->quality_range = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->density_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->density_max = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->density_variance = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->hw_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->hw_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->hw_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->task_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->task_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->task_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->gen_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->gen_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->gen_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->total_population = PROVENANCE_UNINITIALIZED_INT;
-    buf->births_this_gen = PROVENANCE_UNINITIALIZED_INT;
-    buf->deaths_this_gen = PROVENANCE_UNINITIALIZED_INT;
-
-    buf->diresa_recon_loss_hw = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->diresa_recon_loss_task = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->diresa_recon_loss_gen = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->diresa_recon_loss_total = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->diresa_behavioral_drift = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->diresa_latent_utilization = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->genome_unique_hashes = PROVENANCE_UNINITIALIZED_INT;
-    buf->genome_hash_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->genome_avg_deltas = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->axis_corr_hw_task = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->axis_corr_hw_gen = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->axis_corr_task_gen = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->hash_clustering_coefficient = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->chemical_concentration_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->chemical_concentration_max = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->chemical_gradient_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->chemical_source_activity = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->chemical_decay_rate_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->flow_lenia_mass_total = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->flow_lenia_mass_conservation_error = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->flow_lenia_affinity_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->flow_lenia_flow_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->fitness_alpha = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->fitness_beta = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->fitness_gamma = PROVENANCE_UNINITIALIZED_FLOAT;
-    buf->fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
-
-    buf->memory_gpu_allocated = 0;
-    buf->memory_gpu_free = 0;
-    buf->memory_ca_state_size = 0;
-    buf->memory_chemical_field_size = 0;
-    buf->memory_archive_size = 0;
-
-    buf->state_agent_count = PROVENANCE_UNINITIALIZED_INT;
-    buf->state_voronoi_count = PROVENANCE_UNINITIALIZED_INT;
-    buf->state_archive_count = PROVENANCE_UNINITIALIZED_INT;
-
-    buf->pool_total_spawned = PROVENANCE_UNINITIALIZED_INT;
-    buf->pool_total_culled = PROVENANCE_UNINITIALIZED_INT;
-
-    for (int i = 0; i < POOL_CAPACITY_MAX; i++) {
-        buf->pool_entry_alive[i] = PROVENANCE_UNINITIALIZED_INT;
-        buf->pool_entry_fitness[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-        buf->pool_entry_hunger[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-        buf->pool_entry_age[i] = PROVENANCE_UNINITIALIZED_INT;
-        buf->pool_entry_num_deltas[i] = PROVENANCE_UNINITIALIZED_INT;
-        buf->pool_entry_genome_hash[i] = PROVENANCE_UNINITIALIZED_HASH;
-    }
-
-    for (int i = 0; i < NUM_CLASSES_MAX; i++) {
-        buf->per_class_correct[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-        buf->per_class_total[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-    }
-
-    for (int i = 0; i < AUDIT_SAMPLE_COUNT; i++) {
-        buf->sample_labels[i] = PROVENANCE_UNINITIALIZED_INT;
-        buf->sample_predictions[i] = PROVENANCE_UNINITIALIZED_INT;
-        buf->sample_confidences[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-    }
-
-    for (int i = 0; i < CA_FIELD_SIZE; i++) {
-        buf->ca_snapshot[i] = PROVENANCE_UNINITIALIZED_FLOAT;
-    }
-}
-
-__host__ __forceinline__ bool state_export_field_valid(const StateExportEntry* buf, uint32_t mask) {
-    return (buf->fields_written_mask & mask) == mask;
-}
-
-__host__ __forceinline__ void state_export_refuse_invalid(const StateExportEntry* buf, uint32_t mask, const char* name) {
-    if (!state_export_field_valid(buf, mask)) {
-        fprintf(stderr, "E_AUDIT %s m=0x%x have=0x%x\n", name, mask, buf->fields_written_mask);
-        abort();
-    }
-}
-
-constexpr uint32_t AUDIT_RING_SLOTS = 4;
-
-typedef RingBuffer<StateExportEntry, AUDIT_RING_SLOTS> StateExportBuffer;
-typedef HostRingBufferReader<StateExportEntry, AUDIT_RING_SLOTS> StateExportBufferReader;
-
-
-typedef StateExportBuffer AuditBuffer;
-typedef StateExportEntry TelemetryAuditEntry;
-
-__host__ __forceinline__ void state_export_buffer_init_sentinel(StateExportBuffer* ring) {
-    ring->write_sequence = 0;
-    ring->read_sequence = 0;
-    ring->dropped_count = 0;
-    ring->corrupted_count = 0;
-    for (uint32_t i = 0; i < AUDIT_RING_SLOTS; i++) {
-        ring->slots[i].committed = 0;
-        ring->slots[i].header.sequence_number = 0;
-        ring->slots[i].header.checksum_valid = 0;
-        state_export_init_sentinel(&ring->slots[i].payload);
-    }
+__device__ __forceinline__ float compute_ca_gate_center(float coherence) {
+    return 2.0f - 1.5f * coherence;
 }
 
 #endif

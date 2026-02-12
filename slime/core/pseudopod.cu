@@ -18,11 +18,11 @@
 namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
-__global__ void compute_coherence_kernel(
-    float* __restrict__ loss_history,
-    float* __restrict__ coherence,
-    int history_length
-) {
+__device__ void compute_coherence_device(Organism* organism) {
+    float* loss_history = organism->loss_history;
+    float* coherence = organism->coherence_output;
+    int history_length = organism->loss_history_length;
+
     int tid = threadIdx.x;
 
     float local_improvement = 0.0f;
@@ -30,7 +30,7 @@ __global__ void compute_coherence_kernel(
     if (tid < history_length - 1) {
         float current_loss = loss_history[tid];
         float next_loss = loss_history[tid + 1];
-        DEVICE_FATAL_IF(current_loss <= 0.0f, "coherence_kernel: loss history contains non-positive value");
+        DEVICE_FATAL_IF(current_loss <= 0.0f, "compute_coherence_device: loss history contains non-positive value");
         local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
     }
 
@@ -115,42 +115,54 @@ __device__ void init_ca_weights_xavier(
     }
 }
 
-__global__ void init_organism_ca_weights_kernel(
-    ComponentPool* __restrict__ pool,
-    ArchitectureParams arch
-) {
-    int compact_idx = blockIdx.y;
-    if (compact_idx >= pool->alive_indices_count) return;
+__device__ void init_organism_ca_weights_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    Architecture arch = Architecture::maxBounds();
 
-    int entry_idx = pool->alive_indices[compact_idx];
-    PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "init_organism_ca_weights_kernel: dead entry in alive_indices");
+    int perception_size = arch.num_heads * arch.channels * arch.head_dim;
+    int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
+    int value_size = arch.num_heads * arch.head_dim * arch.channels;
+    int max_weight_size = max(perception_size, max(interaction_size, value_size));
 
-    MultiHeadCAState* ca_state = entry->ca_state;
-    int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_work = pool->alive_indices_count * max_weight_size;
+    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = blockDim.x * gridDim.x;
 
-    uint64_t organism_seed = entry->genome_hash ^ (entry->id * 0x9E3779B97F4A7C15ULL);
-    curandState_t rand_state;
-    curand_init(organism_seed, weight_idx, 0, &rand_state);
+    for (int global_idx = thread_id; global_idx < total_work; global_idx += total_threads) {
+        int compact_idx = global_idx / max_weight_size;
+        int weight_idx = global_idx % max_weight_size;
 
-    init_ca_weights_xavier(
-        ca_state->perception_weights,
-        ca_state->interaction_weights,
-        ca_state->value_weights,
-        weight_idx, arch.num_heads, arch.channels, arch.head_dim,
-        &rand_state
-    );
+        int entry_idx = pool->alive_indices[compact_idx];
+        PoolEntry* entry = &pool->entries[entry_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "init_organism_ca_weights_device: dead entry in alive_indices");
+
+        MultiHeadCAState* ca_state = entry->ca_state;
+
+        uint64_t organism_seed = entry->genome_hash ^ (entry->id * 0x9E3779B97F4A7C15ULL);
+        curandState_t rand_state;
+        curand_init(organism_seed, weight_idx, 0, &rand_state);
+
+        init_ca_weights_xavier(
+            ca_state->perception_weights,
+            ca_state->interaction_weights,
+            ca_state->value_weights,
+            weight_idx, arch.num_heads, arch.channels, arch.head_dim,
+            &rand_state
+        );
+    }
 }
 
-__global__ void init_ca_weights_kernel(
-    half* perception_weights,
-    half* interaction_weights,
-    half* value_weights,
-    int num_heads,
-    int channels,
-    int head_dim,
-    unsigned long seed
-) {
+__device__ void init_ca_weights_device(Organism* organism) {
+    MultiHeadCAState* mh_state = organism->multihead_ca_state;
+    half* perception_weights = mh_state->perception_weights;
+    half* interaction_weights = mh_state->interaction_weights;
+    half* value_weights = mh_state->value_weights;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int channels = arch.channels;
+    int head_dim = arch.head_dim;
+    unsigned long seed = organism->init_seed;
+
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
     curandState_t rand_state;
     curand_init(seed, weight_idx, 0, &rand_state);

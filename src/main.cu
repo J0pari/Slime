@@ -1,8 +1,56 @@
+// Core - must come first
 #include "../slime/config/config.cu"
 #include "../slime/core/organism.cu"
-#include "../slime/runtime.cu"
+
+// Utilities and debug
+#include "../slime/debug/kernel_trace.cu"
+#include "../slime/debug/param_validator.cu"
+
+// Memory management
+#include "../slime/memory/archive.cu"
+#include "../slime/memory/pool.cu"
+#include "../slime/memory/tubes.cu"
+#include "../slime/memory/parallel_compaction.cu"
+
+// Core computations
+#include "../slime/core/pseudopod.cu"
+#include "../slime/core/pseudopod_tensor.cu"
+#include "../slime/core/chemotaxis.cu"
+#include "../slime/core/correlation_matrix.cu"
+
+// Kernels
+#include "../slime/kernels/tensor_core_ca.cu"
+#include "../slime/kernels/warp_ca.cu"
+
+// Learning
+#include "../slime/learning/autodiff.cu"
+#include "../slime/learning/diresa.cu"
+
+// Training
+#include "../slime/training/training_types.cu"
+#include "../slime/training/losses.cu"
+#include "../slime/training/classification.cu"
+#include "../slime/training/optimizer.cu"
+#include "../slime/training/autodiff_integration.cu"
+#include "../slime/training/gradient_fitness.cu"
+#include "../slime/training/hybrid_lifecycle.cu"
+
+// Data
+#include "../slime/data/dataset_loader.cu"
+
+// Lifecycle
+#include "../slime/lifecycle/genealogy.cu"
+#include "../slime/lifecycle/archive_sampling.cu"
+#include "../slime/lifecycle/lifecycle_stages.cu"
+
+// Metrics and diagnostics
+#include "../slime/metrics/hardware_geometry.cu"
+#include "../slime/diagnostics/telemetry_probes.cu"
 #include "../slime/diagnostics/report_generator.cu"
 #include "../slime/diagnostics/audit_writer.cu"
+
+// Runtime - must come last
+#include "../slime/runtime.cu"
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -371,9 +419,9 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.dL_dinteraction_buffer, sizeof(float) * WAVE_SIZE * BATCH_SIZE_MAX * NUM_HEADS_MAX * CA_FIELD_SIZE * HEAD_DIM_MAX, "dL_dinteraction_buffer");
     CUDA_ALLOC_CHECK(buffers_host.component_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "component_workspace_genomes_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "behavioral_workspace_genomes_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_child_indices");
-    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "weight_inherit_parent_indices");
-    CUDA_ALLOC_CHECK(buffers_host.weight_inherit_num_pending, sizeof(int), "weight_inherit_num_pending");
+    CUDA_ALLOC_CHECK(buffers_host.inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "inherit_child_indices");
+    CUDA_ALLOC_CHECK(buffers_host.inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "inherit_parent_indices");
+    CUDA_ALLOC_CHECK(buffers_host.num_pending_inherits, sizeof(int), "num_pending_inherits");
     
     constexpr size_t BACKWARD_WS_TOTAL_SIZE = BACKWARD_WS_FP16_A_SIZE + BACKWARD_WS_FP16_B_SIZE +
         BACKWARD_WS_DW_SIZE + BACKWARD_WS_DI_SIZE + BACKWARD_WS_W_T_SIZE +

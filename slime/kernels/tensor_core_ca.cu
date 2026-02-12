@@ -13,11 +13,12 @@
 
 namespace wmma = nvcuda::wmma;
 
-__global__ void convert_fp32_to_fp16_kernel(
-    float* __restrict__ fp32_data,
-    half* __restrict__ fp16_data,
-    int M, int N
-) {
+__device__ void convert_fp32_to_fp16_device(Organism* organism) {
+    float* fp32_data = organism->tensor_fp32_data;
+    half* fp16_data = organism->tensor_fp16_data;
+    int M = organism->tensor_M;
+    int N = organism->tensor_N;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = M * N;
 
@@ -26,11 +27,12 @@ __global__ void convert_fp32_to_fp16_kernel(
     }
 }
 
-__global__ void convert_fp16_to_fp32_kernel(
-    half* __restrict__ fp16_data,
-    float* __restrict__ fp32_data,
-    int M, int N
-) {
+__device__ void convert_fp16_to_fp32_device(Organism* organism) {
+    half* fp16_data = organism->tensor_fp16_data;
+    float* fp32_data = organism->tensor_fp32_data;
+    int M = organism->tensor_M;
+    int N = organism->tensor_N;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = M * N;
 
@@ -39,12 +41,13 @@ __global__ void convert_fp16_to_fp32_kernel(
     }
 }
 
-__global__ void tensor_core_matmul_kernel(
-    half* __restrict__ A,
-    half* __restrict__ B,
-    float* __restrict__ C,
-    int M, int N, int K
-) {
+__device__ void tensor_core_matmul_device(Organism* organism) {
+    half* A = organism->tensor_A;
+    half* B = organism->tensor_B;
+    float* C = organism->tensor_C;
+    int M = organism->tensor_M;
+    int N = organism->tensor_N;
+    int K = organism->tensor_K;
 
     const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
@@ -75,20 +78,20 @@ __global__ void tensor_core_matmul_kernel(
     wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
 }
 
-__global__ void relu_kernel(
-    float* __restrict__ data,
-    int size
-) {
+__device__ void relu_device(Organism* organism) {
+    float* data = organism->activation_data;
+    int size = organism->activation_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         data[idx] = activation_relu(data[idx]);
     }
 }
 
-__global__ void gelu_kernel(
-    float* __restrict__ data,
-    int size
-) {
+__device__ void gelu_device(Organism* organism) {
+    float* data = organism->activation_data;
+    int size = organism->activation_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float x = data[idx];
@@ -96,14 +99,14 @@ __global__ void gelu_kernel(
     }
 }
 
-__global__ void tensor_core_perception_kernel(
-    half* __restrict__ neighborhood_fp16,
-    half* __restrict__ perception_weights,
-    float* __restrict__ perception_out,
-    int grid_size,
-    int head_id,
-    ArchitectureParams arch
-) {
+__device__ void tensor_core_perception_device(Organism* organism) {
+    half* neighborhood_fp16 = organism->tensor_neighborhood_fp16;
+    MultiHeadCAState* mh_state = organism->multihead_ca_state;
+    half* perception_weights = mh_state->perception_weights;
+    float* perception_out = organism->tensor_perception_out;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    int head_id = organism->current_head_id;
 
     const int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int num_cells = grid_size * grid_size;
@@ -145,16 +148,15 @@ __global__ void tensor_core_perception_kernel(
     );
 }
 
-__global__ void prepare_ca_fp16_kernel(
-    ComponentPool* __restrict__ pool,
-    int max_grid_size,
-    ArchitectureParams arch,
-    int entry_idx
-) {
-    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "prepare_ca_fp16_kernel: entry_idx out of bounds");
+__device__ void prepare_ca_fp16_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    Architecture arch = Architecture::maxBounds();
+    int entry_idx = organism->current_entry_idx;
+
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "prepare_ca_fp16_device: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "prepare_ca_fp16_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "prepare_ca_fp16_device: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;
@@ -167,21 +169,21 @@ __global__ void prepare_ca_fp16_kernel(
     ca_state->fp16_workspace[idx] = __float2half(ca_state->ca_concentration[idx]);
 }
 
-__global__ void multi_head_ca_tensor_kernel(
-    ComponentPool* __restrict__ pool,
-    int max_grid_size,
-    ArchitectureParams arch,
-    int entry_idx
-) {
+__device__ void multi_head_ca_tensor_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    int max_grid_size = organism->max_grid_size;
+    Architecture arch = Architecture::maxBounds();
+    int entry_idx = organism->current_entry_idx;
+
     int head = blockIdx.y;
     int tid = threadIdx.x;
     int block_threads = blockDim.x;
 
-    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "multi_head_ca_tensor_kernel: entry_idx out of bounds");
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "multi_head_ca_tensor_device: entry_idx out of bounds");
     if (head >= arch.num_heads) return;
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "multi_head_ca_tensor_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "multi_head_ca_tensor_device: dead entry passed");
 
     int grid_size = entry->grid_size;
     int num_cells = grid_size * grid_size;

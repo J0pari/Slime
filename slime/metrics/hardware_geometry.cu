@@ -6,58 +6,6 @@
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 
-struct HardwareGeometry {
-
-    float warp_divergence_entropy;
-    float warp_convergence_rate;
-    float active_thread_fraction;
-
-    float memory_coalescing_efficiency;
-    float cache_line_utilization;
-    float memory_divergence_spread;
-    float bank_conflict_density;
-
-    float tensor_core_usage;
-    float tensor_memory_bandwidth;
-
-    float instruction_throughput;
-    float pipeline_stall_fraction;
-    float occupancy_variance;
-
-    float arithmetic_intensity;
-    float memory_bandwidth_saturation;
-};
-
-struct ExecutionTrace {
-
-    unsigned long long active_warps;
-    unsigned long long divergent_branches;
-    unsigned long long total_branches;
-
-    unsigned long long global_loads;
-    unsigned long long global_stores;
-    unsigned long long l2_transactions;
-    unsigned long long dram_transactions;
-    unsigned long long shared_loads;
-    unsigned long long shared_stores;
-    unsigned long long bank_conflicts;
-
-    unsigned long long inst_executed;
-    unsigned long long inst_issued;
-    unsigned long long cycles_elapsed;
-    unsigned long long tensor_core_cycles;
-
-    float sm_occupancy;
-    float achieved_bandwidth;
-    float peak_bandwidth;
-};
-
-struct TraceBuffer {
-    ExecutionTrace* traces;
-    int capacity;
-    int current_idx;
-};
-
 __device__ void reset_trace_buffer_device(Organism* organism) {
     TraceBuffer* buffer = organism->trace_buffer;
     buffer->current_idx = 0;

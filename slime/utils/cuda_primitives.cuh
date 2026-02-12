@@ -9,8 +9,6 @@
 #include "../core/organism.cu"
 #include "../debug/param_validator.cu"
 
-struct PoolEntry;
-
 #ifdef __CUDA_ARCH__
 #define VALIDATE_WARP_UNIFORM(val, name) device_validate_warp_uniform(val, name)
 #define VALIDATE_COALESCED(ptr, stride, name) device_validate_coalesced_access(ptr, stride, name)
@@ -303,32 +301,35 @@ __device__ unsigned long long content_hash(float* data, int size) {
 
 
 
-__global__ void convert_weights_to_fp16(
-    float* __restrict__ weights_fp32,
-    half* __restrict__ weights_fp16,
-    int size
-) {
+__device__ void convert_weights_to_fp16_device(Organism* organism) {
+    float* weights_fp32 = organism->weights_fp32;
+    half* weights_fp16 = organism->weights_fp16;
+    int size = organism->weights_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         weights_fp16[idx] = __float2half(weights_fp32[idx]);
     }
 }
 
-__global__ void convert_weights_to_fp32(
-    half* __restrict__ weights_fp16,
-    float* __restrict__ weights_fp32,
-    int size
-) {
+__device__ void convert_weights_to_fp32_device(Organism* organism) {
+    half* weights_fp16 = organism->weights_fp16;
+    float* weights_fp32 = organism->weights_fp32;
+    int size = organism->weights_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         weights_fp32[idx] = __half2float(weights_fp16[idx]);
     }
 }
 
-__global__ void convert_fp32_to_fp16_strided(
-    const float* __restrict__ src, half* __restrict__ dst,
-    int batch_size, int slice_size, int src_stride
-) {
+__device__ void convert_fp32_to_fp16_strided_device(Organism* organism) {
+    const float* src = organism->strided_src_fp32;
+    half* dst = organism->strided_dst_fp16;
+    int batch_size = organism->strided_batch_size;
+    int slice_size = organism->strided_slice_size;
+    int src_stride = organism->strided_src_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch_size * slice_size;
     if (idx >= total) return;
@@ -340,10 +341,13 @@ __global__ void convert_fp32_to_fp16_strided(
     dst[idx] = __float2half(src[src_idx]);
 }
 
-__global__ void memcpy_to_strided(
-    const float* __restrict__ src, float* __restrict__ dst,
-    int batch_size, int slice_size, int dst_stride
-) {
+__device__ void memcpy_to_strided_device(Organism* organism) {
+    const float* src = organism->strided_src_fp32;
+    float* dst = organism->strided_dst_fp32;
+    int batch_size = organism->strided_batch_size;
+    int slice_size = organism->strided_slice_size;
+    int dst_stride = organism->strided_dst_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch_size * slice_size;
     if (idx >= total) return;
@@ -1184,15 +1188,17 @@ struct SafeSize {
     }
 };
 
-__global__ void batched_tensor_core_gemm_kernel(
-    const half* __restrict__ A,
-    const half* __restrict__ B,
-    float* __restrict__ C,
-    int M, int N, int K,
-    int A_head_stride,
-    int B_head_stride,
-    int C_head_stride
-) {
+__device__ void batched_tensor_core_gemm_device(Organism* organism) {
+    const half* A = organism->gemm_A;
+    const half* B = organism->gemm_B;
+    float* C = organism->gemm_C;
+    int M = organism->gemm_M;
+    int N = organism->gemm_N;
+    int K = organism->gemm_K;
+    int A_head_stride = organism->gemm_A_head_stride;
+    int B_head_stride = organism->gemm_B_head_stride;
+    int C_head_stride = organism->gemm_C_head_stride;
+
     int head_id = blockIdx.z;
     const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int warpN = blockIdx.y;
@@ -1222,15 +1228,17 @@ __global__ void batched_tensor_core_gemm_kernel(
     nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
 }
 
-__global__ void batched_tensor_core_gemm_transA_kernel(
-    const half* __restrict__ A,
-    const half* __restrict__ B,
-    float* __restrict__ C,
-    int M, int N, int K,
-    int A_head_stride,
-    int B_head_stride,
-    int C_head_stride
-) {
+__device__ void batched_tensor_core_gemm_transA_device(Organism* organism) {
+    const half* A = organism->gemm_A;
+    const half* B = organism->gemm_B;
+    float* C = organism->gemm_C;
+    int M = organism->gemm_M;
+    int N = organism->gemm_N;
+    int K = organism->gemm_K;
+    int A_head_stride = organism->gemm_A_head_stride;
+    int B_head_stride = organism->gemm_B_head_stride;
+    int C_head_stride = organism->gemm_C_head_stride;
+
     int head_id = blockIdx.z;
     const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int warpN = blockIdx.y;
@@ -1260,13 +1268,14 @@ __global__ void batched_tensor_core_gemm_transA_kernel(
     nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
 }
 
-__global__ void batched_transpose_fp16_kernel(
-    const half* __restrict__ A,
-    half* __restrict__ B,
-    int M, int N,
-    int A_head_stride,
-    int B_head_stride
-) {
+__device__ void batched_transpose_fp16_device(Organism* organism) {
+    const half* A = organism->transpose_A;
+    half* B = organism->transpose_B;
+    int M = organism->transpose_M;
+    int N = organism->transpose_N;
+    int A_head_stride = organism->transpose_A_head_stride;
+    int B_head_stride = organism->transpose_B_head_stride;
+
     int head_id = blockIdx.z;
     __shared__ half tile[WMMA_TILE_DIM][WMMA_TILE_DIM + 1];
 
@@ -1283,17 +1292,18 @@ __global__ void batched_transpose_fp16_kernel(
     if (out_y < N && out_x < M) B_head[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
 }
 
-__global__ void batched_convert_fp32_to_fp16_strided(
-    const float* __restrict__ src,
-    half* __restrict__ dst,
-    int num_heads,
-    int batch_size,
-    int slice_size,
-    int src_head_stride,
-    int src_batch_stride,
-    int dst_head_stride,
-    int batch_offset
-) {
+__device__ void batched_convert_fp32_to_fp16_strided_device(Organism* organism) {
+    const float* src = organism->batched_strided_src_fp32;
+    half* dst = organism->batched_strided_dst_fp16;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int batch_size = organism->strided_batch_size;
+    int slice_size = organism->strided_slice_size;
+    int src_head_stride = organism->batched_src_head_stride;
+    int src_batch_stride = organism->batched_src_batch_stride;
+    int dst_head_stride = organism->batched_dst_head_stride;
+    int batch_offset = organism->strided_batch_offset;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
     if (idx >= total) return;
@@ -1309,17 +1319,18 @@ __global__ void batched_convert_fp32_to_fp16_strided(
     dst[dst_idx] = __float2half(src[src_idx]);
 }
 
-__global__ void batched_memcpy_to_strided(
-    const float* __restrict__ src,
-    float* __restrict__ dst,
-    int num_heads,
-    int batch_size,
-    int slice_size,
-    int src_head_stride,
-    int dst_head_stride,
-    int dst_batch_stride,
-    int batch_offset
-) {
+__device__ void batched_memcpy_to_strided_device(Organism* organism) {
+    const float* src = organism->batched_strided_src_fp32;
+    float* dst = organism->batched_strided_dst_fp32;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int batch_size = organism->strided_batch_size;
+    int slice_size = organism->strided_slice_size;
+    int src_head_stride = organism->batched_src_head_stride;
+    int dst_head_stride = organism->batched_dst_head_stride;
+    int dst_batch_stride = organism->batched_dst_batch_stride;
+    int batch_offset = organism->strided_batch_offset;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
     if (idx >= total) return;
@@ -1335,14 +1346,15 @@ __global__ void batched_memcpy_to_strided(
     dst[dst_idx] = src[src_idx];
 }
 
-__global__ void batched_accumulate_weight_grads_kernel(
-    const float* __restrict__ dW,
-    float* __restrict__ grad_buffer,
-    const int* __restrict__ head_offsets,
-    int weight_size,
-    int num_heads,
-    int dW_head_stride
-) {
+__device__ void batched_accumulate_weight_grads_device(Organism* organism) {
+    const float* dW = organism->weight_grad_src;
+    float* grad_buffer = organism->grad_buffer;
+    const int* head_offsets = organism->head_offsets;
+    int weight_size = organism->weight_size;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int dW_head_stride = organism->dW_head_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * weight_size;
     if (idx >= total) return;
@@ -1356,15 +1368,16 @@ __global__ void batched_accumulate_weight_grads_kernel(
     grad_buffer[dst_idx] = dW[src_idx];
 }
 
-__global__ void batched_gelu_backward_kernel(
-    const float* __restrict__ dL_dI,
-    const float* __restrict__ pre_gelu,
-    float* __restrict__ dL_dpregelu,
-    int num_heads,
-    int elements_per_head,
-    int src_head_stride,
-    int dst_head_stride
-) {
+__device__ void batched_gelu_backward_device(Organism* organism) {
+    const float* dL_dI = organism->backward_dL_dI;
+    const float* pre_gelu = organism->backward_pre_gelu;
+    float* dL_dpregelu = organism->backward_dL_dpregelu;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int elements_per_head = organism->backward_elements_per_head;
+    int src_head_stride = organism->backward_src_head_stride;
+    int dst_head_stride = organism->backward_dst_head_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * elements_per_head;
     if (idx >= total) return;
@@ -1378,15 +1391,16 @@ __global__ void batched_gelu_backward_kernel(
     dL_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu[src_idx], dL_dI[src_idx]);
 }
 
-__global__ void batched_relu_backward_kernel(
-    const float* __restrict__ dL_dP,
-    const float* __restrict__ P,
-    float* __restrict__ dL_dprerelu,
-    int num_heads,
-    int elements_per_head,
-    int src_head_stride,
-    int dst_head_stride
-) {
+__device__ void batched_relu_backward_device(Organism* organism) {
+    const float* dL_dP = organism->backward_dL_dP;
+    const float* P = organism->backward_P;
+    float* dL_dprerelu = organism->backward_dL_dprerelu;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int elements_per_head = organism->backward_elements_per_head;
+    int src_head_stride = organism->backward_src_head_stride;
+    int dst_head_stride = organism->backward_dst_head_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * elements_per_head;
     if (idx >= total) return;
@@ -1400,16 +1414,17 @@ __global__ void batched_relu_backward_kernel(
     dL_dprerelu[dst_idx] = dL_dP[src_idx] * ((P[src_idx] > 0.0f) ? 1.0f : 0.0f);
 }
 
-__global__ void batched_im2col_kernel(
-    const float* __restrict__ input,
-    float* __restrict__ col,
-    int num_heads,
-    int batch_size,
-    int grid_size,
-    int channels,
-    int input_head_stride,
-    int col_head_stride
-) {
+__device__ void batched_im2col_device(Organism* organism) {
+    const float* input = organism->im2col_input;
+    float* col = organism->im2col_col;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int batch_size = organism->im2col_batch_size;
+    int grid_size = arch.grid_size;
+    int channels = arch.channels;
+    int input_head_stride = organism->im2col_input_head_stride;
+    int col_head_stride = organism->im2col_col_head_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     int total = num_heads * batch_size * num_cells;
@@ -1445,16 +1460,17 @@ __global__ void batched_im2col_kernel(
     }
 }
 
-__global__ void batched_col2im_kernel(
-    const float* __restrict__ col,
-    float* __restrict__ output_grad,
-    int num_heads,
-    int batch_size,
-    int grid_size,
-    int channels,
-    int col_head_stride,
-    int output_head_stride
-) {
+__device__ void batched_col2im_device(Organism* organism) {
+    const float* col = organism->col2im_col;
+    float* output_grad = organism->col2im_output_grad;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int batch_size = organism->col2im_batch_size;
+    int grid_size = arch.grid_size;
+    int channels = arch.channels;
+    int col_head_stride = organism->col2im_col_head_stride;
+    int output_head_stride = organism->col2im_output_head_stride;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     int total = num_heads * batch_size * num_cells;

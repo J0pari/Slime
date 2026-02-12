@@ -16,9 +16,12 @@
 
 namespace wmma = nvcuda::wmma;
 
-__global__ void transpose_matrix_kernel(
-    const float* __restrict__ A, float* __restrict__ B, int M, int N
-) {
+__device__ void transpose_matrix_device(Organism* organism) {
+    const float* A = organism->transpose_A_fp32;
+    float* B = organism->transpose_B_fp32;
+    int M = organism->transpose_M;
+    int N = organism->transpose_N;
+
     __shared__ float tile[WMMA_TILE_DIM][WMMA_TILE_DIM + BANK_PAD];
     int bx = blockIdx.x * WMMA_TILE_DIM, by = blockIdx.y * WMMA_TILE_DIM;
     int x = bx + threadIdx.x, y = by + threadIdx.y;
@@ -30,10 +33,14 @@ __global__ void transpose_matrix_kernel(
     if (out_y < N && out_x < M) B[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
 }
 
-__global__ void tensor_core_gemm_kernel(
-    const half* __restrict__ A, const half* __restrict__ B, float* __restrict__ C,
-    int M, int N, int K
-) {
+__device__ void tensor_core_gemm_device(Organism* organism) {
+    const half* A = organism->gemm_A;
+    const half* B = organism->gemm_B;
+    float* C = organism->gemm_C;
+    int M = organism->gemm_M;
+    int N = organism->gemm_N;
+    int K = organism->gemm_K;
+
     const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int warpN = blockIdx.y;
 
@@ -59,27 +66,42 @@ __global__ void tensor_core_gemm_kernel(
     wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
 }
 
-__global__ void fp32_to_fp16_kernel(const float* __restrict__ fp32, half* __restrict__ fp16, int size) {
+__device__ void fp32_to_fp16_device(Organism* organism) {
+    const float* fp32 = organism->conv_fp32;
+    half* fp16 = organism->conv_fp16;
+    int size = organism->conv_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) fp16[idx] = __float2half(fp32[idx]);
 }
 
-__global__ void fp16_to_fp32_kernel(const half* __restrict__ fp16, float* __restrict__ fp32, int size) {
+__device__ void fp16_to_fp32_device(Organism* organism) {
+    const half* fp16 = organism->conv_fp16;
+    float* fp32 = organism->conv_fp32;
+    int size = organism->conv_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) fp32[idx] = __half2float(fp16[idx]);
 }
 
-__global__ void accumulate_weight_grads_kernel(
-    const float* __restrict__ dW, float* __restrict__ grad_buffer, int offset, int size
-) {
+__device__ void accumulate_weight_grads_device(Organism* organism) {
+    const float* dW = organism->weight_grads_src;
+    float* grad_buffer = organism->weight_grads_dst;
+    int offset = organism->weight_grads_offset;
+    int size = organism->weight_grads_size;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) grad_buffer[offset + idx] = dW[idx];
 }
 
-__global__ void tensor_core_gemm_transA_kernel(
-    const half* __restrict__ A, const half* __restrict__ B, float* __restrict__ C,
-    int M, int N, int K
-) {
+__device__ void tensor_core_gemm_transA_device(Organism* organism) {
+    const half* A = organism->gemm_A;
+    const half* B = organism->gemm_B;
+    float* C = organism->gemm_C;
+    int M = organism->gemm_M;
+    int N = organism->gemm_N;
+    int K = organism->gemm_K;
+
     const int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     const int warpN = blockIdx.y;
     const int tile_row = warpM * WMMA_TILE_DIM;
@@ -103,7 +125,12 @@ __global__ void tensor_core_gemm_transA_kernel(
     wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
 }
 
-__global__ void transpose_fp16_kernel(const half* __restrict__ A, half* __restrict__ B, int M, int N) {
+__device__ void transpose_fp16_device(Organism* organism) {
+    const half* A = organism->transpose_A;
+    half* B = organism->transpose_B;
+    int M = organism->transpose_M;
+    int N = organism->transpose_N;
+
     __shared__ half tile[WMMA_TILE_DIM][WMMA_TILE_DIM + 1];
     int bx = blockIdx.x * WMMA_TILE_DIM, by = blockIdx.y * WMMA_TILE_DIM;
     int x = bx + threadIdx.x, y = by + threadIdx.y;
@@ -115,19 +142,18 @@ __global__ void transpose_fp16_kernel(const half* __restrict__ A, half* __restri
     if (out_y < N && out_x < M) B[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
 }
 
-__global__ void multi_head_ca_with_tape_kernel(
-    float* __restrict__ ca_state,
-    MultiHeadCAState* __restrict__ ca_heads,
-    float* __restrict__ ca_output,
-    float* __restrict__ perception_saved,
-    float* __restrict__ interaction_saved,
-    float* __restrict__ pre_gelu_saved,
-    CAParameterMap* __restrict__ param_map,
-    int micro_batch_size,
-    int micro_batch_offset,
-    int grid_size,
-    ArchitectureParams arch
-) {
+__device__ void multi_head_ca_with_tape_device(Organism* organism) {
+    float* ca_state = organism->ca_state;
+    MultiHeadCAState* ca_heads = organism->multihead_ca_state;
+    float* ca_output = organism->ca_output;
+    float* perception_saved = organism->perception_saved;
+    float* interaction_saved = organism->interaction_saved;
+    float* pre_gelu_saved = organism->pre_gelu_saved;
+    CAParameterMap* param_map = organism->ca_param_map;
+    int micro_batch_size = organism->micro_batch_size;
+    int micro_batch_offset = organism->micro_batch_offset;
+    int grid_size = organism->ca_grid_size;
+    Architecture arch = organism->current_arch;
     const int head_id = blockIdx.z % arch.num_heads;
     const int micro_batch_id = blockIdx.z / arch.num_heads;
     const int batch_id = micro_batch_offset + micro_batch_id;
@@ -209,7 +235,8 @@ __global__ void multi_head_ca_with_tape_kernel(
         output[c] = acc;
     }
 
-    float gate = activation_sigmoid(interaction_sum / (float)arch.head_dim - arch.ca_gate_center);
+    float coherence = organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX];
+    float gate = activation_sigmoid(interaction_sum / (float)arch.head_dim - compute_ca_gate_center(coherence));
 
     int out_idx = batch_id * arch.num_heads * cells_per_grid * arch.channels +
                   head_id * cells_per_grid * arch.channels +
@@ -222,14 +249,13 @@ __global__ void multi_head_ca_with_tape_kernel(
     }
 }
 
-__global__ void apply_ca_gradients_kernel(
-    ADTape* __restrict__ tape,
-    CAParameterMap* __restrict__ param_map,
-    MultiHeadCAState* __restrict__ ca_heads,
-    float learning_rate,
-    float gradient_clip,
-    ArchitectureParams arch
-) {
+__device__ void apply_ca_gradients_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    CAParameterMap* param_map = organism->ca_param_map;
+    MultiHeadCAState* ca_heads = organism->multihead_ca_state;
+    float learning_rate = organism->learning_rate;
+    float gradient_clip = organism->gradient_clip_norm;
+    Architecture arch = organism->current_arch;
     int param_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_id = blockIdx.y;
 
@@ -282,7 +308,9 @@ __global__ void apply_ca_gradients_kernel(
     }
 }
 
-__global__ void init_ca_parameter_map_kernel(CAParameterMap* map, ArchitectureParams arch) {
+__device__ void init_ca_parameter_map_device(Organism* organism) {
+    CAParameterMap* map = organism->ca_param_map;
+    Architecture arch = organism->current_arch;
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     map->perception_size = arch.channels * arch.head_dim;
@@ -309,11 +337,12 @@ __global__ void init_ca_parameter_map_kernel(CAParameterMap* map, ArchitecturePa
     map->total_ca_params = offset;
 }
 
-__global__ void im2col_kernel(
-    const float* __restrict__ input,
-    float* __restrict__ col,
-    int batch_size, int grid_size, int channels
-) {
+__device__ void im2col_device(Organism* organism) {
+    const float* input = organism->im2col_input;
+    float* col = organism->im2col_col;
+    int batch_size = organism->im2col_batch_size;
+    int grid_size = organism->ca_grid_size;
+    int channels = organism->ca_channels;
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     if (cell_idx >= batch_size * num_cells) return;
@@ -342,11 +371,12 @@ __global__ void im2col_kernel(
     }
 }
 
-__global__ void col2im_kernel(
-    const float* __restrict__ col,
-    float* __restrict__ input_grad,
-    int batch_size, int grid_size, int channels
-) {
+__device__ void col2im_device(Organism* organism) {
+    const float* col = organism->im2col_col;
+    float* input_grad = organism->col2im_output_grad;
+    int batch_size = organism->im2col_batch_size;
+    int grid_size = organism->ca_grid_size;
+    int channels = organism->ca_channels;
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     if (cell_idx >= batch_size * num_cells) return;
@@ -378,25 +408,23 @@ __global__ void col2im_kernel(
     }
 }
 
-__global__ void relu_backward_kernel(
-    const float* __restrict__ dL_dP,
-    const float* __restrict__ P,
-    float* __restrict__ dL_dprerelu,
-    int size
-) {
+__device__ void relu_backward_device(Organism* organism) {
+    const float* dL_dP = organism->backward_dL_dP;
+    const float* P = organism->backward_P;
+    float* dL_dprerelu = organism->backward_dL_dprerelu;
+    int size = organism->backward_elements_per_head;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         dL_dprerelu[idx] = dL_dP[idx] * ((P[idx] > 0.0f) ? 1.0f : 0.0f);
     }
 }
 
-__global__ void route_autodiff_to_unified_kernel(
-    ADTape* __restrict__ tape,
-    CAParameterMap* __restrict__ param_map,
-    UnifiedGradientBuffer* __restrict__ grad_buf,
-    float gradient_clip,
-    ArchitectureParams arch
-) {
+__device__ void route_autodiff_to_unified_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    CAParameterMap* param_map = organism->ca_param_map;
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
+    float gradient_clip = organism->gradient_clip_norm;
+    Architecture arch = organism->current_arch;
     int param_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_id = blockIdx.y;
 
@@ -452,14 +480,13 @@ __global__ void route_autodiff_to_unified_kernel(
     }
 }
 
-__global__ void route_classification_to_unified_kernel(
-    float* __restrict__ pooling_grads_in,
-    float* __restrict__ fc_weight_grads_in,
-    float* __restrict__ fc_bias_grads_in,
-    UnifiedGradientBuffer* __restrict__ grad_buf,
-    int num_features,
-    int num_classes
-) {
+__device__ void route_classification_to_unified_device(Organism* organism) {
+    float* pooling_grads_in = organism->cls_pooling_weights_grad;
+    float* fc_weight_grads_in = organism->cls_fc_weights_grad;
+    float* fc_bias_grads_in = organism->cls_fc_bias_grad;
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
+    int num_features = organism->cls_num_features;
+    int num_classes = organism->cls_num_classes;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < num_features) {

@@ -6,15 +6,6 @@
 #include "../core/organism.cu"
 #include <stdio.h>
 
-struct KernelLaunchInfo {
-    const char* kernel_name;
-    const char* file;
-    int line;
-    unsigned int grid_x, grid_y, grid_z;
-    unsigned int block_x, block_y, block_z;
-    size_t shared_mem;
-};
-
 __device__ KernelLaunchInfo g_last_launch;
 
 template<typename KernelFunc, typename... Args>
@@ -68,22 +59,12 @@ inline void traced_kernel_launch(
         } \
     } while(0)
 
-__global__ void kernel_trace_init() {
+__device__ void kernel_trace_init_device(Organism* organism) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
     }
 }
 
 inline void init_kernel_trace() {
-    kernel_trace_init<<<1, 1>>>();
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        exit(1);
-    }
-    err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        exit(1);
-    }
-
     cudaDeviceSetLimit(cudaLimitStackSize, CDP_STACK_SIZE);
 
     cudaDeviceSetLimit(cudaLimitMallocHeapSize, DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB);

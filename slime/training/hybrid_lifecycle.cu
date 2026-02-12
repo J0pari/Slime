@@ -14,6 +14,7 @@
 #include "../training/classification.cu"
 #include "../training/optimizer.cu"
 #include "../utils/genome_params.cuh"
+#include "../diagnostics/telemetry_probes.cu"
 #include <cuda_runtime.h>
 
 struct Organism;
@@ -45,28 +46,6 @@ __device__ __forceinline__ void grid_barrier(int num_blocks) {
     }
     __syncthreads();
 }
-
-struct WaveBufferOffsets {
-    int ca_states_offset;       
-    int ca_output_offset;       
-    int activations_offset;     
-    int affinity_offset;        
-    int flow_offset;            
-    size_t backward_ws_offset;  
-};
-
-
-struct BackwardWorkspaceLayout {
-    size_t fp16_a_offset;       
-    size_t fp16_b_offset;       
-    size_t dW_offset;           
-    size_t dI_offset;           
-    size_t W_T_offset;          
-    size_t im2col_offset;       
-    size_t dpregelu_offset;     
-    size_t total_bytes;         
-};
-
 
 __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(PoolEntry* entry) {
     BackwardWorkspaceLayout layout;
@@ -184,9 +163,10 @@ __device__ void zero_buffer_device(Organism* organism, float* buffer, int n) {
     }
 }
 
-__device__ void load_batch_device(Organism* organism, int wave_start) {
+__device__ void load_batch_device(Organism* organism) {
     HybridTrainingMode* training_mode = organism->training_mode;
     int generation = organism->generation;
+    int wave_start = organism->current_wave_start;
 
     int tid = threadIdx.x;
     int wave_position = blockIdx.x;
@@ -203,8 +183,8 @@ __device__ void load_batch_device(Organism* organism, int wave_start) {
     if (compact_idx >= pool->alive_indices_count) return;
     int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
+    int grid_size = entry->grid_size;
 
-    
     __shared__ WaveBufferOffsets s_wave_offsets;
     if (tid == 0) {
         s_wave_offsets = compute_wave_offsets(pool, wave_start, wave_position, training_mode->batch_size);
@@ -358,15 +338,14 @@ __device__ void load_batch_device(Organism* organism, int wave_start) {
     if (tid == 0) printf("V:L3_loop_done\n");
 }
 
-__device__ void hybrid_organism_lifecycle_device(
-    Organism* organism,
-    HybridTrainingMode* training_mode,
-    CAParameterMap* param_map,
-    int generation,
-    float* workspace_genomes,
-    AuditBuffer* audit,
-    int wave_start
-) {
+__device__ void hybrid_organism_lifecycle_device(Organism* organism) {
+    HybridTrainingMode* training_mode = organism->training_mode;
+    CAParameterMap* param_map = organism->param_map;
+    int generation = organism->generation;
+    float* workspace_genomes = organism->workspace_genomes;
+    AuditBuffer* audit = organism->audit_buffer;
+    int wave_start = organism->current_wave_start;
+
     extern __shared__ float sdata[];
     int compact_idx = wave_start + blockIdx.x;
     int wave_position = blockIdx.x;
@@ -437,7 +416,8 @@ __device__ void hybrid_organism_lifecycle_device(
     __shared__ int s_num_classes;
     __shared__ int s_behavioral_dim;
     __shared__ int s_num_features;
-    __shared__ ArchitectureParams s_arch;
+    __shared__ Architecture s_arch;
+    __shared__ float s_task_accuracy;
     __shared__ dim3 s_component_grid;
     __shared__ dim3 s_component_block;
     __shared__ dim3 s_ca_grid;
@@ -450,7 +430,7 @@ __device__ void hybrid_organism_lifecycle_device(
     int num_classes;
     int behavioral_dim;
     int num_features;
-    ArchitectureParams arch;
+    Architecture arch;
     dim3 component_grid;
     dim3 component_block;
     dim3 ca_grid;
@@ -478,8 +458,7 @@ __device__ void hybrid_organism_lifecycle_device(
         arch.hidden_dim = entry->hidden_dim;
         arch.head_dim = entry->head_dim;
         arch.grid_size = entry->grid_size;
-        float accuracy = entry->task_accuracy.value;
-        arch.ca_gate_center = 2.0f - 1.5f * fminf(fmaxf(accuracy, 0.0f), 1.0f);
+        s_task_accuracy = fminf(fmaxf(entry->task_accuracy.value, 0.0f), 1.0f);
 
         num_features = arch.num_heads * arch.channels;
 
@@ -1002,7 +981,7 @@ __device__ void hybrid_organism_lifecycle_device(
                 }
 
                 // DIAG 33: Gate computation
-                float gate_input = interaction_sum / (float)head_dim - arch.ca_gate_center;
+                float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
                 float gate = activation_sigmoid(gate_input);
 
                 if (isnan(gate) || isinf(gate)) {
@@ -1526,12 +1505,12 @@ __device__ void hybrid_organism_lifecycle_device(
                 int current_gen = organism->generation;
                 if (training_mode->is_train_batch) {
                     float smoothed = ema_smoothing * entry->train_accuracy.value + (1.0f - ema_smoothing) * accuracy;
-                    entry->train_accuracy.set_computed(smoothed, current_gen, entry->genome_hash);
+                    measured_value_set_computed(&entry->train_accuracy, smoothed, current_gen, entry->genome_hash);
                 } else {
-                    entry->test_accuracy.set_computed(accuracy, current_gen, entry->genome_hash);
+                    measured_value_set_computed(&entry->test_accuracy, accuracy, current_gen, entry->genome_hash);
                 }
-                entry->task_accuracy.set_computed(accuracy, current_gen, entry->genome_hash);
-                entry->avg_confidence.set_computed(avg_confidence, current_gen, entry->genome_hash);
+                measured_value_set_computed(&entry->task_accuracy, accuracy, current_gen, entry->genome_hash);
+                measured_value_set_computed(&entry->avg_confidence, avg_confidence, current_gen, entry->genome_hash);
                 for (int c = 0; c < NUM_CLASSES_MAX; c++) {
                     entry->per_class_correct[c] = local_per_class_correct[c];
                     entry->per_class_total[c] = local_per_class_total[c];
@@ -2810,7 +2789,7 @@ __device__ void hybrid_organism_lifecycle_device(
                 }
                 float eff_rank = expf(entropy);
                 float clamped_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
-                entry->effective_rank.set_computed(clamped_rank, organism->generation, entry->genome_hash);
+                measured_value_set_computed(&entry->effective_rank, clamped_rank, organism->generation, entry->genome_hash);
             }
             __syncthreads();
         }
@@ -2871,7 +2850,7 @@ __device__ void hybrid_organism_lifecycle_device(
                 ent->max_deltas, eid_primary_genome, GENOME_SIZE, eid_parent_temp, organism->diresa_genome_weights);
 
             float gen_gap_val = fabsf(ent->train_accuracy.value - ent->test_accuracy.value);
-            ent->generalization_gap.set_computed(gen_gap_val, generation, ent->genome_hash);
+            measured_value_set_computed(&ent->generalization_gap, gen_gap_val, generation, ent->genome_hash);
 
             DEVICE_FATAL_IF(ent->cycles_elapsed == 0, "cycles_elapsed is 0 - no execution data");
             DEVICE_FATAL_IF(ent->total_branches == 0, "total_branches is 0 - no branch data");
@@ -2880,12 +2859,12 @@ __device__ void hybrid_organism_lifecycle_device(
             float tensor_util = (float)ent->tensor_core_cycles / (float)ent->cycles_elapsed;
             float branch_efficiency = (float)(ent->total_branches - ent->divergent_branches) / (float)ent->total_branches;
             float hw_eff_val = ipc * tensor_util * branch_efficiency;
-            ent->hardware_efficiency.set_computed(hw_eff_val, generation, ent->genome_hash);
+            measured_value_set_computed(&ent->hardware_efficiency, hw_eff_val, generation, ent->genome_hash);
 
             DEVICE_FATAL_IF(generation == 0, "coherence requires previous generation");
             float prev_acc = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
             float coherence_val = ent->task_accuracy.value - prev_acc;
-            ent->coherence.set_computed(coherence_val, generation, ent->genome_hash);
+            measured_value_set_computed(&ent->coherence, coherence_val, generation, ent->genome_hash);
 
             DEVICE_VALIDATE_FINITE(ent->task_accuracy.value);
             DEVICE_VALIDATE_FINITE(ent->coherence.value);
@@ -3198,5 +3177,67 @@ __device__ void hybrid_organism_lifecycle_device(
     }
 }
 
+
+__device__ void check_convergence_device(Organism* organism, bool* converged) {
+    float* workspace_genomes = organism->workspace_genomes;
+
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float fitness = organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX];
+        float coherence = organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX];
+
+        float* convergence_genome = &workspace_genomes[0];
+        float* convergence_parent_temp = &workspace_genomes[GENOME_SIZE];
+        PoolEntry* best_entry = &organism->pool->entries[0];
+        reconstruct_genome_from_archive(best_entry->parent_hash, organism->archive, organism->archive_size,
+            best_entry->delta_indices, best_entry->delta_values, best_entry->num_deltas,
+            best_entry->max_deltas, convergence_genome, GENOME_SIZE, convergence_parent_temp, organism->diresa_genome_weights);
+
+        uint64_t genome_hash = organism->pool->entries[0].genome_hash;
+        float* genome = convergence_genome;
+
+        int fitness_conv_slot = GenomeParamTable::convergence_fitness_threshold;
+        int coherence_conv_slot = GenomeParamTable::convergence_coherence_threshold;
+        int fitness_min_slot = GenomeParamTable::convergence_fitness_min;
+        int fitness_max_slot = GenomeParamTable::convergence_fitness_max;
+        int coherence_min_slot = GenomeParamTable::convergence_coherence_min;
+        int coherence_max_slot = GenomeParamTable::convergence_coherence_max;
+
+        float fitness_min = genome_slot_to_unit(genome, fitness_min_slot);
+        float fitness_max = genome_slot_to_unit(genome, fitness_max_slot);
+        float coherence_min = genome_slot_to_unit(genome, coherence_min_slot);
+        float coherence_max = genome_slot_to_unit(genome, coherence_max_slot);
+
+        InitContext conv_ctx;
+        conv_ctx.derive_from_genome(genome, organism->pool->entries[0].gradients);
+
+        float fitness_threshold = genome_to_param(
+            genome,
+            organism->pool->entries[0].gradients,
+            fitness_conv_slot,
+            conv_ctx.metabolic, conv_ctx.stress, conv_ctx.morphogen,
+            organism->telemetry->genome_complexity.hash_entropy,
+            organism->telemetry->archive_topology.novelty_gradient,
+            organism->telemetry->diresa_evolution.behavioral_drift_rate,
+            organism->telemetry->task_performance.accuracy,
+            fitness_min, fitness_max
+        );
+
+        float coherence_threshold = genome_to_param(
+            genome,
+            organism->pool->entries[0].gradients,
+            coherence_conv_slot,
+            conv_ctx.metabolic, conv_ctx.stress, conv_ctx.morphogen,
+            organism->telemetry->genome_complexity.hash_entropy,
+            organism->telemetry->archive_topology.novelty_gradient,
+            organism->telemetry->diresa_evolution.behavioral_drift_rate,
+            organism->telemetry->task_performance.accuracy,
+            coherence_min, coherence_max
+        );
+
+        if (fitness > fitness_threshold && coherence > coherence_threshold) {
+            *converged = true;
+        }
+    }
+}
 
 #endif

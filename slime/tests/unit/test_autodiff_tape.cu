@@ -23,12 +23,11 @@ struct TestResult {
     const char* test_name;
 };
 
-__global__ void extract_tape_state_kernel(
-    ADTape* tape,
-    int* current_size_out,
-    int* current_value_idx_out,
-    float* first_grad_out
-) {
+__device__ void extract_tape_state_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    int* current_size_out = organism->test_current_size_out;
+    int* current_value_idx_out = organism->test_current_value_idx_out;
+    float* first_grad_out = organism->test_first_grad_out;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         *current_size_out = tape->current_size;
         *current_value_idx_out = tape->current_value_idx;
@@ -91,7 +90,8 @@ bool test_tape_initialization() {
     return passed;
 }
 
-__global__ void record_single_op_kernel(ADTape* tape) {
+__device__ void record_single_op_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
 
         float x = 0.5f;
@@ -156,7 +156,9 @@ bool test_tape_record_single_op() {
     return passed;
 }
 
-__global__ void forward_test_kernel(ADTape* tape, int* y_idx_out) {
+__device__ void forward_test_device(Organism* organism) {
+    ADTape* tape = organism->ad_tape;
+    int* y_idx_out = organism->test_y_idx_out;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         float x = 3.0f;
 

@@ -6,6 +6,7 @@
 #include "../utils/genome_params.cuh"
 #include "pseudopod.cu"
 #include "../memory/pool.cu"
+#include "../kernels/warp_ca.cu"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
@@ -13,43 +14,6 @@
 #include "../memory/tubes.cu"
 
 namespace cg = cooperative_groups;
-
-struct BehavioralInitSlots {
-    int agent_embedding_scale;
-    int init_exploration;
-    int init_sensitivity;
-    int levy_alpha;
-    int ctx_metabolic;
-    int ctx_stress;
-    int ctx_morphogen;
-};
-
-struct ChemicalField {
-    float* concentration;
-    float* gradient_x;
-    float* gradient_y;
-    float* laplacian;
-    float* sources;
-    float* decay_factors;
-    TemporalTube* history;
-    float cached_mean;  
-};
-
-struct BehavioralState {
-    float position[2];
-    float velocity[2];
-    float* hw_coords;
-    float* task_coords;
-    float* gen_coords;
-    float gradient_memory[GRADIENT_HISTORY][2];
-    float velocity_history[GRADIENT_HISTORY][2];
-    float exploration_noise;
-    float exploration;
-    float sensitivity;
-    int memory_index;
-    uint64_t genome_hash;
-    int organism_id;
-};
 
 __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome, const float* gradients) {
     TemporalTube* history = field->history;
@@ -88,20 +52,25 @@ __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, fl
     }
 }
 
-__global__ void store_chemical_snapshot_kernel(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome, const float* gradients) {
+__device__ void store_chemical_snapshot_device(Organism* organism) {
+    ChemicalField* field = organism->chemical_field;
+    int field_size = organism->field_size;
+    float global_time = organism->global_time;
+    uint64_t genome_hash = organism->genome_hash;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
     store_chemical_snapshot(field, field_size, global_time, genome_hash, genome, gradients);
 }
 
-__global__ void update_field_from_ca_kernel(
-    ComponentPool* __restrict__ pool,
-    float* __restrict__ chemical_concentration,
-    int max_grid_size,
-    int entry_idx
-) {
-    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "update_field_from_ca_kernel: entry_idx out of bounds");
+__device__ void update_field_from_ca_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    float* chemical_concentration = organism->chemical_field->concentration;
+    int entry_idx = organism->current_entry_idx;
+
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "update_field_from_ca_device: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_field_from_ca_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_field_from_ca_device: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -119,27 +88,27 @@ __global__ void update_field_from_ca_kernel(
     }
 }
 
-__global__ void initialize_ca_from_field_kernel(
-    ComponentPool* __restrict__ pool,
-    const float* __restrict__ chem_concentration,
-    const float* __restrict__ chem_gradient_x,
-    const float* __restrict__ chem_gradient_y,
-    const float* __restrict__ chem_laplacian,
-    const float* __restrict__ chem_sources,
-    const float* __restrict__ chem_decay_factors,
-    const float* __restrict__ rd_resource_density,
-    const float* __restrict__ rd_fitness_landscape,
-    const float* __restrict__ rd_resource_gradient_x,
-    const float* __restrict__ rd_resource_gradient_y,
-    const float* __restrict__ behavioral_field,
-    const float* __restrict__ attractor_field,
-    int max_grid_size,
-    int entry_idx
-) {
-    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "initialize_ca_from_field_kernel: entry_idx out of bounds");
+__device__ void initialize_ca_from_field_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    ChemicalField* chem = organism->chemical_field;
+    const float* chem_concentration = chem->concentration;
+    const float* chem_gradient_x = chem->gradient_x;
+    const float* chem_gradient_y = chem->gradient_y;
+    const float* chem_laplacian = chem->laplacian;
+    const float* chem_sources = chem->sources;
+    const float* chem_decay_factors = chem->decay_factors;
+    const float* rd_resource_density = organism->rd_resource_density;
+    const float* rd_fitness_landscape = organism->rd_fitness_landscape;
+    const float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
+    const float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
+    const float* behavioral_field = organism->behavioral_field;
+    const float* attractor_field = organism->attractor_field;
+    int entry_idx = organism->current_entry_idx;
+
+    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "initialize_ca_from_field_device: entry_idx out of bounds");
 
     PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "initialize_ca_from_field_kernel: dead entry passed");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "initialize_ca_from_field_device: dead entry passed");
 
     int grid_size = entry->grid_size;
     int channels = entry->channels;
@@ -149,27 +118,27 @@ __global__ void initialize_ca_from_field_kernel(
     if (x >= grid_size || y >= grid_size) return;
 
     int cell_idx = y * grid_size + x;
-    float* ca_concentration = entry->ca_state->ca_concentration;
+    float* ca_conc = entry->ca_state->ca_concentration;
     int base_idx = cell_idx * channels;
 
-    ca_concentration[base_idx + 0] = chem_concentration[cell_idx];
-    ca_concentration[base_idx + 1] = chem_gradient_x[cell_idx];
-    ca_concentration[base_idx + 2] = chem_gradient_y[cell_idx];
-    ca_concentration[base_idx + 3] = chem_laplacian[cell_idx];
-    ca_concentration[base_idx + 4] = chem_sources[cell_idx];
+    ca_conc[base_idx + 0] = chem_concentration[cell_idx];
+    ca_conc[base_idx + 1] = chem_gradient_x[cell_idx];
+    ca_conc[base_idx + 2] = chem_gradient_y[cell_idx];
+    ca_conc[base_idx + 3] = chem_laplacian[cell_idx];
+    ca_conc[base_idx + 4] = chem_sources[cell_idx];
     DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
-    ca_concentration[base_idx + 5] = chem_decay_factors[cell_idx];
+    ca_conc[base_idx + 5] = chem_decay_factors[cell_idx];
 
-    ca_concentration[base_idx + 6] = rd_resource_density[cell_idx];
-    ca_concentration[base_idx + 7] = rd_fitness_landscape[cell_idx];
-    ca_concentration[base_idx + 8] = rd_resource_gradient_x[cell_idx];
-    ca_concentration[base_idx + 9] = rd_resource_gradient_y[cell_idx];
+    ca_conc[base_idx + 6] = rd_resource_density[cell_idx];
+    ca_conc[base_idx + 7] = rd_fitness_landscape[cell_idx];
+    ca_conc[base_idx + 8] = rd_resource_gradient_x[cell_idx];
+    ca_conc[base_idx + 9] = rd_resource_gradient_y[cell_idx];
 
-    ca_concentration[base_idx + 10] = behavioral_field[cell_idx];
+    ca_conc[base_idx + 10] = behavioral_field[cell_idx];
 
-    if (channels > 11) ca_concentration[base_idx + 11] = 0.0f;
-    if (channels > 12) ca_concentration[base_idx + 12] = 0.0f;
-    if (channels > 13) ca_concentration[base_idx + 13] = 0.0f;
+    if (channels > 11) ca_conc[base_idx + 11] = 0.0f;
+    if (channels > 12) ca_conc[base_idx + 12] = 0.0f;
+    if (channels > 13) ca_conc[base_idx + 13] = 0.0f;
 
     if (channels > 14) {
         float* ca_output = entry->ca_state->ca_output;
@@ -179,36 +148,37 @@ __global__ void initialize_ca_from_field_kernel(
         float recurrence = 0.0f;
         for (int h = 0; h < num_heads; h++) {
             int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
-            recurrence += ca_output[output_idx];  
+            recurrence += ca_output[output_idx];
         }
-        ca_concentration[base_idx + 14] = recurrence / (float)max(1, num_heads);
+        ca_conc[base_idx + 14] = recurrence / (float)max(1, num_heads);
     }
 
     if (channels > 15) {
-        DEVICE_FATAL_IF(attractor_field == nullptr, "init_chemical_field_kernel: attractor_field required for channel 15");
-        ca_concentration[base_idx + 15] = attractor_field[cell_idx];
+        DEVICE_FATAL_IF(attractor_field == nullptr, "initialize_ca_from_field_device: attractor_field required for channel 15");
+        ca_conc[base_idx + 15] = attractor_field[cell_idx];
     }
 }
 
-__global__ void diffusion_reaction_kernel(
-    float* __restrict__ concentration,
-    float* __restrict__ gradient_x,
-    float* __restrict__ gradient_y,
-    float* __restrict__ laplacian,
-    float* __restrict__ sources,
-    int grid_size,
-    float dt,
-    const float* genome,
-    const float* epigenetic,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void diffusion_reaction_device(Organism* organism) {
+    ChemicalField* chem = organism->chemical_field;
+    float* concentration = chem->concentration;
+    float* gradient_x = chem->gradient_x;
+    float* gradient_y = chem->gradient_y;
+    float* laplacian = chem->laplacian;
+    float* sources = chem->sources;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    float dt = organism->dt;
+    const float* genome = organism->genome;
+    const float* epigenetic = organism->gradients;
+    float ctx_metabolic = organism->ctx_metabolic;
+    float ctx_stress = organism->ctx_stress;
+    float ctx_morphogen = organism->ctx_morphogen;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -248,7 +218,7 @@ __device__ void diffusion_reaction_backward_device(Organism* organism) {
 
     int entry_idx = organism->lifecycle_entry_idx;
     PoolEntry* entry = &organism->pool->entries[entry_idx];
-    Architecture arch = Architecture::fromConfig();
+    Architecture arch = Architecture::maxBounds();
 
     const float* grad_concentration = organism->buffers->grad_concentration_buffer;
     const float* concentration = organism->chemical_field->concentration;
@@ -300,8 +270,16 @@ __device__ void diffusion_reaction_backward_device(Organism* organism) {
     atomicAdd(&grad_genome[decay_rate_slot], d_decay_rate);
 }
 
-__global__ void behavioral_gradient_kernel(float* __restrict__ behavioral_field, float* __restrict__ behavioral_gradients, int grid_size, int hw_dim, int task_dim, int gen_dim){
+__device__ void behavioral_gradient_device(Organism* organism) {
+    float* behavioral_field = organism->behavioral_field;
+    float* behavioral_gradients = organism->behavioral_gradients;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    int hw_dim = organism->hw_dim;
+    int task_dim = organism->task_dim;
+    int gen_dim = organism->gen_dim;
     int behavioral_dim = hw_dim + task_dim + gen_dim;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int dim = blockIdx.z;
@@ -321,7 +299,25 @@ __global__ void behavioral_gradient_kernel(float* __restrict__ behavioral_field,
     behavioral_gradients[grad_idx + 1] = grad_y;
 }
 
-__global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agents, float* __restrict__ chemical_field, float* __restrict__ gradient_x, float* __restrict__ gradient_y, float* __restrict__ behavioral_gradients, int num_agents, int grid_size, float dt, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int hw_dim, int task_dim, int gen_dim){
+__device__ void chemotactic_navigation_device(Organism* organism) {
+    BehavioralState* agents = organism->behavioral_agents;
+    float* chemical_field = organism->chemical_field->concentration;
+    float* gradient_x = organism->chemical_field->gradient_x;
+    float* gradient_y = organism->chemical_field->gradient_y;
+    float* behavioral_gradients = organism->behavioral_gradients;
+    int num_agents = organism->pool->capacity;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    float dt = organism->dt;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+    int hw_dim = organism->hw_dim;
+    int task_dim = organism->task_dim;
+    int gen_dim = organism->gen_dim;
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (agent_id >= num_agents) return;
@@ -531,20 +527,20 @@ __global__ void chemotactic_navigation_kernel(BehavioralState* __restrict__ agen
     }
 }
 
-__global__ void create_attractors_kernel(
-    float* __restrict__ sources,
-    float* __restrict__ attractor_positions,
-    float* __restrict__ attractor_strengths,
-    int grid_size,
-    int num_attractors,
-    const float* genome,
-    const float* gradients,
-    uint64_t genome_hash,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void create_attractors_device(Organism* organism) {
+    float* sources = organism->chemical_field->sources;
+    float* attractor_positions = organism->attractor_positions;
+    float* attractor_strengths = organism->attractor_strengths;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    int num_attractors = organism->num_attractors;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -553,7 +549,6 @@ __global__ void create_attractors_kernel(
     int idx = y * grid_size + x;
     float source_value = 0.0f;
 
-    
     float context_metabolic = attractor_strengths[0];
     float context_stress = attractor_strengths[1];
     float context_morphogen = attractor_strengths[2];
@@ -580,7 +575,27 @@ __global__ void create_attractors_kernel(
     sources[idx] = source_value;
 }
 
-__global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__ agents, float* __restrict__ embedding_weights, float* __restrict__ reconstruction_error, int num_agents, float learning_rate, const float* genome, const float* gradients, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int behavioral_dim, int hw_dim, int task_dim, int gen_dim, float* features_buffer, const float* __restrict__ chemical_concentration, int grid_size){
+__device__ void update_behavioral_embedding_device(Organism* organism) {
+    BehavioralState* agents = organism->behavioral_agents;
+    float* embedding_weights = organism->embedding_weights;
+    float* reconstruction_error = organism->reconstruction_error;
+    int num_agents = organism->pool->capacity;
+    float learning_rate = organism->embedding_learning_rate;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+    int hw_dim = organism->hw_dim;
+    int task_dim = organism->task_dim;
+    int gen_dim = organism->gen_dim;
+    int behavioral_dim = hw_dim + task_dim + gen_dim;
+    float* features_buffer = organism->features_buffer;
+    const float* chemical_concentration = organism->chemical_field->concentration;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (agent_id >= num_agents) return;
 
@@ -664,7 +679,14 @@ __global__ void update_behavioral_embedding_kernel(BehavioralState* __restrict__
     }
 }
 
-__global__ void init_embedding_weights_kernel(float* embedding_weights, int behavioral_dim, unsigned int seed){
+__device__ void init_embedding_weights_device(Organism* organism) {
+    float* embedding_weights = organism->embedding_weights;
+    int hw_dim = organism->hw_dim;
+    int task_dim = organism->task_dim;
+    int gen_dim = organism->gen_dim;
+    int behavioral_dim = hw_dim + task_dim + gen_dim;
+    unsigned int seed = organism->init_seed;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_weights = behavioral_dim * behavioral_dim;
     if (idx >= total_weights) return;
@@ -684,7 +706,23 @@ __global__ void init_embedding_weights_kernel(float* embedding_weights, int beha
     embedding_weights[idx] = val;
 }
 
-__global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_agents, unsigned int seed, const float* genome, const float* epigenetic, uint64_t genome_hash, int organism_id, BehavioralInitSlots slots, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int hw_dim, int task_dim, int gen_dim){
+__device__ void init_behavioral_state_device(Organism* organism) {
+    BehavioralState* agents = organism->behavioral_agents;
+    int num_agents = organism->pool->capacity;
+    unsigned int seed = organism->init_seed;
+    const float* genome = organism->genome;
+    const float* epigenetic = organism->pool->entries[0].gradients;
+    uint64_t genome_hash = organism->pool->entries[0].genome_hash;
+    int organism_id = 0;
+    BehavioralInitSlots slots = organism->behavioral_slots;
+    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
+    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
+    float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
+    float ctx_performance = organism->telemetry->task_performance.accuracy;
+    int hw_dim = organism->archive->hw_dim;
+    int task_dim = organism->archive->task_dim;
+    int gen_dim = organism->archive->gen_dim;
+
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -733,8 +771,8 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     float levy_alpha_max = levy_alpha_min + genome_slot_to_unit(genome, levy_alpha_max_slot) * (CHEMOTAXIS_LEVY_ALPHA_MAX - levy_alpha_min);
     float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, levy_alpha_min, levy_alpha_max);
 
-    agent->position[0] = rng.next();
-    agent->position[1] = rng.next();
+    agent->position[0] = prng_next(&rng);
+    agent->position[1] = prng_next(&rng);
 
     agent->velocity[0] = 0.0f;
     agent->velocity[1] = 0.0f;
@@ -743,13 +781,13 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     }
 
     for (int i = 0; i < hw_dim; i++) {
-        agent->hw_coords[i] = rng.levy_stable(levy_alpha, embedding_scale);
+        agent->hw_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
     }
     for (int i = 0; i < task_dim; i++) {
-        agent->task_coords[i] = rng.levy_stable(levy_alpha, embedding_scale);
+        agent->task_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
     }
     for (int i = 0; i < gen_dim; i++) {
-        agent->gen_coords[i] = rng.levy_stable(levy_alpha, embedding_scale);
+        agent->gen_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
     }
 
     if (agent_id == 0) {
@@ -773,17 +811,17 @@ __global__ void init_behavioral_state_kernel(BehavioralState* agents, int num_ag
     }
 }
 
-__global__ void init_chemical_field_kernel(
-    ChemicalField* field,
-    int grid_size,
-    const float* genome,
-    const float* gradients,
-    uint64_t genome_hash,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void init_chemical_field_device(Organism* organism) {
+    ChemicalField* field = organism->chemical_field;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -808,11 +846,12 @@ __global__ void init_chemical_field_kernel(
     }
 }
 
-__global__ void reduce_concentration_mean_kernel(
-    ChemicalField* field,
-    int total_cells,
-    float* partial_sums  
-) {
+__device__ void reduce_concentration_mean_device(Organism* organism) {
+    ChemicalField* field = organism->chemical_field;
+    Architecture arch = Architecture::maxBounds();
+    int total_cells = arch.grid_size * arch.grid_size;
+    float* partial_sums = organism->reduction_partial_sums;
+
     extern __shared__ float sdata[];
 
     int tid = threadIdx.x;
@@ -845,12 +884,13 @@ __global__ void reduce_concentration_mean_kernel(
     }
 }
 
-__global__ void finalize_concentration_mean_kernel(
-    ChemicalField* field,
-    float* partial_sums,
-    int num_blocks,
-    int total_cells
-) {
+__device__ void finalize_concentration_mean_device(Organism* organism) {
+    ChemicalField* field = organism->chemical_field;
+    float* partial_sums = organism->reduction_partial_sums;
+    int num_blocks = organism->reduction_num_blocks;
+    Architecture arch = Architecture::maxBounds();
+    int total_cells = arch.grid_size * arch.grid_size;
+
     float sum = 0.0f;
     for (int i = 0; i < num_blocks; i++) {
         sum += partial_sums[i];
@@ -858,19 +898,20 @@ __global__ void finalize_concentration_mean_kernel(
     field->cached_mean = sum / (float)total_cells;
 }
 
-__global__ void set_chemical_sources_from_agents_kernel(
-    float* sources,
-    BehavioralState* agents,
-    int num_agents,
-    int grid_size,
-    const float* genome,
-    const float* gradients,
-    const float* chemical_field,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void set_chemical_sources_from_agents_device(Organism* organism) {
+    float* sources = organism->chemical_field->sources;
+    BehavioralState* agents = organism->behavioral_agents;
+    int num_agents = organism->pool->capacity;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    const float* chemical_field = organism->chemical_field->concentration;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+
     int agent_id = threadIdx.x;
     if (agent_id >= num_agents) return;
 
@@ -916,7 +957,22 @@ __global__ void set_chemical_sources_from_agents_kernel(
     }
 }
 
-__global__ void compute_behavioral_field_kernel(float* behavioral_field, BehavioralState* agents, int num_agents, int grid_size, const float* genome, const float* gradients, uint64_t genome_hash, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, int hw_dim, int task_dim, int gen_dim){
+__device__ void compute_behavioral_field_device(Organism* organism) {
+    float* behavioral_field = organism->behavioral_field;
+    BehavioralState* agents = organism->behavioral_agents;
+    int num_agents = organism->pool->capacity;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    const float* genome = organism->genome;
+    const float* gradients = organism->gradients;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
+    int hw_dim = organism->hw_dim;
+    int task_dim = organism->task_dim;
+    int gen_dim = organism->gen_dim;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -1014,51 +1070,57 @@ __global__ void compute_behavioral_field_kernel(float* behavioral_field, Behavio
     }
 }
 
-__global__ void init_resource_fields_kernel(
-    float* __restrict__ resource_density,
-    float* __restrict__ fitness_landscape,
-    int grid_size,
-    unsigned int seed,
-    float* genome,
-    const float* epigenetic,
-    uint64_t genome_hash
-) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= grid_size || y >= grid_size) return;
+__device__ void init_resource_fields_device(Organism* organism) {
+    float* resource_density = organism->resource_density;
+    float* fitness_landscape = organism->fitness_landscape;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    unsigned int seed = organism->init_seed * RNG_SEED_MULTIPLIER;
+    float* genome = organism->genome;
+    const float* epigenetic = organism->pool->entries[0].gradients;
+    uint64_t genome_hash = organism->pool->entries[0].genome_hash;
 
-    int idx = y * grid_size + x;
-    curandState_t state;
-    curand_init(seed, idx, 0, &state);
+    int thread_x = threadIdx.x + blockIdx.x * blockDim.x;
+    int thread_y = threadIdx.y + blockIdx.y * blockDim.y;
+    int stride_x = blockDim.x * gridDim.x;
+    int stride_y = blockDim.y * gridDim.y;
 
-    int resource_init_slot = GenomeParamTable::resource_density_initial;
-    int resource_init_min_slot = GenomeParamTable::resource_density_initial_min;
-    int resource_init_max_slot = GenomeParamTable::resource_density_initial_max;
-    float resource_init_min = genome_slot_to_unit(genome, resource_init_min_slot) * RESOURCE_INIT_MAX;
-    float resource_init_max = resource_init_min + genome_slot_to_unit(genome, resource_init_max_slot) * (RESOURCE_INIT_MAX - resource_init_min);
-    float resource_init = genome_to_bootstrap_param(genome, epigenetic, resource_init_slot, resource_init_min, resource_init_max);
+    for (int y = thread_y; y < grid_size; y += stride_y) {
+        for (int x = thread_x; x < grid_size; x += stride_x) {
+            int idx = y * grid_size + x;
+            curandState_t state;
+            curand_init(seed, idx, 0, &state);
 
-    int resource_noise_slot = GenomeParamTable::resource_density_noise;
-    int resource_noise_min_slot = GenomeParamTable::resource_density_noise_min;
-    int resource_noise_max_slot = GenomeParamTable::resource_density_noise_max;
-    float resource_noise_min = genome_slot_to_unit(genome, resource_noise_min_slot) * RESOURCE_NOISE_MAX;
-    float resource_noise_max = resource_noise_min + genome_slot_to_unit(genome, resource_noise_max_slot) * (RESOURCE_NOISE_MAX - resource_noise_min);
-    float resource_noise = genome_to_bootstrap_param(genome, epigenetic, resource_noise_slot, resource_noise_min, resource_noise_max);
+            int resource_init_slot = GenomeParamTable::resource_density_initial;
+            int resource_init_min_slot = GenomeParamTable::resource_density_initial_min;
+            int resource_init_max_slot = GenomeParamTable::resource_density_initial_max;
+            float resource_init_min = genome_slot_to_unit(genome, resource_init_min_slot) * RESOURCE_INIT_MAX;
+            float resource_init_max = resource_init_min + genome_slot_to_unit(genome, resource_init_max_slot) * (RESOURCE_INIT_MAX - resource_init_min);
+            float resource_init = genome_to_bootstrap_param(genome, epigenetic, resource_init_slot, resource_init_min, resource_init_max);
 
-    float rand_val = validated_curand_uniform(&state, "init_resource_fields", idx);
-    resource_density[idx] = resource_init + resource_noise * (rand_val - CENTERED_DIFFERENCE_SCALE);
+            int resource_noise_slot = GenomeParamTable::resource_density_noise;
+            int resource_noise_min_slot = GenomeParamTable::resource_density_noise_min;
+            int resource_noise_max_slot = GenomeParamTable::resource_density_noise_max;
+            float resource_noise_min = genome_slot_to_unit(genome, resource_noise_min_slot) * RESOURCE_NOISE_MAX;
+            float resource_noise_max = resource_noise_min + genome_slot_to_unit(genome, resource_noise_max_slot) * (RESOURCE_NOISE_MAX - resource_noise_min);
+            float resource_noise = genome_to_bootstrap_param(genome, epigenetic, resource_noise_slot, resource_noise_min, resource_noise_max);
 
-    fitness_landscape[idx] = 0.0f;
+            float rand_val = validated_curand_uniform(&state, "init_resource_fields", idx);
+            resource_density[idx] = resource_init + resource_noise * (rand_val - CENTERED_DIFFERENCE_SCALE);
+
+            fitness_landscape[idx] = 0.0f;
+        }
+    }
 }
 
-__global__ void initialize_chemical_field_kernel(
-    float* __restrict__ chemical_field,
-    const float* __restrict__ genome,
-    const float* __restrict__ epigenetic,
-    int grid_size,
-    unsigned int seed,
-    uint64_t genome_hash
-) {
+__device__ void initialize_chemical_field_device(Organism* organism) {
+    float* chemical_field = organism->chemical_field->concentration;
+    const float* genome = organism->genome;
+    const float* epigenetic = organism->gradients;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    unsigned int seed = organism->init_seed;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -1100,17 +1162,18 @@ __global__ void initialize_chemical_field_kernel(
     chemical_field[idx] = clamp(chemical_field[idx], NORMALIZED_MIN, NORMALIZED_MAX);
 }
 
-extern "C" __global__ void resource_flow_kernel(
-    float* __restrict__ resource_density,
-    float* __restrict__ resource_next,
-    const float* __restrict__ fitness_landscape,
-    float* __restrict__ resource_gradient_x,
-    float* __restrict__ resource_gradient_y,
-    int grid_size,
-    float dt,
-    float diffusivity,
-    float flow_strength
-) {
+__device__ void resource_flow_device(Organism* organism) {
+    float* resource_density = organism->rd_resource_density;
+    float* resource_next = organism->rd_resource_next;
+    const float* fitness_landscape = organism->rd_fitness_landscape;
+    float* resource_gradient_x = organism->rd_resource_gradient_x;
+    float* resource_gradient_y = organism->rd_resource_gradient_y;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    float dt = organism->dt;
+    float diffusivity = organism->rd_diffusivity;
+    float flow_strength = organism->rd_flow_strength;
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -1149,17 +1212,18 @@ extern "C" __global__ void resource_flow_kernel(
     resource_next[idx] = fmaxf(0.0f, new_rho);
 }
 
-extern "C" __global__ void update_fitness_landscape_kernel(
-    ComponentPool* pool,
-    BehavioralState* agents,
-    float* __restrict__ fitness_landscape,
-    int grid_size
-) {
+__device__ void update_fitness_landscape_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    BehavioralState* agents = organism->behavioral_agents;
+    float* fitness_landscape = organism->rd_fitness_landscape;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (compact_idx >= pool->alive_indices_count) return;
 
     int entry_idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_fitness_landscape_kernel: dead entry in alive_indices");
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_fitness_landscape_device: dead entry in alive_indices");
 
     float px = agents[entry_idx].position[0];
     float py = agents[entry_idx].position[1];
@@ -1168,6 +1232,476 @@ extern "C" __global__ void update_fitness_landscape_kernel(
     int idx = gy * grid_size + gx;
 
     atomicAdd(&fitness_landscape[idx], pool->fitness_values[entry_idx]);
+}
+
+__device__ void populate_organism_flow_params_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    ChemicalField* chemical_field = organism->chemical_field;
+    float* workspace_genomes = organism->workspace_genomes;
+
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
+
+    int entry_idx = pool->alive_indices[compact_idx];
+    PoolEntry* entry = &pool->entries[entry_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "populate_organism_flow_params_device: dead entry in alive_indices");
+
+    Architecture arch = get_arch_from_pool(organism, entry_idx);
+
+    float* entry_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    float* entry_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+    reconstruct_genome_from_archive(entry->parent_hash, organism->archive, organism->archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
+
+    float* genome = entry_genome;
+    float* epigenetic = entry->gradients;
+    uint64_t genome_hash = entry->genome_hash;
+
+    float context_metabolic = entry->fitness.value;
+    int stress_numerator_slot = GenomeParamTable::context_stress_numerator;
+    float stress_numerator = genome_to_param(
+        genome, epigenetic, stress_numerator_slot,
+        entry->fitness.value,
+        entry->hunger.value,
+        safe_epsilon(1.0f),
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        NORMALIZED_MIN, NORMALIZED_MAX
+    );
+    DEVICE_FATAL_IF(entry->hunger.value <= 0.0f, "archive_driven_lifecycle: hunger <= 0 before stress division");
+    float context_stress = stress_numerator / entry->hunger.value;
+
+    float context_morphogen = chemical_field->cached_mean;
+
+    int s_param_slot = GenomeParamTable::flow_lenia_s;
+    entry->flow_s = genome_to_param(
+        genome, epigenetic, s_param_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_S_MIN, FLOW_LENIA_S_MAX
+    );
+
+    int beta_A_slot = GenomeParamTable::flow_lenia_beta_A;
+    entry->flow_beta_A = genome_to_param(
+        genome, epigenetic, beta_A_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_BETA_A_MIN, FLOW_LENIA_BETA_A_MAX
+    );
+
+    int n_param_slot = GenomeParamTable::flow_lenia_n;
+    entry->flow_n = genome_to_param(
+        genome, epigenetic, n_param_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_N_MIN, FLOW_LENIA_N_MAX
+    );
+
+    int alpha_min_slot = GenomeParamTable::flow_alpha_min;
+    entry->flow_alpha_min = genome_to_param(
+        genome, epigenetic, alpha_min_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_ALPHA_MIN_MIN, FLOW_LENIA_ALPHA_MIN_MAX
+    );
+
+    int alpha_max_slot = GenomeParamTable::flow_alpha_max;
+    entry->flow_alpha_max = genome_to_param(
+        genome, epigenetic, alpha_max_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_ALPHA_MAX_MIN, FLOW_LENIA_ALPHA_MAX_MAX
+    );
+
+    int sharpness_slot = GenomeParamTable::flow_sharpness;
+    entry->flow_sharpness = genome_to_param(
+        genome, epigenetic, sharpness_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FLOW_LENIA_SHARPNESS_MIN, FLOW_LENIA_SHARPNESS_MAX
+    );
+
+    int resource_flow_dt_slot = GenomeParamTable::flow_resource_dt;
+    entry->flow_resource_dt = genome_to_param(
+        genome, epigenetic, resource_flow_dt_slot,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        RESOURCE_FLOW_DT_MIN, RESOURCE_FLOW_DT_MAX
+    );
+}
+
+__device__ void behavioral_update_device(Organism* organism) {
+    BehavioralState* agents = organism->behavioral_agents;
+    ChemicalField* chemical_field = organism->chemical_field;
+    float* workspace_genomes = organism->workspace_genomes;
+    Architecture arch = get_arch_from_pool(organism, blockIdx.x);
+
+    if (blockIdx.x == 0 && threadIdx.x == 0) printf("V:beh_KERNEL_START gen=%d\n", organism->generation);
+
+    int entry_idx = blockIdx.x;
+    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ENTER entry=0 gen=%d blockIdx=%d threadIdx=%d\n", organism->generation, blockIdx.x, threadIdx.x);
+    ComponentPool* pool = organism->pool;
+
+    if (entry_idx >= pool->capacity) {
+        if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_OVER_CAP entry=0 cap=%d\n", pool->capacity);
+        return;
+    }
+
+    PoolEntry* entry = &pool->entries[entry_idx];
+    if (!pool->alive_flags[entry_idx]) {
+        if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_NOT_ALIVE entry=0\n");
+        return;
+    }
+    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ALIVE entry=0 gen=%d\n", organism->generation);
+
+    int num_agents = POOL_CAPACITY_MAX;
+
+    float* primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    float* primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
+
+    reconstruct_genome_from_archive(entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
+
+    uint64_t genome_hash = entry->genome_hash;
+    float* genome = primary_genome;
+    float* gradients = entry->gradients;
+    float ctx_metabolic = entry->fitness.value;
+    float ctx_stress = entry->hunger.value;
+
+    float ctx_morphogen = chemical_field->cached_mean;
+
+    BehavioralDimensions dims;
+    dims.derive_from_genome(primary_genome, gradients);
+
+    if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", organism->generation, entry_idx);
+
+    int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+    int behavioral_buffer_size = arch.grid_size * arch.grid_size * behavioral_dim;
+    float* behavioral_field = &organism->behavioral_field_pool[entry_idx * behavioral_buffer_size];
+    float* behavioral_gradients_pool = &organism->behavioral_gradient_pool[entry_idx * behavioral_buffer_size];
+
+    {
+        int grid_size = arch.grid_size;
+        int total_cells = grid_size * grid_size;
+        int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+
+        ChemotaxisParams chem_params;
+        
+
+        InitContext init_ctx;
+        init_ctx.derive_from_genome(primary_genome, entry->gradients);
+
+        float behavioral_field_sigma = chem_params.get_behavioral_field_sigma(primary_genome, entry->gradients, init_ctx.metabolic, init_ctx.stress, init_ctx.morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
+
+        for (int cell_idx = threadIdx.x; cell_idx < total_cells; cell_idx += blockDim.x) {
+            int x = cell_idx % grid_size;
+            int y = cell_idx / grid_size;
+            float px = (float)x / grid_size;
+            float py = (float)y / grid_size;
+
+            int d_offset = 0;
+
+            for (int d = 0; d < dims.hw_dim; d++) {
+                float field_value = 0.0f;
+                float weight_sum = 0.0f;
+                for (int agent_id = 0; agent_id < num_agents; agent_id++) {
+                    BehavioralState* agent = &agents[agent_id];
+                    float dx = fabsf(px - agent->position[0]);
+                    float dy = fabsf(py - agent->position[1]);
+                    dx = fminf(dx, NORMALIZED_MAX - dx);
+                    dy = fminf(dy, NORMALIZED_MAX - dy);
+                    float dist_sq = dx * dx + dy * dy;
+                    float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
+                    field_value += weight * agent->hw_coords[d];
+                    weight_sum += weight;
+                }
+                int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: hw weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
+                d_offset++;
+            }
+
+            for (int d = 0; d < dims.task_dim; d++) {
+                float field_value = 0.0f;
+                float weight_sum = 0.0f;
+                for (int agent_id = 0; agent_id < num_agents; agent_id++) {
+                    BehavioralState* agent = &agents[agent_id];
+                    float dx = fabsf(px - agent->position[0]);
+                    float dy = fabsf(py - agent->position[1]);
+                    dx = fminf(dx, NORMALIZED_MAX - dx);
+                    dy = fminf(dy, NORMALIZED_MAX - dy);
+                    float dist_sq = dx * dx + dy * dy;
+                    float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
+                    field_value += weight * agent->task_coords[d];
+                    weight_sum += weight;
+                }
+                int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: task weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
+                d_offset++;
+            }
+
+            for (int d = 0; d < dims.gen_dim; d++) {
+                float field_value = 0.0f;
+                float weight_sum = 0.0f;
+                for (int agent_id = 0; agent_id < num_agents; agent_id++) {
+                    BehavioralState* agent = &agents[agent_id];
+                    float dx = fabsf(px - agent->position[0]);
+                    float dy = fabsf(py - agent->position[1]);
+                    dx = fminf(dx, NORMALIZED_MAX - dx);
+                    dy = fminf(dy, NORMALIZED_MAX - dy);
+                    float dist_sq = dx * dx + dy * dy;
+                    float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
+                    field_value += weight * agent->gen_coords[d];
+                    weight_sum += weight;
+                }
+                int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
+                DEVICE_FATAL_IF(!is_meaningful(weight_sum, 1.0f), "behavioral_update: gen weight_sum not meaningful");
+                behavioral_field[field_idx] = field_value / weight_sum;
+                d_offset++;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) printf("V:beh_3_behavioral_field gen=%d\n", organism->generation);
+
+    {
+        int width = arch.grid_size;
+        int height = arch.grid_size;
+        int total_cells = width * height;
+        int num_tiles = (total_cells + WARP_SIZE - 1) / WARP_SIZE;
+        int lane_id = threadIdx.x % WARP_SIZE;
+
+        CAParams ca_params;
+        float warp_ca_growth_rate = ca_params.get_warp_ca_growth_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
+
+        for (int tile = 0; tile < num_tiles; tile++) {
+            int cell_idx = tile * WARP_SIZE + lane_id;
+            if (cell_idx >= total_cells) continue;
+
+            int tile_x = cell_idx % width;
+            int tile_y = cell_idx / width;
+
+            float my_state = behavioral_field[tile_y * width + tile_x];
+            unsigned mask = __ballot_sync(0xffffffff, 1);
+
+            float sum = 0.0f;
+            sum += get_neighbor_2d(my_state, -1, -1, width, mask);
+            sum += get_neighbor_2d(my_state, 0, -1, width, mask);
+            sum += get_neighbor_2d(my_state, 1, -1, width, mask);
+            sum += get_neighbor_2d(my_state, -1, 0, width, mask);
+            sum += get_neighbor_2d(my_state, 1, 0, width, mask);
+            sum += get_neighbor_2d(my_state, -1, 1, width, mask);
+            sum += get_neighbor_2d(my_state, 0, 1, width, mask);
+            sum += get_neighbor_2d(my_state, 1, 1, width, mask);
+
+            float avg = sum / CA_KERNEL_NEIGHBOR_COUNT;
+            float growth = avg * expf(-avg * avg * 2.0f);
+
+            float total_mass = WarpReduce<WARP_SIZE>::sum(my_state);
+            float new_val = my_state + warp_ca_growth_rate * growth;
+            float new_total = WarpReduce<WARP_SIZE>::sum(new_val);
+
+            DEVICE_FATAL_IF(!is_meaningful(new_total, total_mass), "behavioral_update: mass conservation failed - new_total not meaningful");
+            new_val *= total_mass / new_total;
+
+            behavioral_gradients_pool[tile_y * width + tile_x] = new_val;
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) printf("V:beh_4_warp_ca gen=%d\n", organism->generation);
+
+    {
+        int grid_size = arch.grid_size;
+        int total_cells = grid_size * grid_size;
+        int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+
+        for (int cell_idx = threadIdx.x; cell_idx < total_cells; cell_idx += blockDim.x) {
+            int x = cell_idx % grid_size;
+            int y = cell_idx / grid_size;
+
+            for (int dim = 0; dim < behavioral_dim; dim++) {
+                float grad_x, grad_y;
+                Stencils::gradients_at(grad_x, grad_y, &behavioral_gradients_pool[dim], x, y, grid_size, behavioral_dim);
+
+                float grad_sq = grad_x * grad_x + grad_y * grad_y;
+                float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
+                grad_x /= magnitude;
+                grad_y /= magnitude;
+
+                int grad_idx = ((y * grid_size + x) * behavioral_dim + dim) * 2;
+                behavioral_gradients_pool[grad_idx] = grad_x;
+                behavioral_gradients_pool[grad_idx + 1] = grad_y;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", organism->generation);
+
+    int chemotaxis_dt_slot = GenomeParamTable::chemotaxis_dt;
+    float chemotaxis_dt = genome_to_param(genome, gradients, chemotaxis_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMOTAXIS_DT_MIN, CHEMOTAXIS_DT_MAX);
+
+    {
+        int grid_size = arch.grid_size;
+        int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+        float* concentration = chemical_field->concentration;
+        float* gradient_x_arr = chemical_field->gradient_x;
+        float* gradient_y_arr = chemical_field->gradient_y;
+
+        for (int agent_id = threadIdx.x; agent_id < num_agents; agent_id += blockDim.x) {
+            BehavioralState* agent = &agents[agent_id];
+
+            float context_metabolic_agent = agent->sensitivity;
+            float context_stress_agent = sqrtf(agent->velocity[0] * agent->velocity[0] + agent->velocity[1] * agent->velocity[1]);
+            int grid_x = min(max((int)(agent->position[0] * grid_size), 0), grid_size - 1);
+            int grid_y = min(max((int)(agent->position[1] * grid_size), 0), grid_size - 1);
+            int idx = grid_y * grid_size + grid_x;
+            float context_morphogen_agent = concentration[idx];
+
+            ChemotaxisParams chem_params;
+
+            float theta = chem_params.get_theta(primary_genome, entry->gradients, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
+            float sigma = chem_params.get_sigma(primary_genome, entry->gradients, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
+            float gradient_mix_weight = chem_params.get_gradient_mix_weight(primary_genome, entry->gradients, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
+
+            float chem_grad_x = gradient_x_arr[idx];
+            float chem_grad_y = gradient_y_arr[idx];
+
+            float behav_grad_x = 0.0f, behav_grad_y = 0.0f;
+            int d_offset = 0;
+            for (int d = 0; d < dims.hw_dim; d++) {
+                int grad_idx = ((grid_y * grid_size + grid_x) * behavioral_dim + d_offset) * 2;
+                behav_grad_x += behavioral_gradients_pool[grad_idx] * agent->hw_coords[d];
+                behav_grad_y += behavioral_gradients_pool[grad_idx + 1] * agent->hw_coords[d];
+                d_offset++;
+            }
+            for (int d = 0; d < dims.task_dim; d++) {
+                int grad_idx = ((grid_y * grid_size + grid_x) * behavioral_dim + d_offset) * 2;
+                behav_grad_x += behavioral_gradients_pool[grad_idx] * agent->task_coords[d];
+                behav_grad_y += behavioral_gradients_pool[grad_idx + 1] * agent->task_coords[d];
+                d_offset++;
+            }
+            for (int d = 0; d < dims.gen_dim; d++) {
+                int grad_idx = ((grid_y * grid_size + grid_x) * behavioral_dim + d_offset) * 2;
+                behav_grad_x += behavioral_gradients_pool[grad_idx] * agent->gen_coords[d];
+                behav_grad_y += behavioral_gradients_pool[grad_idx + 1] * agent->gen_coords[d];
+                d_offset++;
+            }
+
+            float behav_sq = behav_grad_x * behav_grad_x + behav_grad_y * behav_grad_y;
+            float behav_magnitude = sqrtf(behav_sq) + safe_epsilon(behav_sq);
+            behav_grad_x /= behav_magnitude;
+            behav_grad_y /= behav_magnitude;
+
+            float chem_weight = gradient_mix_weight;
+            float behav_weight = NORMALIZED_MAX - gradient_mix_weight;
+            float mixed_grad_x = chem_grad_x * chem_weight + behav_grad_x * behav_weight;
+            float mixed_grad_y = chem_grad_y * chem_weight + behav_grad_y * behav_weight;
+
+            unsigned int seed = agent_id * RNG_SEED_MULTIPLIER + (unsigned int)(chemotaxis_dt * 1000.0f);
+            seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
+            float noise_scale = sigma * agent->exploration_noise;
+            float noise_x = noise_scale * ((seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE - 0.5f);
+            seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
+            float noise_y = noise_scale * ((seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE - 0.5f);
+
+            agent->velocity[0] += chemotaxis_dt * (agent->sensitivity * mixed_grad_x - theta * agent->velocity[0] + noise_x);
+            agent->velocity[1] += chemotaxis_dt * (agent->sensitivity * mixed_grad_y - theta * agent->velocity[1] + noise_y);
+
+            float vel_magnitude = sqrtf(agent->velocity[0] * agent->velocity[0] + agent->velocity[1] * agent->velocity[1]);
+            int max_vel_slot = GenomeParamTable::max_agent_velocity;
+            float max_agent_velocity = genome_to_param(primary_genome, entry->gradients, max_vel_slot, context_metabolic_agent, context_stress_agent, context_morphogen_agent, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, MAX_AGENT_VELOCITY_BASE_MIN, MAX_AGENT_VELOCITY_BASE_MAX);
+            if (vel_magnitude > max_agent_velocity) {
+                agent->velocity[0] *= (max_agent_velocity / vel_magnitude);
+                agent->velocity[1] *= (max_agent_velocity / vel_magnitude);
+            }
+
+            agent->position[0] += agent->velocity[0] * chemotaxis_dt;
+            agent->position[1] += agent->velocity[1] * chemotaxis_dt;
+            agent->position[0] = agent->position[0] - floorf(agent->position[0]);
+            agent->position[1] = agent->position[1] - floorf(agent->position[1]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) printf("V:beh_6_chemotaxis gen=%d\n", organism->generation);
+
+    {
+        int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+        int memory_entry_size = behavioral_dim + AGENT_SPATIAL_DIMS;
+        float* memory_data_pool = organism->memory_data_pool;
+
+        for (int agent_id = threadIdx.x; agent_id < num_agents; agent_id += blockDim.x) {
+            float* d_memory_data = memory_data_pool + agent_id * memory_entry_size;
+
+            d_memory_data[0] = agents[agent_id].position[0];
+            d_memory_data[1] = agents[agent_id].position[1];
+            d_memory_data[2] = agents[agent_id].velocity[0];
+            d_memory_data[3] = agents[agent_id].velocity[1];
+
+            int offset = AGENT_SPATIAL_DIMS;
+            for (int i = 0; i < dims.hw_dim; i++) {
+                d_memory_data[offset++] = agents[agent_id].hw_coords[i];
+            }
+            for (int i = 0; i < dims.task_dim; i++) {
+                d_memory_data[offset++] = agents[agent_id].task_coords[i];
+            }
+            for (int i = 0; i < dims.gen_dim; i++) {
+                d_memory_data[offset++] = agents[agent_id].gen_coords[i];
+            }
+        }
+        __syncthreads();
+
+        if (threadIdx.x == 0) {
+            float importance = agents[0].exploration_noise;
+            float* d_memory_data = memory_data_pool;
+            TemporalTube* tube = organism->memory_tubes;
+
+            int idx = tube->head;
+            tube->entries[idx].size = memory_entry_size;
+            tube->entries[idx].timestamp = tube->global_time;
+            tube->entries[idx].importance = importance;
+            tube->entries[idx].decay_factor = 1.0f;
+
+            DEVICE_FATAL_IF(d_memory_data == nullptr, "behavioral_update: d_memory_data is null");
+            DEVICE_FATAL_IF(memory_entry_size <= 0, "behavioral_update: memory_entry_size <= 0");
+            DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "behavioral_update: tube entry data is null");
+            for (int i = 0; i < memory_entry_size; i++) {
+                tube->entries[idx].data[i] = d_memory_data[i];
+            }
+
+            tube->head = (tube->head + 1) % tube->capacity;
+            if (tube->count < tube->capacity) {
+                tube->count++;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) printf("V:beh_7_done gen=%d entry=%d\n", organism->generation, entry_idx);
 }
 
 #endif

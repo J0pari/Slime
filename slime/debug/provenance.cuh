@@ -10,47 +10,6 @@
 #include <atomic>
 #include <cstdio>
 
-enum class ComputeState : uint8_t {
-    UNCOMPUTED,
-    COMPUTING,
-    COMPUTED,
-    COMPUTATION_FAILED,
-    STALE,
-    INVALIDATED
-};
-
-enum class LifecyclePhase : uint8_t {
-    DEAD = 0,
-    ACTIVE = 1,
-    STRESSED = 2,
-    DORMANT = 3,
-    REACTIVATING = 4,
-    ARCHIVED = 5
-};
-
-enum class NicheState : uint8_t {
-    UNASSIGNED,
-    COMPUTING,
-    ASSIGNED,
-    STALE,
-    EVICTED
-};
-
-enum class FieldEpochPhase : uint8_t {
-    ACCUMULATING,
-    REINFORCING,
-    RESETTING,
-    READY
-};
-
-enum class BufferEntryState : uint8_t {
-    EMPTY,
-    WRITING,
-    VALID,
-    CONSUMED,
-    CORRUPT
-};
-
 namespace StalenessThreshold {
     constexpr int FITNESS = 1;
     constexpr int LIFECYCLE_SIGNALS = 1;
@@ -59,65 +18,81 @@ namespace StalenessThreshold {
     constexpr int SIGNAL_FLOW = 100;
     constexpr int ENCODER_WEIGHTS_EPOCH = 1;
 }
+
+// MeasuredValue helper functions (struct is in organism.cu)
 template<typename T>
-struct MeasuredValue {
-    T value;
-    ComputeState state;
-    int computed_at_generation;
-    uint64_t input_hash;
-
-    __device__ __host__ MeasuredValue() :
-        value(static_cast<T>(0)),
-        state(ComputeState::UNCOMPUTED),
-        computed_at_generation(INT_MIN),
-        input_hash(UINT64_MAX) {}
-
-    __device__ bool is_valid() const {
-        return state == ComputeState::COMPUTED;
-    }
-
-    __device__ bool is_stale(int current_generation, int threshold) const {
-        if (computed_at_generation == INT_MIN) return true;
-        return (current_generation - computed_at_generation) > threshold;
-    }
-
-    __device__ void set_computed(T v, int generation, uint64_t hash) {
-        value = v;
-        state = ComputeState::COMPUTED;
-        computed_at_generation = generation;
-        input_hash = hash;
-    }
-
-    __device__ void set_uncomputed() {
-        state = ComputeState::UNCOMPUTED;
-        computed_at_generation = INT_MIN;
-        input_hash = UINT64_MAX;
-    }
-
-    __device__ void mark_stale() { state = ComputeState::STALE; }
-    __device__ void mark_invalid() { state = ComputeState::INVALIDATED; }
-    __device__ void mark_computing() { state = ComputeState::COMPUTING; }
-    __device__ void mark_failed() { state = ComputeState::COMPUTATION_FAILED; }
-};
-
-template<>
-__device__ __host__ inline MeasuredValue<float>::MeasuredValue() :
-    value(NAN),
-    state(ComputeState::UNCOMPUTED),
-    computed_at_generation(INT_MIN),
-    input_hash(UINT64_MAX) {}
-
-template<>
-__device__ inline bool MeasuredValue<float>::is_valid() const {
-    return state == ComputeState::COMPUTED && !isnan(value);
+__device__ __host__ inline void measured_value_init(MeasuredValue<T>* mv) {
+    mv->value = static_cast<T>(0);
+    mv->state = ComputeState::UNCOMPUTED;
+    mv->computed_at_generation = INT_MIN;
+    mv->input_hash = UINT64_MAX;
 }
 
 template<>
-__device__ inline void MeasuredValue<float>::set_uncomputed() {
-    value = NAN;
-    state = ComputeState::UNCOMPUTED;
-    computed_at_generation = INT_MIN;
-    input_hash = UINT64_MAX;
+__device__ __host__ inline void measured_value_init<float>(MeasuredValue<float>* mv) {
+    mv->value = NAN;
+    mv->state = ComputeState::UNCOMPUTED;
+    mv->computed_at_generation = INT_MIN;
+    mv->input_hash = UINT64_MAX;
+}
+
+template<typename T>
+__device__ inline bool measured_value_is_valid(const MeasuredValue<T>* mv) {
+    return mv->state == ComputeState::COMPUTED;
+}
+
+template<>
+__device__ inline bool measured_value_is_valid<float>(const MeasuredValue<float>* mv) {
+    return mv->state == ComputeState::COMPUTED && !isnan(mv->value);
+}
+
+template<typename T>
+__device__ inline bool measured_value_is_stale(const MeasuredValue<T>* mv, int current_generation, int threshold) {
+    if (mv->computed_at_generation == INT_MIN) return true;
+    return (current_generation - mv->computed_at_generation) > threshold;
+}
+
+template<typename T>
+__device__ inline void measured_value_set_computed(MeasuredValue<T>* mv, T v, int generation, uint64_t hash) {
+    mv->value = v;
+    mv->state = ComputeState::COMPUTED;
+    mv->computed_at_generation = generation;
+    mv->input_hash = hash;
+}
+
+template<typename T>
+__device__ inline void measured_value_set_uncomputed(MeasuredValue<T>* mv) {
+    mv->state = ComputeState::UNCOMPUTED;
+    mv->computed_at_generation = INT_MIN;
+    mv->input_hash = UINT64_MAX;
+}
+
+template<>
+__device__ inline void measured_value_set_uncomputed<float>(MeasuredValue<float>* mv) {
+    mv->value = NAN;
+    mv->state = ComputeState::UNCOMPUTED;
+    mv->computed_at_generation = INT_MIN;
+    mv->input_hash = UINT64_MAX;
+}
+
+template<typename T>
+__device__ inline void measured_value_mark_stale(MeasuredValue<T>* mv) { mv->state = ComputeState::STALE; }
+
+template<typename T>
+__device__ inline void measured_value_mark_invalid(MeasuredValue<T>* mv) { mv->state = ComputeState::INVALIDATED; }
+
+template<typename T>
+__device__ inline void measured_value_mark_computing(MeasuredValue<T>* mv) { mv->state = ComputeState::COMPUTING; }
+
+template<typename T>
+__device__ inline void measured_value_mark_failed(MeasuredValue<T>* mv) { mv->state = ComputeState::COMPUTATION_FAILED; }
+
+// PhaseTransitionRecord helper
+__device__ __host__ inline void phase_transition_record_init(PhaseTransitionRecord* ptr) {
+    ptr->previous_phase = LifecyclePhase::DEAD;
+    ptr->current_phase = LifecyclePhase::DEAD;
+    ptr->transition_generation = INT_MIN;
+    ptr->transition_count = 0;
 }
 
 __device__ __forceinline__ bool is_valid_phase_transition(LifecyclePhase from, LifecyclePhase to) {
@@ -159,19 +134,6 @@ __device__ __forceinline__ const char* compute_state_to_string(ComputeState stat
     return "UNKNOWN";
 }
 
-struct PhaseTransitionRecord {
-    LifecyclePhase previous_phase;
-    LifecyclePhase current_phase;
-    int transition_generation;
-    int transition_count;
-
-    __device__ __host__ PhaseTransitionRecord() :
-        previous_phase(LifecyclePhase::DEAD),
-        current_phase(LifecyclePhase::DEAD),
-        transition_generation(INT_MIN),
-        transition_count(0) {}
-};
-
 __device__ __host__ __forceinline__ uint32_t crc32_byte(uint32_t crc, uint8_t byte) {
     crc ^= byte;
     for (int i = 0; i < 8; i++) {
@@ -188,17 +150,6 @@ __device__ __host__ __forceinline__ uint32_t crc32_compute(const void* data, siz
     }
     return crc ^ 0xFFFFFFFF;
 }
-
-struct RecordHeader {
-    uint64_t sequence_number;
-    uint32_t source_id;
-    uint32_t block_id;
-    uint32_t thread_id;
-    uint32_t record_size;
-    uint64_t timestamp;
-    uint32_t checksum;
-    uint32_t checksum_valid;
-};
 
 __device__ __forceinline__ void record_header_init(RecordHeader* hdr, uint64_t seq, uint32_t src, uint32_t size) {
     hdr->sequence_number = seq;
@@ -574,5 +525,160 @@ __host__ __forceinline__ void audit_record_refuse_invalid(const AuditRecord* rec
 
 typedef RingBuffer<AuditRecord, RING_BUFFER_SLOTS> AuditRingBuffer;
 typedef HostRingBufferReader<AuditRecord, RING_BUFFER_SLOTS> HostAuditReader;
+
+constexpr uint32_t AUDIT_RING_SLOTS = 4;
+
+typedef RingBuffer<StateExportEntry, AUDIT_RING_SLOTS> StateExportBuffer;
+typedef HostRingBufferReader<StateExportEntry, AUDIT_RING_SLOTS> StateExportBufferReader;
+
+typedef StateExportBuffer AuditBuffer;
+typedef StateExportEntry TelemetryAuditEntry;
+
+// StateExportEntry helper functions (moved from config.cu since struct is in organism.cu)
+__host__ __forceinline__ void state_export_init_sentinel(StateExportEntry* buf) {
+    buf->provenance_source = PROVENANCE_SOURCE_NONE;
+    buf->fields_written_mask = 0;
+    buf->sequence_number = 0;
+
+    buf->generation = PROVENANCE_UNINITIALIZED_INT;
+    buf->batch_size = PROVENANCE_UNINITIALIZED_INT;
+    buf->num_classes = PROVENANCE_UNINITIALIZED_INT;
+    buf->grid_size = PROVENANCE_UNINITIALIZED_INT;
+    buf->correct_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->loss = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->train_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->test_accuracy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->generalization_gap = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->pool_alive_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->pool_capacity = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->archive_occupied_cells = PROVENANCE_UNINITIALIZED_INT;
+    buf->frontier_cells_gained = PROVENANCE_UNINITIALIZED_INT;
+    buf->frontier_cells_lost = PROVENANCE_UNINITIALIZED_INT;
+    buf->sparse_cell_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->niche_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->novelty_gradient = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->elite_fitness_best = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->elite_fitness_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->elite_fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_floor = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->quality_range = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->density_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->density_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->density_variance = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->hw_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hw_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hw_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->task_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_min = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->gen_axis_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->total_population = PROVENANCE_UNINITIALIZED_INT;
+    buf->births_this_gen = PROVENANCE_UNINITIALIZED_INT;
+    buf->deaths_this_gen = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->diresa_recon_loss_hw = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_task = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_recon_loss_total = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_behavioral_drift = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->diresa_latent_utilization = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->genome_unique_hashes = PROVENANCE_UNINITIALIZED_INT;
+    buf->genome_hash_entropy = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->genome_avg_deltas = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->axis_corr_hw_task = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->axis_corr_hw_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->axis_corr_task_gen = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->hash_clustering_coefficient = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->chemical_concentration_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_concentration_max = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_gradient_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_source_activity = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->chemical_decay_rate_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->flow_lenia_mass_total = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_mass_conservation_error = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_affinity_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->flow_lenia_flow_magnitude_mean = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->fitness_alpha = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_beta = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_gamma = PROVENANCE_UNINITIALIZED_FLOAT;
+    buf->fitness_delta = PROVENANCE_UNINITIALIZED_FLOAT;
+
+    buf->memory_gpu_allocated = 0;
+    buf->memory_gpu_free = 0;
+    buf->memory_ca_state_size = 0;
+    buf->memory_chemical_field_size = 0;
+    buf->memory_archive_size = 0;
+
+    buf->state_agent_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->state_voronoi_count = PROVENANCE_UNINITIALIZED_INT;
+    buf->state_archive_count = PROVENANCE_UNINITIALIZED_INT;
+
+    buf->pool_total_spawned = PROVENANCE_UNINITIALIZED_INT;
+    buf->pool_total_culled = PROVENANCE_UNINITIALIZED_INT;
+
+    for (int i = 0; i < POOL_CAPACITY_MAX; i++) {
+        buf->pool_entry_alive[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_fitness[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->pool_entry_hunger[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->pool_entry_age[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_num_deltas[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->pool_entry_genome_hash[i] = PROVENANCE_UNINITIALIZED_HASH;
+    }
+
+    for (int i = 0; i < NUM_CLASSES_MAX; i++) {
+        buf->per_class_correct[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+        buf->per_class_total[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+
+    for (int i = 0; i < AUDIT_SAMPLE_COUNT; i++) {
+        buf->sample_labels[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->sample_predictions[i] = PROVENANCE_UNINITIALIZED_INT;
+        buf->sample_confidences[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+
+    for (int i = 0; i < CA_FIELD_SIZE; i++) {
+        buf->ca_snapshot[i] = PROVENANCE_UNINITIALIZED_FLOAT;
+    }
+}
+
+__host__ __forceinline__ bool state_export_field_valid(const StateExportEntry* buf, uint32_t mask) {
+    return (buf->fields_written_mask & mask) == mask;
+}
+
+__host__ __forceinline__ void state_export_refuse_invalid(const StateExportEntry* buf, uint32_t mask, const char* name) {
+    if (!state_export_field_valid(buf, mask)) {
+        fprintf(stderr, "E_AUDIT %s m=0x%x have=0x%x\n", name, mask, buf->fields_written_mask);
+        abort();
+    }
+}
+
+__host__ __forceinline__ void state_export_buffer_init_sentinel(StateExportBuffer* ring) {
+    ring->write_sequence = 0;
+    ring->read_sequence = 0;
+    ring->dropped_count = 0;
+    ring->corrupted_count = 0;
+    for (uint32_t i = 0; i < AUDIT_RING_SLOTS; i++) {
+        ring->slots[i].committed = 0;
+        ring->slots[i].header.sequence_number = 0;
+        ring->slots[i].header.checksum_valid = 0;
+        state_export_init_sentinel(&ring->slots[i].payload);
+    }
+}
 
 #endif

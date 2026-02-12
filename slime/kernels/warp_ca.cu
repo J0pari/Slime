@@ -1,3 +1,5 @@
+#ifndef WARP_CA_CU
+#define WARP_CA_CU
 
 #include "../config/config.cu"
 #include "../core/organism.cu"
@@ -6,8 +8,6 @@
 #include <cuda_fp16.h>
 #include <mma.h>
 #include <cooperative_groups.h>
-
-struct Organism;
 
 namespace cg = cooperative_groups;
 using namespace nvcuda::wmma;
@@ -353,3 +353,5 @@ __device__ void warp_ca_device(
 
     next_state[tile_y * width + tile_x] = new_val;
 }
+
+#endif

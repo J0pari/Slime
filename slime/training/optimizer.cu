@@ -132,7 +132,7 @@ __device__ void adam_update_pooling_device(Organism* organism) {
 
     ClassificationHead* classifier = organism->classifier;
     HybridTrainingMode* training_mode = organism->training_mode;
-    Architecture arch = Architecture::fromConfig();
+    Architecture arch = Architecture::maxBounds();
 
     float* weights = classifier->pooling_weights;
     float* gradients = organism->pooling_weights_grad;
@@ -169,7 +169,7 @@ __device__ void adam_update_fc_weights_device(Organism* organism) {
 
     ClassificationHead* classifier = organism->classifier;
     HybridTrainingMode* training_mode = organism->training_mode;
-    int num_classes = organism->current_dataset->num_classes;
+    int num_classes = organism->current_dataset->descriptor->num_classes;
     int num_features = CLASSIFIER_FEATURES;
 
     float* weights = classifier->fc_weights;
@@ -207,7 +207,7 @@ __device__ void adam_update_fc_bias_device(Organism* organism) {
 
     ClassificationHead* classifier = organism->classifier;
     HybridTrainingMode* training_mode = organism->training_mode;
-    int num_classes = organism->current_dataset->num_classes;
+    int num_classes = organism->current_dataset->descriptor->num_classes;
 
     float* weights = classifier->fc_bias;
     float* gradients = organism->fc_bias_grad;
@@ -241,20 +241,20 @@ __device__ void adam_update_fc_bias_device(Organism* organism) {
 
 struct UnifiedGradientBuffer;
 
-__global__ void adam_apply_unified_ca_grads_kernel(
-    UnifiedGradientBuffer* __restrict__ grad_buf,
-    half* __restrict__ perception_weights,
-    half* __restrict__ interaction_weights,
-    half* __restrict__ value_weights,
-    float* __restrict__ adam_m,
-    float* __restrict__ adam_v,
-    float lr,
-    float beta1,
-    float beta2,
-    float epsilon,
-    int timestep,
-    float gradient_clip_norm
-) {
+__device__ void adam_apply_unified_ca_grads_device(Organism* organism) {
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
+    MultiHeadCAState* ca_state = organism->multihead_ca_state;
+    half* perception_weights = ca_state->perception_weights;
+    half* interaction_weights = ca_state->interaction_weights;
+    half* value_weights = ca_state->value_weights;
+    float* adam_m = organism->adam_m;
+    float* adam_v = organism->adam_v;
+    float lr = organism->learning_rate;
+    float beta1 = organism->adam_beta1;
+    float beta2 = organism->adam_beta2;
+    float epsilon = organism->adam_epsilon;
+    int timestep = organism->adam_timestep;
+    float gradient_clip_norm = organism->gradient_clip_norm;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     int perception_size = grad_buf->perception_size;
@@ -312,22 +312,22 @@ __global__ void adam_apply_unified_ca_grads_kernel(
     *weight_ptr = __float2half(weight);
 }
 
-__global__ void adam_apply_unified_classifier_grads_kernel(
-    UnifiedGradientBuffer* __restrict__ grad_buf,
-    float* __restrict__ pooling_weights,
-    float* __restrict__ fc_weights,
-    float* __restrict__ fc_bias,
-    float* __restrict__ adam_m,
-    float* __restrict__ adam_v,
-    float lr,
-    float beta1,
-    float beta2,
-    float epsilon,
-    int timestep,
-    float gradient_clip_norm,
-    int num_features,
-    int num_classes
-) {
+__device__ void adam_apply_unified_classifier_grads_device(Organism* organism) {
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
+    ClassificationHead* cls = organism->classification_head;
+    float* pooling_weights = cls->pooling_weights;
+    float* fc_weights = cls->fc_weights;
+    float* fc_bias = cls->fc_bias;
+    float* adam_m = organism->adam_m_classifier;
+    float* adam_v = organism->adam_v_classifier;
+    float lr = organism->learning_rate;
+    float beta1 = organism->adam_beta1;
+    float beta2 = organism->adam_beta2;
+    float epsilon = organism->adam_epsilon;
+    int timestep = organism->adam_timestep;
+    float gradient_clip_norm = organism->gradient_clip_norm;
+    int num_features = organism->cls_num_features;
+    int num_classes = organism->cls_num_classes;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     int fc_weights_size = num_classes * num_features;

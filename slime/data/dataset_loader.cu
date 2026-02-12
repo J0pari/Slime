@@ -10,63 +10,6 @@
 #include <cuda_fp16.h>
 #include <cufft.h>
 
-enum DatasetFormat {
-    FORMAT_IDX_UBYTE,
-    FORMAT_NPZ,
-    FORMAT_CIFAR_BIN,
-    FORMAT_WAV_METADATA,
-    FORMAT_WAV_DIRS,
-    FORMAT_TXT_TIMESERIES,
-    FORMAT_WFDB,
-    FORMAT_DAT_BINARY,
-    FORMAT_TARGZ_IMAGES
-};
-
-enum FeatureEncoding {
-    ENCODING_SPATIAL_2D,        
-    ENCODING_SPECTRAL_AUDIO,    
-    ENCODING_TEMPORAL_1D        
-};
-
-enum DatasetModality {
-    MODALITY_VISION,
-    MODALITY_AUDIO,
-    MODALITY_TIMESERIES,
-    MODALITY_MEDICAL
-};
-
-struct DatasetDescriptor {
-    const char* name;
-    DatasetFormat format;
-    DatasetModality modality;
-    FeatureEncoding encoding;
-    const char* base_path;
-
-    size_t sample_rows;
-    size_t sample_cols;
-    size_t channels;
-    size_t num_classes;
-
-    size_t num_train;
-    size_t num_test;
-
-    size_t train_size_bytes;
-    size_t test_size_bytes;
-
-    bool has_separate_test;
-    bool needs_preprocessing;
-
-    int n_fft;
-    int hop_length;
-    int n_mels;
-
-    bool preserve_stereo;
-    int bit_depth;
-    bool use_multi_resolution;
-    int pyramid_levels;
-    int hilbert_order;
-};
-
 #define DATASET_REGISTRY_INIT { \
     { \
         "MNIST", \
@@ -273,12 +216,12 @@ __device__ int hilbert_xy_to_index(int x, int y, int order) {
     return index;
 }
 
-__global__ void apply_window_kernel(
-    const float* waveform,
-    float* windowed,
-    int window_start,
-    int window_size
-) {
+__device__ void apply_window_device(Organism* organism) {
+    const float* waveform = organism->dataset_waveform;
+    float* windowed = organism->dataset_windowed;
+    int window_start = organism->dataset_window_start;
+    int window_size = organism->dataset_window_size;
+
     int t = threadIdx.x + blockIdx.x * blockDim.x;
     if (t >= window_size) return;
 
@@ -286,12 +229,12 @@ __global__ void apply_window_kernel(
     windowed[t] = waveform[window_start + t] * hann;
 }
 
-__global__ void extract_magnitude_phase_kernel(
-    const cufftComplex* fft_out,
-    float* magnitude,
-    float* phase,
-    int n_bins
-) {
+__device__ void extract_magnitude_phase_device(Organism* organism) {
+    const cufftComplex* fft_out = organism->dataset_fft_out;
+    float* magnitude = organism->dataset_magnitude;
+    float* phase = organism->dataset_phase;
+    int n_bins = organism->dataset_n_bins;
+
     int bin = threadIdx.x + blockIdx.x * blockDim.x;
     if (bin >= n_bins) return;
 
@@ -302,14 +245,14 @@ __global__ void extract_magnitude_phase_kernel(
     phase[bin] = atan2f(imag, real);
 }
 
-__global__ void compute_phase_velocity_kernel(
-    const float* phase_curr,
-    const float* phase_prev,
-    float* phase_velocity,
-    int n_bins,
-    float hop_length,
-    float sample_rate
-) {
+__device__ void compute_phase_velocity_device(Organism* organism) {
+    const float* phase_curr = organism->dataset_phase;
+    const float* phase_prev = organism->dataset_phase_prev;
+    float* phase_velocity = organism->dataset_phase_velocity;
+    int n_bins = organism->dataset_n_bins;
+    float hop_length = organism->dataset_hop_length;
+    float sample_rate = organism->dataset_sample_rate;
+
     int bin = threadIdx.x + blockIdx.x * blockDim.x;
     if (bin >= n_bins) return;
 
@@ -331,18 +274,18 @@ __global__ void compute_phase_velocity_kernel(
     phase_velocity[bin] = phase_diff * sample_rate / hop_length;
 }
 
-__global__ void mel_filterbank_kernel(
-    const float* magnitude,
-    const float* phase,
-    const float* phase_velocity,
-    float* mel_magnitude,
-    float* mel_phase,
-    float* mel_phase_velocity,
-    int n_bins,
-    int n_mels,
-    int sample_rate,
-    int n_fft
-) {
+__device__ void mel_filterbank_device(Organism* organism) {
+    const float* magnitude = organism->dataset_magnitude;
+    const float* phase = organism->dataset_phase;
+    const float* phase_velocity = organism->dataset_phase_velocity;
+    float* mel_magnitude = organism->dataset_mel_magnitude;
+    float* mel_phase = organism->dataset_mel_phase;
+    float* mel_phase_velocity = organism->dataset_mel_phase_velocity;
+    int n_bins = organism->dataset_n_bins;
+    int n_mels = organism->dataset_n_mels;
+    int sample_rate = organism->dataset_sample_rate_int;
+    int n_fft = organism->dataset_n_fft;
+
     int mel_bin = blockIdx.x;
     if (mel_bin >= n_mels) return;
 
@@ -396,13 +339,13 @@ __global__ void mel_filterbank_kernel(
     }
 }
 
-extern "C" __global__ void sample_batch_kernel(
-    Dataset* dataset,
-    HybridTrainingMode* training,
-    int batch_size,
-    int offset,
-    int grid_size
-) {
+__device__ void sample_batch_device(Organism* organism) {
+    Dataset* dataset = organism->dataset;
+    HybridTrainingMode* training = organism->training;
+    int batch_size = organism->dataset_batch_size;
+    int offset = organism->dataset_batch_offset;
+    int grid_size = organism->dataset_grid_size;
+
     int idx = blockIdx.x;
     if (idx >= batch_size) return;
 
@@ -467,27 +410,27 @@ extern "C" __global__ void sample_batch_kernel(
 }
 
 
-__global__ void inject_sample_to_ca_kernel(
-    float* ca_state,
-    int batch_size,
-    int channels,
-    int grid_size,
-    float* chem_concentration,
-    float* chem_gradient_x,
-    float* chem_gradient_y,
-    float* chem_laplacian,
-    float* chem_sources,
-    float* chem_decay_factors,
-    float* rd_resource_density,
-    float* rd_fitness_landscape,
-    float* rd_resource_gradient_x,
-    float* rd_resource_gradient_y,
-    float* behavioral_field,
-    float* batch_images,
-    int image_channels,
-    float* prev_concentration,
-    float* attractor_field
-) {
+__device__ void inject_sample_to_ca_device(Organism* organism) {
+    float* ca_state = organism->ca_state;
+    int batch_size = organism->dataset_batch_size;
+    int channels = organism->ca_channels;
+    int grid_size = organism->dataset_grid_size;
+    ChemicalField* chem = organism->chemical_field;
+    float* chem_concentration = chem->concentration;
+    float* chem_gradient_x = chem->gradient_x;
+    float* chem_gradient_y = chem->gradient_y;
+    float* chem_laplacian = chem->laplacian;
+    float* chem_sources = chem->sources;
+    float* chem_decay_factors = chem->decay_factors;
+    float* rd_resource_density = organism->rd_resource_density;
+    float* rd_fitness_landscape = organism->rd_fitness_landscape;
+    float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
+    float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
+    float* behavioral_field = organism->behavioral_field;
+    float* batch_images = organism->training->batch_images;
+    float* prev_concentration = organism->ca_prev_concentration;
+    float* attractor_field = organism->attractor_field;
+
     int batch_idx = blockIdx.z;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;

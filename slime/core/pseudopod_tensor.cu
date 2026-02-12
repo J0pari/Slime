@@ -17,13 +17,13 @@
 namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
-__global__ void tensor_core_conv3x3_kernel(
-    half* __restrict__ input,
-    half* __restrict__ kernel,
-    float* __restrict__ output,
-    int grid_size,
-    int channels
-) {
+__device__ void tensor_core_conv3x3_device(Organism* organism) {
+    half* input = organism->tensor_A;
+    half* kernel = organism->tensor_B;
+    float* output = organism->tensor_C;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    int channels = arch.channels;
 
     const int warpId = (threadIdx.x + blockIdx.x * blockDim.x) / WARP_SIZE;
     const int laneId = threadIdx.x % WARP_SIZE;
@@ -129,11 +129,11 @@ __global__ void tensor_core_conv3x3_kernel(
     }
 }
 
-__global__ void compute_coherence_tensor_kernel(
-    float* __restrict__ loss_history,
-    float* __restrict__ coherence,
-    int history_length
-) {
+__device__ void compute_coherence_tensor_device(Organism* organism) {
+    float* loss_history = organism->loss_history;
+    float* coherence = organism->coherence_output;
+    int history_length = organism->loss_history_length;
+
     int tid = threadIdx.x;
 
     float local_improvement = 0.0f;
@@ -156,13 +156,14 @@ __global__ void compute_coherence_tensor_kernel(
     }
 }
 
-__global__ void init_multihead_ca_tensor_kernel(
-    MultiHeadCAState* state,
-    unsigned int seed,
-    int num_heads,
-    int channels,
-    int head_dim
-) {
+__device__ void init_multihead_ca_tensor_device(Organism* organism) {
+    MultiHeadCAState* state = organism->multihead_ca_state;
+    unsigned int seed = organism->init_seed;
+    Architecture arch = Architecture::maxBounds();
+    int num_heads = arch.num_heads;
+    int channels = arch.channels;
+    int head_dim = arch.head_dim;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     curandState_t rand_state;
@@ -196,16 +197,17 @@ __global__ void init_multihead_ca_tensor_kernel(
     }
 }
 
-__global__ void pipelined_ca_kernel(
-    float* __restrict__ ca_state_in,
-    float* __restrict__ ca_state_out,
-    half* __restrict__ perception_weights,
-    half* __restrict__ interaction_weights,
-    half* __restrict__ value_weights,
-    int grid_size,
-    int batch_size,
-    ArchitectureParams arch
-) {
+__device__ void pipelined_ca_device(Organism* organism) {
+    float* ca_state_in = organism->ca_state;
+    float* ca_state_out = organism->ca_output;
+    MultiHeadCAState* mh_state = organism->multihead_ca_state;
+    half* perception_weights = mh_state->perception_weights;
+    half* interaction_weights = mh_state->interaction_weights;
+    half* value_weights = mh_state->value_weights;
+    Architecture arch = Architecture::maxBounds();
+    int grid_size = arch.grid_size;
+    int batch_size = organism->dataset_batch_size;
+
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int batch_id = blockIdx.y;
 

@@ -5,23 +5,6 @@
 #include "../core/organism.cu"
 #include <cuda_runtime.h>
 
-struct MemoryEntry {
-    float* data;
-    int size;
-    float timestamp;
-    float decay_factor;
-    float importance;
-};
-
-struct TemporalTube {
-    MemoryEntry* entries;
-    int capacity;
-    int head;
-    int count;
-    float global_time;
-    float decay_rate;
-};
-
 __device__ void store_memory_device(
     Organism* organism,
     float* data,
@@ -90,17 +73,17 @@ __device__ void recall_memory_device(
     }
 }
 
-__device__ void init_tube_device(
-    Organism* organism,
-    int capacity,
-    float decay_rate,
-    float* data_buffer,
-    int entry_size
-) {
+__device__ void init_tube_device(Organism* organism) {
     TemporalTube* tube = organism->temporal_tube;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int capacity = organism->tube_capacity;
+    float decay_rate = organism->tube_decay_rate;
+    float* data_buffer = organism->history_data_buffer;
+    int entry_size = organism->tube_entry_size;
 
-    if (idx < capacity) {
+    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = blockDim.x * gridDim.x;
+
+    for (int idx = thread_id; idx < capacity; idx += total_threads) {
         tube->entries[idx].data = &data_buffer[idx * entry_size];
         tube->entries[idx].size = entry_size;
         tube->entries[idx].timestamp = 0.0f;
@@ -108,7 +91,7 @@ __device__ void init_tube_device(
         tube->entries[idx].importance = 0.0f;
     }
 
-    if (idx == 0) {
+    if (thread_id == 0) {
         tube->capacity = capacity;
         tube->head = 0;
         tube->count = 0;
@@ -151,6 +134,44 @@ __device__ void memory_stats_device(
         atomicAdd(avg_decay, total_decay);
         atomicAdd(total_importance, total_imp);
         atomicAdd(active_memories, total_count);
+    }
+}
+
+__device__ void store_navigation_history_device(Organism* organism) {
+    BehavioralState* agents = organism->behavioral_agents;
+    int hw_dim = organism->behavioral_dim_hw;
+    int task_dim = organism->behavioral_dim_task;
+    int gen_dim = organism->behavioral_dim_gen;
+
+    int tid = threadIdx.x;
+    if (tid >= POOL_CAPACITY_MAX) return;
+
+    int behavioral_dim = hw_dim + task_dim + gen_dim;
+    int memory_entry_size = behavioral_dim + AGENT_SPATIAL_DIMS;
+    float* d_memory_data = organism->memory_data_pool + tid * memory_entry_size;
+
+    d_memory_data[0] = agents[tid].position[0];
+    d_memory_data[1] = agents[tid].position[1];
+    d_memory_data[2] = agents[tid].velocity[0];
+    d_memory_data[3] = agents[tid].velocity[1];
+
+    int offset = AGENT_SPATIAL_DIMS;
+    for (int i = 0; i < hw_dim; i++) {
+        d_memory_data[offset++] = agents[tid].hw_coords[i];
+    }
+    for (int i = 0; i < task_dim; i++) {
+        d_memory_data[offset++] = agents[tid].task_coords[i];
+    }
+    for (int i = 0; i < gen_dim; i++) {
+        d_memory_data[offset++] = agents[tid].gen_coords[i];
+    }
+
+    float importance = agents[tid].exploration_noise;
+
+    if (tid == 0) {
+        printf("V:nav_hist_pre_store gen=%d\n", organism->generation);
+        store_memory_device(organism, d_memory_data, memory_entry_size, importance);
+        printf("V:nav_hist_post_store gen=%d\n", organism->generation);
     }
 }
 

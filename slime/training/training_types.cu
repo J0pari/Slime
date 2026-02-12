@@ -7,116 +7,16 @@
 #include "../utils/genome_params.cuh"
 #include <curand_kernel.h>
 
-struct DatasetDescriptor;
-
-struct ClassificationHead {
-    float* pooling_weights;
-    float* fc_weights;
-    float* fc_bias;
-    volatile int pointers_ready;
-};
-
-struct CAParameterMap {
-    int perception_start[NUM_HEADS_MAX];
-    int interaction_start[NUM_HEADS_MAX];
-    int value_start[NUM_HEADS_MAX];
-
-    int head_param_offsets[NUM_HEADS_MAX];
-    int head_param_counts[NUM_HEADS_MAX];
-
-    int perception_size;
-    int interaction_size;
-    int value_size;
-
-    int total_params;
-    int total_ca_params;
-
-    int batch_size;
-    int grid_size;
-    int channels;
-    int hidden_dim;
-};
-
-struct HybridTrainingMode {
-    bool use_gradients;
-    bool use_selection;
-    float gradient_fitness_weight;
-    float coherence_fitness_weight;
-    float* batch_images;
-    int* batch_labels;
-    int batch_size;
-    ClassificationHead* classifier;
-    float learning_rate;
-    float gradient_clip_norm;
-    float* adam_m;  
-    float* adam_v;  
-    int perception_size;
-    int interaction_size;
-    int value_size;
-    int policy_size;
-    int adam_timestep;
-    bool is_train_batch;
-};
-
-struct Dataset {
-    const DatasetDescriptor* descriptor;  
-    unsigned char* samples;               
-    unsigned char* labels;
-    int num_samples;
-    bool is_train;
-};
-
-struct DatasetStats {
-    int dataset_id;
-    float population_mean_accuracy;
-    float population_best_accuracy;
-    float population_accuracy_variance;
-    float niche_diversity;  
-    int num_generations_trained;
-    bool activation_threshold_met;
-};
-
-struct AdaptiveCurriculum {
-    DatasetStats stats[NUM_ACTIVE_DATASETS];
-    int current_dataset_idx;  
-    int num_datasets_completed;
-    float curriculum_progress;  
-
-    float accuracy_threshold;
-    float diversity_threshold;
-    float min_generations_threshold;
-};
-
-struct UnifiedGradientBuffer {
-    float* perception_grads;     
-    float* interaction_grads;    
-    float* value_grads;          
-
-    float* pooling_weight_grads; 
-    float* fc_weight_grads;      
-    float* fc_bias_grads;        
-
-    int has_autodiff_grads;      
-    int has_backprop_grads;      
-
-    int perception_size;
-    int interaction_size;
-    int value_size;
-    int num_classes;
-    int num_features;
-};
-
-__global__ void init_unified_gradient_buffer_kernel(
-    UnifiedGradientBuffer* grad_buf,
-    float* perception_grads,
-    float* interaction_grads,
-    float* value_grads,
-    float* pooling_weight_grads,
-    float* fc_weight_grads,
-    float* fc_bias_grads,
-    ArchitectureParams arch,
-    int num_classes
-) {
+__device__ void init_unified_gradient_buffer_device(Organism* organism) {
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
+    float* perception_grads = organism->tt_perception_grads;
+    float* interaction_grads = organism->tt_interaction_grads;
+    float* value_grads = organism->tt_value_grads;
+    float* pooling_weight_grads = organism->tt_pooling_weight_grads;
+    float* fc_weight_grads = organism->tt_fc_weight_grads;
+    float* fc_bias_grads = organism->tt_fc_bias_grads;
+    Architecture arch = organism->current_arch;
+    int num_classes = organism->cls_num_classes;
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     grad_buf->perception_grads = perception_grads;
@@ -136,9 +36,8 @@ __global__ void init_unified_gradient_buffer_kernel(
     grad_buf->has_backprop_grads = 0;
 }
 
-__global__ void zero_unified_gradients_kernel(
-    UnifiedGradientBuffer* grad_buf
-) {
+__device__ void zero_unified_gradients_device(Organism* organism) {
+    UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = grad_buf->perception_size + grad_buf->interaction_size + grad_buf->value_size;
 
@@ -167,8 +66,13 @@ __global__ void zero_unified_gradients_kernel(
     }
 }
 
-__global__ void init_ca_param_map_kernel(CAParameterMap* param_map, ArchitectureParams arch) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
+__device__ void init_ca_param_map_device(Organism* organism) {
+    CAParameterMap* param_map = organism->param_map;
+    Architecture arch = Architecture::maxBounds();
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid == 0) {
         param_map->perception_size = arch.num_heads * arch.channels * arch.head_dim;
         param_map->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
         param_map->value_size = arch.num_heads * arch.head_dim * arch.channels;
@@ -176,41 +80,41 @@ __global__ void init_ca_param_map_kernel(CAParameterMap* param_map, Architecture
         param_map->grid_size = arch.grid_size;
         param_map->channels = arch.channels;
         param_map->hidden_dim = arch.head_dim;
+        param_map->total_params = param_map->total_ca_params;
+    }
 
-        int offset = 0;
-        for (int h = 0; h < arch.num_heads; h++) {
-            param_map->perception_start[h] = offset;
-            offset += arch.channels * arch.head_dim;
+    int total_threads = blockDim.x * gridDim.x;
+    for (int h = tid; h < arch.num_heads; h += total_threads) {
+        int offset = h * (arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels);
 
-            param_map->interaction_start[h] = offset;
-            offset += arch.head_dim * arch.head_dim;
+        param_map->perception_start[h] = offset;
+        offset += arch.channels * arch.head_dim;
 
-            param_map->value_start[h] = offset;
-            offset += arch.head_dim * arch.channels;
+        param_map->interaction_start[h] = offset;
+        offset += arch.head_dim * arch.head_dim;
 
-            param_map->head_param_offsets[h] = param_map->perception_start[h];
-            param_map->head_param_counts[h] = arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels;
-        }
-        param_map->total_params = offset;
+        param_map->value_start[h] = offset;
+
+        param_map->head_param_offsets[h] = param_map->perception_start[h];
+        param_map->head_param_counts[h] = arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels;
     }
 }
 
-__global__ void init_training_mode_kernel(
-    HybridTrainingMode* mode,
-    int grid_size,
-    float* batch_images,
-    int* batch_labels,
-    float* genome,
-    float* gradients,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void init_training_mode_device(Organism* organism) {
+    HybridTrainingMode* mode = organism->training;
+    int grid_size = organism->ca_grid_size;
+    float* batch_images = organism->tt_batch_images;
+    int* batch_labels = organism->tt_batch_labels;
+    float* genome = organism->genome;
+    float* gradients = organism->output_gradients;
+    uint64_t genome_hash = organism->genome_hash;
+    float ctx_metabolic = organism->ctx_metabolic;
+    float ctx_stress = organism->ctx_stress;
+    float ctx_morphogen = organism->ctx_morphogen;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         TrainingParams training_params;
 
@@ -228,7 +132,14 @@ __global__ void init_training_mode_kernel(
     }
 }
 
-__global__ void init_classifier_kernel(ClassificationHead* classifier, int input_dim, int num_classes, unsigned int seed, float* workspace) {
+__device__ void init_classifier_device(Organism* organism) {
+    ClassificationHead* classifier = organism->classifier;
+    float* workspace = organism->classifier_workspace;
+    Architecture arch = Architecture::maxBounds();
+    int input_dim = arch.num_heads * arch.channels;
+    int num_classes = organism->classifier_num_classes;
+    unsigned int seed = organism->classifier_seed;
+
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (tid == 0) {
@@ -283,19 +194,18 @@ __global__ void init_classifier_kernel(ClassificationHead* classifier, int input
     }
 }
 
-__global__ void init_curriculum_kernel(
-    AdaptiveCurriculum* curriculum,
-    float* genome,
-    float* gradients,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void init_curriculum_device(Organism* organism) {
+    AdaptiveCurriculum* curriculum = organism->curriculum;
+    float* genome = organism->genome;
+    float* gradients = organism->output_gradients;
+    uint64_t genome_hash = organism->genome_hash;
+    float ctx_metabolic = organism->ctx_metabolic;
+    float ctx_stress = organism->ctx_stress;
+    float ctx_morphogen = organism->ctx_morphogen;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
             curriculum->stats[i].dataset_id = ACTIVE_DATASET_IDS[i];
@@ -339,14 +249,13 @@ __global__ void init_curriculum_kernel(
     }
 }
 
-__global__ void update_curriculum_kernel(
-    AdaptiveCurriculum* curriculum,
-    float* pool_task_accuracies,
-    float* voronoi_occupancy_histogram,
-    int pool_size,
-    int num_voronoi_cells,
-    int generation
-) {
+__device__ void update_curriculum_device(Organism* organism) {
+    AdaptiveCurriculum* curriculum = organism->curriculum;
+    float* pool_task_accuracies = organism->tt_pool_task_accuracies;
+    float* voronoi_occupancy_histogram = organism->tt_voronoi_occupancy_histogram;
+    int pool_size = organism->tt_pool_size;
+    int num_voronoi_cells = organism->tt_num_voronoi_cells;
+    int generation = organism->generation;
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int current_idx = curriculum->current_dataset_idx;
         DatasetStats* current_stats = &curriculum->stats[current_idx];

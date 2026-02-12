@@ -9,6 +9,7 @@
 #include "../memory/archive.cu"
 #include "../memory/pool.cu"
 #include "../core/chemotaxis.cu"
+#include "genealogy.cu"
 
 __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state, int* sparse_cells_buffer) {
     DEVICE_FATAL_IF(archive_size <= 0, "sample_from_archive_novel: empty archive");
@@ -79,13 +80,13 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     float modulated_fitness = archive->fitness[elite_idx] * fitness_modulation;
     uint64_t mod_hash = archive->fitness_input_hash[elite_idx];
     mod_hash ^= __float_as_uint(fitness_modulation) + 0x9e3779b9 + (mod_hash << 6) + (mod_hash >> 2);
-    entry->fitness.set_computed(modulated_fitness, generation, mod_hash);
-    entry->coherence.set_computed(archive->coherence[elite_idx], generation, entry->genome_hash);
-    entry->task_accuracy.set_uncomputed();
-    entry->generalization_gap.set_uncomputed();
-    entry->hardware_efficiency.set_uncomputed();  
+    measured_value_set_computed(&entry->fitness, modulated_fitness, generation, mod_hash);
+    measured_value_set_computed(&entry->coherence, archive->coherence[elite_idx], generation, entry->genome_hash);
+    measured_value_set_uncomputed(&entry->task_accuracy);
+    measured_value_set_uncomputed(&entry->generalization_gap);
+    measured_value_set_uncomputed(&entry->hardware_efficiency);
     float hunger_val = NORMALIZED_MAX - archive->coherence[elite_idx];
-    entry->hunger.set_computed(hunger_val, generation, entry->genome_hash);
+    measured_value_set_computed(&entry->hunger, hunger_val, generation, entry->genome_hash);
     entry->generation = generation;
 
     for (int g = 0; g < GENOME_SIZE; g++) {
@@ -115,6 +116,86 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
 
     entry->ca_state->tape.needs_weight_restore = 1;
     entry->ca_state->tape.restore_elite_idx = elite_idx;
+}
+
+__device__ void selection_device(Organism* organism) {
+    ComponentPool* pool = organism->pool;
+    GPUElite* archive = organism->archive;
+    VoronoiCell* voronoi_cells = organism->voronoi_cells;
+    int num_cells = organism->num_voronoi_cells;
+    int* archive_size = &organism->archive_size;
+    float* workspace_genomes = organism->workspace_genomes;
+
+    int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact_idx >= pool->alive_indices_count) return;
+
+    int entry_idx = pool->alive_indices[compact_idx];
+    PoolEntry* entry = &pool->entries[entry_idx];
+    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_device: dead entry in alive_indices");
+
+    float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
+    float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
+
+    reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+        entry->delta_indices, entry->delta_values, entry->num_deltas,
+        entry->max_deltas, organism_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
+
+    float* latent_genome = organism->latent_genome_pool + entry_idx * GENOME_LATENT_DIM_MAX;
+    diresa_encode(organism_genome, latent_genome, &organism->diresa_genome_weights[0]);
+
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    float hw_features[1] = {entry->hardware_efficiency.value};
+    float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
+    diresa_encode(hw_features, hw_coords_component, entry->diresa_hw_weights);
+
+    float gen_features[1] = {entry->generalization_gap.value};
+    float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
+    diresa_encode(gen_features, gen_coords_component, entry->diresa_gen_weights);
+
+    float* entry_genome = organism_genome;
+
+    uint32_t parent_id_0;
+    uint32_t parent_id_1 = 0;
+
+    if (entry->parent_hash == UINT64_MAX) {
+        parent_id_0 = 0;
+    } else {
+        int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
+        DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
+        parent_id_0 = parent_idx;
+    }
+
+    DEVICE_FATAL_IF(entry->coherence.value <= 0.0f, "organism: entry coherence <= 0");
+
+    insert_elite_device(
+        archive,
+        archive_size,
+        entry->fitness.value,
+        entry->coherence.value,
+        entry->fitness.value / entry->coherence.value,
+        entry->genome_hash,
+        parent_id_0,
+        parent_id_1,
+        organism->generation,
+        &organism->hw_coords_pool[entry_idx * hw_dim],
+        &organism->task_coords_pool[entry_idx * task_dim],
+        &organism->gen_coords_pool[entry_idx * gen_dim],
+        entry->task_accuracy.value,
+        &archive->per_class_accuracy[entry_idx * NUM_CLASSES_MAX],
+        NUM_CLASSES_MAX,
+        voronoi_cells,
+        num_cells,
+        latent_genome,
+        entry->fitness.input_hash,
+        entry->fitness.computed_at_generation
+    );
+
+    if (entry->parent_hash == UINT64_MAX) {
+        entry->parent_hash = entry->genome_hash;
+    }
 }
 
 #endif

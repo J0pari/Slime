@@ -12,54 +12,8 @@
 #include <curand_kernel.h>
 #include <stdint.h>
 
-constexpr int GENOME_HASH_TABLE_SIZE = 16384;  
-constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;  
-
-struct GPUElite {
-    float* fitness;
-    float* coherence;
-    float* effective_rank;
-    uint64_t* genome_hash;
-    uint32_t* parent_ids;
-    uint16_t* generation;
-    float* hw_coords;
-    float* task_coords;
-    float* gen_coords;
-    float* latent_genome;
-    float* hardware_features;
-    float* task_performance;
-    float* per_class_accuracy;
-    int hw_dim;
-    int task_dim;
-    int gen_dim;
-
-    uint64_t* fitness_input_hash;
-    int* fitness_computed_at_generation;
-
-    half* weight_deltas;
-    uint32_t* weight_delta_indices;
-    uint16_t* num_weight_deltas;
-
-    int* archived_num_heads;
-    int* archived_channels;
-    int* archived_head_dim;
-
-    uint64_t* hash_table_keys;
-    int* hash_table_values;
-};
-
-struct VoronoiCell {
-    float* hw_centroid;
-    float* task_centroid;
-    float* gen_centroid;
-    float radius;
-    int density;
-    int density_prev;
-    float density_fluctuation;
-    int best_elite_idx;
-    float quality_threshold;
-};
-
+constexpr int GENOME_HASH_TABLE_SIZE = 16384;
+constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;
 
 __device__ __forceinline__ int hash_table_slot(uint64_t genome_hash) {
     return (int)((genome_hash * 11400714819323198485ULL) >> 50) & (GENOME_HASH_TABLE_SIZE - 1);
@@ -242,19 +196,17 @@ __device__ void create_elite_device(
 }
 
 
-__device__ void update_voronoi_density_device(
-    Organism* organism,
-    const float* genome,
-    const float* gradients,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
+__device__ void update_voronoi_density_device(Organism* organism) {
+    const float* genome = organism->genome;
+    PoolEntry* primary = &organism->pool->entries[0];
+    const float* gradients = primary->gradients;
+    InitContext ctx;
+    ctx.derive_from_genome(genome, gradients);
+    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
+    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
+    float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
+    float ctx_performance = organism->telemetry->task_performance.accuracy;
+
     VoronoiCell* cells = organism->voronoi_cells;
     GPUElite* archive = organism->archive;
     int num_elites = organism->archive_size;
@@ -324,7 +276,7 @@ __device__ void update_voronoi_density_device(
         int correlation_exponent_slot = GenomeParamTable::voronoi_correlation_exponent;
         float correlation_exponent = genome_to_param(
             genome, gradients, correlation_exponent_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx.metabolic, ctx.stress, ctx.morphogen,
             ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
             VORONOI_CORRELATION_EXPONENT_MIN, VORONOI_CORRELATION_EXPONENT_MAX
         );
@@ -473,9 +425,9 @@ __device__ void adapt_embedding_dim_device(
 __device__ void init_voronoi_cells_device(Organism* organism, unsigned int seed) {
     VoronoiCell* cells = organism->voronoi_cells;
     int num_cells = organism->num_voronoi_cells;
-    int hw_dim = organism->behavioral_dim_hw;
-    int task_dim = organism->behavioral_dim_task;
-    int gen_dim = organism->behavioral_dim_gen;
+    int hw_dim = organism->archive->hw_dim;
+    int task_dim = organism->archive->task_dim;
+    int gen_dim = organism->archive->gen_dim;
 
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (cell_id >= num_cells) return;

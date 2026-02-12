@@ -13,11 +13,11 @@
 
 namespace cg = cooperative_groups;
 
-__global__ void mark_valid_entries_kernel(
-    TemporalTube* tube,
-    int* valid_flags,
-    float decay_threshold
-) {
+__device__ void mark_valid_entries_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    int* valid_flags = organism->compact_valid_flags;
+    float decay_threshold = organism->compact_decay_threshold;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < tube->count) {
@@ -64,12 +64,12 @@ __device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
     }
 }
 
-__global__ void scan_phase1_kernel(
-    int* input,
-    int* output,
-    int* block_sums,
-    int N
-) {
+__device__ void scan_phase1_device(Organism* organism) {
+    int* input = organism->scan_input;
+    int* output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    int N = organism->scan_N;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
     int warp_id = threadIdx.x / WARP_SIZE;
@@ -116,22 +116,22 @@ __global__ void scan_phase1_kernel(
     }
 }
 
-__global__ void scan_phase3_kernel(
-    int* output,
-    int* block_prefixes,
-    int N
-) {
+__device__ void scan_phase3_device(Organism* organism) {
+    int* output = organism->scan_output;
+    int* block_prefixes = organism->scan_block_prefixes;
+    int N = organism->scan_N;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < N && blockIdx.x > 0) {
         output[tid] += block_prefixes[blockIdx.x - 1];
     }
 }
 
-__global__ void exclusive_scan_single_kernel(
-    int* input,
-    int* output,
-    int N
-) {
+__device__ void exclusive_scan_single_device(Organism* organism) {
+    int* input = organism->scan_input;
+    int* output = organism->scan_output;
+    int N = organism->scan_N;
+
     __shared__ int temp[MAX_MEMORY_SIZE + BANK_PAD];
 
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
@@ -156,12 +156,12 @@ __global__ void exclusive_scan_single_kernel(
     }
 }
 
-__global__ void exclusive_scan_coop_kernel(
-    int* input,
-    int* output,
-    int* block_sums,
-    int N
-) {
+__device__ void exclusive_scan_coop_device(Organism* organism) {
+    int* input = organism->scan_input;
+    int* output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    int N = organism->scan_N;
+
     cg::grid_group grid = cg::this_grid();
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
@@ -252,13 +252,13 @@ __global__ void exclusive_scan_coop_kernel(
     }
 }
 
-__global__ void compact_entries_kernel(
-    TemporalTube* tube,
-    int* valid_flags,
-    int* write_indices,
-    MemoryEntry* temp_buffer,
-    int old_count
-) {
+__device__ void compact_entries_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    int* valid_flags = organism->compact_valid_flags;
+    int* write_indices = organism->compact_write_indices;
+    MemoryEntry* temp_buffer = organism->compact_temp_buffer;
+    int old_count = organism->compact_old_count;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < old_count) {
@@ -271,11 +271,11 @@ __global__ void compact_entries_kernel(
     }
 }
 
-__global__ void copy_compacted_kernel(
-    TemporalTube* tube,
-    MemoryEntry* temp_buffer,
-    int new_count
-) {
+__device__ void copy_compacted_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    MemoryEntry* temp_buffer = organism->compact_temp_buffer;
+    int new_count = organism->compact_new_count;
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < new_count) {
@@ -288,16 +288,16 @@ __global__ void copy_compacted_kernel(
     }
 }
 
-__global__ void finalize_and_copy_compacted_kernel(
-    TemporalTube* tube,
-    int* valid_flags,
-    int* scan_output,
-    MemoryEntry* temp_buffer,
-    int old_count
-) {
+__device__ void finalize_and_copy_compacted_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    int* valid_flags = organism->compact_valid_flags;
+    int* scan_output = organism->scan_output;
+    MemoryEntry* temp_buffer = organism->compact_temp_buffer;
+    int old_count = organism->compact_old_count;
+
     __shared__ int new_count;
     if (threadIdx.x == 0) {
-        DEVICE_FATAL_IF(old_count <= 0, "stream_compaction_kernel: old_count non-positive");
+        DEVICE_FATAL_IF(old_count <= 0, "finalize_and_copy_compacted_device: old_count non-positive");
         int last_write_idx = scan_output[old_count - 1];
         int last_valid_flag = valid_flags[old_count - 1];
         new_count = last_write_idx + last_valid_flag;
@@ -315,14 +315,14 @@ __global__ void finalize_and_copy_compacted_kernel(
     }
 }
 
-__global__ void compact_memory_tubes_coop_kernel(
-    TemporalTube* tube,
-    int* valid_flags,
-    int* scan_output,
-    int* block_sums,
-    MemoryEntry* temp_buffer,
-    float decay_threshold
-) {
+__device__ void compact_memory_tubes_coop_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    int* valid_flags = organism->compact_valid_flags;
+    int* scan_output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    MemoryEntry* temp_buffer = organism->compact_temp_buffer;
+    float decay_threshold = organism->compact_decay_threshold;
+
     cg::grid_group grid = cg::this_grid();
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
@@ -443,7 +443,7 @@ __global__ void compact_memory_tubes_coop_kernel(
     grid.sync();
 
     if (tid == 0) {
-        DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
+        DEVICE_FATAL_IF(old_count <= 0, "parallel_compaction: old_count non-positive");
         shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
     }
 
@@ -461,14 +461,14 @@ __global__ void compact_memory_tubes_coop_kernel(
     }
 }
 
-__global__ void prune_and_compact_coop_kernel(
-    TemporalTube* tube,
-    int* valid_flags,
-    int* scan_output,
-    int* block_sums,
-    MemoryEntry* temp_buffer,
-    float decay_threshold
-) {
+__device__ void prune_and_compact_coop_device(Organism* organism) {
+    TemporalTube* tube = organism->temporal_tube;
+    int* valid_flags = organism->compact_valid_flags;
+    int* scan_output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    MemoryEntry* temp_buffer = organism->compact_temp_buffer;
+    float decay_threshold = organism->compact_decay_threshold;
+
     cg::grid_group grid = cg::this_grid();
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
@@ -595,7 +595,7 @@ __global__ void prune_and_compact_coop_kernel(
     grid.sync();
 
     if (tid == 0) {
-        DEVICE_FATAL_IF(old_count <= 0, "memory_compaction: old_count non-positive");
+        DEVICE_FATAL_IF(old_count <= 0, "parallel_compaction: old_count non-positive");
         shared_new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
     }
 
@@ -613,13 +613,13 @@ __global__ void prune_and_compact_coop_kernel(
     }
 }
 
-__global__ void refine_elite_coop_kernel(
-    GPUElite* elite,
-    ADTape* tape,
-    int elite_idx,
-    float learning_rate,
-    float gradient_clip_norm
-) {
+__device__ void refine_elite_coop_device(Organism* organism) {
+    GPUElite* elite = organism->gpu_elite;
+    ADTape* tape = organism->ad_tape;
+    int elite_idx = organism->elite_idx;
+    float learning_rate = organism->learning_rate;
+    float gradient_clip_norm = organism->gradient_clip_norm;
+
     cg::grid_group grid = cg::this_grid();
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -697,37 +697,27 @@ __global__ void refine_elite_coop_kernel(
     }
 }
 
-struct MemoryUpdateParams {
-    float decay_threshold;
-    float consolidation_threshold;
-    float flow_lenia_dt;
-    float fitness_trend;
-    int old_count;
-    int new_count;
-};
+__device__ void memory_update_params_device(Organism* organism) {
+    MemoryUpdateParams* params = organism->memory_update_params;
+    TemporalTube* tubes = organism->temporal_tube;
+    float* fitness_history = organism->fitness_history;
+    int generation = organism->generation;
+    float* genome = organism->genome;
+    float* gradients = organism->gradients;
+    float ctx_metabolic = organism->ctx_metabolic;
+    float ctx_stress = organism->ctx_stress;
+    float ctx_morphogen = organism->ctx_morphogen;
+    float ctx_complexity = organism->ctx_complexity;
+    float ctx_niche = organism->ctx_niche;
+    float ctx_learning = organism->ctx_learning;
+    float ctx_performance = organism->ctx_performance;
 
-__global__ void memory_update_params_kernel(
-    MemoryUpdateParams* params,
-    TemporalTube* tubes,
-    float* fitness_history,
-    int generation,
-    float* genome,
-    float* gradients,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_kernel: tubes is null");
-    DEVICE_FATAL_IF(tubes->count <= 0, "memory_update_params_kernel: tubes->count non-positive");
-    DEVICE_FATAL_IF(generation < 1, "memory_update_params_kernel: generation < 1 - no previous data exists for fitness_trend");
-    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_kernel: fitness_history is null");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_device: tubes is null");
+    DEVICE_FATAL_IF(tubes->count <= 0, "memory_update_params_device: tubes->count non-positive");
+    DEVICE_FATAL_IF(generation < 1, "memory_update_params_device: generation < 1 - no previous data exists for fitness_trend");
+    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_device: fitness_history is null");
 
     int decay_threshold_slot = GenomeParamTable::memory_decay_threshold;
     int consolidation_threshold_slot = GenomeParamTable::memory_consolidation_threshold;
@@ -763,13 +753,13 @@ __global__ void memory_update_params_kernel(
     params->fitness_trend = curr_fitness - prev_fitness;
 }
 
-__global__ void memory_decay_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params
-) {
+__device__ void memory_decay_device(Organism* organism) {
+    TemporalTube* tubes = organism->temporal_tube;
+    MemoryUpdateParams* params = organism->memory_update_params;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_decay_kernel: tubes is null");
-    DEVICE_FATAL_IF(params->old_count <= 0, "memory_decay_kernel: old_count non-positive");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_decay_device: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_decay_device: old_count non-positive");
 
     int tube_count = params->old_count;
     int capacity = tubes->capacity;
@@ -783,13 +773,13 @@ __global__ void memory_decay_kernel(
     }
 }
 
-__global__ void memory_prune_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params
-) {
+__device__ void memory_prune_device(Organism* organism) {
+    TemporalTube* tubes = organism->temporal_tube;
+    MemoryUpdateParams* params = organism->memory_update_params;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_prune_kernel: tubes is null");
-    DEVICE_FATAL_IF(params->old_count <= 0, "memory_prune_kernel: old_count non-positive");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_prune_device: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_prune_device: old_count non-positive");
 
     int tube_count = params->old_count;
     int capacity = tubes->capacity;
@@ -803,13 +793,13 @@ __global__ void memory_prune_kernel(
     }
 }
 
-__global__ void memory_consolidate_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params
-) {
+__device__ void memory_consolidate_device(Organism* organism) {
+    TemporalTube* tubes = organism->temporal_tube;
+    MemoryUpdateParams* params = organism->memory_update_params;
+
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_consolidate_kernel: tubes is null");
-    DEVICE_FATAL_IF(params->old_count <= 0, "memory_consolidate_kernel: old_count non-positive");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_consolidate_device: tubes is null");
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_consolidate_device: old_count non-positive");
 
     int tube_count = params->old_count;
     int capacity = tubes->capacity;
@@ -846,14 +836,14 @@ __global__ void memory_consolidate_kernel(
     }
 }
 
-__global__ void memory_mark_valid_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params,
-    int* valid_flags
-) {
+__device__ void memory_mark_valid_device(Organism* organism) {
+    TemporalTube* tubes = organism->temporal_tube;
+    MemoryUpdateParams* params = organism->memory_update_params;
+    int* valid_flags = organism->compact_valid_flags;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_mark_valid_kernel: tubes is null");
-    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_mark_valid_kernel: valid_flags is null");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_mark_valid_device: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_mark_valid_device: valid_flags is null");
 
     int old_count = params->old_count;
     int capacity = tubes->capacity;
@@ -869,12 +859,12 @@ __global__ void memory_mark_valid_kernel(
     }
 }
 
-__global__ void memory_scan_kernel(
-    int* valid_flags,
-    int* scan_output,
-    int* block_sums,
-    int capacity
-) {
+__device__ void memory_scan_device(Organism* organism) {
+    int* valid_flags = organism->compact_valid_flags;
+    int* scan_output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    int capacity = organism->temporal_tube->capacity;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int lane = threadIdx.x % WARP_SIZE;
     int warp_id = threadIdx.x / WARP_SIZE;
@@ -918,10 +908,9 @@ __global__ void memory_scan_kernel(
     }
 }
 
-__global__ void memory_scan_block_sums_kernel(
-    int* block_sums,
-    int num_blocks
-) {
+__device__ void memory_scan_block_sums_device(Organism* organism) {
+    int* block_sums = organism->scan_block_sums;
+    int num_blocks = organism->scan_num_blocks;
     int lane = threadIdx.x % WARP_SIZE;
     int warp_id = threadIdx.x / WARP_SIZE;
     __shared__ int bsum_shared[WARP_SIZE];
@@ -960,29 +949,28 @@ __global__ void memory_scan_block_sums_kernel(
     }
 }
 
-__global__ void memory_add_block_offsets_kernel(
-    int* scan_output,
-    int* block_sums,
-    int capacity
-) {
+__device__ void memory_add_block_offsets_device(Organism* organism) {
+    int* scan_output = organism->scan_output;
+    int* block_sums = organism->scan_block_sums;
+    int capacity = organism->memory_tubes->capacity;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < capacity && blockIdx.x > 0) {
         scan_output[tid] += block_sums[blockIdx.x];
     }
 }
 
-__global__ void memory_compact_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params,
-    int* valid_flags,
-    int* scan_output,
-    MemoryEntry* temp_buffer
-) {
+__device__ void memory_compact_device(Organism* organism) {
+    TemporalTube* tubes = organism->memory_tubes;
+    MemoryUpdateParams* params = organism->memory_update_params;
+    int* valid_flags = organism->memory_valid_flags;
+    int* scan_output = organism->scan_output;
+    MemoryEntry* temp_buffer = organism->memory_temp_buffer;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_compact_kernel: tubes is null");
-    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_compact_kernel: valid_flags is null");
-    DEVICE_FATAL_IF(scan_output == nullptr, "memory_compact_kernel: scan_output is null");
-    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_compact_kernel: temp_buffer is null");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_compact_device: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_compact_device: valid_flags is null");
+    DEVICE_FATAL_IF(scan_output == nullptr, "memory_compact_device: scan_output is null");
+    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_compact_device: temp_buffer is null");
 
     int old_count = params->old_count;
     int capacity = tubes->capacity;
@@ -994,36 +982,35 @@ __global__ void memory_compact_kernel(
     }
 }
 
-__global__ void memory_finalize_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params,
-    int* valid_flags,
-    int* scan_output,
-    MemoryEntry* temp_buffer
-) {
+__device__ void memory_finalize_device(Organism* organism) {
+    TemporalTube* tubes = organism->memory_tubes;
+    MemoryUpdateParams* params = organism->memory_update_params;
+    int* valid_flags = organism->memory_valid_flags;
+    int* scan_output = organism->scan_output;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_finalize_kernel: tubes is null");
-    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_finalize_kernel: valid_flags is null");
-    DEVICE_FATAL_IF(scan_output == nullptr, "memory_finalize_kernel: scan_output is null");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_finalize_device: tubes is null");
+    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_finalize_device: valid_flags is null");
+    DEVICE_FATAL_IF(scan_output == nullptr, "memory_finalize_device: scan_output is null");
 
     int old_count = params->old_count;
     int new_count = params->new_count;
     int capacity = tubes->capacity;
 
     if (tid == 0) {
-        DEVICE_FATAL_IF(old_count <= 0, "memory_finalize_kernel: old_count non-positive");
+        DEVICE_FATAL_IF(old_count <= 0, "memory_finalize_device: old_count non-positive");
         params->new_count = scan_output[old_count - 1] + valid_flags[old_count - 1];
     }
 }
 
-__global__ void memory_copy_back_kernel(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params,
-    MemoryEntry* temp_buffer
-) {
+__device__ void memory_copy_back_device(Organism* organism) {
+    TemporalTube* tubes = organism->memory_tubes;
+    MemoryUpdateParams* params = organism->memory_update_params;
+    MemoryEntry* temp_buffer = organism->memory_temp_buffer;
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_copy_back_kernel: tubes is null");
-    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_copy_back_kernel: temp_buffer is null");
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_copy_back_device: tubes is null");
+    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_copy_back_device: temp_buffer is null");
 
     int new_count = params->new_count;
     int capacity = tubes->capacity;
@@ -1038,80 +1025,47 @@ __global__ void memory_copy_back_kernel(
     }
 }
 
-__device__ void memory_update_cdp(
-    TemporalTube* tubes,
-    MemoryUpdateParams* params,
-    float* fitness_history,
-    int* valid_flags,
-    int* scan_output,
-    int* block_sums,
-    MemoryEntry* temp_buffer,
-    int generation,
-    float* genome,
-    float* gradients,
-    uint64_t genome_hash,
-    float ctx_metabolic,
-    float ctx_stress,
-    float ctx_morphogen,
-    float ctx_complexity,
-    float ctx_niche,
-    float ctx_learning,
-    float ctx_performance
-) {
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_cdp: tubes is null");
-    DEVICE_FATAL_IF(params == nullptr, "memory_update_cdp: params is null");
-    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_cdp: fitness_history is null");
-    DEVICE_FATAL_IF(valid_flags == nullptr, "memory_update_cdp: valid_flags is null");
-    DEVICE_FATAL_IF(scan_output == nullptr, "memory_update_cdp: scan_output is null");
-    DEVICE_FATAL_IF(block_sums == nullptr, "memory_update_cdp: block_sums is null");
-    DEVICE_FATAL_IF(temp_buffer == nullptr, "memory_update_cdp: temp_buffer is null");
-    DEVICE_FATAL_IF(genome == nullptr, "memory_update_cdp: genome is null");
-    DEVICE_FATAL_IF(gradients == nullptr, "memory_update_cdp: gradients is null");
+__device__ void memory_update_device(Organism* organism) {
+    TemporalTube* tubes = organism->chemical_field->history;
+    MemoryUpdateParams* params = organism->memory_params;
 
-    memory_update_params_kernel<<<1, 1>>>(
-        params, tubes, fitness_history, generation,
-        genome, gradients, genome_hash,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance
-    );
-    cudaDeviceSynchronize();
+    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_device: tubes is null");
+    DEVICE_FATAL_IF(params == nullptr, "memory_update_device: params is null");
 
-    DEVICE_FATAL_IF(params->old_count <= 0, "memory_update_cdp: old_count non-positive after params kernel");
+    memory_update_params_device(organism);
+    __syncthreads();
 
-    int tube_count = params->old_count;
-    int capacity = tubes->capacity;
-    int num_blocks = (tube_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    int cap_blocks = (capacity + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    DEVICE_FATAL_IF(params->old_count <= 0, "memory_update_device: old_count non-positive after params");
 
-    memory_decay_kernel<<<num_blocks, BLOCK_SIZE>>>(tubes, params);
-    cudaDeviceSynchronize();
+    memory_decay_device(organism);
+    __syncthreads();
 
-    memory_prune_kernel<<<num_blocks, BLOCK_SIZE>>>(tubes, params);
-    cudaDeviceSynchronize();
+    memory_prune_device(organism);
+    __syncthreads();
 
-    memory_consolidate_kernel<<<1, 1>>>(tubes, params);
-    cudaDeviceSynchronize();
+    memory_consolidate_device(organism);
+    __syncthreads();
 
-    memory_mark_valid_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, valid_flags);
-    cudaDeviceSynchronize();
+    memory_mark_valid_device(organism);
+    __syncthreads();
 
-    memory_scan_kernel<<<cap_blocks, BLOCK_SIZE>>>(valid_flags, scan_output, block_sums, capacity);
-    cudaDeviceSynchronize();
+    memory_scan_device(organism);
+    __syncthreads();
 
-    memory_scan_block_sums_kernel<<<1, BLOCK_SIZE>>>(block_sums, cap_blocks);
-    cudaDeviceSynchronize();
+    memory_scan_block_sums_device(organism);
+    __syncthreads();
 
-    memory_add_block_offsets_kernel<<<cap_blocks, BLOCK_SIZE>>>(scan_output, block_sums, capacity);
-    cudaDeviceSynchronize();
+    memory_add_block_offsets_device(organism);
+    __syncthreads();
 
-    memory_compact_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, valid_flags, scan_output, temp_buffer);
-    cudaDeviceSynchronize();
+    memory_compact_device(organism);
+    __syncthreads();
 
-    memory_finalize_kernel<<<1, 1>>>(tubes, params, valid_flags, scan_output, temp_buffer);
-    cudaDeviceSynchronize();
+    memory_finalize_device(organism);
+    __syncthreads();
 
-    memory_copy_back_kernel<<<cap_blocks, BLOCK_SIZE>>>(tubes, params, temp_buffer);
-    cudaDeviceSynchronize();
+    memory_copy_back_device(organism);
+    __syncthreads();
 }
 
 #endif

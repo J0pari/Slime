@@ -12,113 +12,6 @@
 #include <cuda_runtime.h>
 #include <cmath>
 
-struct GenomeComplexityMetrics {
-    float delta_diversity;
-    float hash_entropy;
-    float parameter_variance;
-    int unique_hashes;
-    float avg_deltas_per_genome;
-};
-
-struct ArchiveTopologyMetrics {
-    int occupied_cells;
-    int frontier_cells_gained;   
-    int frontier_cells_lost;     
-    int sparse_cell_count;       
-    float niche_entropy;         
-    float novelty_gradient;      
-
-    float elite_fitness_best;
-    float elite_fitness_mean;    
-    float elite_fitness_delta;   
-    float quality_floor;         
-    float quality_mean;          
-    float quality_range;
-
-    float density_mean;          
-    float density_max;           
-    float density_variance;
-
-    float hw_axis_min, hw_axis_max, hw_axis_mean;
-    float task_axis_min, task_axis_max, task_axis_mean;
-    float gen_axis_min, gen_axis_max, gen_axis_mean;
-
-    float axis_corr_hw_task;
-    float axis_corr_hw_gen;
-    float axis_corr_task_gen;
-
-    int total_population;
-    int births_since_checkpoint;   
-    int deaths_since_checkpoint;   
-
-    float hash_clustering_coefficient;
-};
-
-struct DIRESAEvolutionMetrics {
-    float recon_loss_hw;
-    float recon_loss_task;
-    float recon_loss_gen;
-    float recon_loss_total;
-    float behavioral_drift_rate;
-    float latent_utilization;
-    float compression_ratio;
-    float hardware_feature_correlation;
-    float gradient_magnitude_avg;
-    int archive_injections;
-};
-
-struct TaskPerformanceMetrics {
-    float accuracy;
-    float train_accuracy;
-    float test_accuracy;
-    float loss;
-    float classification_stability;
-    float avg_confidence;
-    int correct_predictions;
-    int total_predictions;
-    int per_class_correct[NUM_CLASSES_MAX];
-    int per_class_total[NUM_CLASSES_MAX];
-};
-
-struct PopulationMetrics {
-    float total_accuracy;
-    float total_generalization_gap;
-    float total_hardware_efficiency;
-    float total_fitness;
-};
-
-struct MemoryAllocationMetrics {
-    size_t total_gpu_allocated;
-    size_t total_gpu_free;
-    size_t total_gpu_capacity;
-    size_t unified_memory_allocated;
-    size_t archive_pools_size;
-    size_t training_pools_size;
-    size_t ca_state_size;
-    size_t chemical_field_size;
-    size_t behavioral_pools_size;
-    size_t diresa_weights_size;
-    size_t autodiff_tape_size;
-    size_t device_heap_limit;        
-    size_t device_heap_allocated;    
-};
-
-struct TelemetryBuffer {
-    GenomeComplexityMetrics genome_complexity;
-    ArchiveTopologyMetrics archive_topology;
-    DIRESAEvolutionMetrics diresa_evolution;
-    TaskPerformanceMetrics task_performance;
-    PopulationMetrics population_metrics;
-    MemoryAllocationMetrics memory_allocation;
-    int generation;
-    bool valid;
-
-    ArchiveTopologyMetrics last_checkpoint;
-    int last_occupancy[MAX_CELLS];
-    int last_total_spawned;
-    int last_total_culled;
-};
-
 __device__ void track_allocation(
     void* ptr,
     size_t size_bytes,
@@ -785,6 +678,35 @@ __device__ void populate_audit_buffer(
     ring->commit_write(audit);
 
     printf("V:audit_done gen=%d m=0x%x\n", generation, audit->fields_written_mask);
+}
+
+__device__ void run_telemetry_probes(Organism* organism, int generation) {
+    GPUElite* arch = (GPUElite*)organism->archive;
+
+    if (organism->generation % TELEMETRY_DETAILED == 0) {
+        genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
+    }
+
+    if (organism->generation % TELEMETRY_COMPREHENSIVE == 0) {
+        archive_topology_probe(
+            arch, organism->archive_size,
+            organism->voronoi_cells, organism->num_voronoi_cells,
+            &organism->telemetry->archive_topology,
+            &organism->telemetry->last_checkpoint,
+            organism->telemetry->last_occupancy,
+            arch->hw_dim, arch->task_dim, arch->gen_dim
+        );
+        int current_spawned = Atomics::load_int(organism->pool->total_spawned);
+        int current_culled = Atomics::load_int(organism->pool->total_culled);
+        organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
+        organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
+        organism->telemetry->last_total_spawned = current_spawned;
+        organism->telemetry->last_total_culled = current_culled;
+        organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
+        diresa_evolution_probe(organism->pool, &organism->telemetry->diresa_evolution);
+
+        organism->telemetry->valid = true;
+    }
 }
 
 #endif

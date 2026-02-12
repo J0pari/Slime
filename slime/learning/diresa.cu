@@ -9,44 +9,19 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
-struct PoolEntry;
-
-struct DIRESABatch {
-    int input_dim;   
-    int output_dim;  
-    int batch_size;  
-
-    float* features;              
-    float* features_shuffled;     
-    int* shuffle_indices;         
-
-    float* latent;                
-    float* latent_shuffled;       
-
-    float* reconstructed;         
-
-    float* orig_distances;        
-    float* latent_distances;      
-
-    float recon_loss;
-    float dist_loss;
-    float cov_loss;
-};
-
 __device__ void init_diresa_device(Organism* organism) {
-    DIRESAWeights* replicas = organism->diresa_genome_weights;
-    float* preallocated_weight_pool = organism->diresa_genome_weight_pool;
-    int entry_idx = organism->lifecycle_entry_idx;
-    PoolEntry* entry = &organism->pool->entries[entry_idx];
-    size_t replica_stride = entry->diresa_replica_stride;
-    int input_dim = entry->diresa_input_dim;
-    int output_dim = entry->diresa_output_dim;
-    unsigned int seed = entry->diresa_init_seed;
+    DIRESAWeights* replicas = organism->diresa_init_target_weights;
+    float* preallocated_weight_pool = organism->diresa_init_target_pool;
+    PoolEntry* entry = organism->diresa_init_entry;
+    size_t replica_stride = organism->diresa_init_stride;
+    int input_dim = organism->diresa_init_input_dim;
+    int output_dim = organism->diresa_init_output_dim;
+    unsigned int seed = organism->diresa_init_seed;
     float* genome = organism->genome;
     int replica_id = blockIdx.x;
     int local_tid = threadIdx.x;
 
-    if (replica_id >= entry->num_tempering_replicas) return;
+    if (replica_id >= organism->diresa_init_num_replicas) return;
 
     DIRESAWeights* weights = &replicas[replica_id];
 

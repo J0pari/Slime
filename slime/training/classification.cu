@@ -12,15 +12,14 @@
 
 namespace cg = cooperative_groups;
 
-__global__ void spatial_pooling_kernel(
-    float* __restrict__ ca_output,
-    float* __restrict__ pooling_weights,
-    float* __restrict__ features,
-    int batch_size,
-    int num_heads,
-    int grid_size,
-    int channels
-) {
+__device__ void spatial_pooling_device(Organism* organism) {
+    float* ca_output = organism->ca_output;
+    float* pooling_weights = organism->cls_pooling_weights;
+    float* features = organism->cls_features;
+    int batch_size = organism->cls_batch_size;
+    int num_heads = organism->cls_num_heads;
+    int grid_size = organism->ca_grid_size;
+    int channels = organism->ca_channels;
     int batch_idx = blockIdx.x;
     int feature_idx = blockIdx.y * blockDim.x + threadIdx.x;
     int num_features = num_heads * channels;
@@ -53,15 +52,14 @@ __global__ void spatial_pooling_kernel(
     features[batch_idx * num_features + feature_idx] = weighted;
 }
 
-__global__ void classification_head_kernel(
-    float* __restrict__ features,
-    float* __restrict__ fc_weights,
-    float* __restrict__ fc_bias,
-    float* __restrict__ logits,
-    int batch_size,
-    int num_features,
-    int num_classes
-) {
+__device__ void classification_head_device(Organism* organism) {
+    float* features = organism->cls_features;
+    float* fc_weights = organism->cls_fc_weights;
+    float* fc_bias = organism->cls_fc_bias;
+    float* logits = organism->cls_logits;
+    int batch_size = organism->cls_batch_size;
+    int num_features = organism->cls_num_features;
+    int num_classes = organism->cls_num_classes;
     int batch_idx = blockIdx.x;
     int class_idx = threadIdx.x;
 
@@ -99,12 +97,11 @@ __global__ void classification_head_kernel(
     }
 }
 
-__global__ void softmax_kernel(
-    float* __restrict__ logits,
-    float* __restrict__ probabilities,
-    int batch_size,
-    int num_classes
-) {
+__device__ void softmax_device(Organism* organism) {
+    float* logits = organism->cls_logits;
+    float* probabilities = organism->cls_probabilities;
+    int batch_size = organism->cls_batch_size;
+    int num_classes = organism->cls_num_classes;
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
 
@@ -126,13 +123,12 @@ __global__ void softmax_kernel(
     }
 }
 
-__global__ void accuracy_kernel(
-    float* __restrict__ logits,
-    int* __restrict__ labels,
-    int* __restrict__ correct_count,
-    int batch_size,
-    int num_classes
-) {
+__device__ void accuracy_device(Organism* organism) {
+    float* logits = organism->cls_logits;
+    int* labels = organism->cls_labels;
+    int* correct_count = organism->cls_correct_count;
+    int batch_size = organism->cls_batch_size;
+    int num_classes = organism->cls_num_classes;
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (batch_idx >= batch_size) return;
@@ -154,14 +150,13 @@ __global__ void accuracy_kernel(
     }
 }
 
-__global__ void classification_cross_entropy_kernel(
-    float* __restrict__ logits,
-    int* __restrict__ labels,
-    float* __restrict__ loss_out,
-    float* __restrict__ logit_grads,
-    int batch_size,
-    int num_classes
-) {
+__device__ void classification_cross_entropy_device(Organism* organism) {
+    float* logits = organism->cls_logits;
+    int* labels = organism->cls_labels;
+    float* loss_out = organism->cls_loss_out;
+    float* logit_grads = organism->cls_logit_grads;
+    int batch_size = organism->cls_batch_size;
+    int num_classes = organism->cls_num_classes;
     int batch_idx = blockIdx.x;
     int tid = threadIdx.x;
 
@@ -203,17 +198,16 @@ __global__ void classification_cross_entropy_kernel(
     }
 }
 
-__global__ void classification_head_backward_kernel(
-    float* __restrict__ logit_grads,
-    float* __restrict__ features,
-    float* __restrict__ fc_weights,
-    float* __restrict__ fc_weights_grad,
-    float* __restrict__ fc_bias_grad,
-    float* __restrict__ features_grad,
-    int batch_size,
-    int num_features,
-    int num_classes
-) {
+__device__ void classification_head_backward_device(Organism* organism) {
+    float* logit_grads = organism->cls_logit_grads;
+    float* features = organism->cls_features;
+    float* fc_weights = organism->cls_fc_weights;
+    float* fc_weights_grad = organism->cls_fc_weights_grad;
+    float* fc_bias_grad = organism->cls_fc_bias_grad;
+    float* features_grad = organism->cls_features_grad;
+    int batch_size = organism->cls_batch_size;
+    int num_features = organism->cls_num_features;
+    int num_classes = organism->cls_num_classes;
     int batch_idx = blockIdx.x;
     int class_idx = threadIdx.x;
 
@@ -233,17 +227,16 @@ __global__ void classification_head_backward_kernel(
     }
 }
 
-__global__ void spatial_pooling_backward_kernel(
-    float* __restrict__ features_grad,
-    float* __restrict__ ca_output,
-    float* __restrict__ pooling_weights,
-    float* __restrict__ pooling_weights_grad,
-    float* __restrict__ ca_output_grad,
-    int batch_size,
-    int num_heads,
-    int grid_size,
-    int channels
-) {
+__device__ void spatial_pooling_backward_device(Organism* organism) {
+    float* features_grad = organism->cls_features_grad;
+    float* ca_output = organism->ca_output;
+    float* pooling_weights = organism->cls_pooling_weights;
+    float* pooling_weights_grad = organism->cls_pooling_weights_grad;
+    float* ca_output_grad = organism->cls_ca_output_grad;
+    int batch_size = organism->cls_batch_size;
+    int num_heads = organism->cls_num_heads;
+    int grid_size = organism->ca_grid_size;
+    int channels = organism->ca_channels;
     int batch_idx = blockIdx.x;
     int feature_idx = blockIdx.y * blockDim.x + threadIdx.x;
     int num_features = num_heads * channels;
@@ -281,15 +274,14 @@ __global__ void spatial_pooling_backward_kernel(
     }
 }
 
-__global__ void init_classification_head_kernel(
-    ClassificationHead* head,
-    float* pooling_weights,
-    float* fc_weights,
-    float* fc_bias,
-    int num_features,
-    int num_classes,
-    unsigned int seed
-) {
+__device__ void init_classification_head_device(Organism* organism) {
+    ClassificationHead* head = organism->classification_head;
+    float* pooling_weights = organism->cls_pooling_weights;
+    float* fc_weights = organism->cls_fc_weights;
+    float* fc_bias = organism->cls_fc_bias;
+    int num_features = organism->cls_num_features;
+    int num_classes = organism->cls_num_classes;
+    unsigned int seed = organism->init_seed;
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     head->pooling_weights = pooling_weights;
