@@ -13,7 +13,9 @@
 #include <stdint.h>
 
 constexpr int GENOME_HASH_TABLE_SIZE = 16384;
-constexpr uint64_t HASH_TABLE_EMPTY_KEY = 0ULL;
+// Use UINT64_MAX-1 as empty sentinel since UINT64_MAX means "root genome" (no parent)
+// and 0 is a valid hash value that can be produced by gpu_sha256
+constexpr uint64_t HASH_TABLE_EMPTY_KEY = UINT64_MAX - 1;
 
 __device__ __forceinline__ int hash_table_slot(uint64_t genome_hash) {
     return (int)((genome_hash * 11400714819323198485ULL) >> 50) & (GENOME_HASH_TABLE_SIZE - 1);
@@ -508,11 +510,10 @@ __device__ void store_elite_weight_deltas_device(
     int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (flat_idx >= total_size) return;
 
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        archive->archived_num_heads[elite_idx] = num_heads;
-        archive->archived_channels[elite_idx] = channels;
-        archive->archived_head_dim[elite_idx] = head_dim;
-    }
+    // Distribute arch writes across first 3 threads
+    if (flat_idx == 0) archive->archived_num_heads[elite_idx] = num_heads;
+    if (flat_idx == 1) archive->archived_channels[elite_idx] = channels;
+    if (flat_idx == 2) archive->archived_head_dim[elite_idx] = head_dim;
 
     int delta_threshold_slot = GenomeParamTable::weight_delta_threshold;
     int delta_threshold_min_slot = GenomeParamTable::weight_delta_threshold_min;
@@ -558,7 +559,8 @@ __device__ void finalize_weight_deltas_device(
 ) {
     GPUElite* archive = organism->archive;
 
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_tid == 0) {
         int count = min(*num_deltas_out, MAX_WEIGHT_DELTAS_PER_ELITE);
         archive->num_weight_deltas[elite_idx] = count;
     }

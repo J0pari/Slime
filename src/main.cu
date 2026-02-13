@@ -430,7 +430,7 @@ int main() {
 
     cudaMemcpy(buffers, &buffers_host, sizeof(OrganismPreallocatedBuffers), cudaMemcpyHostToDevice);
 
-    persistent_evolution_kernel<<<1, 1>>>(
+    persistent_evolution_kernel<<<POOL_CAPACITY_MAX, BLOCK_SIZE>>>(
         (unsigned int)time(nullptr),
         d_dataset_array,
         d_test_dataset_array,

@@ -115,20 +115,30 @@ __device__ void init_training_mode_device(Organism* organism) {
     float ctx_niche = organism->ctx_niche;
     float ctx_learning = organism->ctx_learning;
     float ctx_performance = organism->ctx_performance;
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        TrainingParams training_params;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
 
-        mode->use_gradients = true;
-        mode->use_selection = true;
-        mode->gradient_fitness_weight = training_params.get_gradient_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        mode->coherence_fitness_weight = training_params.get_coherence_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        mode->batch_size = training_params.get_batch_size(genome, gradients);
-        mode->learning_rate = training_params.get_learning_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        mode->gradient_clip_norm = training_params.get_gradient_clip_norm(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        mode->adam_timestep = 1;
+    // All threads compute same values, distribute writes across threads
+    TrainingParams training_params;
+    float gradient_fitness_weight = training_params.get_gradient_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+    float coherence_fitness_weight = training_params.get_coherence_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+    int batch_size_val = training_params.get_batch_size(genome, gradients);
+    float learning_rate_val = training_params.get_learning_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+    float gradient_clip_norm_val = training_params.get_gradient_clip_norm(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
-        mode->batch_images = batch_images;
-        mode->batch_labels = batch_labels;
+    int num_fields = 9;
+    for (int field = global_tid; field < num_fields; field += total_threads) {
+        switch (field) {
+            case 0: mode->use_gradients = true; break;
+            case 1: mode->use_selection = true; break;
+            case 2: mode->gradient_fitness_weight = gradient_fitness_weight; break;
+            case 3: mode->coherence_fitness_weight = coherence_fitness_weight; break;
+            case 4: mode->batch_size = batch_size_val; break;
+            case 5: mode->learning_rate = learning_rate_val; break;
+            case 6: mode->gradient_clip_norm = gradient_clip_norm_val; break;
+            case 7: mode->adam_timestep = 1; break;
+            case 8: mode->batch_images = batch_images; mode->batch_labels = batch_labels; break;
+        }
     }
 }
 
@@ -206,46 +216,57 @@ __device__ void init_curriculum_device(Organism* organism) {
     float ctx_niche = organism->ctx_niche;
     float ctx_learning = organism->ctx_learning;
     float ctx_performance = organism->ctx_performance;
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
-            curriculum->stats[i].dataset_id = ACTIVE_DATASET_IDS[i];
-            curriculum->stats[i].population_mean_accuracy = 0.0f;
-            curriculum->stats[i].population_best_accuracy = 0.0f;
-            curriculum->stats[i].population_accuracy_variance = 0.0f;
-            curriculum->stats[i].niche_diversity = 0.0f;
-            curriculum->stats[i].num_generations_trained = 0;
-            curriculum->stats[i].activation_threshold_met = false;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+
+    // Parallel dataset stats init - each thread handles different datasets
+    for (int i = global_tid; i < NUM_ACTIVE_DATASETS; i += total_threads) {
+        curriculum->stats[i].dataset_id = ACTIVE_DATASET_IDS[i];
+        curriculum->stats[i].population_mean_accuracy = 0.0f;
+        curriculum->stats[i].population_best_accuracy = 0.0f;
+        curriculum->stats[i].population_accuracy_variance = 0.0f;
+        curriculum->stats[i].niche_diversity = 0.0f;
+        curriculum->stats[i].num_generations_trained = 0;
+        curriculum->stats[i].activation_threshold_met = (i == 0);  // Only first dataset starts active
+    }
+
+    // All threads compute thresholds
+    int acc_slot = GenomeParamTable::curriculum_accuracy_threshold;
+    int div_slot = GenomeParamTable::curriculum_diversity_threshold;
+    int gen_slot = GenomeParamTable::curriculum_min_generations;
+
+    float accuracy_threshold = genome_to_param(
+        genome, gradients, acc_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        CURRICULUM_ACCURACY_THRESHOLD_MIN, CURRICULUM_ACCURACY_THRESHOLD_MAX
+    );
+
+    float diversity_threshold = genome_to_param(
+        genome, gradients, div_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        CURRICULUM_DIVERSITY_THRESHOLD_MIN, CURRICULUM_DIVERSITY_THRESHOLD_MAX
+    );
+
+    float min_generations_threshold = genome_to_param(
+        genome, gradients, gen_slot,
+        ctx_metabolic, ctx_stress, ctx_morphogen,
+        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+        CURRICULUM_MIN_GENERATIONS_MIN, CURRICULUM_MIN_GENERATIONS_MAX
+    );
+
+    // Distribute scalar writes
+    int num_fields = 6;
+    for (int field = global_tid; field < num_fields; field += total_threads) {
+        switch (field) {
+            case 0: curriculum->current_dataset_idx = 0; break;
+            case 1: curriculum->num_datasets_completed = 0; break;
+            case 2: curriculum->curriculum_progress = 0.0f; break;
+            case 3: curriculum->accuracy_threshold = accuracy_threshold; break;
+            case 4: curriculum->diversity_threshold = diversity_threshold; break;
+            case 5: curriculum->min_generations_threshold = min_generations_threshold; break;
         }
-
-        curriculum->current_dataset_idx = 0;
-        curriculum->num_datasets_completed = 0;
-        curriculum->curriculum_progress = 0.0f;
-        curriculum->stats[0].activation_threshold_met = true;
-
-        int acc_slot = GenomeParamTable::curriculum_accuracy_threshold;
-        int div_slot = GenomeParamTable::curriculum_diversity_threshold;
-        int gen_slot = GenomeParamTable::curriculum_min_generations;
-
-        curriculum->accuracy_threshold = genome_to_param(
-            genome, gradients, acc_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            CURRICULUM_ACCURACY_THRESHOLD_MIN, CURRICULUM_ACCURACY_THRESHOLD_MAX
-        );
-
-        curriculum->diversity_threshold = genome_to_param(
-            genome, gradients, div_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            CURRICULUM_DIVERSITY_THRESHOLD_MIN, CURRICULUM_DIVERSITY_THRESHOLD_MAX
-        );
-
-        curriculum->min_generations_threshold = genome_to_param(
-            genome, gradients, gen_slot,
-            ctx_metabolic, ctx_stress, ctx_morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            CURRICULUM_MIN_GENERATIONS_MIN, CURRICULUM_MIN_GENERATIONS_MAX
-        );
     }
 }
 
@@ -256,52 +277,103 @@ __device__ void update_curriculum_device(Organism* organism) {
     int pool_size = organism->tt_pool_size;
     int num_voronoi_cells = organism->tt_num_voronoi_cells;
     int generation = organism->generation;
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int current_idx = curriculum->current_dataset_idx;
-        DatasetStats* current_stats = &curriculum->stats[current_idx];
 
+    int tid = threadIdx.x;
+    int global_tid = blockIdx.x * blockDim.x + tid;
+    int total_threads = gridDim.x * blockDim.x;
+
+    __shared__ float shared_sum[BLOCK_SIZE];
+    __shared__ float shared_max[BLOCK_SIZE];
+    __shared__ float shared_var[BLOCK_SIZE];
+    __shared__ float shared_entropy[BLOCK_SIZE];
+
+    int current_idx = curriculum->current_dataset_idx;
+    DatasetStats* current_stats = &curriculum->stats[current_idx];
+
+    // Parallel reduction for sum and max accuracy
+    float local_sum = 0.0f;
+    float local_max = 0.0f;
+    for (int i = global_tid; i < pool_size; i += total_threads) {
+        float acc = pool_task_accuracies[i];
+        local_sum += acc;
+        local_max = fmaxf(local_max, acc);
+    }
+
+    // Block-level reduction for sum
+    shared_sum[tid] = local_sum;
+    shared_max[tid] = local_max;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+            shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    float mean_acc = shared_sum[0] / pool_size;
+    float best_acc = shared_max[0];
+
+    // Parallel variance calculation
+    float local_var = 0.0f;
+    for (int i = global_tid; i < pool_size; i += total_threads) {
+        float diff = pool_task_accuracies[i] - mean_acc;
+        local_var += diff * diff;
+    }
+
+    shared_var[tid] = local_var;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_var[tid] += shared_var[tid + s];
+        }
+        __syncthreads();
+    }
+
+    float var_acc = shared_var[0] / pool_size;
+
+    // Parallel entropy calculation
+    float local_entropy = 0.0f;
+    float total_organisms = (float)pool_size;
+    for (int i = global_tid; i < num_voronoi_cells; i += total_threads) {
+        if (voronoi_occupancy_histogram[i] > 0) {
+            float p = voronoi_occupancy_histogram[i] / total_organisms;
+            local_entropy -= p * logf(p);
+        }
+    }
+
+    shared_entropy[tid] = local_entropy;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_entropy[tid] += shared_entropy[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (num_voronoi_cells <= 1) return;
+
+    float log_cells = logf((float)num_voronoi_cells);
+    float diversity = shared_entropy[0] / log_cells;
+
+    // Single thread writes final stats (deterministic)
+    if (global_tid == 0) {
         current_stats->num_generations_trained = generation;
-
-        float sum_acc = 0.0f;
-        float best_acc = 0.0f;
-        for (int i = 0; i < pool_size; i++) {
-            float acc = pool_task_accuracies[i];
-            sum_acc += acc;
-            if (acc > best_acc) best_acc = acc;
-        }
-        current_stats->population_mean_accuracy = sum_acc / pool_size;
+        current_stats->population_mean_accuracy = mean_acc;
         current_stats->population_best_accuracy = best_acc;
+        current_stats->population_accuracy_variance = var_acc;
+        current_stats->niche_diversity = diversity;
 
-        float var_sum = 0.0f;
-        for (int i = 0; i < pool_size; i++) {
-            float diff = pool_task_accuracies[i] - current_stats->population_mean_accuracy;
-            var_sum += diff * diff;
-        }
-        current_stats->population_accuracy_variance = var_sum / pool_size;
-
-        float total_organisms = (float)pool_size;
-        float entropy = 0.0f;
-        for (int i = 0; i < num_voronoi_cells; i++) {
-            if (voronoi_occupancy_histogram[i] > 0) {
-                float p = voronoi_occupancy_histogram[i] / total_organisms;
-                entropy -= p * logf(p);
-            }
-        }
-        if (num_voronoi_cells <= 1) {
-            return;
-        }
-        float log_cells = logf((float)num_voronoi_cells);
-        current_stats->niche_diversity = entropy / log_cells;
-
-        bool acc_met = current_stats->population_mean_accuracy >= curriculum->accuracy_threshold;
-        bool div_met = current_stats->niche_diversity >= curriculum->diversity_threshold;
+        bool acc_met = mean_acc >= curriculum->accuracy_threshold;
+        bool div_met = diversity >= curriculum->diversity_threshold;
         bool gen_met = generation >= (int)curriculum->min_generations_threshold;
 
         if (acc_met && div_met && gen_met && curriculum->current_dataset_idx < NUM_ACTIVE_DATASETS - 1) {
             curriculum->num_datasets_completed++;
             curriculum->current_dataset_idx++;
-
-            int next_dataset_id = ACTIVE_DATASET_IDS[curriculum->current_dataset_idx];
             curriculum->stats[curriculum->current_dataset_idx].activation_threshold_met = true;
             curriculum->curriculum_progress = (float)(curriculum->current_dataset_idx + 1) / (float)NUM_ACTIVE_DATASETS;
         }

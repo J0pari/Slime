@@ -1360,23 +1360,17 @@ __device__ void behavioral_update_device(Organism* organism) {
     float* workspace_genomes = organism->workspace_genomes;
     Architecture arch = get_arch_from_pool(organism, blockIdx.x);
 
-    if (blockIdx.x == 0 && threadIdx.x == 0) printf("V:beh_KERNEL_START gen=%d\n", organism->generation);
-
     int entry_idx = blockIdx.x;
-    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ENTER entry=0 gen=%d blockIdx=%d threadIdx=%d\n", organism->generation, blockIdx.x, threadIdx.x);
     ComponentPool* pool = organism->pool;
 
     if (entry_idx >= pool->capacity) {
-        if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_OVER_CAP entry=0 cap=%d\n", pool->capacity);
         return;
     }
 
     PoolEntry* entry = &pool->entries[entry_idx];
     if (!pool->alive_flags[entry_idx]) {
-        if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_NOT_ALIVE entry=0\n");
         return;
     }
-    if (entry_idx == 0 && threadIdx.x == 0) printf("V:beh_ALIVE entry=0 gen=%d\n", organism->generation);
 
     int num_agents = POOL_CAPACITY_MAX;
 
@@ -1397,8 +1391,6 @@ __device__ void behavioral_update_device(Organism* organism) {
 
     BehavioralDimensions dims;
     dims.derive_from_genome(primary_genome, gradients);
-
-    if (threadIdx.x == 0) printf("V:beh_entry gen=%d entry=%d\n", organism->generation, entry_idx);
 
     int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
     int behavioral_buffer_size = arch.grid_size * arch.grid_size * behavioral_dim;
@@ -1488,7 +1480,6 @@ __device__ void behavioral_update_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_3_behavioral_field gen=%d\n", organism->generation);
 
     {
         int width = arch.grid_size;
@@ -1534,7 +1525,6 @@ __device__ void behavioral_update_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_4_warp_ca gen=%d\n", organism->generation);
 
     {
         int grid_size = arch.grid_size;
@@ -1561,7 +1551,6 @@ __device__ void behavioral_update_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_5_grad gen=%d\n", organism->generation);
 
     int chemotaxis_dt_slot = GenomeParamTable::chemotaxis_dt;
     float chemotaxis_dt = genome_to_param(genome, gradients, chemotaxis_dt_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, CHEMOTAXIS_DT_MIN, CHEMOTAXIS_DT_MAX);
@@ -1648,7 +1637,6 @@ __device__ void behavioral_update_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_6_chemotaxis gen=%d\n", organism->generation);
 
     {
         int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
@@ -1701,7 +1689,6 @@ __device__ void behavioral_update_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) printf("V:beh_7_done gen=%d entry=%d\n", organism->generation, entry_idx);
 }
 
 #endif

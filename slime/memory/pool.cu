@@ -66,9 +66,13 @@ __device__ void finalize_alive_count_device(Organism* organism) {
     int* flags = organism->pool_compaction_flags;
     int* scan_results = organism->pool_compaction_scan;
     int capacity = pool->capacity;
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        int last_idx = capacity - 1;
-        pool->alive_indices_count = scan_results[last_idx] + flags[last_idx];
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // All threads can compute the final value (it's a simple read), one writes
+    int last_idx = capacity - 1;
+    int final_count = scan_results[last_idx] + flags[last_idx];
+    if (global_tid == 0) {
+        pool->alive_indices_count = final_count;
     }
 }
 
@@ -560,47 +564,44 @@ __device__ void init_pool_device(Organism* organism) {
     int generation = organism->generation;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx == 0) printf("V:init_pool_enter cap=%d pool=%p\n", capacity, (void*)pool);
+    int total_threads = gridDim.x * blockDim.x;
+
+    // Count threads working on pool init
+    __shared__ int active_inits;
+    __shared__ int alive_inits;
+    if (threadIdx.x == 0) { active_inits = 0; alive_inits = 0; }
+    __syncthreads();
 
     if (idx < capacity) {
-        if (idx == 0) printf("V:init_pool_idx0_A\n");
+        atomicAdd(&active_inits, 1);
 
         PRNGState rng;
         rng.s0 = idx * XORSHIFT_GOLDEN_RATIO_A;
         rng.s1 = idx * XORSHIFT_GOLDEN_RATIO_B;
 
-        if (idx == 0) printf("V:init_pool_idx0_B entries=%p\n", (void*)pool->entries);
         pool->entries[idx].max_deltas = GENOME_SIZE;
-        if (idx == 0) printf("V:init_pool_idx0_C\n");
         pool->entries[idx].delta_indices = &delta_indices_buffer[idx * GENOME_SIZE];
         pool->entries[idx].delta_values = &delta_values_buffer[idx * GENOME_SIZE];
         pool->entries[idx].gradients = &gradients_buffer[idx * GENOME_SIZE];
-        if (idx == 0) printf("V:init_pool_idx0_D alive_flags=%p fitness_vals=%p\n", (void*)pool->alive_flags, (void*)pool->fitness_values);
 
         if (idx < POOL_CAPACITY_MIN) {
-            if (idx == 0) printf("V:init_pool_idx0_E\n");
+            atomicAdd(&alive_inits, 1);
             pool->entries[idx].id = idx;
             pool->entries[idx].phase = LifecyclePhase::ACTIVE;
-            if (idx == 0) printf("V:init_pool_idx0_F\n");
             pool->alive_flags[idx] = true;
-            if (idx == 0) printf("V:init_pool_idx0_G\n");
             pool->entries[idx].age = 0;
             pool->entries[idx].parent_hash = UINT64_MAX;
             pool->entries[idx].parent_idx = INT_MAX;
             pool->entries[idx].num_deltas = GENOME_SIZE;
-            if (idx == 0) printf("V:init_pool_idx0_H\n");
 
             float* temp_genome = pool->entries[idx].delta_values;
-            if (idx == 0) printf("V:init_pool_pre_genome_loop temp=%p\n", (void*)temp_genome);
             for (int i = 0; i < GENOME_SIZE; i++) {
                 temp_genome[i] = prng_next(&rng) * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
                 pool->entries[idx].delta_indices[i] = i;
                 pool->entries[idx].gradients[i] = 0.0f;
             }
-            if (idx == 0) printf("V:init_pool_post_genome_loop\n");
 
             pool->entries[idx].genome_hash = gpu_sha256(temp_genome, GENOME_SIZE);
-            if (idx == 0) printf("V:init_pool_post_sha256\n");
 
             PoolInitParams init_params;
             init_params.derive_from_genome(temp_genome, pool->entries[idx].gradients);
@@ -643,12 +644,24 @@ __device__ void init_pool_device(Organism* organism) {
         pool->alive_indices[idx] = idx;
     }
 
+    __syncthreads();
+
+    // Report aggregate stats
+    if (threadIdx.x == 0) {
+        // Use atomicAdd to aggregate across blocks
+        int block_active = active_inits;
+        int block_alive = alive_inits;
+        atomicAdd((int*)&pool->total_spawned, block_alive);  // temp use for counting
+    }
+    __syncthreads();
+
     if (idx == 0) {
+        int total_initialized = pool->total_spawned;
         pool->active_count = POOL_CAPACITY_MIN;
         pool->total_spawned = POOL_CAPACITY_MIN;
         pool->total_culled = 0;
         pool->alive_indices_count = POOL_CAPACITY_MIN;
-        printf("V:init_pool_done cap=%d alive_indices_count=%d\n", capacity, POOL_CAPACITY_MIN);
+        printf("V:init_pool_done cap=%d alive=%d threads_worked=%d\n", capacity, POOL_CAPACITY_MIN, total_initialized);
     }
 }
 

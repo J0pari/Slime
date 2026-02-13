@@ -101,7 +101,8 @@ __device__ void reconstruct_genome_from_archive(
     DEVICE_VALIDATE_RANGE(genome_length, 1, GENOME_SIZE);
     DEVICE_VALIDATE_RANGE(num_deltas, 0, max_deltas);
 
-    DEVICE_FATAL_IF(parent_hash == 0, "reconstruct_genome_from_archive: parent_hash is 0 (invalid)");
+    // UINT64_MAX-1 is the hash table empty sentinel - if we see it, an entry was used before initialization
+    DEVICE_FATAL_IF(parent_hash == UINT64_MAX - 1, "reconstruct_genome_from_archive: parent_hash is HASH_TABLE_EMPTY_KEY (uninitialized entry)");
 
     if (parent_hash == UINT64_MAX) {
         for (int i = 0; i < genome_length; i++) {

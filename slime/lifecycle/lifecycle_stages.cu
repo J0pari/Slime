@@ -279,6 +279,8 @@ __device__ void lifecycle_transition_device(Organism* organism) {
         entry->generation = generation;
         entry->age = 0;
         entry->genome_hash = archive->genome_hash[elite_idx];
+        entry->parent_hash = archive->genome_hash[elite_idx];
+        entry->num_deltas = 0;
 
         for (int d = 0; d < hw_dim; d++) {
             behavioral_agents[idx].hw_coords[d] = archive->hw_coords[elite_idx * hw_dim + d];

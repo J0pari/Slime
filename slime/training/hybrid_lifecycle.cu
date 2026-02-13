@@ -29,6 +29,80 @@ __device__ int g_block_counter = 0;
 __device__ int g_grid_barrier_count = 0;
 __device__ int g_grid_barrier_sense = 0;
 
+// Aggregate printf counters - atomicAdd to count, grid_barrier, then one thread prints total
+__device__ int g_blocks_entered = 0;
+__device__ int g_blocks_grad = 0;
+__device__ int g_blocks_ca_fwd = 0;
+__device__ int g_blocks_flow = 0;
+__device__ int g_blocks_bwd = 0;
+__device__ int g_blocks_complete = 0;
+__device__ int g_diag6_progress_count = 0;
+__device__ int g_diag7_tdr_warning_count = 0;
+__device__ int g_diag12_weight_ptr_count = 0;
+__device__ int g_diag13_neigh_read_count = 0;
+__device__ int g_diag15_input_bad_count = 0;
+__device__ int g_diag16_post_neigh_count = 0;
+__device__ int g_diag17_pre_perc_count = 0;
+__device__ int g_diag19_perc_w_bad_count = 0;
+__device__ int g_diag20_perc_acc_bad_count = 0;
+__device__ int g_diag21_perc_bad_count = 0;
+__device__ int g_diag22_post_perc_count = 0;
+__device__ int g_diag23_pre_inter_count = 0;
+__device__ int g_diag25_inter_prog_count = 0;
+__device__ int g_diag26_inter_sample_count = 0;
+__device__ int g_diag27_pregelu_bad_count = 0;
+__device__ int g_diag28_gelu_bad_count = 0;
+__device__ int g_diag29_post_inter_count = 0;
+__device__ int g_diag30_inter_slow_count = 0;
+__device__ int g_diag31_pre_out_count = 0;
+__device__ int g_diag32_out_bad_count = 0;
+__device__ int g_diag33_gate_bad_count = 0;
+__device__ int g_diag34_post_out_count = 0;
+__device__ int g_diag35_pre_save_count = 0;
+__device__ int g_diag37_perc_save_verify_count = 0;
+__device__ int g_diag40_post_save_count = 0;
+__device__ int g_diag42_pre_caout_count = 0;
+__device__ int g_diag43_caout_bad_count = 0;
+__device__ int g_diag44_post_caout_count = 0;
+__device__ int g_diag45_timing_count = 0;
+__device__ int g_diag46_iter_slow_count = 0;
+__device__ int g_diag47_stack_corrupt_count = 0;
+__device__ int g_diag48_nancheck_count = 0;
+__device__ int g_diag49_thread_prog_count = 0;
+__device__ int g_diag50_thread_exit_count = 0;
+__device__ int g_diag51_warp_count = 0;
+__device__ int g_diag52_block_done_count = 0;
+__device__ int g_diag53_sync_count = 0;
+// V: verbose progress counters for backward pass
+__device__ int g_v_flow_done_count = 0;
+__device__ int g_v_bwd_enter_count = 0;
+__device__ int g_v_bwd_fatal_checks_count = 0;
+__device__ int g_v_bwd_chunk_count = 0;
+__device__ int g_v_bwd_value_grad_count = 0;
+__device__ int g_v_bwd_inter_grad_count = 0;
+__device__ int g_v_bwd_perc_grad_count = 0;
+__device__ int g_v_bwd_done_count = 0;
+__device__ int g_v_bwd_zero_dw_count = 0;
+__device__ int g_v_bwd_setup_done_count = 0;
+__device__ int g_v_bwd_chunks_done_count = 0;
+__device__ int g_v_bwd_inter_grad_copy_count = 0;
+__device__ int g_v_bwd_perc_grad_copy_count = 0;
+__device__ int g_v_bwd_grad_conc_count = 0;
+__device__ int g_v_bwd_diffusion_launch_count = 0;
+__device__ int g_v_bwd_chunk0_count = 0;
+__device__ int g_v_bwd_i_done_count = 0;
+__device__ int g_v_bwd_v_done_count = 0;
+__device__ int g_v_bwd_chunk2_enter_count = 0;
+__device__ int g_v_bwd_di_write_count = 0;
+__device__ int g_v_bwd_perc_load_count = 0;
+__device__ int g_v_bwd_dp_write_count = 0;
+__device__ int g_v_bwd_im2col_count = 0;
+__device__ int g_v_bwd_conv_fp16_count = 0;
+__device__ int g_v_bwd_input_grad_count = 0;
+__device__ int g_v_bwd_scatter_count = 0;
+__device__ int g_v_bwd_diff_device_count = 0;
+__device__ int g_v_post_bwd_barrier_count = 0;
+
 __device__ __forceinline__ void grid_barrier(int num_blocks) {
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -45,6 +119,16 @@ __device__ __forceinline__ void grid_barrier(int num_blocks) {
         }
     }
     __syncthreads();
+}
+
+// Helper: after grid_barrier, one thread prints aggregate and resets counter
+__device__ __forceinline__ void print_aggregate_and_reset(const char* label, int* counter, int num_blocks) {
+    grid_barrier(num_blocks);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("V:%s blocks=%d\n", label, *counter);
+        *counter = 0;
+    }
+    __threadfence();
 }
 
 __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(PoolEntry* entry) {
@@ -225,7 +309,7 @@ __device__ void load_batch_device(Organism* organism) {
     float* batch_images_out = training_mode->batch_images;
     int* batch_labels_out = training_mode->batch_labels;
 
-    if (tid == 0) printf("V:L1_pre\n");
+    if (tid == 0 && blockIdx.x == 0) printf("V:L1_pre\n");
     if (tid == 0) {
         for (int idx = 0; idx < batch_size; idx++) {
             int src_idx = (offset + idx) % dataset_size;
@@ -234,10 +318,10 @@ __device__ void load_batch_device(Organism* organism) {
             batch_labels_out[idx] = all_labels[src_idx];
         }
     }
-    if (tid == 0) printf("V:L1_post\n");
+    if (tid == 0 && blockIdx.x == 0) printf("V:L1_post\n");
     __syncthreads();
 
-    if (tid == 0) printf("V:L2_pre\n");
+    if (tid == 0 && blockIdx.x == 0) printf("V:L2_pre\n");
     for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
         int idx = work_idx / batch_stride;
         int pixel_idx = work_idx % batch_stride;
@@ -294,7 +378,7 @@ __device__ void load_batch_device(Organism* organism) {
             batch_images_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
         }
     }
-    if (tid == 0) printf("V:L2_post\n");
+    if (tid == 0 && blockIdx.x == 0) printf("V:L2_post\n");
     __syncthreads();
 
     DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "load_batch: batch_ca_states_pool null");
@@ -309,7 +393,7 @@ __device__ void load_batch_device(Organism* organism) {
 
     int total_positions = batch_size * batch_stride;
     DEVICE_FATAL_IF(total_positions <= 0 || total_positions > BATCH_SIZE_MAX * CA_FIELD_SIZE, "load_batch: total_positions OOB");
-    if (tid == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
+    if (tid == 0 && blockIdx.x == 0) printf("V:L3_loop_pre total=%d\n", total_positions);
 
     
     constexpr int IMG_CHANNEL_START = 11;
@@ -335,7 +419,7 @@ __device__ void load_batch_device(Organism* organism) {
         }
         __syncthreads();
     }
-    if (tid == 0) printf("V:L3_loop_done\n");
+    if (tid == 0 && blockIdx.x == 0) printf("V:L3_loop_done\n");
 }
 
 __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
@@ -350,7 +434,15 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     int compact_idx = wave_start + blockIdx.x;
     int wave_position = blockIdx.x;
     int tid = threadIdx.x;
-    if (blockIdx.x == 0 && tid == 0) g_block_counter = 0;
+    if (blockIdx.x == 0 && tid == 0) {
+        g_block_counter = 0;
+        g_blocks_entered = 0;
+        g_blocks_grad = 0;
+        g_blocks_ca_fwd = 0;
+        g_blocks_flow = 0;
+        g_blocks_bwd = 0;
+        g_blocks_complete = 0;
+    }
     __threadfence();
     ComponentPool* pool = organism->pool;
 
@@ -503,7 +595,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     if (tid == 0 && arch.grid_size != organism->current_activation_grid_size) {
         organism->current_activation_grid_size = arch.grid_size;
     }
-    if (tid == 0) printf("V:BLK_ARCH blk=%d grid=%d heads=%d hdim=%d ch=%d\n", blockIdx.x, arch.grid_size, arch.num_heads, arch.head_dim, arch.channels);
+    if (tid == 0 && blockIdx.x == 0) printf("V:BLK_ARCH grid=%d heads=%d hdim=%d ch=%d blocks=%d\n", arch.grid_size, arch.num_heads, arch.head_dim, arch.channels, gridDim.x);
 
     if (s_use_gradients) {
         if (tid == 0) {
@@ -515,7 +607,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             DEVICE_FATAL_IF(training_mode->batch_labels == nullptr, "hybrid: batch_labels is null");
         }
         __syncthreads();
-        if (tid == 0) printf("V:GRAD_ENTER blk=%d\n", blockIdx.x);
+        if (tid == 0 && blockIdx.x == 0) printf("V:GRAD_ENTER\n");
 
         {
             ADTape* tape = &ca_state->tape;
@@ -575,7 +667,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             DEVICE_FATAL_IF(pre_gelu_saved == nullptr, "CA_LOOP: pre_gelu_saved is null");
             int my_act_size = batch_size * num_heads * cells_per_grid * head_dim;
             int my_max_abs_idx = s_wave_offsets.activations_offset + my_act_size - 1;
-            if (tid == 0) printf("V:CA_LOOP_ENTER blk=%d hdim=%d act_off=%d my_size=%d max_abs=%d\n", blockIdx.x, head_dim, s_wave_offsets.activations_offset, my_act_size, my_max_abs_idx);
+            if (tid == 0) atomicAdd(&g_blocks_ca_fwd, 1);
 
             PROVENANCE_FATAL_IF(total_cells <= 0, "CA_LOOP total_cells<=0");
             PROVENANCE_FATAL_IF(total_cells > 1000000, "CA_LOOP total_cells>1M");
@@ -620,18 +712,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int expected_iters = (total_cells + blockDim.x - 1) / blockDim.x;
             long long kernel_start_clock = clock64();
 
-            // DIAG 1: Initial state dump for this block
+            // DIAG 1: Initial state dump - aggregate count
             if (tid == 0) {
-                printf("DIAG1_INIT blk=%d hdim=%d heads=%d cells=%d batch=%d grid=%d chan=%d\n",
-                       blockIdx.x, head_dim, num_heads, cells_per_grid, batch_size, grid_size, channels);
-                printf("DIAG1_SIZES blk=%d total_cells=%d expected_iters=%d blockDim=%d\n",
-                       blockIdx.x, total_cells, expected_iters, blockDim.x);
-                printf("DIAG1_PTRS blk=%d ca_in=%p ca_out=%p perc_w=%p inter_w=%p val_w=%p\n",
-                       blockIdx.x, (void*)ca_input, (void*)ca_output,
-                       (void*)ca_state->perception_weights, (void*)ca_state->interaction_weights,
-                       (void*)ca_state->value_weights);
-                printf("DIAG1_SAVE blk=%d perc_s=%p inter_s=%p gelu_s=%p\n",
-                       blockIdx.x, (void*)perception_saved, (void*)interaction_saved, (void*)pre_gelu_saved);
+                int count = atomicAdd(&g_blocks_ca_fwd, 1) + 1;
+                if (count == gridDim.x) {
+                    printf("DIAG1_INIT blocks=%d hdim=%d heads=%d cells=%d batch=%d grid=%d chan=%d\n",
+                           gridDim.x, head_dim, num_heads, cells_per_grid, batch_size, grid_size, channels);
+                }
             }
 
             // DIAG 2: Validate all pointer addresses are in reasonable range (not null, not obviously bad)
@@ -653,9 +740,17 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             PROVENANCE_FATAL_IF(cells_per_grid <= 0 || cells_per_grid > 65536, "DIAG3: cells_per_grid insane");
             PROVENANCE_FATAL_IF(total_cells <= 0 || total_cells > 10000000, "DIAG3: total_cells insane");
 
-            // DIAG 4: Per-thread initial state (sample threads)
-            if (tid == 0 || tid == 1 || tid == 127 || tid == 128 || tid == 255) {
-                printf("DIAG4_THREAD blk=%d tid=%d start_work_idx=%d\n", blockIdx.x, tid, tid);
+            // DIAG 4: Per-thread initial state - count threads entering
+            __shared__ int s_diag4_threads;
+            if (tid == 0) s_diag4_threads = 0;
+            __syncthreads();
+            atomicAdd(&s_diag4_threads, 1);
+            __syncthreads();
+            if (tid == 0) {
+                int total_threads = atomicAdd(&g_blocks_entered, s_diag4_threads);
+                if (blockIdx.x == gridDim.x - 1) {
+                    printf("DIAG4_THREADS total=%d blocks=%d\n", total_threads + s_diag4_threads, gridDim.x);
+                }
             }
 
             int loop_iter = 0;
@@ -671,26 +766,23 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
             for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x, loop_iter++) {
 
-                // DIAG 5: Infinite loop protection
+                // DIAG 5: Infinite loop protection - count occurrences
                 if (loop_iter > max_iter_safety) {
-                    printf("DIAG5_INFINITE_LOOP blk=%d tid=%d iter=%d max=%d\n",
-                           blockIdx.x, tid, loop_iter, max_iter_safety);
+                    atomicAdd(&g_blocks_flow, 1);  // reuse counter for infinite loop count
                     break;
                 }
 
                 long long iter_start = clock64();
                 long long iter_since_start_ms = (iter_start - kernel_start_clock) / 1000000;
 
-                // DIAG 6: Progress tracking every 5 iterations (more frequent)
-                if (tid == 0 && (loop_iter % 5 == 0)) {
-                    printf("DIAG6_PROG blk=%d iter=%d/%d ms=%lld hdim=%d\n",
-                           blockIdx.x, loop_iter, expected_iters, iter_since_start_ms, head_dim);
+                // DIAG 6: Progress tracking - count all thread iterations at 5-iter checkpoints
+                if (loop_iter % 5 == 0) {
+                    atomicAdd(&g_diag6_progress_count, 1);
                 }
 
-                // DIAG 7: TDR warning - approaching 60 second timeout
-                if (iter_since_start_ms > 50000 && tid == 0 && loop_iter % 10 == 0) {
-                    printf("DIAG7_TDR_WARNING blk=%d iter=%d ms=%lld APPROACHING_TIMEOUT\n",
-                           blockIdx.x, loop_iter, iter_since_start_ms);
+                // DIAG 7: TDR warning threshold - count all threads exceeding 2s from start
+                if (iter_since_start_ms > 2000) {
+                    atomicAdd(&g_diag7_tdr_warning_count, 1);
                 }
 
                 // DIAG 8: Verify loop variables not corrupted
@@ -737,11 +829,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 half* inter_w = &ca_state->interaction_weights[inter_w_offset];
                 half* val_w = &ca_state->value_weights[val_w_offset];
 
-                // DIAG 12: Print weight pointers on first iteration per block
-                if (tid == 0 && loop_iter == 0) {
-                    printf("DIAG12_WEIGHTS blk=%d perc=%p inter=%p val=%p\n",
-                           blockIdx.x, (void*)perc_w, (void*)inter_w, (void*)val_w);
-                }
+                // DIAG 12: Weight pointer calculations done - count all threads
+                atomicAdd(&g_diag12_weight_ptr_count, 1);
 
                 float neighborhood[3][3][MAX_CHANNELS];
 
@@ -751,10 +840,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 // ============ NEIGHBORHOOD READ ============
                 long long t_neigh_start = clock64();
 
-                // DIAG 13: Before neighborhood read
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG13_PRE_NEIGH blk=%d iter=%d\n", blockIdx.x, loop_iter);
-                }
+                // DIAG 13: Before neighborhood read - count all threads
+                atomicAdd(&g_diag13_neigh_read_count, 1);
 
                 for (int dy = -1; dy <= 1; dy++) {
                     for (int dx = -1; dx <= 1; dx++) {
@@ -773,10 +860,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                             float val = ca_input[state_idx + c];
                             neighborhood[dy + 1][dx + 1][c] = val;
 
-                            // DIAG 15: Check for NaN/Inf in input (first few iterations)
-                            if (loop_iter < 2 && (isnan(val) || isinf(val))) {
-                                printf("DIAG15_INPUT_BAD blk=%d iter=%d dy=%d dx=%d c=%d val=%f\n",
-                                       blockIdx.x, loop_iter, dy, dx, c, val);
+                            // DIAG 15: Check for NaN/Inf in input - count all occurrences
+                            if (isnan(val) || isinf(val)) {
+                                atomicAdd(&g_diag15_input_bad_count, 1);
                             }
                         }
                     }
@@ -784,11 +870,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_neigh_end = clock64();
 
-                // DIAG 16: After neighborhood read
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG16_POST_NEIGH blk=%d iter=%d us=%lld\n",
-                           blockIdx.x, loop_iter, (t_neigh_end - t_neigh_start)/1000);
-                }
+                // DIAG 16: After neighborhood read - count all threads
+                atomicAdd(&g_diag16_post_neigh_count, 1);
 
                 // ============ PERCEPTION COMPUTATION ============
                 float perception[MAX_HEAD_DIM];
@@ -798,11 +881,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_perc_start = clock64();
 
-                // DIAG 17: Before perception loop
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG17_PRE_PERC blk=%d iter=%d hdim=%d macs=%d\n",
-                           blockIdx.x, loop_iter, head_dim, head_dim * 9 * channels);
-                }
+                // DIAG 17: Before perception loop - count all threads
+                atomicAdd(&g_diag17_pre_perc_count, 1);
 
                 for (int h = 0; h < head_dim; h++) {
                     // DIAG 18: Check perception loop variable
@@ -820,12 +900,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                                 half w_half = perc_w[w_idx];
                                 float w_float = __half2float(w_half);
 
-                                // DIAG 19: Check half conversion
+                                // DIAG 19: Check half conversion - count all bad weights
                                 if (isnan(w_float) || isinf(w_float)) {
-                                    if (tid == 0 && loop_iter < 2) {
-                                        printf("DIAG19_PERC_W_BAD blk=%d h=%d c=%d w=%.6f\n",
-                                               blockIdx.x, h, c, w_float);
-                                    }
+                                    atomicAdd(&g_diag19_perc_w_bad_count, 1);
                                 }
 
                                 acc += neigh_val * w_float;
@@ -833,30 +910,23 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         }
                     }
 
-                    // DIAG 20: Check accumulator before activation
+                    // DIAG 20: Check accumulator before activation - count all bad
                     if (isnan(acc) || isinf(acc)) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG20_PERC_ACC_BAD blk=%d h=%d acc=%.6f\n", blockIdx.x, h, acc);
-                        }
+                        atomicAdd(&g_diag20_perc_acc_bad_count, 1);
                     }
 
                     perception[h] = activation_relu(acc);
 
-                    // DIAG 21: Check perception value after activation
+                    // DIAG 21: Check perception value after activation - count all bad
                     if (isnan(perception[h]) || isinf(perception[h])) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG21_PERC_BAD blk=%d h=%d perc=%.6f\n", blockIdx.x, h, perception[h]);
-                        }
+                        atomicAdd(&g_diag21_perc_bad_count, 1);
                     }
                 }
 
                 long long t_perc_end = clock64();
 
-                // DIAG 22: After perception
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG22_POST_PERC blk=%d iter=%d us=%lld p0=%.4f\n",
-                           blockIdx.x, loop_iter, (t_perc_end - t_perc_start)/1000, perception[0]);
-                }
+                // DIAG 22: After perception - count all threads
+                atomicAdd(&g_diag22_post_perc_count, 1);
 
                 // ============ INTERACTION COMPUTATION (THE BIG ONE - hdim^2 MACs) ============
                 float interaction[MAX_HEAD_DIM];
@@ -868,12 +938,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_inter_start = clock64();
 
-                // DIAG 23: Before interaction - THIS IS THE 16x DIFFERENCE
-                // hdim=16: 16*16=256 MACs, hdim=64: 64*64=4096 MACs
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG23_PRE_INTER blk=%d iter=%d hdim=%d macs=%d\n",
-                           blockIdx.x, loop_iter, head_dim, head_dim * head_dim);
-                }
+                // DIAG 23: Before interaction - count all threads
+                atomicAdd(&g_diag23_pre_inter_count, 1);
 
                 // DIAG 24: Detailed interaction loop tracking for hdim=64
                 int inter_checkpoint = head_dim / 4; // Report every 25%
@@ -881,11 +947,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 for (int h = 0; h < head_dim; h++) {
                     PROVENANCE_FATAL_IF(h < 0 || h >= MAX_HEAD_DIM, "DIAG24: interaction h OOB");
 
-                    // DIAG 25: Track progress through interaction for large hdim
-                    if (head_dim >= 32 && tid == 0 && loop_iter % 50 == 0 &&
-                        inter_checkpoint > 0 && h % inter_checkpoint == 0) {
-                        printf("DIAG25_INTER_PROG blk=%d iter=%d h=%d/%d\n",
-                               blockIdx.x, loop_iter, h, head_dim);
+                    // DIAG 25: Track progress through interaction for large hdim - count checkpoints
+                    if (head_dim >= 32 && inter_checkpoint > 0 && h % inter_checkpoint == 0) {
+                        atomicAdd(&g_diag25_inter_prog_count, 1);
                     }
 
                     float acc = 0.0f;
@@ -900,10 +964,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         half w_half = inter_w[w_idx];
                         float w_float = __half2float(w_half);
 
-                        // DIAG 26: Check values in inner loop (sample)
-                        if (h == 0 && j == 0 && loop_iter == 0 && tid == 0) {
-                            printf("DIAG26_INTER_SAMPLE blk=%d p=%.4f w=%.4f\n",
-                                   blockIdx.x, p_val, w_float);
+                        // DIAG 26: Check values in inner loop - count first samples
+                        if (h == 0 && j == 0 && loop_iter == 0) {
+                            atomicAdd(&g_diag26_inter_sample_count, 1);
                         }
 
                         acc += p_val * w_float;
@@ -911,20 +974,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                     pre_gelu_vals[h] = acc;
 
-                    // DIAG 27: Check pre-gelu value
+                    // DIAG 27: Check pre-gelu value - count all bad
                     if (isnan(acc) || isinf(acc)) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG27_PREGELU_BAD blk=%d h=%d acc=%.6f\n", blockIdx.x, h, acc);
-                        }
+                        atomicAdd(&g_diag27_pregelu_bad_count, 1);
                     }
 
                     float gelu = activation_gelu(acc);
 
-                    // DIAG 28: Check gelu result
+                    // DIAG 28: Check gelu result - count all bad
                     if (isnan(gelu) || isinf(gelu)) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG28_GELU_BAD blk=%d h=%d gelu=%.6f\n", blockIdx.x, h, gelu);
-                        }
+                        atomicAdd(&g_diag28_gelu_bad_count, 1);
                     }
 
                     interaction[h] = gelu;
@@ -934,16 +993,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 long long t_inter_end = clock64();
                 long long inter_time_us = (t_inter_end - t_inter_start) / 1000;
 
-                // DIAG 29: After interaction - KEY TIMING FOR hdim COMPARISON
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG29_POST_INTER blk=%d iter=%d us=%lld hdim=%d i0=%.4f sum=%.4f\n",
-                           blockIdx.x, loop_iter, inter_time_us, head_dim, interaction[0], interaction_sum);
-                }
+                // DIAG 29: After interaction - count all threads
+                atomicAdd(&g_diag29_post_inter_count, 1);
 
-                // DIAG 30: Warn if interaction taking too long (potential hang indicator)
-                if (inter_time_us > 100000 && tid == 0) { // > 100ms
-                    printf("DIAG30_INTER_SLOW blk=%d iter=%d us=%lld hdim=%d\n",
-                           blockIdx.x, loop_iter, inter_time_us, head_dim);
+                // DIAG 30: Warn if interaction taking too long - count all slow threads
+                if (inter_time_us > 100000) { // > 100ms
+                    atomicAdd(&g_diag30_inter_slow_count, 1);
                 }
 
                 // ============ OUTPUT COMPUTATION ============
@@ -951,10 +1006,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_out_start = clock64();
 
-                // DIAG 31: Before output
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG31_PRE_OUT blk=%d iter=%d\n", blockIdx.x, loop_iter);
-                }
+                // DIAG 31: Before output - count all threads
+                atomicAdd(&g_diag31_pre_out_count, 1);
 
                 for (int c = 0; c < channels; c++) {
                     PROVENANCE_FATAL_IF(c < 0 || c >= MAX_CHANNELS, "DIAG31: output c OOB");
@@ -972,11 +1025,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     }
                     output[c] = acc;
 
-                    // DIAG 32: Check output value
+                    // DIAG 32: Check output value - count all bad
                     if (isnan(output[c]) || isinf(output[c])) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG32_OUT_BAD blk=%d c=%d out=%.6f\n", blockIdx.x, c, output[c]);
-                        }
+                        atomicAdd(&g_diag32_out_bad_count, 1);
                     }
                 }
 
@@ -984,20 +1035,15 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
                 float gate = activation_sigmoid(gate_input);
 
+                // DIAG 33: Check gate value - count all bad
                 if (isnan(gate) || isinf(gate)) {
-                    if (tid == 0 && loop_iter < 2) {
-                        printf("DIAG33_GATE_BAD blk=%d gate_in=%.6f gate=%.6f\n",
-                               blockIdx.x, gate_input, gate);
-                    }
+                    atomicAdd(&g_diag33_gate_bad_count, 1);
                 }
 
                 long long t_out_end = clock64();
 
-                // DIAG 34: After output
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG34_POST_OUT blk=%d iter=%d us=%lld o0=%.4f gate=%.4f\n",
-                           blockIdx.x, loop_iter, (t_out_end - t_out_start)/1000, output[0], gate);
-                }
+                // DIAG 34: After output - count all threads
+                atomicAdd(&g_diag34_post_out_count, 1);
 
                 // ============ SAVE ACTIVATIONS ============
                 long long t_save_start = clock64();
@@ -1013,10 +1059,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 PROVENANCE_FATAL_IF(saved_base < 0, "DIAG35: saved_base negative");
                 PROVENANCE_FATAL_IF(max_saved_idx >= expected_saved_size, "DIAG35: saved OOB");
 
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG35_PRE_SAVE blk=%d iter=%d base=%d max=%d exp=%d\n",
-                           blockIdx.x, loop_iter, saved_base, max_saved_idx, expected_saved_size);
-                }
+                // DIAG 35: Pre-save - count all threads
+                atomicAdd(&g_diag35_pre_save_count, 1);
 
                 // DIAG 36: Save perception
                 for (int h = 0; h < head_dim; h++) {
@@ -1025,11 +1069,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     perception_saved[idx] = perception[h];
                 }
 
-                // DIAG 37: Verify perception save
-                if (tid == 0 && loop_iter == 0) {
-                    float verify = perception_saved[saved_base];
-                    printf("DIAG37_PERC_SAVE_VERIFY blk=%d wrote=%.4f read=%.4f\n",
-                           blockIdx.x, perception[0], verify);
+                // DIAG 37: Verify perception save - count all first-iteration saves
+                if (loop_iter == 0) {
+                    atomicAdd(&g_diag37_perc_save_verify_count, 1);
                 }
 
                 // DIAG 38: Save interaction
@@ -1046,11 +1088,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_save_end = clock64();
 
-                // DIAG 40: After saves
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG40_POST_SAVE blk=%d iter=%d us=%lld\n",
-                           blockIdx.x, loop_iter, (t_save_end - t_save_start)/1000);
-                }
+                // DIAG 40: After saves - count all threads
+                atomicAdd(&g_diag40_post_save_count, 1);
 
                 // ============ WRITE CA OUTPUT ============
                 long long t_caout_start = clock64();
@@ -1066,11 +1105,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 PROVENANCE_FATAL_IF(out_idx < 0, "DIAG41: out_idx negative");
                 PROVENANCE_FATAL_IF(max_out_idx >= expected_out_size, "DIAG41: ca_out OOB");
 
-                // DIAG 42: Before ca_output write
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG42_PRE_CAOUT blk=%d iter=%d idx=%d max=%d exp=%d\n",
-                           blockIdx.x, loop_iter, out_idx, max_out_idx, expected_out_size);
-                }
+                // DIAG 42: Before ca_output write - count all threads
+                atomicAdd(&g_diag42_pre_caout_count, 1);
 
                 for (int c = 0; c < channels; c++) {
                     int idx = out_idx + c;
@@ -1079,12 +1115,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     float input_val = neighborhood[1][1][c];
                     float out_val = input_val * (1.0f - gate) + output[c] * gate;
 
-                    // DIAG 43: Check output value
+                    // DIAG 43: Check output value - count all bad
                     if (isnan(out_val) || isinf(out_val)) {
-                        if (tid == 0 && loop_iter < 2) {
-                            printf("DIAG43_CAOUT_BAD blk=%d c=%d in=%.4f out=%.4f gate=%.4f\n",
-                                   blockIdx.x, c, input_val, output[c], gate);
-                        }
+                        atomicAdd(&g_diag43_caout_bad_count, 1);
                     }
 
                     ca_output[idx] = out_val;
@@ -1092,46 +1125,35 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 long long t_caout_end = clock64();
 
-                // DIAG 44: After ca_output write
-                if (tid == 0 && loop_iter % 20 == 0) {
-                    printf("DIAG44_POST_CAOUT blk=%d iter=%d us=%lld\n",
-                           blockIdx.x, loop_iter, (t_caout_end - t_caout_start)/1000);
-                }
+                // DIAG 44: After ca_output write - count all threads
+                atomicAdd(&g_diag44_post_caout_count, 1);
 
                 // ============ ITERATION COMPLETE ============
                 long long iter_end = clock64();
                 long long iter_total_us = (iter_end - iter_start) / 1000;
                 long long total_ms = (iter_end - kernel_start_clock) / 1000000;
 
-                // DIAG 45: Comprehensive timing breakdown every 10 iterations
-                if (tid == 0 && loop_iter % 10 == 0) {
-                    long long neigh_us = (t_neigh_end - t_neigh_start) / 1000;
-                    long long perc_us = (t_perc_end - t_perc_start) / 1000;
-                    long long out_us = (t_out_end - t_out_start) / 1000;
-                    long long save_us = (t_save_end - t_save_start) / 1000;
-                    long long caout_us = (t_caout_end - t_caout_start) / 1000;
-                    printf("DIAG45_TIMING blk=%d iter=%d neigh=%lld perc=%lld inter=%lld out=%lld save=%lld caout=%lld total=%lld ms=%lld\n",
-                           blockIdx.x, loop_iter, neigh_us, perc_us, inter_time_us, out_us, save_us, caout_us, iter_total_us, total_ms);
+                // DIAG 45: Timing breakdown - count timing checkpoints
+                if (loop_iter % 10 == 0) {
+                    atomicAdd(&g_diag45_timing_count, 1);
                 }
 
-                // DIAG 46: Warn if iteration took too long
-                if (iter_total_us > 500000 && tid == 0) { // > 500ms
-                    printf("DIAG46_ITER_SLOW blk=%d iter=%d us=%lld hdim=%d\n",
-                           blockIdx.x, loop_iter, iter_total_us, head_dim);
+                // DIAG 46: Warn if iteration took too long - count all slow threads
+                if (iter_total_us > 500000) { // > 500ms
+                    atomicAdd(&g_diag46_iter_slow_count, 1);
                 }
 
-                // DIAG 47: Stack canary check
+                // DIAG 47: Stack canary check - count all corruptions
                 if (stack_canary_start != 3.14159265f || stack_canary_mid1 != 2.71828f ||
                     stack_canary_mid2 != 1.41421f || stack_canary_mid3 != 1.73205f) {
-                    printf("DIAG47_STACK_CORRUPT blk=%d tid=%d iter=%d\n", blockIdx.x, tid, loop_iter);
+                    atomicAdd(&g_diag47_stack_corrupt_count, 1);
                 }
 
-                // DIAG 48: Check for NaN/Inf summary
+                // DIAG 48: Check for NaN/Inf summary - count all bad
                 int any_nan = isnan(perception[0]) || isnan(interaction[0]) || isnan(output[0]) || isnan(gate);
                 int any_inf = isinf(perception[0]) || isinf(interaction[0]) || isinf(output[0]) || isinf(gate);
                 if (any_nan || any_inf) {
-                    printf("DIAG48_NANCHECK blk=%d tid=%d iter=%d nan=%d inf=%d\n",
-                           blockIdx.x, tid, loop_iter, any_nan, any_inf);
+                    atomicAdd(&g_diag48_nancheck_count, 1);
                 }
 
                 // Update warp progress tracking
@@ -1140,10 +1162,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 last_completed_iter = loop_iter;
                 prev_iter_end = iter_end;
 
-                // DIAG 49: Per-thread completion tracking (sample threads)
-                if ((tid == 0 || tid == 127 || tid == 255) && loop_iter % 50 == 0) {
-                    printf("DIAG49_THREAD_PROG blk=%d tid=%d iter=%d work_idx=%d next=%d\n",
-                           blockIdx.x, tid, loop_iter, work_idx, work_idx + blockDim.x);
+                // DIAG 49: Per-thread completion tracking - count progress checkpoints
+                if (loop_iter % 50 == 0) {
+                    atomicAdd(&g_diag49_thread_prog_count, 1);
                 }
             }
 
@@ -1151,41 +1172,32 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             long long loop_end = clock64();
             long long total_loop_ms = (loop_end - kernel_start_clock) / 1000000;
 
-            // DIAG 50: Loop exit for this thread
-            if (tid == 0 || tid == 127 || tid == 255) {
-                printf("DIAG50_THREAD_EXIT blk=%d tid=%d final_iter=%d expected=%d ms=%lld hdim=%d\n",
-                       blockIdx.x, tid, last_completed_iter, expected_iters - 1, total_loop_ms, head_dim);
-            }
+            // DIAG 50: Loop exit for all threads
+            atomicAdd(&g_diag50_thread_exit_count, 1);
 
-            // DIAG 51: Warp-level completion
+            // DIAG 51: Warp-level completion - count all warps
             unsigned int completed_mask = __ballot_sync(0xFFFFFFFF, 1);
             if (tid % 32 == 0) {
-                printf("DIAG51_WARP blk=%d warp=%d mask=0x%08X last_iter=%d\n",
-                       blockIdx.x, tid/32, completed_mask, s_warp_last_iter[tid/32]);
+                atomicAdd(&g_diag51_warp_count, 1);
             }
 
-            // DIAG 52: Block-level summary (only tid 0)
+            // DIAG 52: Block-level summary - count all blocks
             if (tid == 0) {
-                printf("DIAG52_BLOCK_DONE blk=%d iters=%d expected=%d ms=%lld hdim=%d SUCCESS\n",
-                       blockIdx.x, last_completed_iter + 1, expected_iters, total_loop_ms, head_dim);
+                atomicAdd(&g_diag52_block_done_count, 1);
             }
 
             // Final stack canary check
             PROVENANCE_FATAL_IF(stack_canary_start != 3.14159265f, "DIAG_FINAL: stack canary start corrupted");
         }
 
-        // DIAG 53: Before first __syncthreads() after loop
-        if (tid == 0) {
-            long long sync1_start = clock64();
-            printf("DIAG53_PRE_SYNC1 blk=%d clock=%lld\n", blockIdx.x, sync1_start);
-        }
+        // DIAG 53: Sync after loop - count all threads reaching sync
+        atomicAdd(&g_diag53_sync_count, 1);
         __syncthreads();
-        if (tid == 0) {
-            long long sync1_end = clock64();
-            printf("DIAG53_POST_SYNC1 blk=%d clock=%lld\n", blockIdx.x, sync1_end);
-        }
 
-        if (tid == 0) printf("V:CA_FWD_DONE blk=%d\n", blockIdx.x);
+        // V:CA_FWD_DONE - count blocks completing CA forward
+        if (tid == 0) {
+            atomicAdd(&g_blocks_ca_fwd, 1);
+        }
 
         __syncthreads();
         if (s_error_flag) return;
@@ -1306,10 +1318,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
         }
         __syncthreads();
-        if (tid == 0) printf("V:FLOW_DONE blk=%d\n", blockIdx.x);
+        // V:FLOW_DONE - count blocks completing flow
+        if (tid == 0) {
+            atomicAdd(&g_v_flow_done_count, 1);
+        }
 
         grid_barrier(gridDim.x);
-        if (tid == 0) printf("V:POST_FLOW_BARRIER blk=%d\n", blockIdx.x);
 
         float* ca_output_grad = nullptr;
 
@@ -1641,11 +1655,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             DEVICE_FATAL_IF(s_wave_offsets.activations_offset < 0, "BWD: activations_offset negative");
             float* dL_dperception = organism->buffers->dL_dperception_buffer + s_wave_offsets.activations_offset;
             float* dL_dinteraction = organism->buffers->dL_dinteraction_buffer + s_wave_offsets.activations_offset;
-            if (tid == 0) printf("V:BWD_ENTER blk=%d\n", blockIdx.x);
+            // V:BWD_ENTER - count blocks entering backward pass
+            if (tid == 0) atomicAdd(&g_v_bwd_enter_count, 1);
 
             {
 
-            if (tid == 0) printf("V:BWD_FATAL_CHECKS_START blk=%d\n", blockIdx.x);
+            // V:BWD_FATAL_CHECKS_START - count blocks starting fatal checks
+            if (tid == 0) atomicAdd(&g_v_bwd_fatal_checks_count, 1);
             DEVICE_FATAL_IF(organism->buffers->backward_workspace == nullptr, "BWD: backward_workspace is null");
             DEVICE_FATAL_IF(s_wave_offsets.backward_ws_offset < 0, "BWD: backward_ws_offset negative");
             char* backward_ws_base = organism->buffers->backward_workspace + s_wave_offsets.backward_ws_offset;
@@ -1701,7 +1717,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             DEVICE_FATAL_IF(arch.channels <= 0, "BWD: arch.channels <= 0");
             DEVICE_FATAL_IF(total_samples <= 0, "BWD: total_samples <= 0");
             DEVICE_FATAL_IF(ca_output_grad == nullptr, "BWD: ca_output_grad is null");
-            if (tid == 0) printf("V:BWD_FATAL_CHECKS_DONE blk=%d heads=%d hdim=%d ch=%d\n", blockIdx.x, arch.num_heads, arch.head_dim, arch.channels);
+            // V:BWD_FATAL_CHECKS_DONE counted via g_v_bwd_fatal_checks_count
 
             int chunk_ws_a_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
             int chunk_ws_b_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
@@ -1724,7 +1740,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CHUNK0 blk=%d aligned=%d\n", blockIdx.x, chunk_samples_aligned);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_chunk0_count, 1);
 
                 {
                     int total_I = arch.num_heads * chunk_samples_aligned * arch.head_dim;
@@ -1749,7 +1765,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_I_DONE blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_i_done_count, 1);
 
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
@@ -1774,7 +1790,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_V_DONE blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_v_done_count, 1);
 
                 
                 {
@@ -1849,7 +1865,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 __syncthreads();
             }
 
-            if (tid == 0) printf("V:BWD_VALUE_GRAD_COPY blk=%d\n", blockIdx.x);
+            // V:BWD_VALUE_GRAD_COPY - count blocks
+            if (tid == 0) atomicAdd(&g_v_bwd_value_grad_count, 1);
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.channels;
                 int max_ws_dW = arch.num_heads * ws_dW_value_stride;
@@ -1870,7 +1887,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_VALUE_TRANSPOSE blk=%d\n", blockIdx.x);
+            // V:BWD_VALUE_TRANSPOSE counted via aggregate
             {
                 int t_tiles_x = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int t_tiles_y = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
@@ -1911,7 +1928,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_INTER_TRANSPOSE blk=%d\n", blockIdx.x);
+            // V:BWD_INTER_TRANSPOSE counted via aggregate
             {
                 int dW_tiles = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                 int total_tile_elements = dW_tiles * dW_tiles * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
@@ -1951,7 +1968,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_ZERO_DW blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_zero_dw_count, 1);
             {
                 int total_interaction = arch.num_heads * arch.head_dim * arch.head_dim;
                 int total_perception = arch.num_heads * arch.channels * arch.head_dim;
@@ -1981,7 +1998,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
             }
-            if (tid == 0) printf("V:BWD_SETUP_DONE blk=%d d_ca=%p\n", blockIdx.x, d_ca_input);
+            if (tid == 0) atomicAdd(&g_v_bwd_setup_done_count, 1);
 
             for (int chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
                 int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
@@ -1989,7 +2006,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
                 if (chunk_samples_aligned == 0) continue;
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CHUNK2_ENTER blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_chunk2_enter_count, 1);
 
                 {
                     int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
@@ -2074,7 +2091,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_DI_WRITE blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_di_write_count, 1);
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     int max_ws_dI = arch.num_heads * chunk_ws_dI_stride;
@@ -2112,7 +2129,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_PERC_LOAD blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_perc_load_count, 1);
                 {
                     int total_P = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     int max_src_P = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
@@ -2266,7 +2283,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_DP_WRITE blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_dp_write_count, 1);
                 {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
                     int max_ws_dI = arch.num_heads * chunk_ws_dI_stride;
@@ -2301,7 +2318,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_IM2COL blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_im2col_count, 1);
                 {
                     int max_input = training_mode->batch_size * arch.grid_size * arch.grid_size * arch.channels;
                     int max_im2col = chunk_samples_aligned * arch.channels;
@@ -2341,7 +2358,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_CONV_FP16 blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_conv_fp16_count, 1);
                 {
                     int total_conv = chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_conv; idx += blockDim.x) {
@@ -2417,7 +2434,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 __syncthreads();
 
-                if (tid == 0 && chunk_idx == 0) printf("V:BWD_INPUT_GRAD blk=%d\n", blockIdx.x);
+                if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_input_grad_count, 1);
                 if (d_ca_input != nullptr) {
                     int weights_per_head = arch.channels * arch.head_dim;
                     int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
@@ -2450,7 +2467,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     }
                     __syncthreads();
 
-                    if (tid == 0 && chunk_idx == 0) printf("V:BWD_SCATTER blk=%d\n", blockIdx.x);
+                    if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_scatter_count, 1);
                     PROVENANCE_FATAL_IF(d_ca_input == nullptr, "d_ca_input null");
                     PROVENANCE_FATAL_IF(ws_im2col == nullptr, "ws_im2col null");
                     PROVENANCE_ASSERT_INITIALIZED_INT(training_mode->batch_size, "batch_size");
@@ -2493,9 +2510,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
             }
 
-            if (tid == 0) printf("V:BWD_CHUNKS_DONE blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_chunks_done_count, 1);
 
-            if (tid == 0) printf("V:BWD_INTER_GRAD_COPY blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_inter_grad_copy_count, 1);
             {
                 int total_grads = arch.num_heads * arch.head_dim * arch.head_dim;
                 int max_src = arch.num_heads * ws_dW_interaction_stride;
@@ -2516,7 +2533,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_PERC_GRAD_COPY blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_perc_grad_copy_count, 1);
             {
                 int ws_dW_perception_stride = arch.channels * arch.head_dim;
                 int weights_per_head = arch.channels * arch.head_dim;
@@ -2539,7 +2556,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_GRAD_CONC blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_grad_conc_count, 1);
             if (d_ca_input != nullptr) {
                 DEVICE_FATAL_IF(organism->buffers->grad_concentration_buffer == nullptr, "BWD: grad_concentration_buffer is null");
                 float* grad_conc = organism->buffers->grad_concentration_buffer;
@@ -2555,7 +2572,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             __syncthreads();
 
-            if (tid == 0) printf("V:BWD_DIFFUSION_LAUNCH blk=%d\n", blockIdx.x);
+            if (tid == 0) atomicAdd(&g_v_bwd_diffusion_launch_count, 1);
             if (d_ca_input != nullptr && tid == 0) {
                 dim3 diff_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
                 dim3 diff_block(16, 16);
@@ -2574,7 +2591,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 float ctx_learning = training_mode->learning_rate;
                 float ctx_performance = entry->task_accuracy.value;
 
-                printf("V:BWD_DIFF_DEVICE blk=%d grid=(%d,%d)\n", blockIdx.x, diff_grid.x, diff_grid.y);
+                atomicAdd(&g_v_bwd_diff_device_count, 1);
                 diffusion_reaction_backward_device(organism);
             }
             __syncthreads();
@@ -2829,7 +2846,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
 
     grid_barrier(gridDim.x);
-    if (tid == 0) printf("V:POST_BWD_BARRIER blk=%d\n", blockIdx.x);
+    if (tid == 0) atomicAdd(&g_v_post_bwd_barrier_count, 1);
 
     if (entry_idx == 0) {
         float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
@@ -3142,9 +3159,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         }
     }
     __syncthreads();
-    if (tid == 0 && blockIdx.x == 0) printf("V:HYB_sync_done\n");
 
-    if (tid == 0 && audit != nullptr && training_mode->batch_images != nullptr) {
+    // Only block 0 does telemetry and audit - prevents N blocks each printing
+    if (tid == 0 && blockIdx.x == 0 && audit != nullptr && training_mode->batch_images != nullptr) {
         run_telemetry_probes(organism, generation);
         float* logits = organism->gradient_logits_pool;
         int* labels = training_mode->batch_labels;
@@ -3238,6 +3255,149 @@ __device__ void check_convergence_device(Organism* organism, bool* converged) {
             *converged = true;
         }
     }
+
+    // Print aggregate DIAG counts at end of lifecycle
+    grid_barrier(gridDim.x);
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        printf("DIAG_AGGREGATE blocks_ca_fwd=%d blocks_entered=%d\n", g_blocks_ca_fwd, g_blocks_entered);
+        printf("DIAG6_PROGRESS total=%d\n", g_diag6_progress_count);
+        printf("DIAG7_TDR_WARN total=%d\n", g_diag7_tdr_warning_count);
+        printf("DIAG12_WEIGHT_PTR total=%d\n", g_diag12_weight_ptr_count);
+        printf("DIAG13_NEIGH_READ total=%d\n", g_diag13_neigh_read_count);
+        printf("DIAG15_INPUT_BAD total=%d\n", g_diag15_input_bad_count);
+        printf("DIAG16_POST_NEIGH total=%d\n", g_diag16_post_neigh_count);
+        printf("DIAG17_PRE_PERC total=%d\n", g_diag17_pre_perc_count);
+        printf("DIAG19_PERC_W_BAD total=%d\n", g_diag19_perc_w_bad_count);
+        printf("DIAG20_PERC_ACC_BAD total=%d\n", g_diag20_perc_acc_bad_count);
+        printf("DIAG21_PERC_BAD total=%d\n", g_diag21_perc_bad_count);
+        printf("DIAG22_POST_PERC total=%d\n", g_diag22_post_perc_count);
+        printf("DIAG23_PRE_INTER total=%d\n", g_diag23_pre_inter_count);
+        printf("DIAG25_INTER_PROG total=%d\n", g_diag25_inter_prog_count);
+        printf("DIAG26_INTER_SAMPLE total=%d\n", g_diag26_inter_sample_count);
+        printf("DIAG27_PREGELU_BAD total=%d\n", g_diag27_pregelu_bad_count);
+        printf("DIAG28_GELU_BAD total=%d\n", g_diag28_gelu_bad_count);
+        printf("DIAG29_POST_INTER total=%d\n", g_diag29_post_inter_count);
+        printf("DIAG30_INTER_SLOW total=%d\n", g_diag30_inter_slow_count);
+        printf("DIAG31_PRE_OUT total=%d\n", g_diag31_pre_out_count);
+        printf("DIAG32_OUT_BAD total=%d\n", g_diag32_out_bad_count);
+        printf("DIAG33_GATE_BAD total=%d\n", g_diag33_gate_bad_count);
+        printf("DIAG34_POST_OUT total=%d\n", g_diag34_post_out_count);
+        printf("DIAG35_PRE_SAVE total=%d\n", g_diag35_pre_save_count);
+        printf("DIAG37_PERC_SAVE_VERIFY total=%d\n", g_diag37_perc_save_verify_count);
+        printf("DIAG40_POST_SAVE total=%d\n", g_diag40_post_save_count);
+        printf("DIAG42_PRE_CAOUT total=%d\n", g_diag42_pre_caout_count);
+        printf("DIAG43_CAOUT_BAD total=%d\n", g_diag43_caout_bad_count);
+        printf("DIAG44_POST_CAOUT total=%d\n", g_diag44_post_caout_count);
+        printf("DIAG45_TIMING total=%d\n", g_diag45_timing_count);
+        printf("DIAG46_ITER_SLOW total=%d\n", g_diag46_iter_slow_count);
+        printf("DIAG47_STACK_CORRUPT total=%d\n", g_diag47_stack_corrupt_count);
+        printf("DIAG48_NANCHECK total=%d\n", g_diag48_nancheck_count);
+        printf("DIAG49_THREAD_PROG total=%d\n", g_diag49_thread_prog_count);
+        printf("DIAG50_THREAD_EXIT total=%d\n", g_diag50_thread_exit_count);
+        printf("DIAG51_WARP total=%d\n", g_diag51_warp_count);
+        printf("DIAG52_BLOCK_DONE total=%d\n", g_diag52_block_done_count);
+        printf("DIAG53_SYNC total=%d\n", g_diag53_sync_count);
+        // V:BWD aggregate counters
+        printf("V:BWD_FLOW_DONE total=%d\n", g_v_flow_done_count);
+        printf("V:BWD_ENTER total=%d\n", g_v_bwd_enter_count);
+        printf("V:BWD_FATAL_CHECKS total=%d\n", g_v_bwd_fatal_checks_count);
+        printf("V:BWD_CHUNK total=%d\n", g_v_bwd_chunk_count);
+        printf("V:BWD_VALUE_GRAD total=%d\n", g_v_bwd_value_grad_count);
+        printf("V:BWD_INTER_GRAD total=%d\n", g_v_bwd_inter_grad_count);
+        printf("V:BWD_PERC_GRAD total=%d\n", g_v_bwd_perc_grad_count);
+        printf("V:BWD_DONE total=%d\n", g_v_bwd_done_count);
+        printf("V:BWD_ZERO_DW total=%d\n", g_v_bwd_zero_dw_count);
+        printf("V:BWD_SETUP_DONE total=%d\n", g_v_bwd_setup_done_count);
+        printf("V:BWD_CHUNKS_DONE total=%d\n", g_v_bwd_chunks_done_count);
+        printf("V:BWD_INTER_GRAD_COPY total=%d\n", g_v_bwd_inter_grad_copy_count);
+        printf("V:BWD_PERC_GRAD_COPY total=%d\n", g_v_bwd_perc_grad_copy_count);
+        printf("V:BWD_GRAD_CONC total=%d\n", g_v_bwd_grad_conc_count);
+        printf("V:BWD_DIFFUSION_LAUNCH total=%d\n", g_v_bwd_diffusion_launch_count);
+        printf("V:BWD_CHUNK0 total=%d\n", g_v_bwd_chunk0_count);
+        printf("V:BWD_I_DONE total=%d\n", g_v_bwd_i_done_count);
+        printf("V:BWD_V_DONE total=%d\n", g_v_bwd_v_done_count);
+        printf("V:BWD_CHUNK2_ENTER total=%d\n", g_v_bwd_chunk2_enter_count);
+        printf("V:BWD_DI_WRITE total=%d\n", g_v_bwd_di_write_count);
+        printf("V:BWD_PERC_LOAD total=%d\n", g_v_bwd_perc_load_count);
+        printf("V:BWD_DP_WRITE total=%d\n", g_v_bwd_dp_write_count);
+        printf("V:BWD_IM2COL total=%d\n", g_v_bwd_im2col_count);
+        printf("V:BWD_CONV_FP16 total=%d\n", g_v_bwd_conv_fp16_count);
+        printf("V:BWD_INPUT_GRAD total=%d\n", g_v_bwd_input_grad_count);
+        printf("V:BWD_SCATTER total=%d\n", g_v_bwd_scatter_count);
+        printf("V:BWD_DIFF_DEVICE total=%d\n", g_v_bwd_diff_device_count);
+        printf("V:POST_BWD_BARRIER total=%d\n", g_v_post_bwd_barrier_count);
+
+        // Reset all counters
+        g_blocks_ca_fwd = 0;
+        g_blocks_entered = 0;
+        g_diag6_progress_count = 0;
+        g_diag7_tdr_warning_count = 0;
+        g_diag12_weight_ptr_count = 0;
+        g_diag13_neigh_read_count = 0;
+        g_diag15_input_bad_count = 0;
+        g_diag16_post_neigh_count = 0;
+        g_diag17_pre_perc_count = 0;
+        g_diag19_perc_w_bad_count = 0;
+        g_diag20_perc_acc_bad_count = 0;
+        g_diag21_perc_bad_count = 0;
+        g_diag22_post_perc_count = 0;
+        g_diag23_pre_inter_count = 0;
+        g_diag25_inter_prog_count = 0;
+        g_diag26_inter_sample_count = 0;
+        g_diag27_pregelu_bad_count = 0;
+        g_diag28_gelu_bad_count = 0;
+        g_diag29_post_inter_count = 0;
+        g_diag30_inter_slow_count = 0;
+        g_diag31_pre_out_count = 0;
+        g_diag32_out_bad_count = 0;
+        g_diag33_gate_bad_count = 0;
+        g_diag34_post_out_count = 0;
+        g_diag35_pre_save_count = 0;
+        g_diag37_perc_save_verify_count = 0;
+        g_diag40_post_save_count = 0;
+        g_diag42_pre_caout_count = 0;
+        g_diag43_caout_bad_count = 0;
+        g_diag44_post_caout_count = 0;
+        g_diag45_timing_count = 0;
+        g_diag46_iter_slow_count = 0;
+        g_diag47_stack_corrupt_count = 0;
+        g_diag48_nancheck_count = 0;
+        g_diag49_thread_prog_count = 0;
+        g_diag50_thread_exit_count = 0;
+        g_diag51_warp_count = 0;
+        g_diag52_block_done_count = 0;
+        g_diag53_sync_count = 0;
+        // Reset V:BWD counters
+        g_v_flow_done_count = 0;
+        g_v_bwd_enter_count = 0;
+        g_v_bwd_fatal_checks_count = 0;
+        g_v_bwd_chunk_count = 0;
+        g_v_bwd_value_grad_count = 0;
+        g_v_bwd_inter_grad_count = 0;
+        g_v_bwd_perc_grad_count = 0;
+        g_v_bwd_done_count = 0;
+        g_v_bwd_zero_dw_count = 0;
+        g_v_bwd_setup_done_count = 0;
+        g_v_bwd_chunks_done_count = 0;
+        g_v_bwd_inter_grad_copy_count = 0;
+        g_v_bwd_perc_grad_copy_count = 0;
+        g_v_bwd_grad_conc_count = 0;
+        g_v_bwd_diffusion_launch_count = 0;
+        g_v_bwd_chunk0_count = 0;
+        g_v_bwd_i_done_count = 0;
+        g_v_bwd_v_done_count = 0;
+        g_v_bwd_chunk2_enter_count = 0;
+        g_v_bwd_di_write_count = 0;
+        g_v_bwd_perc_load_count = 0;
+        g_v_bwd_dp_write_count = 0;
+        g_v_bwd_im2col_count = 0;
+        g_v_bwd_conv_fp16_count = 0;
+        g_v_bwd_input_grad_count = 0;
+        g_v_bwd_scatter_count = 0;
+        g_v_bwd_diff_device_count = 0;
+        g_v_post_bwd_barrier_count = 0;
+    }
+    __threadfence();
 }
 
 #endif
