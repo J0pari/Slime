@@ -46,17 +46,17 @@ __device__ void compute_delta_device(
     int genome_length
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= genome_length) return;
+    if (tid < genome_length) {
+        int threshold_slot = GenomeParamTable::delta_threshold;
+        float delta_threshold = genome_slot_to_unit(child_genome, threshold_slot) * DELTA_THRESHOLD_BASE_MAX;
 
-    int threshold_slot = GenomeParamTable::delta_threshold;
-    float delta_threshold = genome_slot_to_unit(child_genome, threshold_slot) * DELTA_THRESHOLD_BASE_MAX;
-
-    float diff = child_genome[tid] - parent_genome[tid];
-    if (fabsf(diff) > delta_threshold) {
-        int idx = atomicAdd((unsigned int*)num_deltas, 1);
-        if (idx < genome_length) {
-            delta_indices[idx] = tid;
-            delta_values[idx] = diff;
+        float diff = child_genome[tid] - parent_genome[tid];
+        if (fabsf(diff) > delta_threshold) {
+            int idx = atomicAdd((unsigned int*)num_deltas, 1);
+            if (idx < genome_length) {
+                delta_indices[idx] = tid;
+                delta_values[idx] = diff;
+            }
         }
     }
 }
@@ -108,24 +108,22 @@ __device__ void reconstruct_genome_from_archive(
         for (int i = 0; i < genome_length; i++) {
             parent_genome_workspace[i] = 0.0f;
         }
-        reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
-        return;
+    } else {
+        DEVICE_VALIDATE_PTR(archive->hash_table_keys);
+        DEVICE_VALIDATE_PTR(archive->hash_table_values);
+
+        int parent_idx = hash_table_lookup(
+            archive->hash_table_keys,
+            archive->hash_table_values,
+            parent_hash
+        );
+
+        DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
+        DEVICE_VALIDATE_ARCHIVE_IDX(parent_idx, archive_size);
+        DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
+
+        diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
     }
-
-    DEVICE_VALIDATE_PTR(archive->hash_table_keys);
-    DEVICE_VALIDATE_PTR(archive->hash_table_values);
-
-    int parent_idx = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        parent_hash
-    );
-
-    DEVICE_FATAL_IF(parent_idx < 0, "reconstruct_genome_from_archive: parent evicted from archive - cannot reconstruct");
-    DEVICE_VALIDATE_ARCHIVE_IDX(parent_idx, archive_size);
-    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "reconstruct_genome_from_archive: archive latent_genome is null");
-
-    diresa_decode(&archive->latent_genome[parent_idx * GENOME_LATENT_DIM_MAX], parent_genome_workspace, weights);
     reconstruct_from_delta(parent_genome_workspace, delta_indices, delta_values, num_deltas, output_genome, genome_length);
 }
 

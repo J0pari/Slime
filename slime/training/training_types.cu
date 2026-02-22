@@ -15,25 +15,28 @@ __device__ void init_unified_gradient_buffer_device(Organism* organism) {
     float* pooling_weight_grads = organism->tt_pooling_weight_grads;
     float* fc_weight_grads = organism->tt_fc_weight_grads;
     float* fc_bias_grads = organism->tt_fc_bias_grads;
-    Architecture arch = organism->current_arch;
+
+    int entry_idx = blockIdx.x % organism->pool->capacity;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
     int num_classes = organism->cls_num_classes;
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
-    grad_buf->perception_grads = perception_grads;
-    grad_buf->interaction_grads = interaction_grads;
-    grad_buf->value_grads = value_grads;
-    grad_buf->pooling_weight_grads = pooling_weight_grads;
-    grad_buf->fc_weight_grads = fc_weight_grads;
-    grad_buf->fc_bias_grads = fc_bias_grads;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        grad_buf->perception_grads = perception_grads;
+        grad_buf->interaction_grads = interaction_grads;
+        grad_buf->value_grads = value_grads;
+        grad_buf->pooling_weight_grads = pooling_weight_grads;
+        grad_buf->fc_weight_grads = fc_weight_grads;
+        grad_buf->fc_bias_grads = fc_bias_grads;
 
-    grad_buf->perception_size = arch.num_heads * arch.channels * arch.head_dim;
-    grad_buf->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
-    grad_buf->value_size = arch.num_heads * arch.head_dim * arch.channels;
-    grad_buf->num_classes = num_classes;
-    grad_buf->num_features = arch.num_heads * arch.channels;
+        grad_buf->perception_size = entry->num_heads * entry->channels * entry->head_dim;
+        grad_buf->interaction_size = entry->num_heads * entry->head_dim * entry->head_dim;
+        grad_buf->value_size = entry->num_heads * entry->head_dim * entry->channels;
+        grad_buf->num_classes = num_classes;
+        grad_buf->num_features = entry->num_heads * entry->channels;
 
-    grad_buf->has_autodiff_grads = 0;
-    grad_buf->has_backprop_grads = 0;
+        grad_buf->has_autodiff_grads = 0;
+        grad_buf->has_backprop_grads = 0;
+    }
 }
 
 __device__ void zero_unified_gradients_device(Organism* organism) {
@@ -68,7 +71,13 @@ __device__ void zero_unified_gradients_device(Organism* organism) {
 
 __device__ void init_ca_param_map_device(Organism* organism) {
     CAParameterMap* param_map = organism->param_map;
-    Architecture arch = Architecture::maxBounds();
+    int entry_idx = blockIdx.x % organism->pool->capacity;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    Architecture arch;
+    arch.num_heads = entry->num_heads;
+    arch.head_dim = entry->head_dim;
+    arch.channels = entry->channels;
+    arch.grid_size = entry->grid_size;
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -79,7 +88,7 @@ __device__ void init_ca_param_map_device(Organism* organism) {
         param_map->total_ca_params = param_map->perception_size + param_map->interaction_size + param_map->value_size;
         param_map->grid_size = arch.grid_size;
         param_map->channels = arch.channels;
-        param_map->hidden_dim = arch.head_dim;
+        param_map->hidden_dim = arch.num_heads * arch.head_dim;
         param_map->total_params = param_map->total_ca_params;
     }
 
@@ -101,13 +110,11 @@ __device__ void init_ca_param_map_device(Organism* organism) {
 }
 
 __device__ void init_training_mode_device(Organism* organism) {
-    HybridTrainingMode* mode = organism->training;
+    int entry_idx = blockIdx.x;
+    HybridTrainingMode* mode = organism->training_mode;
     int grid_size = organism->ca_grid_size;
-    float* batch_images = organism->tt_batch_images;
-    int* batch_labels = organism->tt_batch_labels;
-    float* genome = organism->genome;
+    float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* gradients = organism->output_gradients;
-    uint64_t genome_hash = organism->genome_hash;
     float ctx_metabolic = organism->ctx_metabolic;
     float ctx_stress = organism->ctx_stress;
     float ctx_morphogen = organism->ctx_morphogen;
@@ -122,11 +129,11 @@ __device__ void init_training_mode_device(Organism* organism) {
     TrainingParams training_params;
     float gradient_fitness_weight = training_params.get_gradient_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
     float coherence_fitness_weight = training_params.get_coherence_fitness_weight(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-    int batch_size_val = training_params.get_batch_size(genome, gradients);
+    int batch_size_val = training_params.get_batch_size();
     float learning_rate_val = training_params.get_learning_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
     float gradient_clip_norm_val = training_params.get_gradient_clip_norm(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
-    int num_fields = 9;
+    int num_fields = 8;
     for (int field = global_tid; field < num_fields; field += total_threads) {
         switch (field) {
             case 0: mode->use_gradients = true; break;
@@ -137,78 +144,61 @@ __device__ void init_training_mode_device(Organism* organism) {
             case 5: mode->learning_rate = learning_rate_val; break;
             case 6: mode->gradient_clip_norm = gradient_clip_norm_val; break;
             case 7: mode->adam_timestep = 1; break;
-            case 8: mode->batch_images = batch_images; mode->batch_labels = batch_labels; break;
         }
     }
 }
 
 __device__ void init_classifier_device(Organism* organism) {
-    ClassificationHead* classifier = organism->classifier;
-    float* workspace = organism->classifier_workspace;
-    Architecture arch = Architecture::maxBounds();
-    int input_dim = arch.num_heads * arch.channels;
+    int entry_idx = blockIdx.x;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    ClassificationHead* classifier = &organism->classifier[entry_idx];
+
+    size_t workspace_offset = 0;
+    for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
+        PoolEntry* prev = &organism->pool->entries[prev_idx];
+        int prev_input_dim = prev->num_heads * prev->channels;
+        int prev_num_classes = organism->classifier_num_classes;
+        workspace_offset += prev_input_dim + (prev_input_dim * prev_num_classes) + prev_num_classes;
+    }
+    float* workspace = organism->classifier_workspace + workspace_offset;
+
+    int input_dim = entry->num_heads * entry->channels;
     int num_classes = organism->classifier_num_classes;
-    unsigned int seed = organism->classifier_seed;
+    unsigned int seed = organism->classifier_seed + entry_idx;
 
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x;
 
-    if (tid == 0) {
-        classifier->pooling_weights = workspace;
-        classifier->fc_weights = workspace + input_dim;
-        classifier->fc_bias = workspace + input_dim + (input_dim * num_classes);
-        __threadfence();
-        classifier->pointers_ready = 1;
-    }
-    while (classifier->pointers_ready == 0) {
-        __threadfence();
-    }
-    __syncthreads();
+    // All threads compute identical pointer values - redundant but no sync needed
+    classifier->pooling_weights = workspace;
+    classifier->fc_weights = workspace + input_dim;
+    classifier->fc_bias = workspace + input_dim + (input_dim * num_classes);
+
+    cg::this_grid().sync();
 
     curandState state;
     curand_init(seed + tid, 0, 0, &state);
 
     if (tid < input_dim) {
-        float val = curand_normal(&state) * 0.1f;
-        if (isnan(val) || isinf(val)) {
-            return;
-        }
-        classifier->pooling_weights[tid] = val;
+        classifier->pooling_weights[tid] = curand_normal(&state) * 0.1f;
     }
 
     if (tid < input_dim * num_classes) {
         float scale = sqrtf(2.0f / (input_dim + num_classes));
-        float val = curand_normal(&state) * scale;
-        if (isnan(val) || isinf(val)) {
-            return;
-        }
-        classifier->fc_weights[tid] = val;
+        classifier->fc_weights[tid] = curand_normal(&state) * scale;
     }
 
     if (tid < num_classes) {
         classifier->fc_bias[tid] = 0.0f;
     }
 
-    __syncthreads();
-
-    if (tid == 0) {
-        for (int i = 0; i < input_dim && i < 10; i++) {
-            if (isnan(classifier->pooling_weights[i])) {
-                return;
-            }
-        }
-        for (int i = 0; i < input_dim * num_classes && i < 10; i++) {
-            if (isnan(classifier->fc_weights[i])) {
-                return;
-            }
-        }
-    }
+    cg::this_grid().sync();
 }
 
 __device__ void init_curriculum_device(Organism* organism) {
+    int entry_idx = blockIdx.x;
     AdaptiveCurriculum* curriculum = organism->curriculum;
-    float* genome = organism->genome;
+    float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* gradients = organism->output_gradients;
-    uint64_t genome_hash = organism->genome_hash;
     float ctx_metabolic = organism->ctx_metabolic;
     float ctx_stress = organism->ctx_stress;
     float ctx_morphogen = organism->ctx_morphogen;
@@ -302,14 +292,14 @@ __device__ void update_curriculum_device(Organism* organism) {
     // Block-level reduction for sum
     shared_sum[tid] = local_sum;
     shared_max[tid] = local_max;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_sum[tid] += shared_sum[tid + s];
             shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + s]);
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     float mean_acc = shared_sum[0] / pool_size;
@@ -323,13 +313,13 @@ __device__ void update_curriculum_device(Organism* organism) {
     }
 
     shared_var[tid] = local_var;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_var[tid] += shared_var[tid + s];
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     float var_acc = shared_var[0] / pool_size;
@@ -345,16 +335,16 @@ __device__ void update_curriculum_device(Organism* organism) {
     }
 
     shared_entropy[tid] = local_entropy;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             shared_entropy[tid] += shared_entropy[tid + s];
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
-    if (num_voronoi_cells <= 1) return;
+    DEVICE_FATAL_IF(num_voronoi_cells <= 1, "update_curriculum: num_voronoi_cells must be > 1");
 
     float log_cells = logf((float)num_voronoi_cells);
     float diversity = shared_entropy[0] / log_cells;

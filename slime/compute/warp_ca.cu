@@ -20,15 +20,15 @@ __device__ void jacobi_rotation(float* A, int n, int p, int q, float* s, float* 
     if (fabsf(apq) <= 0.0f) {
         *s = 0.0f;
         *c = 1.0f;
-        return;
-    }
-    float tau = (aqq - app) / (2.0f * apq);
-    float t = (tau >= 0.0f) ?
-        1.0f / (tau + sqrtf(1.0f + tau * tau)) :
-        -1.0f / (-tau + sqrtf(1.0f + tau * tau));
+    } else {
+        float tau = (aqq - app) / (2.0f * apq);
+        float t = (tau >= 0.0f) ?
+            1.0f / (tau + sqrtf(1.0f + tau * tau)) :
+            -1.0f / (-tau + sqrtf(1.0f + tau * tau));
 
-    *c = 1.0f / sqrtf(1.0f + t * t);
-    *s = t * (*c);
+        *c = 1.0f / sqrtf(1.0f + t * t);
+        *s = t * (*c);
+    }
 }
 
 __device__ void gpu_svd_device(
@@ -49,7 +49,7 @@ __device__ void gpu_svd_device(
             }
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int max_sweeps = min(MAX_JACOBI_SWEEPS, 10);
     int tile_dim = min(n, WARP_SIZE);
@@ -79,7 +79,7 @@ __device__ void gpu_svd_device(
                     shared_V[local_row][local_col] = 0.0f;
                 }
             }
-            __syncthreads();
+            cg::this_grid().sync();
 
             int effective_size = min(tile_dim, n - base_row);
             effective_size = min(effective_size, n - base_col);
@@ -107,7 +107,7 @@ __device__ void gpu_svd_device(
                             shared_V[p][i] = c * vip - s * viq;
                             shared_V[q][i] = s * vip + c * viq;
                         }
-                        __syncthreads();
+                        cg::this_grid().sync();
                     }
                 }
             }
@@ -131,7 +131,7 @@ __device__ void gpu_svd_device(
                     S[global_idx] = (diag_val >= 0.0f) ? sqrtf(diag_val) : 0.0f;
                 }
             }
-            __syncthreads();
+            cg::this_grid().sync();
         }
     }
 }
@@ -149,7 +149,7 @@ __device__ void coherence_device(
     __shared__ float learning_progress;
 
     if (threadIdx.x == 0) learning_progress = 0.0f;
-    __syncthreads();
+    cg::this_grid().sync();
 
     float local_progress = 0.0f;
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
@@ -162,7 +162,7 @@ __device__ void coherence_device(
         }
     }
 
-    __syncthreads();
+    cg::this_grid().sync();
     local_progress = BlockReduce<BLOCK_SIZE>::sum(local_progress);
 
     if (threadIdx.x == 0) {
@@ -217,7 +217,7 @@ __device__ void neural_ca_tensor_device(
         __shared__ float temp[WMMA_TILE_DIM][WMMA_TILE_DIM + BANK_PAD];
         wmma::store_matrix_sync(&temp[0][0], c_frag, WMMA_TILE_DIM, wmma::mem_row_major);
 
-        __syncthreads();
+        cg::this_grid().sync();
 
         int lane = threadIdx.x % WARP_SIZE;
         if (lane < WMMA_TILE_DIM * WMMA_TILE_DIM) {
@@ -243,39 +243,39 @@ __device__ void flow_lenia_device(
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= width || y >= height) return;
+    if (x < width && y < height) {
+        int idx = y * width + x;
+        float center = state[idx];
 
-    int idx = y * width + x;
-    float center = state[idx];
+        float potential = 0.0f;
+        float total_mass = 0.0f;
 
-    float potential = 0.0f;
-    float total_mass = 0.0f;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = (x + dx + width) % width;
+                int ny = (y + dy + height) % height;
+                int nidx = ny * width + nx;
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int nx = (x + dx + width) % width;
-            int ny = (y + dy + height) % height;
-            int nidx = ny * width + nx;
+                float neighbor = state[nidx];
+                float kernel_val = kernels[(dy + 1) * 3 + (dx + 1)];
 
-            float neighbor = state[nidx];
-            float kernel_val = kernels[(dy + 1) * 3 + (dx + 1)];
+                potential += neighbor * kernel_val;
+                total_mass += neighbor;
+            }
+        }
 
-            potential += neighbor * kernel_val;
-            total_mass += neighbor;
+        float growth = potential * expf(-potential * potential);
+
+        float next_val = center + dt * growth;
+
+        float denom = CA_KERNEL_CELL_COUNT * next_val;
+        if (denom <= 0.0f) {
+            next_state[idx] = 0.0f;
+        } else {
+            float mass_ratio = total_mass / denom;
+            next_state[idx] = next_val * mass_ratio;
         }
     }
-
-    float growth = potential * expf(-potential * potential);
-
-    float next_val = center + dt * growth;
-
-    float denom = CA_KERNEL_CELL_COUNT * next_val;
-    if (denom <= 0.0f) {
-        next_state[idx] = 0.0f;
-        return;
-    }
-    float mass_ratio = total_mass / denom;
-    next_state[idx] = next_val * mass_ratio;
 }
 
 __device__ float get_neighbor_2d(
@@ -316,42 +316,40 @@ __device__ void warp_ca_device(
     int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
 
-    if (warp_id >= (width * height) / WARP_SIZE) return;
-
     int tile_x = (warp_id * WARP_SIZE + lane_id) % width;
     int tile_y = (warp_id * WARP_SIZE + lane_id) / width;
 
-    if (tile_x >= width || tile_y >= height) return;
+    if (warp_id < (width * height) / WARP_SIZE && tile_x < width && tile_y < height) {
+        float my_state = state[tile_y * width + tile_x];
+        unsigned mask = warp.ballot(1);
 
-    float my_state = state[tile_y * width + tile_x];
-    unsigned mask = warp.ballot(1);
+        float sum = 0.0f;
 
-    float sum = 0.0f;
+        sum += get_neighbor_2d(my_state, -1, -1, width, mask);
+        sum += get_neighbor_2d(my_state, 0, -1, width, mask);
+        sum += get_neighbor_2d(my_state, 1, -1, width, mask);
+        sum += get_neighbor_2d(my_state, -1, 0, width, mask);
+        sum += get_neighbor_2d(my_state, 1, 0, width, mask);
+        sum += get_neighbor_2d(my_state, -1, 1, width, mask);
+        sum += get_neighbor_2d(my_state, 0, 1, width, mask);
+        sum += get_neighbor_2d(my_state, 1, 1, width, mask);
 
-    sum += get_neighbor_2d(my_state, -1, -1, width, mask);
-    sum += get_neighbor_2d(my_state, 0, -1, width, mask);
-    sum += get_neighbor_2d(my_state, 1, -1, width, mask);
-    sum += get_neighbor_2d(my_state, -1, 0, width, mask);
-    sum += get_neighbor_2d(my_state, 1, 0, width, mask);
-    sum += get_neighbor_2d(my_state, -1, 1, width, mask);
-    sum += get_neighbor_2d(my_state, 0, 1, width, mask);
-    sum += get_neighbor_2d(my_state, 1, 1, width, mask);
+        float avg = sum / CA_KERNEL_NEIGHBOR_COUNT;
+        float growth = avg * expf(-avg * avg * 2.0f);
 
-    float avg = sum / CA_KERNEL_NEIGHBOR_COUNT;
-    float growth = avg * expf(-avg * avg * 2.0f);
+        CAParams ca_params;
+        float warp_ca_growth_rate = ca_params.get_warp_ca_growth_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
-    CAParams ca_params;
-    float warp_ca_growth_rate = ca_params.get_warp_ca_growth_rate(genome, gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        float total_mass = WarpReduce<WARP_SIZE>::sum(my_state);
+        float new_val = my_state + warp_ca_growth_rate * growth;
+        float new_total = WarpReduce<WARP_SIZE>::sum(new_val);
 
-    float total_mass = WarpReduce<WARP_SIZE>::sum(my_state);
-    float new_val = my_state + warp_ca_growth_rate * growth;
-    float new_total = WarpReduce<WARP_SIZE>::sum(new_val);
+        if (is_meaningful(new_total, total_mass)) {
+            new_val *= total_mass / new_total;
+        }
 
-    if (is_meaningful(new_total, total_mass)) {
-        new_val *= total_mass / new_total;
+        next_state[tile_y * width + tile_x] = new_val;
     }
-
-    next_state[tile_y * width + tile_x] = new_val;
 }
 
 #endif

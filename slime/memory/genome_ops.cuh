@@ -404,27 +404,10 @@ struct BehavioralDimensions {
     int task_dim;
     int gen_dim;
 
-    __device__ __forceinline__ void derive_from_genome(const float* genome, const float* epigenetic) {
-        int hw_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 3;
-        int task_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 4;
-        int gen_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + 5;
-
-        float hw_min = genome_slot_to_unit(genome, hw_bounds_slot);
-        float hw_max = hw_min + genome_slot_to_unit(genome, hw_bounds_slot + 3) * (NORMALIZED_MAX - hw_min);
-
-        float task_min = genome_slot_to_unit(genome, task_bounds_slot);
-        float task_max = task_min + genome_slot_to_unit(genome, task_bounds_slot + 3) * (NORMALIZED_MAX - task_min);
-
-        float gen_min = genome_slot_to_unit(genome, gen_bounds_slot);
-        float gen_max = gen_min + genome_slot_to_unit(genome, gen_bounds_slot + 3) * (NORMALIZED_MAX - gen_min);
-
-        float hw_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_hw, hw_min, hw_max);
-        float task_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_task, task_min, task_max);
-        float gen_norm = genome_to_bootstrap_param(genome, epigenetic, GenomeParamTable::behavioral_dim_gen, gen_min, gen_max);
-
-        hw_dim = BEHAVIORAL_DIM_HW_MIN + (int)(hw_norm * (BEHAVIORAL_DIM_HW_MAX - BEHAVIORAL_DIM_HW_MIN));
-        task_dim = BEHAVIORAL_DIM_TASK_MIN + (int)(task_norm * (BEHAVIORAL_DIM_TASK_MAX - BEHAVIORAL_DIM_TASK_MIN));
-        gen_dim = BEHAVIORAL_DIM_GEN_MIN + (int)(gen_norm * (BEHAVIORAL_DIM_GEN_MAX - BEHAVIORAL_DIM_GEN_MIN));
+    __device__ __forceinline__ void derive_from_genome() {
+        hw_dim = BEHAVIORAL_DIM_HW;
+        task_dim = BEHAVIORAL_DIM_TASK;
+        gen_dim = BEHAVIORAL_DIM_GEN;
     }
 
     __device__ __forceinline__ int total() const {

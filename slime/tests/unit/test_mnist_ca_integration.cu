@@ -209,26 +209,24 @@ bool test_ca_channel_layout() {
 bool test_architecture_dataset_compatibility() {
     printf("\n[TEST 5] Architecture↔Dataset dimension compatibility\n");
 
-    printf("  CA grid range: [%d, %d]\n", GRID_SIZE_MIN, GRID_SIZE_MAX);
+    printf("  CA grid size: %d (environmental constant)\n", GRID_SIZE);
 
     for (int i = 0; i < NUM_DATASETS; i++) {
         const DatasetDescriptor* desc = &HOST_DATASET_REGISTRY[i];
         int max_dim = (desc->sample_rows > desc->sample_cols) ?
                       (int)desc->sample_rows : (int)desc->sample_cols;
 
-        float min_scale = (float)GRID_SIZE_MIN / max_dim;
-        float max_scale = (float)GRID_SIZE_MAX / max_dim;
+        float scale = (float)GRID_SIZE / max_dim;
 
-        printf("  %s: %zux%zu → scale range [%.2f, %.2f]\n",
-               desc->name, desc->sample_rows, desc->sample_cols,
-               min_scale, max_scale);
+        printf("  %s: %zux%zu → scale %.2f\n",
+               desc->name, desc->sample_rows, desc->sample_cols, scale);
 
-        if (max_scale < 0.1f) {
+        if (scale < 0.1f) {
             fprintf(stderr, "  WARN: Dataset %s may lose too much resolution\n", desc->name);
         }
     }
 
-    printf("  ✓ All datasets can be scaled to CA grid range\n");
+    printf("  ✓ All datasets can be scaled to CA grid\n");
     return true;
 }
 

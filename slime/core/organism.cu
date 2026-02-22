@@ -381,9 +381,9 @@ struct StateExportEntry {
     int state_voronoi_count;
     int state_voronoi_density[STATE_EXPORT_VORONOI_COUNT];
     float state_voronoi_radius[STATE_EXPORT_VORONOI_COUNT];
-    float state_voronoi_hw_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_HW_MAX];
-    float state_voronoi_task_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_TASK_MAX];
-    float state_voronoi_gen_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_GEN_MAX];
+    float state_voronoi_hw_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_HW];
+    float state_voronoi_task_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_TASK];
+    float state_voronoi_gen_centroid[STATE_EXPORT_VORONOI_COUNT * BEHAVIORAL_DIM_GEN];
     int state_voronoi_best_elite_idx[STATE_EXPORT_VORONOI_COUNT];
 
     int state_archive_count;
@@ -394,9 +394,9 @@ struct StateExportEntry {
     uint64_t state_archive_genome_hash[STATE_EXPORT_ARCHIVE_COUNT];
     uint32_t state_archive_parent_id_0[STATE_EXPORT_ARCHIVE_COUNT];
     uint32_t state_archive_parent_id_1[STATE_EXPORT_ARCHIVE_COUNT];
-    float state_archive_hw_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_HW_MAX];
-    float state_archive_task_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_TASK_MAX];
-    float state_archive_gen_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_GEN_MAX];
+    float state_archive_hw_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_HW];
+    float state_archive_task_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_TASK];
+    float state_archive_gen_coords[STATE_EXPORT_ARCHIVE_COUNT * BEHAVIORAL_DIM_GEN];
     float state_archive_hardware_features[STATE_EXPORT_ARCHIVE_COUNT * HARDWARE_FEATURES_DIM];
 
     float state_chemical_sample[STATE_EXPORT_CHEM_SIZE * STATE_EXPORT_CHEM_SIZE];
@@ -414,11 +414,11 @@ struct Architecture {
 
     __device__ __host__ static Architecture maxBounds() {
         Architecture arch;
-        arch.num_heads = NUM_HEADS_MAX;
-        arch.channels = CHANNELS_MAX;
-        arch.hidden_dim = HIDDEN_DIM_MAX;
-        arch.head_dim = HEAD_DIM_MAX;
-        arch.grid_size = GRID_SIZE_MAX;
+        arch.num_heads = NUM_HEADS;
+        arch.channels = CHANNELS;
+        arch.hidden_dim = HIDDEN_DIM;
+        arch.head_dim = HEAD_DIM;
+        arch.grid_size = GRID_SIZE;
         return arch;
     }
 };
@@ -481,7 +481,7 @@ struct DatasetDescriptor {
     int hilbert_order;
 };
 
-// From kernel_trace.cu
+// From device_trace.cu
 struct KernelLaunchInfo {
     const char* kernel_name;
     const char* file;
@@ -678,12 +678,12 @@ struct ClassificationHead {
 };
 
 struct CAParameterMap {
-    int perception_start[NUM_HEADS_MAX];
-    int interaction_start[NUM_HEADS_MAX];
-    int value_start[NUM_HEADS_MAX];
+    int perception_start[NUM_HEADS];
+    int interaction_start[NUM_HEADS];
+    int value_start[NUM_HEADS];
 
-    int head_param_offsets[NUM_HEADS_MAX];
-    int head_param_counts[NUM_HEADS_MAX];
+    int head_param_offsets[NUM_HEADS];
+    int head_param_counts[NUM_HEADS];
 
     int perception_size;
     int interaction_size;
@@ -1018,15 +1018,6 @@ struct Organism {
     float* per_entry_diresa_hw_weight_pool;
     float* per_entry_diresa_gen_weight_pool;
 
-    DIRESAWeights* diresa_init_target_weights;
-    float* diresa_init_target_pool;
-    size_t diresa_init_stride;
-    int diresa_init_input_dim;
-    int diresa_init_output_dim;
-    unsigned int diresa_init_seed;
-    PoolEntry* diresa_init_entry;
-    int diresa_init_num_replicas;
-
     float* hw_coords_pool;     
     float* task_coords_pool;   
     float* gen_coords_pool;    
@@ -1158,7 +1149,6 @@ struct Organism {
     curandState* diresa_rng_states;
 
     float* workspace_genomes;
-    float* genome;
     unsigned int init_seed;
 
     float* history_data_buffer;
@@ -1298,7 +1288,6 @@ struct Organism {
     int dataset_sample_rate_int;
     int dataset_n_fft;
     Dataset* dataset;
-    HybridTrainingMode* training;
     int dataset_batch_size;
     int dataset_batch_offset;
     int dataset_grid_size;
@@ -1345,7 +1334,6 @@ struct Organism {
     TemporalTube* memory_tubes;
     int* memory_valid_flags;
     MemoryEntry* memory_temp_buffer;
-    float* gradients;
 
     // Context fields
     float ctx_metabolic;
@@ -1454,8 +1442,6 @@ struct Organism {
     float* tt_pooling_weight_grads;
     float* tt_fc_weight_grads;
     float* tt_fc_bias_grads;
-    float* tt_batch_images;
-    int* tt_batch_labels;
     float* tt_pool_task_accuracies;
     float* tt_voronoi_occupancy_histogram;
     int tt_pool_size;

@@ -177,9 +177,9 @@ struct TrainingParams {
         return genome_to_param(genome, gradients, GenomeParamTable::learning_rate, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LEARNING_RATE_MIN, LEARNING_RATE_MAX);
     }
 
-    __device__ __forceinline__ int get_batch_size(const float* genome, const float* gradients) {
-        float batch_size_norm = genome_to_bootstrap_param(genome, gradients, GenomeParamTable::batch_size, NORMALIZED_MIN, NORMALIZED_MAX);
-        return BATCH_SIZE_MIN + (int)(batch_size_norm * (BATCH_SIZE_MAX - BATCH_SIZE_MIN));
+    __device__ __forceinline__ int get_batch_size() {
+        // Batch size is environmental, not genome-derived
+        return BATCH_SIZE;
     }
 
     __device__ __forceinline__ float get_flow_lenia_lr(const float* genome, const float* gradients, float ctx_metabolic, float ctx_stress, float ctx_morphogen, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance) {

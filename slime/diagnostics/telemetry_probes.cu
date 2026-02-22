@@ -8,6 +8,7 @@
 #include "../utils/cuda_primitives.cuh"
 #include "../core/ca_state.cuh"
 #include "../core/chemotaxis.cu"
+#include "../core/correlation_matrix.cu"
 #include "../metrics/hardware_geometry.cu"
 #include <cuda_runtime.h>
 #include <cmath>
@@ -496,9 +497,9 @@ __device__ void populate_audit_buffer(
     }
     printf("V:audit_cp4 images_done\n");
 
-    if (ca_concentration && pool && pool->entries[0].channels > 0) {
+    if (ca_concentration && pool) {
         int snap_grid = 64;
-        int channels = pool->entries[0].channels;
+        int channels = CHANNELS;
         for (int y = 0; y < snap_grid && y < grid_size; y++) {
             for (int x = 0; x < snap_grid && x < grid_size; x++) {
                 int cell_idx = y * grid_size + x;
@@ -595,12 +596,19 @@ __device__ void populate_audit_buffer(
     audit->memory_archive_size = telemetry->memory_allocation.archive_pools_size;
 
     DEVICE_FATAL_IF(pool == nullptr, "populate_audit_buffer: pool is null");
-    DEVICE_FATAL_IF(!pool->alive_flags[0], "populate_audit_buffer: pool entry 0 not alive");
-    PoolEntry* e0 = &pool->entries[0];
-    audit->fitness_alpha = e0->fitness_task_exponent;
-    audit->fitness_beta = e0->fitness_gen_exponent;
-    audit->fitness_gamma = e0->fitness_rank_exponent;
-    audit->fitness_delta = e0->fitness_efficiency_exponent;
+    int best_idx = 0;
+    float best_fitness = -1e10f;
+    for (int i = 0; i < pool->capacity; i++) {
+        if (pool->alive_flags[i] && pool->fitness_values[i] > best_fitness) {
+            best_fitness = pool->fitness_values[i];
+            best_idx = i;
+        }
+    }
+    PoolEntry* best_entry = &pool->entries[best_idx];
+    audit->fitness_alpha = best_entry->fitness_task_exponent;
+    audit->fitness_beta = best_entry->fitness_gen_exponent;
+    audit->fitness_gamma = best_entry->fitness_rank_exponent;
+    audit->fitness_delta = best_entry->fitness_efficiency_exponent;
 
     DEVICE_FATAL_IF(hardware_geom == nullptr, "populate_audit_buffer: hardware_geom is null");
     audit->hw_warp_divergence_entropy = hardware_geom->warp_divergence_entropy;
@@ -642,11 +650,10 @@ __device__ void populate_audit_buffer(
     audit->chemical_decay_rate_mean = decay_sum / total_cells;
 
     DEVICE_FATAL_IF(ca_state == nullptr, "populate_audit_buffer: ca_state is null");
-    DEVICE_FATAL_IF(pool->entries[0].channels <= 0, "populate_audit_buffer: pool entry 0 channels <= 0");
     DEVICE_FATAL_IF(ca_state->ca_concentration == nullptr, "populate_audit_buffer: ca_concentration is null");
     DEVICE_FATAL_IF(ca_state->affinity_reduced == nullptr, "populate_audit_buffer: affinity_reduced is null");
     DEVICE_FATAL_IF(ca_state->flow_field == nullptr, "populate_audit_buffer: flow_field is null");
-    int channels = pool->entries[0].channels;
+    int channels = CHANNELS;
     float mass_total = 0.0f;
     float affinity_sum = 0.0f;
     float flow_mag_sum = 0.0f;
@@ -685,6 +692,8 @@ __device__ void run_telemetry_probes(Organism* organism, int generation) {
 
     if (organism->generation % TELEMETRY_DETAILED == 0) {
         genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
+        compute_correlation_matrix_device(organism);
+        task_performance_probe(organism->pool, &organism->telemetry->task_performance);
     }
 
     if (organism->generation % TELEMETRY_COMPREHENSIVE == 0) {

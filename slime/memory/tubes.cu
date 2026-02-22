@@ -144,34 +144,35 @@ __device__ void store_navigation_history_device(Organism* organism) {
     int gen_dim = organism->behavioral_dim_gen;
 
     int tid = threadIdx.x;
-    if (tid >= POOL_CAPACITY_MAX) return;
 
-    int behavioral_dim = hw_dim + task_dim + gen_dim;
-    int memory_entry_size = behavioral_dim + AGENT_SPATIAL_DIMS;
-    float* d_memory_data = organism->memory_data_pool + tid * memory_entry_size;
+    if (tid < POOL_CAPACITY_MAX) {
+        int behavioral_dim = hw_dim + task_dim + gen_dim;
+        int memory_entry_size = behavioral_dim + AGENT_SPATIAL_DIMS;
+        float* d_memory_data = organism->memory_data_pool + tid * memory_entry_size;
 
-    d_memory_data[0] = agents[tid].position[0];
-    d_memory_data[1] = agents[tid].position[1];
-    d_memory_data[2] = agents[tid].velocity[0];
-    d_memory_data[3] = agents[tid].velocity[1];
+        d_memory_data[0] = agents[tid].position[0];
+        d_memory_data[1] = agents[tid].position[1];
+        d_memory_data[2] = agents[tid].velocity[0];
+        d_memory_data[3] = agents[tid].velocity[1];
 
-    int offset = AGENT_SPATIAL_DIMS;
-    for (int i = 0; i < hw_dim; i++) {
-        d_memory_data[offset++] = agents[tid].hw_coords[i];
-    }
-    for (int i = 0; i < task_dim; i++) {
-        d_memory_data[offset++] = agents[tid].task_coords[i];
-    }
-    for (int i = 0; i < gen_dim; i++) {
-        d_memory_data[offset++] = agents[tid].gen_coords[i];
-    }
+        int offset = AGENT_SPATIAL_DIMS;
+        for (int i = 0; i < hw_dim; i++) {
+            d_memory_data[offset++] = agents[tid].hw_coords[i];
+        }
+        for (int i = 0; i < task_dim; i++) {
+            d_memory_data[offset++] = agents[tid].task_coords[i];
+        }
+        for (int i = 0; i < gen_dim; i++) {
+            d_memory_data[offset++] = agents[tid].gen_coords[i];
+        }
 
-    float importance = agents[tid].exploration_noise;
+        float importance = agents[tid].exploration_noise;
 
-    if (tid == 0) {
-        printf("V:nav_hist_pre_store gen=%d\n", organism->generation);
-        store_memory_device(organism, d_memory_data, memory_entry_size, importance);
-        printf("V:nav_hist_post_store gen=%d\n", organism->generation);
+        if (tid == 0) {
+            printf("V:nav_hist_pre_store gen=%d\n", organism->generation);
+            store_memory_device(organism, d_memory_data, memory_entry_size, importance);
+            printf("V:nav_hist_post_store gen=%d\n", organism->generation);
+        }
     }
 }
 

@@ -77,32 +77,12 @@ __device__ void finalize_alive_count_device(Organism* organism) {
 }
 
 __device__ __forceinline__ void derive_architecture(const float* genome, PoolEntry* entry) {
-    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::num_heads]), "arch_num_heads genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::channels]), "arch_channels genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::head_dim]), "arch_head_dim genome value is NaN");
-    DEVICE_FATAL_IF(isnan(genome[GenomeParamTable::grid_size]), "arch_grid_size genome value is NaN");
-
-    float num_heads_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::num_heads, NORMALIZED_MIN, NORMALIZED_MAX);
-    float channels_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::channels, NORMALIZED_MIN, NORMALIZED_MAX);
-    float head_dim_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::head_dim, NORMALIZED_MIN, NORMALIZED_MAX);
-    float grid_size_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::grid_size, NORMALIZED_MIN, NORMALIZED_MAX);
-
-    entry->num_heads = (int)fmaxf((float)NUM_HEADS_MIN, fminf((float)NUM_HEADS_MAX, NUM_HEADS_MIN + num_heads_norm * (NUM_HEADS_MAX - NUM_HEADS_MIN)));
-
-    int head_dim_tiles = min(HEAD_DIM_TILES_MAX, HEAD_DIM_TILES_MIN + (int)(head_dim_norm * (HEAD_DIM_TILES_MAX - HEAD_DIM_TILES_MIN + 1)));
-    int channels_octets = min(CHANNELS_OCTETS_MAX, CHANNELS_OCTETS_MIN + (int)(channels_norm * (CHANNELS_OCTETS_MAX - CHANNELS_OCTETS_MIN + 1)));
-
-    entry->head_dim = head_dim_tiles * WMMA_TILE_DIM;
-    entry->channels = channels_octets * WMMA_ALIGNMENT;
-    entry->grid_size = (int)fmaxf((float)GRID_SIZE_MIN, fminf((float)GRID_SIZE_MAX, GRID_SIZE_MIN + grid_size_norm * (GRID_SIZE_MAX - GRID_SIZE_MIN)));
-    entry->hidden_dim = entry->num_heads * entry->head_dim;
-
-    
-    DEVICE_FATAL_IF(entry->num_heads <= 0, "derived num_heads <= 0");
-    DEVICE_FATAL_IF(entry->head_dim <= 0, "derived head_dim <= 0");
-    DEVICE_FATAL_IF(entry->channels <= 0, "derived channels <= 0");
-    DEVICE_FATAL_IF(entry->grid_size <= 0, "derived grid_size <= 0");
-    DEVICE_FATAL_IF(entry->hidden_dim <= 0, "derived hidden_dim <= 0");
+    // Architecture is environmental - all entries use shared structure
+    entry->num_heads = NUM_HEADS;
+    entry->head_dim = HEAD_DIM;
+    entry->channels = CHANNELS;
+    entry->grid_size = GRID_SIZE;
+    entry->hidden_dim = HIDDEN_DIM;
 }
 
 __device__ __forceinline__ void derive_diresa(const float* genome, PoolEntry* entry) {
@@ -205,156 +185,160 @@ __device__ void spawn_component_device(
     PRNGState rng;
     PoolInitParams params;
     int use_latent;
+    bool should_spawn = true;
 
-    
+    // Check capacity
     int old_count = atomicAdd((int*)&pool->active_count, 1);
     if (old_count >= pool->capacity) {
         atomicSub((int*)&pool->active_count, 1);
-        return;
+        should_spawn = false;
     }
 
-    
-    for (int i = 0; i < pool->capacity; i++) {
-        if (pool->entries[i].id == INT_MAX) {
-            int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);
-            if (old_id == INT_MAX) {
-                slot_idx = i;
-                break;
+    // Find empty slot
+    if (should_spawn) {
+        for (int i = 0; i < pool->capacity; i++) {
+            if (pool->entries[i].id == INT_MAX) {
+                int old_id = atomicCAS(&pool->entries[i].id, INT_MAX, -2);
+                if (old_id == INT_MAX) {
+                    slot_idx = i;
+                    break;
+                }
             }
+        }
+
+        if (slot_idx < 0) {
+            atomicSub((int*)&pool->active_count, 1);
+            should_spawn = false;
         }
     }
 
-    if (slot_idx < 0) {
-        atomicSub((int*)&pool->active_count, 1);
-        return;
-    }
+    if (should_spawn) {
+        new_id = atomicAdd((int*)&pool->total_spawned, 1);
+        int i = slot_idx;
 
-    
-    new_id = atomicAdd((int*)&pool->total_spawned, 1);
-    int i = slot_idx;
+        pool->entries[i].id = new_id;
+        pool->entries[i].age = 0;
+        pool->alive_flags[i] = true;
 
-    pool->entries[i].id = new_id;
-    pool->entries[i].age = 0;
-    pool->alive_flags[i] = true;  
-    
-    DEVICE_FATAL_IF(parent_id < 0 || parent_id >= pool->capacity, "spawn_component_device: invalid parent_id");
-    pool->entries[i].parent_idx = parent_id;
+        DEVICE_FATAL_IF(parent_id < 0 || parent_id >= pool->capacity, "spawn_component_device: invalid parent_id");
+        pool->entries[i].parent_idx = parent_id;
 
-    float* parent_genome = workspace_parent_genome;
-    float* child_genome = workspace_child_genome;
-    float* reference_genome = workspace_parent_temp;
-    PoolEntry* parent = &pool->entries[parent_id];
+        float* parent_genome = workspace_parent_genome;
+        float* child_genome = workspace_child_genome;
+        float* reference_genome = workspace_parent_temp;
+        PoolEntry* parent = &pool->entries[parent_id];
 
-    int parent_self_archived = hash_table_lookup(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        parent->genome_hash
-    );
-
-    uint64_t reference_hash;
-    int reference_archive_idx;
-    if (parent_self_archived >= 0) {
-        reference_hash = parent->genome_hash;
-        reference_archive_idx = parent_self_archived;
-    } else {
-        reference_hash = parent->parent_hash;
-        reference_archive_idx = hash_table_lookup(
+        int parent_self_archived = hash_table_lookup(
             archive->hash_table_keys,
             archive->hash_table_values,
-            parent->parent_hash
+            parent->genome_hash
         );
-    }
 
-    parent_archive_idx = reference_archive_idx;
-    use_latent = (reference_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
-    rng.s0 = new_id * XORSHIFT_GOLDEN_RATIO_A;
-    rng.s1 = parent_id * XORSHIFT_GOLDEN_RATIO_B;
-
-    DEVICE_FATAL_IF(reference_archive_idx < 0, "spawn: reference not in archive");
-    diresa_decode(&archive->latent_genome[reference_archive_idx * GENOME_LATENT_DIM_MAX], reference_genome, diresa_genome_weights);
-
-    reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size,
-        parent->delta_indices, parent->delta_values, parent->num_deltas,
-        parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
-
-    params.derive_from_genome(parent_genome, parent->gradients);
-
-    if (use_latent) {
-        float* ref_latent = &archive->latent_genome[reference_archive_idx * GENOME_LATENT_DIM_MAX];
-        float* mutated_latent_temp = workspace_parent_temp;
-        for (int j = 0; j < GENOME_LATENT_DIM_MAX; j++) {
-            float mutated_latent = ref_latent[j];
-            PRNGState local_rng = rng;
-            local_rng.s0 ^= j;
-            if (prng_next(&local_rng) < mutation_rate) {
-                mutated_latent += prng_levy_stable(&local_rng, params.mutation_levy_alpha, params.mutation_scale);
-                mutated_latent = tanhf(mutated_latent);
-            }
-            mutated_latent_temp[j] = mutated_latent;
+        uint64_t reference_hash;
+        int reference_archive_idx;
+        if (parent_self_archived >= 0) {
+            reference_hash = parent->genome_hash;
+            reference_archive_idx = parent_self_archived;
+        } else {
+            reference_hash = parent->parent_hash;
+            reference_archive_idx = hash_table_lookup(
+                archive->hash_table_keys,
+                archive->hash_table_values,
+                parent->parent_hash
+            );
         }
-        diresa_decode(mutated_latent_temp, child_genome, diresa_genome_weights);
-    } else {
+
+        parent_archive_idx = reference_archive_idx;
+        use_latent = (reference_archive_idx >= 0 && archive->latent_genome != nullptr) ? 1 : 0;
+        rng.s0 = new_id * XORSHIFT_GOLDEN_RATIO_A;
+        rng.s1 = parent_id * XORSHIFT_GOLDEN_RATIO_B;
+
+        DEVICE_FATAL_IF(reference_archive_idx < 0, "spawn: reference not in archive");
+        diresa_decode(&archive->latent_genome[reference_archive_idx * GENOME_LATENT_DIM_MAX], reference_genome, diresa_genome_weights);
+
+        reconstruct_genome_from_archive(parent->parent_hash, archive, archive_size,
+            parent->delta_indices, parent->delta_values, parent->num_deltas,
+            parent->max_deltas, parent_genome, GENOME_SIZE, workspace_parent_temp, diresa_genome_weights);
+
+        params.derive_from_genome(parent_genome, parent->gradients);
+
+        if (use_latent) {
+            float* ref_latent = &archive->latent_genome[reference_archive_idx * GENOME_LATENT_DIM_MAX];
+            float* mutated_latent_temp = workspace_parent_temp;
+            for (int j = 0; j < GENOME_LATENT_DIM_MAX; j++) {
+                float mutated_latent = ref_latent[j];
+                PRNGState local_rng = rng;
+                local_rng.s0 ^= j;
+                if (prng_next(&local_rng) < mutation_rate) {
+                    mutated_latent += prng_levy_stable(&local_rng, params.mutation_levy_alpha, params.mutation_scale);
+                    mutated_latent = tanhf(mutated_latent);
+                }
+                mutated_latent_temp[j] = mutated_latent;
+            }
+            diresa_decode(mutated_latent_temp, child_genome, diresa_genome_weights);
+        } else {
+            for (int j = 0; j < GENOME_SIZE; j++) {
+                float val = reference_genome[j];
+                PRNGState local_rng = rng;
+                local_rng.s0 ^= j;
+                if (prng_next(&local_rng) < mutation_rate) {
+                    val += prng_levy_stable(&local_rng, params.mutation_levy_alpha, params.mutation_scale);
+                    val = tanhf(val);
+                }
+                child_genome[j] = val;
+            }
+        }
+
+        pool->entries[i].parent_hash = reference_hash;
+
+        float inherit_center = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_center,
+            LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
+        float inherit_steepness = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_steepness,
+            LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
+        inheritance_factor = activation_sigmoid(inherit_steepness * (parent->fitness.value - inherit_center));
+
         for (int j = 0; j < GENOME_SIZE; j++) {
-            float val = reference_genome[j];
-            PRNGState local_rng = rng;
-            local_rng.s0 ^= j;
-            if (prng_next(&local_rng) < mutation_rate) {
-                val += prng_levy_stable(&local_rng, params.mutation_levy_alpha, params.mutation_scale);
-                val = tanhf(val);
-            }
-            child_genome[j] = val;
+            pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
         }
+
+        pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
+        pool->entries[i].num_deltas = 0;
+
+        compute_genome_deltas(
+            child_genome,
+            reference_genome,
+            pool->entries[i].delta_indices,
+            pool->entries[i].delta_values,
+            &pool->entries[i].num_deltas,
+            pool->entries[i].max_deltas,
+            pool->entries[i].genome_hash
+        );
+
+        PoolInitParams init_params;
+        init_params.derive_from_genome(child_genome, pool->entries[i].gradients);
+        measured_value_set_computed(&pool->entries[i].hunger, init_params.initial_hunger, generation, pool->entries[i].genome_hash);
+        derive_architecture(child_genome, &pool->entries[i]);
+        derive_diresa(child_genome, &pool->entries[i]);
+        derive_fitness_exponents(child_genome, &pool->entries[i]);
+        measured_value_set_uncomputed(&pool->entries[i].fitness);
+        pool->fitness_values[i] = NAN;
+        measured_value_set_uncomputed(&pool->entries[i].coherence);
+        measured_value_set_uncomputed(&pool->entries[i].task_accuracy);
+        measured_value_set_uncomputed(&pool->entries[i].generalization_gap);
+        measured_value_set_uncomputed(&pool->entries[i].hardware_efficiency);
+        measured_value_set_uncomputed(&pool->entries[i].effective_rank);
+        pool->entries[i].active_warps = 0;
+        pool->entries[i].divergent_branches = 0;
+        pool->entries[i].total_branches = 0;
+        pool->entries[i].global_loads = 0;
+        pool->entries[i].global_stores = 0;
+        pool->entries[i].l2_transactions = 0;
+        pool->entries[i].dram_transactions = 0;
+        pool->entries[i].inst_executed = 0;
+        pool->entries[i].inst_issued = 0;
+        pool->entries[i].cycles_elapsed = 0;
+        pool->entries[i].tensor_core_cycles = 0;
     }
-
-    pool->entries[i].parent_hash = reference_hash;
-
-    float inherit_center = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_center,
-        LIFECYCLE_FITNESS_INHERIT_CENTER_MIN, LIFECYCLE_FITNESS_INHERIT_CENTER_MAX);
-    float inherit_steepness = genome_to_bootstrap_param(parent_genome, parent->gradients, GenomeParamTable::fitness_inherit_steepness,
-        LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
-    inheritance_factor = activation_sigmoid(inherit_steepness * (parent->fitness.value - inherit_center));
-
-    for (int j = 0; j < GENOME_SIZE; j++) {
-        pool->entries[i].gradients[j] = parent->gradients[j] * inheritance_factor;
-    }
-
-    pool->entries[i].genome_hash = gpu_sha256(child_genome, GENOME_SIZE);
-    pool->entries[i].num_deltas = 0;
-
-    compute_genome_deltas(
-        child_genome,
-        reference_genome,
-        pool->entries[i].delta_indices,
-        pool->entries[i].delta_values,
-        &pool->entries[i].num_deltas,
-        pool->entries[i].max_deltas,
-        pool->entries[i].genome_hash
-    );
-
-    PoolInitParams init_params;
-    init_params.derive_from_genome(child_genome, pool->entries[i].gradients);
-    measured_value_set_computed(&pool->entries[i].hunger, init_params.initial_hunger, generation, pool->entries[i].genome_hash);
-    derive_architecture(child_genome, &pool->entries[i]);
-    derive_diresa(child_genome, &pool->entries[i]);
-    derive_fitness_exponents(child_genome, &pool->entries[i]);
-    measured_value_set_uncomputed(&pool->entries[i].fitness);
-    pool->fitness_values[i] = NAN;
-    measured_value_set_uncomputed(&pool->entries[i].coherence);
-    measured_value_set_uncomputed(&pool->entries[i].task_accuracy);
-    measured_value_set_uncomputed(&pool->entries[i].generalization_gap);
-    measured_value_set_uncomputed(&pool->entries[i].hardware_efficiency);
-    measured_value_set_uncomputed(&pool->entries[i].effective_rank);
-    pool->entries[i].active_warps = 0;
-    pool->entries[i].divergent_branches = 0;
-    pool->entries[i].total_branches = 0;
-    pool->entries[i].global_loads = 0;
-    pool->entries[i].global_stores = 0;
-    pool->entries[i].l2_transactions = 0;
-    pool->entries[i].dram_transactions = 0;
-    pool->entries[i].inst_executed = 0;
-    pool->entries[i].inst_issued = 0;
-    pool->entries[i].cycles_elapsed = 0;
-    pool->entries[i].tensor_core_cycles = 0;
 }
 
 __device__ void cull_weak_device(Organism* organism, float threshold) {
@@ -501,7 +485,7 @@ __device__ void diversity_selection_device(Organism* organism, int* selected_ind
     }
     distances[tid] = my_distance;
     indices[tid] = idx;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int sel = 0; sel < num_select; sel++) {
         float val = distances[tid];
@@ -522,7 +506,7 @@ __device__ void diversity_selection_device(Organism* organism, int* selected_ind
             warp_max[warp_id] = max_val;
             warp_max_idx[warp_id] = max_idx;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (tid < (BLOCK_SIZE / 32)) {
             max_val = warp_max[tid];
@@ -541,7 +525,7 @@ __device__ void diversity_selection_device(Organism* organism, int* selected_ind
         if (tid == 0 && max_idx >= 0 && max_val >= 0.0f) {
             selected_indices[sel] = max_idx;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (tid == 0) {
             for (int j = 0; j < BLOCK_SIZE; j++) {
@@ -551,7 +535,7 @@ __device__ void diversity_selection_device(Organism* organism, int* selected_ind
                 }
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 }
 
@@ -570,7 +554,7 @@ __device__ void init_pool_device(Organism* organism) {
     __shared__ int active_inits;
     __shared__ int alive_inits;
     if (threadIdx.x == 0) { active_inits = 0; alive_inits = 0; }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (idx < capacity) {
         atomicAdd(&active_inits, 1);
@@ -644,7 +628,7 @@ __device__ void init_pool_device(Organism* organism) {
         pool->alive_indices[idx] = idx;
     }
 
-    __syncthreads();
+    cg::this_grid().sync();
 
     // Report aggregate stats
     if (threadIdx.x == 0) {
@@ -653,7 +637,7 @@ __device__ void init_pool_device(Organism* organism) {
         int block_alive = alive_inits;
         atomicAdd((int*)&pool->total_spawned, block_alive);  // temp use for counting
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (idx == 0) {
         int total_initialized = pool->total_spawned;
@@ -811,7 +795,7 @@ __device__ void compact_pool_alive_indices_device(Organism* organism, cg::grid_g
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -822,7 +806,7 @@ __device__ void compact_pool_alive_indices_device(Organism* organism, cg::grid_g
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -853,7 +837,7 @@ __device__ void compact_pool_alive_indices_device(Organism* organism, cg::grid_g
         if (lane == WARP_SIZE - 1) {
             bsum_shared[warp_id] = bval;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (warp_id == 0) {
             int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
@@ -864,7 +848,7 @@ __device__ void compact_pool_alive_indices_device(Organism* organism, cg::grid_g
             }
             bsum_shared[lane] = ws;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
         int b_inclusive = bprefix + bval;
@@ -908,12 +892,13 @@ __device__ void collect_pool_task_accuracies_device(Organism* organism) {
     float* pool_task_accuracies = organism->pool_task_accuracies;
 
     int compact_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (compact_idx >= pool->alive_indices_count) return;
 
-    int tid = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[tid], "collect_pool_task_accuracies_device: dead entry in alive_indices");
+    if (compact_idx < pool->alive_indices_count) {
+        int tid = pool->alive_indices[compact_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[tid], "collect_pool_task_accuracies_device: dead entry in alive_indices");
 
-    pool_task_accuracies[tid] = pool->entries[tid].task_accuracy.value;
+        pool_task_accuracies[tid] = pool->entries[tid].task_accuracy.value;
+    }
 }
 
 __device__ void inherit_ca_weights_device(Organism* organism) {
@@ -923,37 +908,50 @@ __device__ void inherit_ca_weights_device(Organism* organism) {
     int* parent_indices = organism->inherit_parent_indices;
 
     int inherit_idx = blockIdx.y;
-    if (inherit_idx >= num_pending_inherits) return;
 
-    int child_idx = child_indices[inherit_idx];
-    int parent_idx = parent_indices[inherit_idx];
+    if (inherit_idx < num_pending_inherits) {
+        int child_idx = child_indices[inherit_idx];
+        int parent_idx = parent_indices[inherit_idx];
 
-    PoolEntry* child = &pool->entries[child_idx];
-    PoolEntry* parent = &pool->entries[parent_idx];
+        PoolEntry* child = &pool->entries[child_idx];
+        PoolEntry* parent = &pool->entries[parent_idx];
 
-    DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights_device: child became dead between find and inherit");
-    DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights_device: parent became dead between find and inherit");
-    DEVICE_FATAL_IF(!child->ca_state, "inherit_ca_weights_device: child ca_state is null");
-    DEVICE_FATAL_IF(!parent->ca_state, "inherit_ca_weights_device: parent ca_state is null");
+        DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights_device: child became dead between find and inherit");
+        DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights_device: parent became dead between find and inherit");
+        DEVICE_FATAL_IF(!child->ca_state, "inherit_ca_weights_device: child ca_state is null");
+        DEVICE_FATAL_IF(!parent->ca_state, "inherit_ca_weights_device: parent ca_state is null");
 
-    MultiHeadCAState* child_ca = child->ca_state;
-    MultiHeadCAState* parent_ca = parent->ca_state;
+        MultiHeadCAState* child_ca = child->ca_state;
+        MultiHeadCAState* parent_ca = parent->ca_state;
 
-    int perception_size = parent->num_heads * parent->channels * parent->head_dim;
-    int interaction_size = parent->num_heads * parent->head_dim * parent->head_dim;
-    int value_size = parent->num_heads * parent->head_dim * parent->channels;
-    int total_size = perception_size + interaction_size + value_size;
+        bool dims_match = (parent->num_heads == child->num_heads) &&
+                         (parent->head_dim == child->head_dim) &&
+                         (parent->channels == child->channels);
 
-    int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (!dims_match) {
+            if (blockIdx.x == 0 && threadIdx.x == 0) {
+                printf("WARN: inherit_ca_weights dimension mismatch: parent(%d,%d,%d) != child(%d,%d,%d) - skipping inherit\n",
+                       parent->num_heads, parent->head_dim, parent->channels,
+                       child->num_heads, child->head_dim, child->channels);
+            }
+            return;
+        }
 
-    if (weight_idx < perception_size) {
-        child_ca->perception_weights[weight_idx] = parent_ca->perception_weights[weight_idx];
-    }
-    if (weight_idx < interaction_size) {
-        child_ca->interaction_weights[weight_idx] = parent_ca->interaction_weights[weight_idx];
-    }
-    if (weight_idx < value_size) {
-        child_ca->value_weights[weight_idx] = parent_ca->value_weights[weight_idx];
+        int perception_size = child->num_heads * child->channels * child->head_dim;
+        int interaction_size = child->num_heads * child->head_dim * child->head_dim;
+        int value_size = child->num_heads * child->head_dim * child->channels;
+
+        int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (weight_idx < perception_size) {
+            child_ca->perception_weights[weight_idx] = parent_ca->perception_weights[weight_idx];
+        }
+        if (weight_idx < interaction_size) {
+            child_ca->interaction_weights[weight_idx] = parent_ca->interaction_weights[weight_idx];
+        }
+        if (weight_idx < value_size) {
+            child_ca->value_weights[weight_idx] = parent_ca->value_weights[weight_idx];
+        }
     }
 }
 
@@ -964,24 +962,27 @@ __device__ void find_pending_weight_inherits_device(Organism* organism) {
     int* num_pending = organism->num_pending_inherits;
 
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (compact_idx >= pool->alive_indices_count) return;
 
-    int idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[idx], "find_pending_weight_inherits_device: dead entry in alive_indices");
+    if (compact_idx < pool->alive_indices_count) {
+        int idx = pool->alive_indices[compact_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[idx], "find_pending_weight_inherits_device: dead entry in alive_indices");
 
-    PoolEntry* entry = &pool->entries[idx];
-    if (entry->age != 0) return;
+        PoolEntry* entry = &pool->entries[idx];
 
-    int p = entry->parent_idx;
+        // Only process new entries (age == 0) that have valid parents
+        if (entry->age == 0) {
+            int p = entry->parent_idx;
 
-    if (p != INT_MAX && p >= 0 && p < pool->capacity && pool->alive_flags[p]) {
-        int slot = atomicAdd(num_pending, 1);
-        child_indices[slot] = idx;
-        parent_indices[slot] = p;
+            if (p != INT_MAX && p >= 0 && p < pool->capacity && pool->alive_flags[p]) {
+                int slot = atomicAdd(num_pending, 1);
+                child_indices[slot] = idx;
+                parent_indices[slot] = p;
+            }
+        }
     }
 }
 
-__device__ void seed_archive_from_pool_device(Organism* organism, int num_to_seed) {
+__device__ void seed_archive_from_pool_device(Organism* organism, int num_to_seed, int num_classes) {
     GPUElite* archive = organism->archive;
     int* archive_size = &organism->archive_size;
     ComponentPool* pool = organism->pool;
@@ -992,60 +993,59 @@ __device__ void seed_archive_from_pool_device(Organism* organism, int num_to_see
     int hw_dim = organism->archive->hw_dim;
     int task_dim = organism->archive->task_dim;
     int gen_dim = organism->archive->gen_dim;
-    int num_classes = organism->current_dataset->descriptor->num_classes;
 
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int actual_num_to_seed = min(num_to_seed, pool->alive_indices_count);
-    if (compact_idx >= actual_num_to_seed) return;
 
-    int idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[idx], "seed_archive_from_pool_device: dead entry in alive_indices");
+    if (compact_idx < actual_num_to_seed) {
+        int idx = pool->alive_indices[compact_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[idx], "seed_archive_from_pool_device: dead entry in alive_indices");
 
-    PoolEntry* entry = &pool->entries[idx];
+        PoolEntry* entry = &pool->entries[idx];
 
-    float* temp_genome = &workspace_genomes[idx * GENOME_SIZE];
+        float* temp_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
+        float* temp_parent = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
 
-    for (int i = 0; i < GENOME_SIZE; i++) {
-        int slot = GenomeParamTable::genome_slot;
-        slot = (slot + i) % GENOME_SIZE;
-        temp_genome[i] = entry->gradients[slot];
+        reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, temp_genome, GENOME_SIZE, temp_parent, diresa_genome_weights);
+
+        float latent[GENOME_LATENT_DIM_MAX];
+        diresa_encode(temp_genome, latent, diresa_genome_weights);
+
+        float hw_coords[BEHAVIORAL_DIM_HW];
+        float task_coords[BEHAVIORAL_DIM_TASK];
+        float gen_coords[BEHAVIORAL_DIM_GEN];
+        float per_class_accuracy[NUM_CLASSES_MAX];
+
+        for (int i = 0; i < hw_dim; i++) hw_coords[i] = 0.0f;
+        for (int i = 0; i < task_dim; i++) task_coords[i] = 0.0f;
+        for (int i = 0; i < gen_dim; i++) gen_coords[i] = 0.0f;
+        for (int i = 0; i < num_classes; i++) per_class_accuracy[i] = 0.0f;
+
+        insert_elite_device(
+            archive,
+            archive_size,
+            entry->fitness.value,
+            entry->coherence.value,
+            entry->effective_rank.value,
+            entry->genome_hash,
+            0,
+            0,
+            0,
+            hw_coords,
+            task_coords,
+            gen_coords,
+            0.0f,
+            per_class_accuracy,
+            num_classes,
+            voronoi_cells,
+            num_voronoi_cells,
+            latent,
+            entry->fitness.input_hash,
+            entry->fitness.computed_at_generation
+        );
     }
-
-    float latent[GENOME_LATENT_DIM_MAX];
-    diresa_encode(temp_genome, latent, diresa_genome_weights);
-
-    float hw_coords[BEHAVIORAL_DIM_HW_MAX];
-    float task_coords[BEHAVIORAL_DIM_TASK_MAX];
-    float gen_coords[BEHAVIORAL_DIM_GEN_MAX];
-    float per_class_accuracy[NUM_CLASSES_MAX];
-
-    for (int i = 0; i < hw_dim; i++) hw_coords[i] = 0.0f;
-    for (int i = 0; i < task_dim; i++) task_coords[i] = 0.0f;
-    for (int i = 0; i < gen_dim; i++) gen_coords[i] = 0.0f;
-    for (int i = 0; i < num_classes; i++) per_class_accuracy[i] = 0.0f;
-
-    insert_elite_device(
-        archive,
-        archive_size,
-        entry->fitness.value,
-        entry->coherence.value,
-        entry->effective_rank.value,
-        entry->genome_hash,
-        0,
-        0,
-        0,
-        hw_coords,
-        task_coords,
-        gen_coords,
-        0.0f,
-        per_class_accuracy,
-        num_classes,
-        voronoi_cells,
-        num_voronoi_cells,
-        latent,
-        entry->fitness.input_hash,
-        entry->fitness.computed_at_generation
-    );
 }
 
 __device__ void spawn_wave_device(Organism* organism) {
@@ -1060,7 +1060,7 @@ __device__ void spawn_wave_device(Organism* organism) {
     int alive_count = pool->alive_indices_count;
 
     if (tid == 0) qualifying_count = 0;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int compact = tid; compact < alive_count; compact += blockDim.x) {
         int i = pool->alive_indices[compact];
@@ -1126,83 +1126,85 @@ __device__ void spawn_wave_device(Organism* organism) {
             }
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
-    if (qualifying_count == 0) return;
+    // Only spawn if there are qualifying parents
+    if (qualifying_count > 0) {
+        unsigned int seed = tid * organism->generation * RNG_SEED_MULTIPLIER;
+        seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
+        float rand = (seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE;
 
-    unsigned int seed = tid * organism->generation * RNG_SEED_MULTIPLIER;
-    seed = seed * LCG_MULTIPLIER + LCG_INCREMENT;
-    float rand = (seed & 0xFFFFFF) / RNG_NORMALIZATION_SCALE;
+        // Only spawn with given probability
+        if (rand < spawn_probability) {
+            int parent_slot = tid % qualifying_count;
+            int parent_idx = qualifying_parents[parent_slot];
 
-    if (rand >= spawn_probability) return;
+            float* workspace_parent_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_GENOME];
+            float* workspace_child_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_CHILD_GENOME];
+            float* workspace_parent_parent_temp = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_PARENT_TEMP];
 
-    int parent_slot = tid % qualifying_count;
-    int parent_idx = qualifying_parents[parent_slot];
+            PoolEntry* parent_entry = &pool->entries[parent_idx];
+            reconstruct_genome_from_archive(parent_entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
+                parent_entry->delta_indices, parent_entry->delta_values, parent_entry->num_deltas,
+                parent_entry->max_deltas, workspace_parent_genome, GENOME_SIZE, workspace_parent_parent_temp, organism->diresa_genome_weights);
 
-    float* workspace_parent_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_GENOME];
-    float* workspace_child_genome = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_CHILD_GENOME];
-    float* workspace_parent_parent_temp = &workspace_genomes[tid * GENOME_SIZE * SPAWN_WS_COUNT + GENOME_SIZE * SPAWN_WS_PARENT_PARENT_TEMP];
+            uint64_t parent_hash = pool->entries[parent_idx].genome_hash;
+            float parent_morphogen = sample_neighborhood(
+                organism->chemical_field->concentration, parent_idx, pool->entries[parent_idx].grid_size);
 
-    PoolEntry* parent_entry = &pool->entries[parent_idx];
-    reconstruct_genome_from_archive(parent_entry->parent_hash, (GPUElite*)organism->archive, organism->archive_size,
-        parent_entry->delta_indices, parent_entry->delta_values, parent_entry->num_deltas,
-        parent_entry->max_deltas, workspace_parent_genome, GENOME_SIZE, workspace_parent_parent_temp, organism->diresa_genome_weights);
+            float parent_fitness = pool->fitness_values[parent_idx];
+            float parent_hunger = pool->entries[parent_idx].hunger.value;
 
-    uint64_t parent_hash = pool->entries[parent_idx].genome_hash;
-    float parent_morphogen = sample_neighborhood(
-        organism->chemical_field->concentration, parent_idx, pool->entries[parent_idx].grid_size);
+            int ctx_metabolic_slot = GenomeParamTable::mutation_ctx_metabolic;
+            float ctx_metabolic = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_metabolic_slot,
+                parent_fitness, parent_hunger, parent_morphogen,
+                organism->telemetry->genome_complexity.hash_entropy,
+                organism->telemetry->archive_topology.novelty_gradient,
+                organism->telemetry->diresa_evolution.behavioral_drift_rate,
+                organism->telemetry->task_performance.accuracy,
+                NORMALIZED_MIN, NORMALIZED_MAX);
 
-    float parent_fitness = pool->fitness_values[parent_idx];
-    float parent_hunger = pool->entries[parent_idx].hunger.value;
+            int ctx_stress_slot = GenomeParamTable::mutation_ctx_stress;
+            float ctx_stress = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_stress_slot,
+                parent_fitness, parent_hunger, parent_morphogen,
+                organism->telemetry->genome_complexity.hash_entropy,
+                organism->telemetry->archive_topology.novelty_gradient,
+                organism->telemetry->diresa_evolution.behavioral_drift_rate,
+                organism->telemetry->task_performance.accuracy,
+                NORMALIZED_MIN, NORMALIZED_MAX);
 
-    int ctx_metabolic_slot = GenomeParamTable::mutation_ctx_metabolic;
-    float ctx_metabolic = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_metabolic_slot,
-        parent_fitness, parent_hunger, parent_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
-        NORMALIZED_MIN, NORMALIZED_MAX);
+            int ctx_morphogen_slot = GenomeParamTable::mutation_ctx_morphogen;
+            float ctx_morphogen = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_morphogen_slot,
+                parent_fitness, parent_hunger, parent_morphogen,
+                organism->telemetry->genome_complexity.hash_entropy,
+                organism->telemetry->archive_topology.novelty_gradient,
+                organism->telemetry->diresa_evolution.behavioral_drift_rate,
+                organism->telemetry->task_performance.accuracy,
+                NORMALIZED_MIN, NORMALIZED_MAX);
 
-    int ctx_stress_slot = GenomeParamTable::mutation_ctx_stress;
-    float ctx_stress = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_stress_slot,
-        parent_fitness, parent_hunger, parent_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
-        NORMALIZED_MIN, NORMALIZED_MAX);
+            int mutation_rate_slot = GenomeParamTable::metalearning_mutation_rate;
+            float mutation_rate = genome_to_param(
+                workspace_parent_genome,
+                pool->entries[parent_idx].gradients,
+                mutation_rate_slot,
+                ctx_metabolic, ctx_stress, ctx_morphogen,
+                organism->telemetry->genome_complexity.hash_entropy,
+                organism->telemetry->archive_topology.novelty_gradient,
+                organism->telemetry->diresa_evolution.behavioral_drift_rate,
+                organism->telemetry->task_performance.accuracy,
+                SPAWN_RATE_MIN, SPAWN_RATE_MAX
+            );
 
-    int ctx_morphogen_slot = GenomeParamTable::mutation_ctx_morphogen;
-    float ctx_morphogen = genome_to_param(workspace_parent_genome, pool->entries[parent_idx].gradients, ctx_morphogen_slot,
-        parent_fitness, parent_hunger, parent_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
-        NORMALIZED_MIN, NORMALIZED_MAX);
-
-    int mutation_rate_slot = GenomeParamTable::metalearning_mutation_rate;
-    float mutation_rate = genome_to_param(
-        workspace_parent_genome,
-        pool->entries[parent_idx].gradients,
-        mutation_rate_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
-        SPAWN_RATE_MIN, SPAWN_RATE_MAX
-    );
-
-    spawn_component_device(
-        organism,
-        parent_idx,
-        mutation_rate,
-        workspace_parent_genome,
-        workspace_child_genome,
-        workspace_parent_parent_temp
-    );
+            spawn_component_device(
+                organism,
+                parent_idx,
+                mutation_rate,
+                workspace_parent_genome,
+                workspace_child_genome,
+                workspace_parent_parent_temp
+            );
+        }
+    }
 }
 
 __device__ void culling_device(Organism* organism, float fitness_threshold, float hunger_threshold) {
@@ -1213,36 +1215,37 @@ __device__ void culling_device(Organism* organism, float fitness_threshold, floa
     float* workspace_genomes = organism->workspace_genomes;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= pool->capacity) return;
 
-    PoolEntry* entry = &pool->entries[idx];
+    if (idx < pool->capacity) {
+        PoolEntry* entry = &pool->entries[idx];
 
-    if (pool->alive_flags[idx]) {
-        float* entry_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
-        float* entry_parent_temp = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
-        reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
-            entry->delta_indices, entry->delta_values, entry->num_deltas,
-            entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
+        if (pool->alive_flags[idx]) {
+            float* entry_genome = &workspace_genomes[idx * GENOME_SIZE * 2];
+            float* entry_parent_temp = &workspace_genomes[idx * GENOME_SIZE * 2 + GENOME_SIZE];
+            reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
+                entry->delta_indices, entry->delta_values, entry->num_deltas,
+                entry->max_deltas, entry_genome, GENOME_SIZE, entry_parent_temp, organism->diresa_genome_weights);
 
-        uint64_t entry_genome_hash = entry->genome_hash;
-        float ctx_metabolic = entry->fitness.value;
-        float ctx_stress = entry->hunger.value;
+            uint64_t entry_genome_hash = entry->genome_hash;
+            float ctx_metabolic = entry->fitness.value;
+            float ctx_stress = entry->hunger.value;
 
-        float ctx_morphogen = chemical_field->cached_mean;
+            float ctx_morphogen = chemical_field->cached_mean;
 
-        int fitness_cull_mult_slot = GenomeParamTable::lifecycle_fitness_culling_mult;
-        float fitness_cull_mult = genome_to_param(entry_genome, entry->gradients, fitness_cull_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, FITNESS_CULLING_MULT_MIN, FITNESS_CULLING_MULT_MAX);
+            int fitness_cull_mult_slot = GenomeParamTable::lifecycle_fitness_culling_mult;
+            float fitness_cull_mult = genome_to_param(entry_genome, entry->gradients, fitness_cull_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, FITNESS_CULLING_MULT_MIN, FITNESS_CULLING_MULT_MAX);
 
-        if (entry->fitness.value < fitness_threshold * fitness_cull_mult) {
-            pool->alive_flags[idx] = false;
-            Atomics::increment_int(pool->total_culled);
-            Atomics::decrement_int(pool->active_count);
-        }
+            if (entry->fitness.value < fitness_threshold * fitness_cull_mult) {
+                pool->alive_flags[idx] = false;
+                Atomics::increment_int(pool->total_culled);
+                Atomics::decrement_int(pool->active_count);
+            }
 
-        else if (entry->hunger.value > hunger_threshold) {
-            pool->alive_flags[idx] = false;
-            Atomics::increment_int(pool->total_culled);
-            Atomics::decrement_int(pool->active_count);
+            else if (entry->hunger.value > hunger_threshold) {
+                pool->alive_flags[idx] = false;
+                Atomics::increment_int(pool->total_culled);
+                Atomics::decrement_int(pool->active_count);
+            }
         }
     }
 }

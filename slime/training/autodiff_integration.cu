@@ -27,7 +27,7 @@ __device__ void transpose_matrix_device(Organism* organism) {
     int x = bx + threadIdx.x, y = by + threadIdx.y;
 
     if (y < M && x < N) tile[threadIdx.y][threadIdx.x] = A[y * N + x];
-    __syncthreads();
+    cg::this_grid().sync();
 
     int out_x = by + threadIdx.x, out_y = bx + threadIdx.y;
     if (out_y < N && out_x < M) B[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
@@ -47,23 +47,23 @@ __device__ void tensor_core_gemm_device(Organism* organism) {
     const int tile_row = warpM * WMMA_TILE_DIM;
     const int tile_col = warpN * WMMA_TILE_DIM;
 
-    if (tile_row >= M || tile_col >= N) return;
+    if (tile_row < M && tile_col < N) {
+        wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
+        wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::col_major> b_frag;
+        wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-    wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::col_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+        wmma::fill_fragment(c_frag, 0.0f);
 
-    wmma::fill_fragment(c_frag, 0.0f);
-
-    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
-        if (k_tile + WMMA_TILE_DIM <= K) {
-            wmma::load_matrix_sync(a_frag, A + tile_row * K + k_tile, K);
-            wmma::load_matrix_sync(b_frag, B + k_tile * N + tile_col, N);
-            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+            if (k_tile + WMMA_TILE_DIM <= K) {
+                wmma::load_matrix_sync(a_frag, A + tile_row * K + k_tile, K);
+                wmma::load_matrix_sync(b_frag, B + k_tile * N + tile_col, N);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
         }
-    }
 
-    wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
+        wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
+    }
 }
 
 __device__ void fp32_to_fp16_device(Organism* organism) {
@@ -107,22 +107,22 @@ __device__ void tensor_core_gemm_transA_device(Organism* organism) {
     const int tile_row = warpM * WMMA_TILE_DIM;
     const int tile_col = warpN * WMMA_TILE_DIM;
 
-    if (tile_row >= M || tile_col >= N) return;
+    if (tile_row < M && tile_col < N) {
+        wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::col_major> a_frag;
+        wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
+        wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-    wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::col_major> a_frag;
-    wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
-    wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+        wmma::fill_fragment(c_frag, 0.0f);
 
-    wmma::fill_fragment(c_frag, 0.0f);
-
-    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
-        if (k_tile + WMMA_TILE_DIM <= K) {
-            wmma::load_matrix_sync(a_frag, A + k_tile * M + tile_row, M);
-            wmma::load_matrix_sync(b_frag, B + k_tile * N + tile_col, N);
-            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+            if (k_tile + WMMA_TILE_DIM <= K) {
+                wmma::load_matrix_sync(a_frag, A + k_tile * M + tile_row, M);
+                wmma::load_matrix_sync(b_frag, B + k_tile * N + tile_col, N);
+                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
         }
+        wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
     }
-    wmma::store_matrix_sync(C + tile_row * N + tile_col, c_frag, N, wmma::mem_row_major);
 }
 
 __device__ void transpose_fp16_device(Organism* organism) {
@@ -136,7 +136,7 @@ __device__ void transpose_fp16_device(Organism* organism) {
     int x = bx + threadIdx.x, y = by + threadIdx.y;
 
     if (y < M && x < N) tile[threadIdx.y][threadIdx.x] = A[y * N + x];
-    __syncthreads();
+    cg::this_grid().sync();
 
     int out_x = by + threadIdx.x, out_y = bx + threadIdx.y;
     if (out_y < N && out_x < M) B[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
@@ -160,9 +160,8 @@ __device__ void multi_head_ca_with_tape_device(Organism* organism) {
     const int cell_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int cell_y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (cell_x >= grid_size || cell_y >= grid_size) return;
-
-    TraceBuffer* trace_buffer = &ca_heads->trace;
+    if (cell_x < grid_size && cell_y < grid_size) {
+        TraceBuffer* trace_buffer = &ca_heads->trace;
     if (trace_buffer->current_idx < trace_buffer->capacity && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
         int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
         if (trace_idx < trace_buffer->capacity) {
@@ -176,7 +175,7 @@ __device__ void multi_head_ca_with_tape_device(Organism* organism) {
                            cell_y * grid_size * arch.head_dim +
                            cell_x * arch.head_dim;
 
-    __shared__ float neighborhood[3][3][MAX_CHANNELS + BANK_PAD];
+    __shared__ float neighborhood[3][3][CHANNELS + BANK_PAD];
 
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
@@ -191,11 +190,11 @@ __device__ void multi_head_ca_with_tape_device(Organism* organism) {
             }
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
-    float perception[MAX_HEAD_DIM];
-    float interaction[MAX_HEAD_DIM];
-    float output[MAX_CHANNELS];
+    float perception[HEAD_DIM];
+    float interaction[HEAD_DIM];
+    float output[CHANNELS];
 
     half* perc_w = &ca_heads->perception_weights[head_id * arch.channels * arch.head_dim];
     half* inter_w = &ca_heads->interaction_weights[head_id * arch.head_dim * arch.head_dim];
@@ -243,9 +242,10 @@ __device__ void multi_head_ca_with_tape_device(Organism* organism) {
                   cell_y * grid_size * arch.channels +
                   cell_x * arch.channels;
 
-    for (int c = 0; c < arch.channels; c++) {
-        float input_val = neighborhood[1][1][c];
-        ca_output[out_idx + c] = input_val * (1.0f - gate) + output[c] * gate;
+        for (int c = 0; c < arch.channels; c++) {
+            float input_val = neighborhood[1][1][c];
+            ca_output[out_idx + c] = input_val * (1.0f - gate) + output[c] * gate;
+        }
     }
 }
 
@@ -259,82 +259,82 @@ __device__ void apply_ca_gradients_device(Organism* organism) {
     int param_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_id = blockIdx.y;
 
-    if (head_id >= arch.num_heads) return;
+    if (head_id < arch.num_heads) {
+        int perception_base = param_map->perception_start[head_id];
+        int interaction_base = param_map->interaction_start[head_id];
+        int value_base = param_map->value_start[head_id];
 
-    int perception_base = param_map->perception_start[head_id];
-    int interaction_base = param_map->interaction_start[head_id];
-    int value_base = param_map->value_start[head_id];
+        half* param_ptr_fp16 = nullptr;
+        float* param_ptr_fp32 = nullptr;
+        int tape_idx = -1;
+        bool is_fp16 = true;
 
-    half* param_ptr_fp16 = nullptr;
-    float* param_ptr_fp32 = nullptr;
-    int tape_idx = -1;
-    bool is_fp16 = true;
-
-    if (param_idx < param_map->perception_size) {
-        param_ptr_fp16 = &ca_heads->perception_weights[head_id * param_map->perception_size + param_idx];
-        tape_idx = perception_base + param_idx;
-    } else if (param_idx < param_map->perception_size + param_map->interaction_size) {
-        int local_idx = param_idx - param_map->perception_size;
-        param_ptr_fp16 = &ca_heads->interaction_weights[head_id * param_map->interaction_size + local_idx];
-        tape_idx = interaction_base + local_idx;
-    } else if (param_idx < param_map->perception_size + param_map->interaction_size + param_map->value_size) {
-        int local_idx = param_idx - param_map->perception_size - param_map->interaction_size;
-        param_ptr_fp16 = &ca_heads->value_weights[head_id * param_map->value_size + local_idx];
-        tape_idx = value_base + local_idx;
-    }
-
-    if ((param_ptr_fp16 != nullptr || param_ptr_fp32 != nullptr) && tape_idx >= 0 && tape_idx < tape->current_value_idx) {
-        float grad = tape->grad_buffer[tape_idx];
-
-        DEVICE_FATAL_IF(isnan(grad), "apply_ca_gradients: gradient is NaN - autodiff tape corrupted");
-        DEVICE_FATAL_IF(isinf(grad), "apply_ca_gradients: gradient is Inf - autodiff tape corrupted");
-
-        if (fabsf(grad) > gradient_clip) {
-            grad = copysignf(gradient_clip, grad);
+        if (param_idx < param_map->perception_size) {
+            param_ptr_fp16 = &ca_heads->perception_weights[head_id * param_map->perception_size + param_idx];
+            tape_idx = perception_base + param_idx;
+        } else if (param_idx < param_map->perception_size + param_map->interaction_size) {
+            int local_idx = param_idx - param_map->perception_size;
+            param_ptr_fp16 = &ca_heads->interaction_weights[head_id * param_map->interaction_size + local_idx];
+            tape_idx = interaction_base + local_idx;
+        } else if (param_idx < param_map->perception_size + param_map->interaction_size + param_map->value_size) {
+            int local_idx = param_idx - param_map->perception_size - param_map->interaction_size;
+            param_ptr_fp16 = &ca_heads->value_weights[head_id * param_map->value_size + local_idx];
+            tape_idx = value_base + local_idx;
         }
 
-        if (is_fp16 && param_ptr_fp16 != nullptr) {
-            float val = __half2float(*param_ptr_fp16);
-            DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight is NaN before update - data corrupted");
-            val -= learning_rate * grad;
-            DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight became NaN after update");
-            DEVICE_FATAL_IF(isinf(val), "apply_ca_gradients: weight became Inf after update");
-            *param_ptr_fp16 = __float2half(val);
-        } else if (param_ptr_fp32 != nullptr) {
-            *param_ptr_fp32 -= learning_rate * grad;
-        }
+        if ((param_ptr_fp16 != nullptr || param_ptr_fp32 != nullptr) && tape_idx >= 0 && tape_idx < tape->current_value_idx) {
+            float grad = tape->grad_buffer[tape_idx];
 
-        tape->grad_buffer[tape_idx] = 0.0f;
+            DEVICE_FATAL_IF(isnan(grad), "apply_ca_gradients: gradient is NaN - autodiff tape corrupted");
+            DEVICE_FATAL_IF(isinf(grad), "apply_ca_gradients: gradient is Inf - autodiff tape corrupted");
+
+            if (fabsf(grad) > gradient_clip) {
+                grad = copysignf(gradient_clip, grad);
+            }
+
+            if (is_fp16 && param_ptr_fp16 != nullptr) {
+                float val = __half2float(*param_ptr_fp16);
+                DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight is NaN before update - data corrupted");
+                val -= learning_rate * grad;
+                DEVICE_FATAL_IF(isnan(val), "apply_ca_gradients: weight became NaN after update");
+                DEVICE_FATAL_IF(isinf(val), "apply_ca_gradients: weight became Inf after update");
+                *param_ptr_fp16 = __float2half(val);
+            } else if (param_ptr_fp32 != nullptr) {
+                *param_ptr_fp32 -= learning_rate * grad;
+            }
+
+            tape->grad_buffer[tape_idx] = 0.0f;
+        }
     }
 }
 
 __device__ void init_ca_parameter_map_device(Organism* organism) {
     CAParameterMap* map = organism->ca_param_map;
     Architecture arch = organism->current_arch;
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        map->perception_size = arch.channels * arch.head_dim;
+        map->interaction_size = arch.head_dim * arch.head_dim;
+        map->value_size = arch.head_dim * arch.channels;
 
-    map->perception_size = arch.channels * arch.head_dim;
-    map->interaction_size = arch.head_dim * arch.head_dim;
-    map->value_size = arch.head_dim * arch.channels;
+        int offset = 0;
+        for (int h = 0; h < arch.num_heads; h++) {
+            map->head_param_offsets[h] = offset;
 
-    int offset = 0;
-    for (int h = 0; h < arch.num_heads; h++) {
-        map->head_param_offsets[h] = offset;
+            map->perception_start[h] = offset;
+            offset += map->perception_size;
 
-        map->perception_start[h] = offset;
-        offset += map->perception_size;
+            map->interaction_start[h] = offset;
+            offset += map->interaction_size;
 
-        map->interaction_start[h] = offset;
-        offset += map->interaction_size;
+            map->value_start[h] = offset;
+            offset += map->value_size;
 
-        map->value_start[h] = offset;
-        offset += map->value_size;
+            map->head_param_counts[h] = map->perception_size + map->interaction_size + map->value_size;
+        }
 
-        map->head_param_counts[h] = map->perception_size + map->interaction_size + map->value_size;
+        map->total_params = offset;
+        map->total_ca_params = offset;
     }
-
-    map->total_params = offset;
-    map->total_ca_params = offset;
 }
 
 __device__ void im2col_device(Organism* organism) {
@@ -345,27 +345,27 @@ __device__ void im2col_device(Organism* organism) {
     int channels = organism->ca_channels;
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
-    if (cell_idx >= batch_size * num_cells) return;
+    if (cell_idx < batch_size * num_cells) {
+        int batch_id = cell_idx / num_cells;
+        int local_cell = cell_idx % num_cells;
+        int cell_y = local_cell / grid_size;
+        int cell_x = local_cell % grid_size;
 
-    int batch_id = cell_idx / num_cells;
-    int local_cell = cell_idx % num_cells;
-    int cell_y = local_cell / grid_size;
-    int cell_x = local_cell % grid_size;
+        int col_row = cell_idx;
+        int col_width = 9 * channels;
 
-    int col_row = cell_idx;
-    int col_width = 9 * channels;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int ny = max(0, min(grid_size - 1, cell_y + dy));
+                int nx = max(0, min(grid_size - 1, cell_x + dx));
+                int patch_idx = (dy + 1) * 3 + (dx + 1);
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int ny = max(0, min(grid_size - 1, cell_y + dy));
-            int nx = max(0, min(grid_size - 1, cell_x + dx));
-            int patch_idx = (dy + 1) * 3 + (dx + 1);
+                int input_base = batch_id * grid_size * grid_size * channels +
+                                ny * grid_size * channels + nx * channels;
 
-            int input_base = batch_id * grid_size * grid_size * channels +
-                            ny * grid_size * channels + nx * channels;
-
-            for (int c = 0; c < channels; c++) {
-                col[col_row * col_width + patch_idx * channels + c] = input[input_base + c];
+                for (int c = 0; c < channels; c++) {
+                    col[col_row * col_width + patch_idx * channels + c] = input[input_base + c];
+                }
             }
         }
     }
@@ -379,30 +379,30 @@ __device__ void col2im_device(Organism* organism) {
     int channels = organism->ca_channels;
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
-    if (cell_idx >= batch_size * num_cells) return;
+    if (cell_idx < batch_size * num_cells) {
+        int batch_id = cell_idx / num_cells;
+        int local_cell = cell_idx % num_cells;
+        int cell_y = local_cell / grid_size;
+        int cell_x = local_cell % grid_size;
 
-    int batch_id = cell_idx / num_cells;
-    int local_cell = cell_idx % num_cells;
-    int cell_y = local_cell / grid_size;
-    int cell_x = local_cell % grid_size;
+        int col_width = 9 * channels;
 
-    int col_width = 9 * channels;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int out_y = cell_y - dy;
+                int out_x = cell_x - dx;
+                if (out_y >= 0 && out_y < grid_size && out_x >= 0 && out_x < grid_size) {
+                    int out_cell = batch_id * num_cells + out_y * grid_size + out_x;
+                    int patch_idx = (dy + 1) * 3 + (dx + 1);
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int out_y = cell_y - dy;
-            int out_x = cell_x - dx;
-            if (out_y < 0 || out_y >= grid_size || out_x < 0 || out_x >= grid_size) continue;
+                    int input_base = batch_id * grid_size * grid_size * channels +
+                                    cell_y * grid_size * channels + cell_x * channels;
 
-            int out_cell = batch_id * num_cells + out_y * grid_size + out_x;
-            int patch_idx = (dy + 1) * 3 + (dx + 1);
-
-            int input_base = batch_id * grid_size * grid_size * channels +
-                            cell_y * grid_size * channels + cell_x * channels;
-
-            for (int c = 0; c < channels; c++) {
-                atomicAdd(&input_grad[input_base + c],
-                         col[out_cell * col_width + patch_idx * channels + c]);
+                    for (int c = 0; c < channels; c++) {
+                        atomicAdd(&input_grad[input_base + c],
+                                 col[out_cell * col_width + patch_idx * channels + c]);
+                    }
+                }
             }
         }
     }
@@ -428,54 +428,54 @@ __device__ void route_autodiff_to_unified_device(Organism* organism) {
     int param_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_id = blockIdx.y;
 
-    if (head_id >= arch.num_heads) return;
+    if (head_id < arch.num_heads) {
+        int perception_base = param_map->perception_start[head_id];
+        int interaction_base = param_map->interaction_start[head_id];
+        int value_base = param_map->value_start[head_id];
 
-    int perception_base = param_map->perception_start[head_id];
-    int interaction_base = param_map->interaction_start[head_id];
-    int value_base = param_map->value_start[head_id];
+        int per_head_perception = arch.channels * arch.head_dim;
+        int per_head_interaction = arch.head_dim * arch.head_dim;
+        int per_head_value = arch.head_dim * arch.channels;
+        int total_per_head = per_head_perception + per_head_interaction + per_head_value;
 
-    int per_head_perception = arch.channels * arch.head_dim;
-    int per_head_interaction = arch.head_dim * arch.head_dim;
-    int per_head_value = arch.head_dim * arch.channels;
-    int total_per_head = per_head_perception + per_head_interaction + per_head_value;
+        if (param_idx < total_per_head) {
+            int tape_idx = -1;
+            float* target = nullptr;
+            int target_idx = -1;
 
-    if (param_idx >= total_per_head) return;
+            if (param_idx < per_head_perception) {
+                tape_idx = perception_base + param_idx;
+                target = grad_buf->perception_grads;
+                target_idx = head_id * per_head_perception + param_idx;
+            } else if (param_idx < per_head_perception + per_head_interaction) {
+                int local_idx = param_idx - per_head_perception;
+                tape_idx = interaction_base + local_idx;
+                target = grad_buf->interaction_grads;
+                target_idx = head_id * per_head_interaction + local_idx;
+            } else {
+                int local_idx = param_idx - per_head_perception - per_head_interaction;
+                tape_idx = value_base + local_idx;
+                target = grad_buf->value_grads;
+                target_idx = head_id * per_head_value + local_idx;
+            }
 
-    int tape_idx = -1;
-    float* target = nullptr;
-    int target_idx = -1;
+            if (tape_idx >= 0 && tape_idx < tape->current_value_idx && target != nullptr) {
+                float grad = tape->grad_buffer[tape_idx];
 
-    if (param_idx < per_head_perception) {
-        tape_idx = perception_base + param_idx;
-        target = grad_buf->perception_grads;
-        target_idx = head_id * per_head_perception + param_idx;
-    } else if (param_idx < per_head_perception + per_head_interaction) {
-        int local_idx = param_idx - per_head_perception;
-        tape_idx = interaction_base + local_idx;
-        target = grad_buf->interaction_grads;
-        target_idx = head_id * per_head_interaction + local_idx;
-    } else {
-        int local_idx = param_idx - per_head_perception - per_head_interaction;
-        tape_idx = value_base + local_idx;
-        target = grad_buf->value_grads;
-        target_idx = head_id * per_head_value + local_idx;
-    }
+                DEVICE_FATAL_IF(isnan(grad), "route_autodiff: gradient is NaN");
+                DEVICE_FATAL_IF(isinf(grad), "route_autodiff: gradient is Inf");
 
-    if (tape_idx >= 0 && tape_idx < tape->current_value_idx && target != nullptr) {
-        float grad = tape->grad_buffer[tape_idx];
+                if (fabsf(grad) > gradient_clip) {
+                    grad = copysignf(gradient_clip, grad);
+                }
 
-        DEVICE_FATAL_IF(isnan(grad), "route_autodiff: gradient is NaN");
-        DEVICE_FATAL_IF(isinf(grad), "route_autodiff: gradient is Inf");
+                atomicAdd(&target[target_idx], grad);
+                tape->grad_buffer[tape_idx] = 0.0f;
 
-        if (fabsf(grad) > gradient_clip) {
-            grad = copysignf(gradient_clip, grad);
-        }
-
-        atomicAdd(&target[target_idx], grad);
-        tape->grad_buffer[tape_idx] = 0.0f;
-
-        if (param_idx == 0 && head_id == 0) {
-            grad_buf->has_autodiff_grads = 1;
+                if (param_idx == 0 && head_id == 0) {
+                    grad_buf->has_autodiff_grads = 1;
+                }
+            }
         }
     }
 }

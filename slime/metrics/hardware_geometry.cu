@@ -142,7 +142,7 @@ __device__ void aggregate_hardware_geometry_device(Organism* organism) {
         aggregate_trace.achieved_bandwidth = 0.0f;
         aggregate_trace.peak_bandwidth = 0.0f;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int i = tid; i < buffer->current_idx; i += blockDim.x) {
         ExecutionTrace* trace = &buffer->traces[i];
@@ -162,7 +162,7 @@ __device__ void aggregate_hardware_geometry_device(Organism* organism) {
         atomicAdd((unsigned long long*)&aggregate_trace.cycles_elapsed, trace->cycles_elapsed);
         atomicAdd((unsigned long long*)&aggregate_trace.tensor_core_cycles, trace->tensor_core_cycles);
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (tid == 0) {
         compute_hardware_geometry(&aggregate_trace, output_geom);

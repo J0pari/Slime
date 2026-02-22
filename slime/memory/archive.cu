@@ -77,22 +77,24 @@ __device__ void hash_table_remove(
     int* __restrict__ values,
     uint64_t genome_hash
 ) {
-    if (genome_hash == HASH_TABLE_EMPTY_KEY) return;
+    if (genome_hash != HASH_TABLE_EMPTY_KEY) {
+        int slot = hash_table_slot(genome_hash);
+        int probes = 0;
+        bool found = false;
 
-    int slot = hash_table_slot(genome_hash);
-    int probes = 0;
-
-    while (probes < GENOME_HASH_TABLE_SIZE) {
-        if (keys[slot] == genome_hash) {
-            keys[slot] = HASH_TABLE_EMPTY_KEY;
-            values[slot] = -1;
-            return;
+        while (probes < GENOME_HASH_TABLE_SIZE && !found) {
+            if (keys[slot] == genome_hash) {
+                keys[slot] = HASH_TABLE_EMPTY_KEY;
+                values[slot] = -1;
+                found = true;
+            } else {
+                DEVICE_FATAL_IF(keys[slot] == HASH_TABLE_EMPTY_KEY, "hash_table_remove: key not found in table");
+                slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
+                probes++;
+            }
         }
-        DEVICE_FATAL_IF(keys[slot] == HASH_TABLE_EMPTY_KEY, "hash_table_remove: key not found in table");
-        slot = (slot + 1) & (GENOME_HASH_TABLE_SIZE - 1);
-        probes++;
+        DEVICE_FATAL_IF(!found, "hash_table_remove: exhausted probe limit");
     }
-    DEVICE_FATAL_IF(true, "hash_table_remove: exhausted probe limit");
 }
 
 __device__ void restore_fitness_from_archive(
@@ -137,9 +139,9 @@ __device__ __forceinline__ float elite_to_cell_distance_sq(
     const GPUElite* archive, int elite_idx,
     const VoronoiCell* cell, int hw_dim, int task_dim, int gen_dim
 ) {
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "elite_to_cell_distance_sq: gen_dim invalid");
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "elite_to_cell_distance_sq: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "elite_to_cell_distance_sq: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "elite_to_cell_distance_sq: gen_dim invalid");
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "elite_to_cell_distance_sq: elite_idx out of bounds");
     return compute_three_axis_distance_sq(
         &archive->hw_coords[elite_idx * hw_dim],
@@ -199,8 +201,9 @@ __device__ void create_elite_device(
 
 
 __device__ void update_voronoi_density_device(Organism* organism) {
-    const float* genome = organism->genome;
-    PoolEntry* primary = &organism->pool->entries[0];
+    int entry_idx = blockIdx.x;
+    const float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    PoolEntry* primary = &organism->pool->entries[entry_idx];
     const float* gradients = primary->gradients;
     InitContext ctx;
     ctx.derive_from_genome(genome, gradients);
@@ -214,52 +217,54 @@ __device__ void update_voronoi_density_device(Organism* organism) {
     int num_elites = organism->archive_size;
     int num_cells = organism->num_voronoi_cells;
 
-    if (num_cells <= 0) {
-        return;
-    }
+    DEVICE_FATAL_IF(num_cells <= 0, "update_voronoi_density: num_cells must be > 0");
+
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (cell_id >= num_cells) return;
 
-    VoronoiCell* cell = &cells[cell_id];
-    cell->density = 0;
-    cell->best_elite_idx = -1;
+    // Work for threads within bounds
+    VoronoiCell* cell = nullptr;
     float best_fitness = -1.0f;
-
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
 
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "update_voronoi: gen_dim invalid");
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "update_voronoi: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "update_voronoi: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "update_voronoi: gen_dim invalid");
 
-    for (int i = 0; i < num_elites; i++) {
-        float dist_sq = 0.0f;
-        for (int d = 0; d < hw_dim; d++) {
-            float diff = archive->hw_coords[i * hw_dim + d] - cell->hw_centroid[d];
-            dist_sq += diff * diff;
-        }
-        for (int d = 0; d < task_dim; d++) {
-            float diff = archive->task_coords[i * task_dim + d] - cell->task_centroid[d];
-            dist_sq += diff * diff;
-        }
-        for (int d = 0; d < gen_dim; d++) {
-            float diff = archive->gen_coords[i * gen_dim + d] - cell->gen_centroid[d];
-            dist_sq += diff * diff;
-        }
+    if (cell_id < num_cells) {
+        cell = &cells[cell_id];
+        cell->density = 0;
+        cell->best_elite_idx = -1;
 
-        if (sqrtf(dist_sq) < cell->radius) {
-            cell->density++;
-            if (archive->fitness[i] > best_fitness) {
-                best_fitness = archive->fitness[i];
-                cell->best_elite_idx = i;
+        for (int i = 0; i < num_elites; i++) {
+            float dist_sq = 0.0f;
+            for (int d = 0; d < hw_dim; d++) {
+                float diff = archive->hw_coords[i * hw_dim + d] - cell->hw_centroid[d];
+                dist_sq += diff * diff;
+            }
+            for (int d = 0; d < task_dim; d++) {
+                float diff = archive->task_coords[i * task_dim + d] - cell->task_centroid[d];
+                dist_sq += diff * diff;
+            }
+            for (int d = 0; d < gen_dim; d++) {
+                float diff = archive->gen_coords[i * gen_dim + d] - cell->gen_centroid[d];
+                dist_sq += diff * diff;
+            }
+
+            if (sqrtf(dist_sq) < cell->radius) {
+                cell->density++;
+                if (archive->fitness[i] > best_fitness) {
+                    best_fitness = archive->fitness[i];
+                    cell->best_elite_idx = i;
+                }
             }
         }
     }
 
     __shared__ float shared_densities[256];
-    shared_densities[threadIdx.x] = (cell_id < num_cells) ? (float)cell->density : 0.0f;
-    __syncthreads();
+    shared_densities[threadIdx.x] = (cell_id < num_cells && cell != nullptr) ? (float)cell->density : 0.0f;
+    cg::this_grid().sync();
 
     if (threadIdx.x == 0) {
         float density_mean = 0.0f;
@@ -283,12 +288,11 @@ __device__ void update_voronoi_density_device(Organism* organism) {
             VORONOI_CORRELATION_EXPONENT_MIN, VORONOI_CORRELATION_EXPONENT_MAX
         );
 
+        DEVICE_FATAL_IF(density_mean <= 0.0f, "update_voronoi_density: density_mean must be > 0");
+
         for (int i = 0; i < blockDim.x && (blockIdx.x * blockDim.x + i) < num_cells; i++) {
             int idx = blockIdx.x * blockDim.x + i;
 
-            if (density_mean <= 0.0f) {
-                return;
-            }
             cells[idx].density_fluctuation = fabsf((float)cells[idx].density - (float)cells[idx].density_prev) / density_mean;
             cells[idx].density_prev = cells[idx].density;
 
@@ -319,84 +323,91 @@ __device__ void insert_elite_device(
     uint64_t fitness_input_hash,
     int fitness_computed_at_generation
 ) {
+    // Check if genome already exists - if so, skip insertion
     int existing_idx = hash_table_lookup(
         archive->hash_table_keys,
         archive->hash_table_values,
         genome_hash_val
     );
-    if (existing_idx >= 0) {
-        return;  
-    }
 
-    int idx = atomicAdd(archive_size, 1);
-    if (idx >= MAX_ARCHIVE_SIZE) {
-        atomicSub(archive_size, 1);
-        return;
-    }
+    bool should_insert = (existing_idx < 0);
+    int idx = -1;
 
-    bool inserted = hash_table_insert(
-        archive->hash_table_keys,
-        archive->hash_table_values,
-        genome_hash_val,
-        idx
-    );
-    if (!inserted) {
-        atomicSub(archive_size, 1);
-        return;
-    }
-
-    int hw_dim = archive->hw_dim;
-    int task_dim = archive->task_dim;
-    int gen_dim = archive->gen_dim;
-
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "insert_elite_device: gen_dim invalid");
-    DEVICE_FATAL_IF(num_classes <= 0 || num_classes > NUM_CLASSES_MAX, "insert_elite_device: num_classes invalid");
-
-    archive->fitness[idx] = fitness_val;
-    archive->coherence[idx] = coherence_val;
-    archive->effective_rank[idx] = effective_rank_val;
-    archive->genome_hash[idx] = genome_hash_val;
-    archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
-    archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
-    archive->generation[idx] = generation_val;
-    archive->fitness_input_hash[idx] = fitness_input_hash;
-    archive->fitness_computed_at_generation[idx] = fitness_computed_at_generation;
-
-    for (int d = 0; d < hw_dim; d++) {
-        archive->hw_coords[idx * hw_dim + d] = hw_coords_new[d];
-    }
-    for (int d = 0; d < task_dim; d++) {
-        archive->task_coords[idx * task_dim + d] = task_coords_new[d];
-    }
-    for (int d = 0; d < gen_dim; d++) {
-        archive->gen_coords[idx * gen_dim + d] = gen_coords_new[d];
-    }
-
-    archive->task_performance[idx] = task_performance_val;
-    for (int c = 0; c < num_classes; c++) {
-        archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
-    }
-
-    DEVICE_FATAL_IF(latent_genome_new == nullptr, "insert_elite_device: latent_genome_new is null");
-    DEVICE_FATAL_IF(archive->latent_genome == nullptr, "insert_elite_device: archive latent_genome buffer is null");
-    for (int l = 0; l < GENOME_LATENT_DIM_MAX; l++) {
-        archive->latent_genome[idx * GENOME_LATENT_DIM_MAX + l] = latent_genome_new[l];
-    }
-
-    float min_dist = 1e9f;
-    int closest_cell = 0;
-    for (int c = 0; c < num_cells; c++) {
-        float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
-        if (dist_sq < min_dist) {
-            min_dist = dist_sq;
-            closest_cell = c;
+    if (should_insert) {
+        idx = atomicAdd(archive_size, 1);
+        if (idx >= MAX_ARCHIVE_SIZE) {
+            atomicSub(archive_size, 1);
+            should_insert = false;
         }
     }
 
-    atomicAdd(&cells[closest_cell].density, 1);
-    cells[closest_cell].best_elite_idx = idx;
+    if (should_insert) {
+        bool inserted = hash_table_insert(
+            archive->hash_table_keys,
+            archive->hash_table_values,
+            genome_hash_val,
+            idx
+        );
+        if (!inserted) {
+            atomicSub(archive_size, 1);
+            should_insert = false;
+        }
+    }
+
+    if (should_insert) {
+        int hw_dim = archive->hw_dim;
+        int task_dim = archive->task_dim;
+        int gen_dim = archive->gen_dim;
+
+        DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "insert_elite_device: hw_dim invalid");
+        DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "insert_elite_device: task_dim invalid");
+        DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "insert_elite_device: gen_dim invalid");
+        DEVICE_FATAL_IF(num_classes <= 0 || num_classes > NUM_CLASSES_MAX, "insert_elite_device: num_classes invalid");
+
+        archive->fitness[idx] = fitness_val;
+        archive->coherence[idx] = coherence_val;
+        archive->effective_rank[idx] = effective_rank_val;
+        archive->genome_hash[idx] = genome_hash_val;
+        archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
+        archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
+        archive->generation[idx] = generation_val;
+        archive->fitness_input_hash[idx] = fitness_input_hash;
+        archive->fitness_computed_at_generation[idx] = fitness_computed_at_generation;
+
+        for (int d = 0; d < hw_dim; d++) {
+            archive->hw_coords[idx * hw_dim + d] = hw_coords_new[d];
+        }
+        for (int d = 0; d < task_dim; d++) {
+            archive->task_coords[idx * task_dim + d] = task_coords_new[d];
+        }
+        for (int d = 0; d < gen_dim; d++) {
+            archive->gen_coords[idx * gen_dim + d] = gen_coords_new[d];
+        }
+
+        archive->task_performance[idx] = task_performance_val;
+        for (int c = 0; c < num_classes; c++) {
+            archive->per_class_accuracy[idx * num_classes + c] = per_class_accuracy_new[c];
+        }
+
+        DEVICE_FATAL_IF(latent_genome_new == nullptr, "insert_elite_device: latent_genome_new is null");
+        DEVICE_FATAL_IF(archive->latent_genome == nullptr, "insert_elite_device: archive latent_genome buffer is null");
+        for (int l = 0; l < GENOME_LATENT_DIM_MAX; l++) {
+            archive->latent_genome[idx * GENOME_LATENT_DIM_MAX + l] = latent_genome_new[l];
+        }
+
+        float min_dist = 1e9f;
+        int closest_cell = 0;
+        for (int c = 0; c < num_cells; c++) {
+            float dist_sq = elite_to_cell_distance_sq(archive, idx, &cells[c], hw_dim, task_dim, gen_dim);
+            if (dist_sq < min_dist) {
+                min_dist = dist_sq;
+                closest_cell = c;
+            }
+        }
+
+        atomicAdd(&cells[closest_cell].density, 1);
+        cells[closest_cell].best_elite_idx = idx;
+    }
 }
 
 __device__ void adapt_embedding_dim_device(
@@ -432,34 +443,35 @@ __device__ void init_voronoi_cells_device(Organism* organism, unsigned int seed)
     int gen_dim = organism->archive->gen_dim;
 
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (cell_id >= num_cells) return;
 
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "init_voronoi: gen_dim invalid");
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "init_voronoi: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "init_voronoi: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "init_voronoi: gen_dim invalid");
 
-    curandState_t state;
-    curand_init(seed, cell_id, 0, &state);
+    if (cell_id < num_cells) {
+        curandState_t state;
+        curand_init(seed, cell_id, 0, &state);
 
-    VoronoiCell* cell = &cells[cell_id];
+        VoronoiCell* cell = &cells[cell_id];
 
-    for (int d = 0; d < hw_dim; d++) {
-        cell->hw_centroid[d] = validated_curand_normal(&state, "init_voronoi_hw", cell_id * hw_dim + d) * 0.5f;
+        for (int d = 0; d < hw_dim; d++) {
+            cell->hw_centroid[d] = validated_curand_normal(&state, "init_voronoi_hw", cell_id * hw_dim + d) * 0.5f;
+        }
+        for (int d = 0; d < task_dim; d++) {
+            cell->task_centroid[d] = validated_curand_normal(&state, "init_voronoi_task", cell_id * task_dim + d) * 0.5f;
+        }
+        for (int d = 0; d < gen_dim; d++) {
+            cell->gen_centroid[d] = validated_curand_normal(&state, "init_voronoi_gen", cell_id * gen_dim + d) * 0.5f;
+        }
+
+        int total_dims = hw_dim + task_dim + gen_dim;
+        float typical_spacing = powf((float)num_cells, -1.0f / total_dims);
+        cell->radius = typical_spacing * 2.0f;
+
+        cell->density = 0;
+        cell->best_elite_idx = -1;
+        cell->quality_threshold = 0.0f;
     }
-    for (int d = 0; d < task_dim; d++) {
-        cell->task_centroid[d] = validated_curand_normal(&state, "init_voronoi_task", cell_id * task_dim + d) * 0.5f;
-    }
-    for (int d = 0; d < gen_dim; d++) {
-        cell->gen_centroid[d] = validated_curand_normal(&state, "init_voronoi_gen", cell_id * gen_dim + d) * 0.5f;
-    }
-
-    int total_dims = hw_dim + task_dim + gen_dim;
-    float typical_spacing = powf((float)num_cells, -1.0f / total_dims);
-    cell->radius = typical_spacing * 2.0f;
-
-    cell->density = 0;
-    cell->best_elite_idx = -1;
-    cell->quality_threshold = 0.0f;
 }
 
 
@@ -497,9 +509,9 @@ __device__ void store_elite_weight_deltas_device(
     GPUElite* archive = organism->archive;
 
     DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
-    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "store_weight_deltas: num_heads invalid");
-    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "store_weight_deltas: channels invalid");
-    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "store_weight_deltas: head_dim invalid");
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS, "store_weight_deltas: num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS, "store_weight_deltas: channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM, "store_weight_deltas: head_dim invalid");
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "store_weight_deltas: elite_idx invalid");
 
     int perception_size = num_heads * channels * head_dim;
@@ -508,46 +520,47 @@ __device__ void store_elite_weight_deltas_device(
     int total_size = perception_size + interaction_size + value_size;
 
     int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (flat_idx >= total_size) return;
 
-    // Distribute arch writes across first 3 threads
-    if (flat_idx == 0) archive->archived_num_heads[elite_idx] = num_heads;
-    if (flat_idx == 1) archive->archived_channels[elite_idx] = channels;
-    if (flat_idx == 2) archive->archived_head_dim[elite_idx] = head_dim;
+    if (flat_idx < total_size) {
+        // Distribute arch writes across first 3 threads
+        if (flat_idx == 0) archive->archived_num_heads[elite_idx] = num_heads;
+        if (flat_idx == 1) archive->archived_channels[elite_idx] = channels;
+        if (flat_idx == 2) archive->archived_head_dim[elite_idx] = head_dim;
 
-    int delta_threshold_slot = GenomeParamTable::weight_delta_threshold;
-    int delta_threshold_min_slot = GenomeParamTable::weight_delta_threshold_min;
-    int delta_threshold_max_slot = GenomeParamTable::weight_delta_threshold_max;
-    float delta_threshold_min = genome_slot_to_unit(genome, delta_threshold_min_slot) * DELTA_THRESHOLD_BASE_MAX;
-    float delta_threshold_max = delta_threshold_min + genome_slot_to_unit(genome, delta_threshold_max_slot) * (DELTA_THRESHOLD_BASE_MAX - delta_threshold_min);
-    float delta_threshold = genome_to_bootstrap_param(genome, epigenetic, delta_threshold_slot, delta_threshold_min, delta_threshold_max);
+        int delta_threshold_slot = GenomeParamTable::weight_delta_threshold;
+        int delta_threshold_min_slot = GenomeParamTable::weight_delta_threshold_min;
+        int delta_threshold_max_slot = GenomeParamTable::weight_delta_threshold_max;
+        float delta_threshold_min = genome_slot_to_unit(genome, delta_threshold_min_slot) * DELTA_THRESHOLD_BASE_MAX;
+        float delta_threshold_max = delta_threshold_min + genome_slot_to_unit(genome, delta_threshold_max_slot) * (DELTA_THRESHOLD_BASE_MAX - delta_threshold_min);
+        float delta_threshold = genome_to_bootstrap_param(genome, epigenetic, delta_threshold_slot, delta_threshold_min, delta_threshold_max);
 
-    curandState_t rand_state;
-    curand_init(genome_hash, flat_idx, 0, &rand_state);
+        curandState_t rand_state;
+        curand_init(genome_hash, flat_idx, 0, &rand_state);
 
-    int matrix, local_idx;
-    float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
-    float baseline = curand_normal(&rand_state) * scale;
+        int matrix, local_idx;
+        float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+        float baseline = curand_normal(&rand_state) * scale;
 
-    float current;
-    if (matrix == 0) {
-        current = __half2float(perception_weights[local_idx]);
-    } else if (matrix == 1) {
-        current = __half2float(interaction_weights[local_idx]);
-    } else if (matrix == 2) {
-        current = __half2float(value_weights[local_idx]);
-    } else {
-        DEVICE_FATAL("invalid matrix index from get_ca_xavier_scale");
-    }
+        float current;
+        if (matrix == 0) {
+            current = __half2float(perception_weights[local_idx]);
+        } else if (matrix == 1) {
+            current = __half2float(interaction_weights[local_idx]);
+        } else if (matrix == 2) {
+            current = __half2float(value_weights[local_idx]);
+        } else {
+            DEVICE_FATAL("invalid matrix index from get_ca_xavier_scale");
+        }
 
-    float delta = current - baseline;
+        float delta = current - baseline;
 
-    if (fabsf(delta) > delta_threshold) {
-        int slot = atomicAdd(num_deltas_out, 1);
-        if (slot < MAX_WEIGHT_DELTAS_PER_ELITE) {
-            int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
-            archive->weight_delta_indices[base_offset + slot] = flat_idx;
-            archive->weight_deltas[base_offset + slot] = __float2half(delta);
+        if (fabsf(delta) > delta_threshold) {
+            int slot = atomicAdd(num_deltas_out, 1);
+            if (slot < MAX_WEIGHT_DELTAS_PER_ELITE) {
+                int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
+                archive->weight_delta_indices[base_offset + slot] = flat_idx;
+                archive->weight_deltas[base_offset + slot] = __float2half(delta);
+            }
         }
     }
 }
@@ -583,9 +596,9 @@ __device__ void restore_elite_weights_device(
     int head_dim = archive->archived_head_dim[elite_idx];
     uint64_t genome_hash = archive->genome_hash[elite_idx];
 
-    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "restore_weights: archived num_heads invalid");
-    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "restore_weights: archived channels invalid");
-    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "restore_weights: archived head_dim invalid");
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS, "restore_weights: archived num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS, "restore_weights: archived channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM, "restore_weights: archived head_dim invalid");
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
@@ -593,21 +606,22 @@ __device__ void restore_elite_weights_device(
     int total_size = perception_size + interaction_size + value_size;
 
     int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (flat_idx >= total_size) return;
 
-    curandState_t rand_state;
-    curand_init(genome_hash, flat_idx, 0, &rand_state);
+    if (flat_idx < total_size) {
+        curandState_t rand_state;
+        curand_init(genome_hash, flat_idx, 0, &rand_state);
 
-    int matrix, local_idx;
-    float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
-    float val = curand_normal(&rand_state) * scale;
+        int matrix, local_idx;
+        float scale = get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+        float val = curand_normal(&rand_state) * scale;
 
-    if (matrix == 0) {
-        perception_weights[local_idx] = __float2half(val);
-    } else if (matrix == 1) {
-        interaction_weights[local_idx] = __float2half(val);
-    } else if (matrix == 2) {
-        value_weights[local_idx] = __float2half(val);
+        if (matrix == 0) {
+            perception_weights[local_idx] = __float2half(val);
+        } else if (matrix == 1) {
+            interaction_weights[local_idx] = __float2half(val);
+        } else if (matrix == 2) {
+            value_weights[local_idx] = __float2half(val);
+        }
     }
 }
 
@@ -627,30 +641,31 @@ __device__ void apply_weight_deltas_device(
     int channels = archive->archived_channels[elite_idx];
     int head_dim = archive->archived_head_dim[elite_idx];
 
-    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS_MAX, "apply_deltas: archived num_heads invalid");
-    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS_MAX, "apply_deltas: archived channels invalid");
-    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM_MAX, "apply_deltas: archived head_dim invalid");
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS, "apply_deltas: archived num_heads invalid");
+    DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS, "apply_deltas: archived channels invalid");
+    DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM, "apply_deltas: archived head_dim invalid");
 
     int num_deltas = archive->num_weight_deltas[elite_idx];
     int delta_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (delta_idx >= num_deltas) return;
 
-    int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
-    uint32_t flat_idx = archive->weight_delta_indices[base_offset + delta_idx];
-    half delta = archive->weight_deltas[base_offset + delta_idx];
+    if (delta_idx < num_deltas) {
+        int base_offset = elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE;
+        uint32_t flat_idx = archive->weight_delta_indices[base_offset + delta_idx];
+        half delta = archive->weight_deltas[base_offset + delta_idx];
 
-    int matrix, local_idx;
-    get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
+        int matrix, local_idx;
+        get_ca_xavier_scale(flat_idx, num_heads, channels, head_dim, &matrix, &local_idx);
 
-    if (matrix == 0) {
-        float current = __half2float(perception_weights[local_idx]);
-        perception_weights[local_idx] = __float2half(current + __half2float(delta));
-    } else if (matrix == 1) {
-        float current = __half2float(interaction_weights[local_idx]);
-        interaction_weights[local_idx] = __float2half(current + __half2float(delta));
-    } else if (matrix == 2) {
-        float current = __half2float(value_weights[local_idx]);
-        value_weights[local_idx] = __float2half(current + __half2float(delta));
+        if (matrix == 0) {
+            float current = __half2float(perception_weights[local_idx]);
+            perception_weights[local_idx] = __float2half(current + __half2float(delta));
+        } else if (matrix == 1) {
+            float current = __half2float(interaction_weights[local_idx]);
+            interaction_weights[local_idx] = __float2half(current + __half2float(delta));
+        } else if (matrix == 2) {
+            float current = __half2float(value_weights[local_idx]);
+            value_weights[local_idx] = __float2half(current + __half2float(delta));
+        }
     }
 }
 
@@ -658,45 +673,45 @@ __device__ void archive_to_tube_device(Organism* organism, int elite_idx) {
     const GPUElite* archive = organism->archive;
     TemporalTube* tube = organism->temporal_tube;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "archive_to_tube: elite_idx invalid");
+        DEVICE_FATAL_IF(tube == nullptr, "archive_to_tube: tube is null");
+        DEVICE_FATAL_IF(tube->entries == nullptr, "archive_to_tube: tube entries is null");
 
-    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "archive_to_tube: elite_idx invalid");
-    DEVICE_FATAL_IF(tube == nullptr, "archive_to_tube: tube is null");
-    DEVICE_FATAL_IF(tube->entries == nullptr, "archive_to_tube: tube entries is null");
+        int hw_dim = archive->hw_dim;
+        int task_dim = archive->task_dim;
+        int gen_dim = archive->gen_dim;
 
-    int hw_dim = archive->hw_dim;
-    int task_dim = archive->task_dim;
-    int gen_dim = archive->gen_dim;
+        DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "archive_to_tube: hw_dim invalid");
+        DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "archive_to_tube: task_dim invalid");
+        DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "archive_to_tube: gen_dim invalid");
 
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "archive_to_tube: gen_dim invalid");
+        int total_dim = hw_dim + task_dim + gen_dim;
+        int idx = tube->head;
 
-    int total_dim = hw_dim + task_dim + gen_dim;
-    int idx = tube->head;
+        DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "archive_to_tube: entry data buffer is null");
+        DEVICE_FATAL_IF(tube->entries[idx].size < total_dim, "archive_to_tube: entry size too small for behavioral dims");
 
-    DEVICE_FATAL_IF(tube->entries[idx].data == nullptr, "archive_to_tube: entry data buffer is null");
-    DEVICE_FATAL_IF(tube->entries[idx].size < total_dim, "archive_to_tube: entry size too small for behavioral dims");
+        int offset = 0;
+        for (int d = 0; d < hw_dim; d++) {
+            tube->entries[idx].data[offset++] = archive->hw_coords[elite_idx * hw_dim + d];
+        }
+        for (int d = 0; d < task_dim; d++) {
+            tube->entries[idx].data[offset++] = archive->task_coords[elite_idx * task_dim + d];
+        }
+        for (int d = 0; d < gen_dim; d++) {
+            tube->entries[idx].data[offset++] = archive->gen_coords[elite_idx * gen_dim + d];
+        }
 
-    int offset = 0;
-    for (int d = 0; d < hw_dim; d++) {
-        tube->entries[idx].data[offset++] = archive->hw_coords[elite_idx * hw_dim + d];
-    }
-    for (int d = 0; d < task_dim; d++) {
-        tube->entries[idx].data[offset++] = archive->task_coords[elite_idx * task_dim + d];
-    }
-    for (int d = 0; d < gen_dim; d++) {
-        tube->entries[idx].data[offset++] = archive->gen_coords[elite_idx * gen_dim + d];
-    }
+        tube->entries[idx].size = total_dim;
+        tube->entries[idx].timestamp = tube->global_time;
+        tube->entries[idx].importance = archive->fitness[elite_idx];
+        tube->entries[idx].decay_factor = 1.0f;
 
-    tube->entries[idx].size = total_dim;
-    tube->entries[idx].timestamp = tube->global_time;
-    tube->entries[idx].importance = archive->fitness[elite_idx];
-    tube->entries[idx].decay_factor = 1.0f;
-
-    tube->head = (tube->head + 1) % tube->capacity;
-    if (tube->count < tube->capacity) {
-        tube->count++;
+        tube->head = (tube->head + 1) % tube->capacity;
+        if (tube->count < tube->capacity) {
+            tube->count++;
+        }
     }
 }
 
@@ -715,9 +730,9 @@ __device__ void tube_to_archive_query_device(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int num_threads = blockDim.x * gridDim.x;
 
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_MAX, "tube_to_archive: gen_dim invalid");
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "tube_to_archive: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "tube_to_archive: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "tube_to_archive: gen_dim invalid");
 
     int total_dim = hw_dim + task_dim + gen_dim;
 

@@ -9,124 +9,122 @@
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 
-__device__ void init_diresa_device(Organism* organism) {
-    DIRESAWeights* replicas = organism->diresa_init_target_weights;
-    float* preallocated_weight_pool = organism->diresa_init_target_pool;
-    PoolEntry* entry = organism->diresa_init_entry;
-    size_t replica_stride = organism->diresa_init_stride;
-    int input_dim = organism->diresa_init_input_dim;
-    int output_dim = organism->diresa_init_output_dim;
-    unsigned int seed = organism->diresa_init_seed;
-    float* genome = organism->genome;
-    int replica_id = blockIdx.x;
+// Parallel entry-based DIRESA init - each block handles entries[blockIdx.x]
+__device__ void init_diresa_entry_device(
+    DIRESAWeights* weights,
+    float* weight_pool,
+    size_t stride,
+    int input_dim,
+    int output_dim,
+    int hidden1,
+    int hidden2,
+    float distance_exponent,
+    float quality_weight,
+    float* genome,
+    float* gradients,
+    unsigned int seed
+) {
     int local_tid = threadIdx.x;
 
-    if (replica_id >= organism->diresa_init_num_replicas) return;
-
-    DIRESAWeights* weights = &replicas[replica_id];
-
+    // Thread 0 sets up weight pointers
     if (local_tid == 0) {
-        size_t offset = replica_id * replica_stride;
+        size_t offset = 0;
 
-        weights->encoder_w1 = &preallocated_weight_pool[offset];
+        weights->encoder_w1 = &weight_pool[offset];
         offset += input_dim * DIRESA_HIDDEN1_MAX;
 
-        weights->encoder_b1 = &preallocated_weight_pool[offset];
+        weights->encoder_b1 = &weight_pool[offset];
         offset += DIRESA_HIDDEN1_MAX;
 
-        weights->encoder_w2 = &preallocated_weight_pool[offset];
+        weights->encoder_w2 = &weight_pool[offset];
         offset += DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX;
 
-        weights->encoder_b2 = &preallocated_weight_pool[offset];
+        weights->encoder_b2 = &weight_pool[offset];
         offset += DIRESA_HIDDEN2_MAX;
 
-        weights->encoder_w3 = &preallocated_weight_pool[offset];
+        weights->encoder_w3 = &weight_pool[offset];
         offset += DIRESA_HIDDEN2_MAX * output_dim;
 
-        weights->encoder_b3 = &preallocated_weight_pool[offset];
+        weights->encoder_b3 = &weight_pool[offset];
         offset += output_dim;
 
-        weights->decoder_w1 = &preallocated_weight_pool[offset];
+        weights->decoder_w1 = &weight_pool[offset];
         offset += output_dim * DIRESA_HIDDEN2_MAX;
 
-        weights->decoder_b1 = &preallocated_weight_pool[offset];
+        weights->decoder_b1 = &weight_pool[offset];
         offset += DIRESA_HIDDEN2_MAX;
 
-        weights->decoder_w2 = &preallocated_weight_pool[offset];
+        weights->decoder_w2 = &weight_pool[offset];
         offset += DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX;
 
-        weights->decoder_b2 = &preallocated_weight_pool[offset];
+        weights->decoder_b2 = &weight_pool[offset];
         offset += DIRESA_HIDDEN1_MAX;
 
-        weights->decoder_w3 = &preallocated_weight_pool[offset];
+        weights->decoder_w3 = &weight_pool[offset];
         offset += DIRESA_HIDDEN1_MAX * input_dim;
 
-        weights->decoder_b3 = &preallocated_weight_pool[offset];
+        weights->decoder_b3 = &weight_pool[offset];
 
         weights->input_dim = input_dim;
         weights->output_dim = output_dim;
-        weights->hidden1 = entry->diresa_hidden1;
-        weights->hidden2 = entry->diresa_hidden2;
+        weights->hidden1 = hidden1;
+        weights->hidden2 = hidden2;
     }
     __syncthreads();
 
-    if (local_tid == 0) {
-    }
-
+    // Initialize random state per thread
     curandState state;
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     curand_init(seed + global_tid, 0, 0, &state);
 
-    if (local_tid == 0) {
-    }
-
-    int hidden1 = weights->hidden1;
-    int hidden2 = weights->hidden2;
+    int h1 = weights->hidden1;
+    int h2 = weights->hidden2;
     int in_dim = weights->input_dim;
     int out_dim = weights->output_dim;
 
-    if (local_tid < in_dim * hidden1) {
-        float scale = sqrtf(2.0f / (in_dim + hidden1));
+    // Parallel weight initialization across threads in this block
+    if (local_tid < in_dim * h1) {
+        float scale = sqrtf(2.0f / (in_dim + h1));
         weights->encoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_enc1", local_tid) * scale;
     }
-    if (local_tid < hidden1) {
+    if (local_tid < h1) {
         weights->encoder_b1[local_tid] = 0.0f;
     }
 
-    if (local_tid < hidden1 * hidden2) {
-        float scale = sqrtf(2.0f / (hidden1 + hidden2));
+    if (local_tid < h1 * h2) {
+        float scale = sqrtf(2.0f / (h1 + h2));
         weights->encoder_w2[local_tid] = validated_curand_normal(&state, "diresa_init_enc2", local_tid) * scale;
     }
-    if (local_tid < hidden2) {
+    if (local_tid < h2) {
         weights->encoder_b2[local_tid] = 0.0f;
     }
 
-    if (local_tid < hidden2 * out_dim) {
-        float scale = sqrtf(2.0f / (hidden2 + out_dim));
+    if (local_tid < h2 * out_dim) {
+        float scale = sqrtf(2.0f / (h2 + out_dim));
         weights->encoder_w3[local_tid] = validated_curand_normal(&state, "diresa_init_enc3", local_tid) * scale;
     }
     if (local_tid < out_dim) {
         weights->encoder_b3[local_tid] = 0.0f;
     }
 
-    if (local_tid < out_dim * hidden2) {
-        float scale = sqrtf(2.0f / (out_dim + hidden2));
+    if (local_tid < out_dim * h2) {
+        float scale = sqrtf(2.0f / (out_dim + h2));
         weights->decoder_w1[local_tid] = validated_curand_normal(&state, "diresa_init_dec1", local_tid) * scale;
     }
-    if (local_tid < hidden2) {
+    if (local_tid < h2) {
         weights->decoder_b1[local_tid] = 0.0f;
     }
 
-    if (local_tid < hidden2 * hidden1) {
-        float scale = sqrtf(2.0f / (hidden2 + hidden1));
+    if (local_tid < h2 * h1) {
+        float scale = sqrtf(2.0f / (h2 + h1));
         weights->decoder_w2[local_tid] = validated_curand_normal(&state, "diresa_init_dec2", local_tid) * scale;
     }
-    if (local_tid < hidden1) {
+    if (local_tid < h1) {
         weights->decoder_b2[local_tid] = 0.0f;
     }
 
-    if (local_tid < hidden1 * in_dim) {
-        float scale = sqrtf(2.0f / (hidden1 + in_dim));
+    if (local_tid < h1 * in_dim) {
+        float scale = sqrtf(2.0f / (h1 + in_dim));
         weights->decoder_w3[local_tid] = validated_curand_normal(&state, "diresa_init_dec3", local_tid) * scale;
     }
     if (local_tid < in_dim) {
@@ -136,9 +134,9 @@ __device__ void init_diresa_device(Organism* organism) {
     if (local_tid == 0) {
         weights->cov_weight = 0.0f;
         weights->training_step = 0;
-        weights->replica_id = replica_id;
-        weights->distance_exponent = entry->distance_exponent;
-        weights->quality_weight = entry->quality_weight;
+        weights->replica_id = 0;
+        weights->distance_exponent = distance_exponent;
+        weights->quality_weight = quality_weight;
 
         int diresa_ctx_metabolic_slot = GenomeParamTable::diresa_ctx_metabolic;
         int diresa_ctx_stress_slot = GenomeParamTable::diresa_ctx_stress;
@@ -151,8 +149,7 @@ __device__ void init_diresa_device(Organism* organism) {
         int diresa_temp_scale_slot = GenomeParamTable::diresa_temp_scale;
         float temp_base = genome_slot_to_unit(genome, diresa_temp_base_slot);
         float temp_scale = genome_slot_to_unit(genome, diresa_temp_scale_slot);
-        weights->temperature = DIRESA_TEMP_BASE_MIN + temp_base * (DIRESA_TEMP_BASE_MAX - DIRESA_TEMP_BASE_MIN)
-                             + replica_id * (DIRESA_TEMP_SCALE_MIN + temp_scale * (DIRESA_TEMP_SCALE_MAX - DIRESA_TEMP_SCALE_MIN));
+        weights->temperature = DIRESA_TEMP_BASE_MIN + temp_base * (DIRESA_TEMP_BASE_MAX - DIRESA_TEMP_BASE_MIN);
 
         int diresa_ctx_complexity_slot = GenomeParamTable::diresa_ctx_complexity;
         int diresa_ctx_niche_slot = GenomeParamTable::diresa_ctx_niche;
@@ -165,7 +162,7 @@ __device__ void init_diresa_device(Organism* organism) {
 
         TrainingParams diresa_training_params;
         weights->learning_rate = diresa_training_params.get_behavioral_learning_rate(
-            genome, entry->gradients,
+            genome, gradients,
             diresa_ctx_metabolic, diresa_ctx_stress, diresa_ctx_morphogen,
             diresa_ctx_complexity, diresa_ctx_niche, diresa_ctx_learning, diresa_ctx_performance
         );
@@ -324,46 +321,46 @@ __device__ void diresa_forward_device(Organism* organism) {
     DIRESAWeights* weights = organism->diresa_genome_weights;
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= batch->batch_size) return;
+    if (tid < batch->batch_size) {
+        const float* features = batch->features + tid * batch->input_dim;
+        const float* features_shuffled = batch->features_shuffled + tid * batch->input_dim;
+        float* latent = batch->latent + tid * batch->output_dim;
+        float* latent_shuffled = batch->latent_shuffled + tid * batch->output_dim;
+        float* reconstructed = batch->reconstructed + tid * batch->input_dim;
 
-    const float* features = batch->features + tid * batch->input_dim;
-    const float* features_shuffled = batch->features_shuffled + tid * batch->input_dim;
-    float* latent = batch->latent + tid * batch->output_dim;
-    float* latent_shuffled = batch->latent_shuffled + tid * batch->output_dim;
-    float* reconstructed = batch->reconstructed + tid * batch->input_dim;
+        diresa_encode(features, latent, weights);
+        CooperativeSync::sync_warp();
 
-    diresa_encode(features, latent, weights);
-    CooperativeSync::sync_warp();
+        diresa_encode(features_shuffled, latent_shuffled, weights);
+        CooperativeSync::sync_warp();
 
-    diresa_encode(features_shuffled, latent_shuffled, weights);
-    CooperativeSync::sync_warp();
-
-    diresa_decode(latent, reconstructed, weights);
-    CooperativeSync::sync_warp();
+        diresa_decode(latent, reconstructed, weights);
+        CooperativeSync::sync_warp();
+    }
 }
 
 __device__ void diresa_distance_device(Organism* organism) {
     DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= batch->batch_size) return;
+    if (tid < batch->batch_size) {
+        int shuffled_idx = batch->shuffle_indices[tid];
 
-    int shuffled_idx = batch->shuffle_indices[tid];
+        const float* features_i = batch->features + tid * batch->input_dim;
+        const float* features_j = batch->features + shuffled_idx * batch->input_dim;
+        const float* latent_i = batch->latent + tid * batch->output_dim;
+        const float* latent_j = batch->latent + shuffled_idx * batch->output_dim;
 
-    const float* features_i = batch->features + tid * batch->input_dim;
-    const float* features_j = batch->features + shuffled_idx * batch->input_dim;
-    const float* latent_i = batch->latent + tid * batch->output_dim;
-    const float* latent_j = batch->latent + shuffled_idx * batch->output_dim;
+        float orig_dist_sq = 0.0f;
+        for (int k = 0; k < batch->input_dim; k++) {
+            float diff = features_i[k] - features_j[k];
+            orig_dist_sq += diff * diff;
+        }
+        batch->orig_distances[tid] = sqrtf(orig_dist_sq);
 
-    float orig_dist_sq = 0.0f;
-    for (int k = 0; k < batch->input_dim; k++) {
-        float diff = features_i[k] - features_j[k];
-        orig_dist_sq += diff * diff;
+        float latent_dist_sq = DIRESAOps::compute_latent_distance_sq(latent_i, latent_j, batch->output_dim);
+        batch->latent_distances[tid] = sqrtf(latent_dist_sq);
     }
-    batch->orig_distances[tid] = sqrtf(orig_dist_sq);
-
-    float latent_dist_sq = DIRESAOps::compute_latent_distance_sq(latent_i, latent_j, batch->output_dim);
-    batch->latent_distances[tid] = sqrtf(latent_dist_sq);
 }
 
 __device__ void diresa_loss_device(Organism* organism) {
@@ -375,9 +372,12 @@ __device__ void diresa_loss_device(Organism* organism) {
     __shared__ float shared_latent_mean[1];
     __shared__ float shared_latent_var[1];
     __shared__ float shared_cov_sum[1];
+    __shared__ int diresa_error_flag;  // 0 = ok, nonzero = error code
 
     int tid = threadIdx.x;
     int sample_idx = blockIdx.x * blockDim.x + tid;
+
+    if (tid == 0) diresa_error_flag = 0;
 
     float local_recon = 0.0f;
     if (sample_idx < batch->batch_size) {
@@ -390,13 +390,13 @@ __device__ void diresa_loss_device(Organism* organism) {
         local_recon /= batch->input_dim;
     }
     shared_recon[tid] = local_recon;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             shared_recon[tid] += shared_recon[tid + stride];
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
     if (tid == 0) {
         atomicAdd(&batch->recon_loss, shared_recon[0] / batch->batch_size);
@@ -407,40 +407,49 @@ __device__ void diresa_loss_device(Organism* organism) {
 
         if (tid == 0) {
             float sum = 0.0f;
-            for (int i = 0; i < batch->batch_size; i++) {
+            bool valid = true;
+            for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    return;
+                    diresa_error_flag = 1;  // orig_distances <= 0
+                    valid = false;
+                } else {
+                    sum += logf(batch->orig_distances[i]);
                 }
-                sum += logf(batch->orig_distances[i]);
             }
-            shared_orig_mean[0] = sum / batch->batch_size;
+            shared_orig_mean[0] = valid ? (sum / batch->batch_size) : 0.0f;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
-        if (tid == 0) {
+        if (tid == 0 && diresa_error_flag == 0) {
             float sum_sq = 0.0f;
             float mean = shared_orig_mean[0];
-            for (int i = 0; i < batch->batch_size; i++) {
+            bool valid = true;
+            for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    return;
+                    diresa_error_flag = 2;  // orig_distances <= 0 (second check)
+                    valid = false;
+                } else {
+                    float diff = logf(batch->orig_distances[i]) - mean;
+                    sum_sq += diff * diff;
                 }
-                float diff = logf(batch->orig_distances[i]) - mean;
-                sum_sq += diff * diff;
             }
-            shared_orig_var[0] = sum_sq / batch->batch_size;
+            if (valid) shared_orig_var[0] = sum_sq / batch->batch_size;
         }
 
-        if (tid == 1) {
+        if (tid == 1 && diresa_error_flag == 0) {
             float sum = 0.0f;
-            for (int i = 0; i < batch->batch_size; i++) {
+            bool valid = true;
+            for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->latent_distances[i] <= 0.0f) {
-                    return;
+                    diresa_error_flag = 3;  // latent_distances <= 0
+                    valid = false;
+                } else {
+                    sum += logf(batch->latent_distances[i]);
                 }
-                sum += logf(batch->latent_distances[i]);
             }
-            shared_latent_mean[0] = sum / batch->batch_size;
+            if (valid) shared_latent_mean[0] = sum / batch->batch_size;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         float latent_mean = shared_latent_mean[0];
         float orig_mean = shared_orig_mean[0];
@@ -448,62 +457,67 @@ __device__ void diresa_loss_device(Organism* organism) {
         float local_var = 0.0f;
         float local_cov = 0.0f;
 
-        for (int i = tid; i < batch->batch_size; i += blockDim.x) {
-            if (batch->latent_distances[i] <= 0.0f || batch->orig_distances[i] <= 0.0f) {
-                return;
+        if (diresa_error_flag == 0) {
+            for (int i = tid; i < batch->batch_size; i += blockDim.x) {
+                if (batch->latent_distances[i] <= 0.0f || batch->orig_distances[i] <= 0.0f) {
+                    atomicCAS(&diresa_error_flag, 0, 4);  // distances <= 0 in loop
+                } else {
+                    float latent_diff = logf(batch->latent_distances[i]) - latent_mean;
+                    float orig_diff = logf(batch->orig_distances[i]) - orig_mean;
+                    local_var += latent_diff * latent_diff;
+                    local_cov += latent_diff * orig_diff;
+                }
             }
-            float latent_diff = logf(batch->latent_distances[i]) - latent_mean;
-            float orig_diff = logf(batch->orig_distances[i]) - orig_mean;
-            local_var += latent_diff * latent_diff;
-            local_cov += latent_diff * orig_diff;
         }
 
         shared_recon[tid] = local_var;
         shared_cov_sum[0] = 0.0f;
-        __syncthreads();
+        cg::this_grid().sync();
 
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 shared_recon[tid] += shared_recon[tid + stride];
             }
-            __syncthreads();
+            cg::this_grid().sync();
         }
         if (tid == 0) {
             shared_latent_var[0] = shared_recon[0] / batch->batch_size;
         }
 
         shared_recon[tid] = local_cov;
-        __syncthreads();
+        cg::this_grid().sync();
 
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 shared_recon[tid] += shared_recon[tid + stride];
             }
-            __syncthreads();
+            cg::this_grid().sync();
         }
-        if (tid == 0) {
+        if (tid == 0 && diresa_error_flag == 0) {
             shared_cov_sum[0] = shared_recon[0];
 
             float alpha_denom = shared_orig_var[0] * batch->batch_size;
             if (alpha_denom <= 0.0f) {
-                return;
-            }
-            float alpha_measured = shared_cov_sum[0] / alpha_denom;
+                diresa_error_flag = 5;  // alpha_denom <= 0
+            } else {
+                float alpha_measured = shared_cov_sum[0] / alpha_denom;
 
-            float corr_denom = sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size;
-            if (corr_denom <= 0.0f || isnan(corr_denom) || isinf(corr_denom)) {
-                return;
-            }
-            float log_correlation = shared_cov_sum[0] / corr_denom;
+                float corr_denom = sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size;
+                if (corr_denom <= 0.0f || isnan(corr_denom) || isinf(corr_denom)) {
+                    diresa_error_flag = 6;  // corr_denom invalid
+                } else {
+                    float log_correlation = shared_cov_sum[0] / corr_denom;
 
-            float exponent_loss = (alpha_measured - target_alpha) * (alpha_measured - target_alpha);
-            float quality_loss = 1.0f - fabsf(log_correlation);
-            batch->dist_loss = exponent_loss + weights->quality_weight * quality_loss;
+                    float exponent_loss = (alpha_measured - target_alpha) * (alpha_measured - target_alpha);
+                    float quality_loss = 1.0f - fabsf(log_correlation);
+                    batch->dist_loss = exponent_loss + weights->quality_weight * quality_loss;
+                }
+            }
         }
     }
 
     if (blockIdx.x == 0 && tid == 0) {
-        float latent_means[BEHAVIORAL_DIM_MAX] = {0};
+        float latent_means[BEHAVIORAL_DIM_TASK] = {0};  // TASK is the largest single dimension
 
         for (int dim = 0; dim < batch->output_dim; dim++) {
             float sum = 0.0f;
@@ -530,6 +544,12 @@ __device__ void diresa_loss_device(Organism* organism) {
         int num_pairs = batch->output_dim * (batch->output_dim - 1) / 2;
         batch->cov_loss = cov_sum / num_pairs;
     }
+
+    // Check error flag after all syncs - trap loudly if there was an error
+    __syncthreads();
+    if (diresa_error_flag != 0 && tid == 0 && blockIdx.x == 0) {
+        printf("!E:DIRESA_LOSS code=%d batch_size=%d\n", diresa_error_flag, batch->batch_size);
+    }
 }
 
 __device__ void update_annealing(DIRESAWeights* weights, float cov_loss, PoolEntry* entry) {
@@ -545,30 +565,30 @@ __device__ void replica_exchange_device(Organism* organism) {
     PoolEntry* entry = &organism->pool->entries[entry_idx];
     curandState* rand_states = organism->diresa_rng_states;
     int tid = threadIdx.x;
-    if (tid >= entry->num_tempering_replicas - 1) return;
+    if (tid < entry->num_tempering_replicas - 1) {
+        int i = tid;
+        int j = tid + 1;
 
-    int i = tid;
-    int j = tid + 1;
+        float E_i = batches[i].recon_loss * entry->recon_weight +
+                    batches[i].dist_loss * entry->dist_weight +
+                    batches[i].cov_loss * replicas[i].cov_weight;
 
-    float E_i = batches[i].recon_loss * entry->recon_weight +
-                batches[i].dist_loss * entry->dist_weight +
-                batches[i].cov_loss * replicas[i].cov_weight;
+        float E_j = batches[j].recon_loss * entry->recon_weight +
+                    batches[j].dist_loss * entry->dist_weight +
+                    batches[j].cov_loss * replicas[j].cov_weight;
 
-    float E_j = batches[j].recon_loss * entry->recon_weight +
-                batches[j].dist_loss * entry->dist_weight +
-                batches[j].cov_loss * replicas[j].cov_weight;
+        float beta_i = 1.0f / replicas[i].temperature;
+        float beta_j = 1.0f / replicas[j].temperature;
 
-    float beta_i = 1.0f / replicas[i].temperature;
-    float beta_j = 1.0f / replicas[j].temperature;
+        float delta = (beta_j - beta_i) * (E_i - E_j);
+        float accept_prob = fminf(1.0f, expf(delta));
 
-    float delta = (beta_j - beta_i) * (E_i - E_j);
-    float accept_prob = fminf(1.0f, expf(delta));
-
-    float rand = validated_curand_uniform(&rand_states[tid], "replica_exchange", tid);
-    if (rand < accept_prob) {
-        float temp_swap = replicas[i].temperature;
-        replicas[i].temperature = replicas[j].temperature;
-        replicas[j].temperature = temp_swap;
+        float rand = validated_curand_uniform(&rand_states[tid], "replica_exchange", tid);
+        if (rand < accept_prob) {
+            float temp_swap = replicas[i].temperature;
+            replicas[i].temperature = replicas[j].temperature;
+            replicas[j].temperature = temp_swap;
+        }
     }
 }
 

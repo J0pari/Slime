@@ -2,25 +2,14 @@
 #define RUNTIME_CU
 
 #include "core/organism.cu"
+#include "debug/device_trace.cu"
 
 __device__ void init_behavioral_dimensions_device(Organism* organism) {
-    float* workspace_genomes = organism->workspace_genomes;
-
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
-        PoolEntry* entry = &organism->pool->entries[0];
-
-        // At init, root entries have their genome directly in delta_values (no parent exists yet)
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            primary_genome[i] = entry->delta_values[i];
-        }
-
-        BehavioralDimensions dims;
-        dims.derive_from_genome(primary_genome, entry->gradients);
-
-        organism->archive->hw_dim = dims.hw_dim;
-        organism->archive->task_dim = dims.task_dim;
-        organism->archive->gen_dim = dims.gen_dim;
+        // Archive tessellation uses fixed dimensions (constants)
+        organism->archive->hw_dim = BEHAVIORAL_DIM_HW;
+        organism->archive->task_dim = BEHAVIORAL_DIM_TASK;
+        organism->archive->gen_dim = BEHAVIORAL_DIM_GEN;
     }
 }
 
@@ -34,11 +23,11 @@ __device__ void wire_behavioral_agents_device(Organism* organism, int num_agents
     int gen_dim = organism->behavioral_dim_gen;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_agents) return;
-
-    agents[idx].hw_coords = &hw_buffer[idx * hw_dim];
-    agents[idx].task_coords = &task_buffer[idx * task_dim];
-    agents[idx].gen_coords = &gen_buffer[idx * gen_dim];
+    if (idx < num_agents) {
+        agents[idx].hw_coords = &hw_buffer[idx * hw_dim];
+        agents[idx].task_coords = &task_buffer[idx * task_dim];
+        agents[idx].gen_coords = &gen_buffer[idx * gen_dim];
+    }
 }
 
 __device__ void init_organism_device(Organism* organism) {
@@ -46,7 +35,6 @@ __device__ void init_organism_device(Organism* organism) {
     int total_threads = gridDim.x * blockDim.x;
 
     int pool_capacity = organism->init_pool_capacity;
-    float* workspace_genomes = organism->workspace_genomes;
     OrganismPreallocatedBuffers* buffers = organism->buffers;
 
     // Phase 1: Set base pointers that others depend on (single thread to avoid races)
@@ -54,10 +42,10 @@ __device__ void init_organism_device(Organism* organism) {
         organism->pool = buffers->pool;
         organism->archive = buffers->archive;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     // Phase 2: Set pool sub-fields and other dependent pointers (parallel safe now)
-    int num_scalar_fields = 32;
+    int num_scalar_fields = 33;
     for (int field = global_tid; field < num_scalar_fields; field += total_threads) {
         switch (field) {
             case 0: organism->generation = 0; break;
@@ -92,13 +80,14 @@ __device__ void init_organism_device(Organism* organism) {
             case 29: organism->delta_indices_buffer = buffers->delta_indices_buffer; break;
             case 30: organism->delta_values_buffer = buffers->delta_values_buffer; break;
             case 31: organism->gradients_buffer = buffers->gradients_buffer; break;
+            case 32: organism->output_gradients = buffers->gradients_buffer; break;
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     // init_pool_device uses all threads for parallel work - each thread handles one pool entry
     init_pool_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 }
 
 __device__ void init_voronoi_pointers_device(Organism* organism) {
@@ -112,11 +101,11 @@ __device__ void init_voronoi_pointers_device(Organism* organism) {
     int gen_dim = organism->archive->gen_dim;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_cells) return;
-
-    cells[idx].hw_centroid = &hw_buffer[idx * hw_dim];
-    cells[idx].task_centroid = &task_buffer[idx * task_dim];
-    cells[idx].gen_centroid = &gen_buffer[idx * gen_dim];
+    if (idx < num_cells) {
+        cells[idx].hw_centroid = &hw_buffer[idx * hw_dim];
+        cells[idx].task_centroid = &task_buffer[idx * task_dim];
+        cells[idx].gen_centroid = &gen_buffer[idx * gen_dim];
+    }
 }
 
 __device__ void init_organism_phase2_device(Organism* organism) {
@@ -126,7 +115,6 @@ __device__ void init_organism_phase2_device(Organism* organism) {
     Dataset** dataset_array = organism->dataset_array;
     Dataset** test_dataset_array = organism->test_dataset_array;
     unsigned int seed = organism->init_seed;
-    float* workspace_genomes = organism->workspace_genomes;
     OrganismPreallocatedBuffers* buffers = organism->buffers;
 
     cudaError_t err;
@@ -142,22 +130,30 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->per_entry_diresa_hw_weight_pool = buffers->per_entry_diresa_hw_weight_pool;
         organism->per_entry_diresa_gen_weight_pool = buffers->per_entry_diresa_gen_weight_pool;
 
-        float* primary_genome = &workspace_genomes[GENOME_SIZE * 2];
-        PoolEntry* entry = &organism->pool->entries[0];
+        float* primary_genome = &organism->workspace_genomes[GENOME_SIZE * 2];
 
-        // At init, root entries have their genome directly in delta_values (no parent exists yet)
-        for (int i = 0; i < GENOME_SIZE; i++) {
-            primary_genome[i] = entry->delta_values[i];
+        // Find first alive entry for initial genome copy
+        int init_entry_idx = -1;
+        int pool_capacity = organism->pool->capacity;
+        for (int i = 0; i < pool_capacity; i++) {
+            if (organism->pool->alive_flags[i]) {
+                init_entry_idx = i;
+                break;
+            }
         }
 
-        organism->genome = primary_genome;
+        // At init, root entries have their genome directly in delta_values (no parent exists yet)
+        if (init_entry_idx >= 0) {
+            PoolEntry* entry = &organism->pool->entries[init_entry_idx];
+            for (int i = 0; i < GENOME_SIZE; i++) {
+                primary_genome[i] = entry->delta_values[i];
+            }
+        }
 
-        BehavioralDimensions dims;
-        dims.derive_from_genome(primary_genome, entry->gradients);
-
-        organism->archive->hw_dim = dims.hw_dim;
-        organism->archive->task_dim = dims.task_dim;
-        organism->archive->gen_dim = dims.gen_dim;
+        // Behavioral dimensions are environmental constants (fixed for all entries)
+        organism->archive->hw_dim = BEHAVIORAL_DIM_HW;
+        organism->archive->task_dim = BEHAVIORAL_DIM_TASK;
+        organism->archive->gen_dim = BEHAVIORAL_DIM_GEN;
 
         organism->hw_coords_pool = buffers->behavioral_hw_coords_buffer;
         organism->task_coords_pool = buffers->behavioral_task_coords_buffer;
@@ -184,8 +180,6 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         init_hash_table_device(organism);
 
-        int pool_capacity = organism->pool->capacity;
-
         organism->hw_coords_pool = buffers->hw_coords_pool;
         organism->task_coords_pool = buffers->task_coords_pool;
         organism->gen_coords_pool = buffers->gen_coords_pool;
@@ -208,10 +202,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->telemetry->valid = false;
         organism->telemetry->generation = 0;
 
-        size_t heap_limit;
-        err = cudaDeviceGetLimit(&heap_limit, cudaLimitMallocHeapSize);
-        DEVICE_FATAL_IF(err != cudaSuccess, "init2 heap_limit failed");
-        organism->telemetry->memory_allocation.device_heap_limit = heap_limit;
+        organism->telemetry->memory_allocation.device_heap_limit = DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
         organism->ca_state_pool = buffers->ca_state_pool;
@@ -256,10 +247,17 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             entry_ca_state->interaction_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE;
             entry_ca_state->value_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE;
 
-            int fp32_stride = CA_FIELD_SIZE * (NUM_HEADS_MAX + 1) * HEAD_DIM_MAX;
-            int fp16_stride = CA_FIELD_SIZE * (CHANNELS_MAX + HEAD_DIM_MAX);
-            entry_ca_state->fp32_workspace = buffers->fp32_ca_workspace + entry_idx * fp32_stride;
-            entry_ca_state->fp16_workspace = buffers->fp16_ca_workspace + entry_idx * fp16_stride;
+            // Accumulate workspace offset based on dimensions of all previous entries
+            size_t fp32_ws_offset = 0;
+            size_t fp16_ws_offset = 0;
+            for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
+                PoolEntry* prev = &organism->pool->entries[prev_idx];
+                int cells = prev->grid_size * prev->grid_size;
+                fp32_ws_offset += cells * (prev->num_heads + 1) * prev->head_dim;
+                fp16_ws_offset += cells * (prev->channels + prev->head_dim);
+            }
+            entry_ca_state->fp32_workspace = buffers->fp32_ca_workspace + fp32_ws_offset;
+            entry_ca_state->fp16_workspace = buffers->fp16_ca_workspace + fp16_ws_offset;
 
             entry_ca_state->tape.entries = buffers->ad_tape_entries_pool + entry_idx * TAPE_ENTRIES_PER_ENTRY;
             entry_ca_state->tape.capacity = TAPE_ENTRIES_PER_ENTRY;
@@ -277,9 +275,22 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             entry_ca_state->trace.capacity = TRACE_CAPACITY;
             entry_ca_state->trace.current_idx = 0;
 
-            entry_ca_state->perception_saved = buffers->perception_activations_saved;
-            entry_ca_state->interaction_saved = buffers->interaction_activations_saved;
-            entry_ca_state->pre_gelu_saved = buffers->pre_gelu_values_saved;
+            // Accumulate saved activation offsets based on dimensions of all previous entries
+            size_t perception_saved_offset = 0;
+            size_t interaction_saved_offset = 0;
+            size_t pre_gelu_saved_offset = 0;
+
+            for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
+                PoolEntry* prev = &organism->pool->entries[prev_idx];
+                int cells = prev->grid_size * prev->grid_size;
+                perception_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
+                interaction_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
+                pre_gelu_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
+            }
+
+            entry_ca_state->perception_saved = buffers->perception_activations_saved + perception_saved_offset;
+            entry_ca_state->interaction_saved = buffers->interaction_activations_saved + interaction_saved_offset;
+            entry_ca_state->pre_gelu_saved = buffers->pre_gelu_values_saved + pre_gelu_saved_offset;
 
             entry->ca_state = entry_ca_state;
         }
@@ -306,17 +317,42 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->resource_gradient_y = all_rd_fields + CA_FIELD_SIZE * RD_RESOURCE_GRADIENT_Y;
 
         init_resource_fields_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
         if (global_tid == 0) printf("V:p2_sync2 grid_size=%d\n", arch.grid_size);
+        cg::this_grid().sync();
+
+        // Partition shared workspace into three separate pools based on maximum entry requirements
+        size_t coherence_ws_size = 0;
+        size_t correlation_ws_size = 0;
+        size_t fitness_ws_size = 0;
+
+        for (int i = 0; i < pool_capacity; i++) {
+            PoolEntry* entry = &organism->pool->entries[i];
+            int cells = entry->grid_size * entry->grid_size;
+            size_t entry_coh_size = cells * entry->num_heads * entry->head_dim;
+            size_t entry_corr_size = entry->num_heads * entry->num_heads;
+            size_t entry_fit_size = cells * entry->channels;
+            coherence_ws_size = (entry_coh_size > coherence_ws_size) ? entry_coh_size : coherence_ws_size;
+            correlation_ws_size = (entry_corr_size > correlation_ws_size) ? entry_corr_size : correlation_ws_size;
+            fitness_ws_size = (entry_fit_size > fitness_ws_size) ? entry_fit_size : fitness_ws_size;
+        }
 
         float* shared_workspace = buffers->shared_workspace;
         organism->coherence_workspace_pool = shared_workspace;
-        organism->correlation_matrix_pool = shared_workspace;
-        organism->fitness_workspace_pool = shared_workspace;
+        organism->correlation_matrix_pool = shared_workspace + coherence_ws_size;
+        organism->fitness_workspace_pool = shared_workspace + coherence_ws_size + correlation_ws_size;
 
         organism->lifecycle_states = buffers->lifecycle_states;
 
-        PoolEntry* first_entry = &organism->pool->entries[0];
+        // Find first alive entry for genome DIRESA initialization
+        int first_alive_idx = -1;
+        for (int i = 0; i < pool_capacity; i++) {
+            if (organism->pool->alive_flags[i]) {
+                first_alive_idx = i;
+                break;
+            }
+        }
+        PoolEntry* first_entry = (first_alive_idx >= 0) ? &organism->pool->entries[first_alive_idx] : nullptr;
 
         int max_num_classes = 0;
         for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
@@ -337,105 +373,110 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->telemetry->memory_allocation.device_heap_limit = DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB;
         organism->telemetry->memory_allocation.device_heap_allocated = 0;
 
-        
-        size_t genome_stride = GENOME_SIZE * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                               DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                               DIRESA_HIDDEN2_MAX * GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX +
-                               GENOME_LATENT_DIM_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                               DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                               DIRESA_HIDDEN1_MAX * GENOME_SIZE + GENOME_SIZE;
-        int num_replicas = first_entry->num_tempering_replicas;
-        organism->diresa_init_target_weights = organism->diresa_genome_weights;
-        organism->diresa_init_target_pool = organism->diresa_genome_weight_pool;
-        organism->diresa_init_stride = genome_stride;
-        organism->diresa_init_input_dim = GENOME_SIZE;
-        organism->diresa_init_output_dim = GENOME_LATENT_DIM_MAX;
-        organism->diresa_init_seed = seed + 666666;
-        organism->diresa_init_entry = first_entry;
-        organism->diresa_init_num_replicas = num_replicas;
-        init_diresa_device(organism);
-        __syncthreads();
+        if (global_tid == 0) printf("V:p2_pre_diresa_genome\n");
+        cg::this_grid().sync();
 
-        
-        for (int entry_idx = 0; entry_idx < pool_capacity; entry_idx++) {
-            PoolEntry* e = &organism->pool->entries[entry_idx];
-            if (!organism->pool->alive_flags[entry_idx]) continue;
+        // Genome DIRESA - block 0 handles it
+        if (blockIdx.x == 0 && first_entry != nullptr) {
+            size_t genome_stride = GENOME_SIZE * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                                   DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                                   DIRESA_HIDDEN2_MAX * GENOME_LATENT_DIM_MAX + GENOME_LATENT_DIM_MAX +
+                                   GENOME_LATENT_DIM_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
+                                   DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
+                                   DIRESA_HIDDEN1_MAX * GENOME_SIZE + GENOME_SIZE;
+            init_diresa_entry_device(
+                organism->diresa_genome_weights,
+                organism->diresa_genome_weight_pool,
+                genome_stride,
+                GENOME_SIZE,
+                GENOME_LATENT_DIM_MAX,
+                first_entry->diresa_hidden1,
+                first_entry->diresa_hidden2,
+                first_entry->distance_exponent,
+                first_entry->quality_weight,
+                primary_genome,
+                first_entry->gradients,
+                seed + 666666
+            );
+        }
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_diresa_genome pool_cap=%d\n", pool_capacity);
 
-            
+        // Per-entry DIRESA - each block handles entries[blockIdx.x]
+        int my_entry = blockIdx.x;
+        if (my_entry < pool_capacity && organism->pool->alive_flags[my_entry]) {
+            PoolEntry* e = &organism->pool->entries[my_entry];
+
             int entry_task_input_dim = e->num_heads * e->channels;
             e->diresa_task_input_dim = entry_task_input_dim;
 
-            
-            size_t entry_task_stride =
-                entry_task_input_dim * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * dims.task_dim + dims.task_dim +
-                dims.task_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * entry_task_input_dim + entry_task_input_dim;
+            // Set up weight pointers for this entry
+            e->diresa_task_weights = &organism->per_entry_diresa_task_weights[my_entry];
+            e->diresa_hw_weights = &organism->per_entry_diresa_hw_weights[my_entry];
+            e->diresa_gen_weights = &organism->per_entry_diresa_gen_weights[my_entry];
 
-            size_t entry_hw_stride =
-                HARDWARE_FEATURES_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * dims.hw_dim + dims.hw_dim +
-                dims.hw_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * HARDWARE_FEATURES_DIM + HARDWARE_FEATURES_DIM;
+            float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+            float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + my_entry * DIRESA_HW_STRIDE;
+            float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + my_entry * DIRESA_GEN_STRIDE;
 
-            size_t entry_gen_stride =
-                1 * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * dims.gen_dim + dims.gen_dim +
-                dims.gen_dim * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
-                DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
-                DIRESA_HIDDEN1_MAX * 1 + 1;
+            // Task DIRESA
+            init_diresa_entry_device(
+                e->diresa_task_weights,
+                entry_task_pool,
+                0,
+                entry_task_input_dim,
+                BEHAVIORAL_DIM_TASK,
+                e->diresa_hidden1,
+                e->diresa_hidden2,
+                e->distance_exponent,
+                e->quality_weight,
+                primary_genome,
+                e->gradients,
+                seed + 888888 + my_entry
+            );
 
-            
-            e->diresa_task_weights = &organism->per_entry_diresa_task_weights[entry_idx];
-            e->diresa_hw_weights = &organism->per_entry_diresa_hw_weights[entry_idx];
-            e->diresa_gen_weights = &organism->per_entry_diresa_gen_weights[entry_idx];
+            // HW DIRESA
+            init_diresa_entry_device(
+                e->diresa_hw_weights,
+                entry_hw_pool,
+                0,
+                HARDWARE_FEATURES_DIM,
+                BEHAVIORAL_DIM_HW,
+                e->diresa_hidden1,
+                e->diresa_hidden2,
+                e->distance_exponent,
+                e->quality_weight,
+                primary_genome,
+                e->gradients,
+                seed + 999999 + my_entry
+            );
 
-            
-            float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + entry_idx * DIRESA_TASK_STRIDE_PER_ENTRY;
-            float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + entry_idx * DIRESA_HW_STRIDE;
-            float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + entry_idx * DIRESA_GEN_STRIDE;
-
-            organism->diresa_init_target_weights = e->diresa_task_weights;
-            organism->diresa_init_target_pool = entry_task_pool;
-            organism->diresa_init_stride = entry_task_stride;
-            organism->diresa_init_input_dim = entry_task_input_dim;
-            organism->diresa_init_output_dim = dims.task_dim;
-            organism->diresa_init_seed = seed + 888888 + entry_idx;
-            organism->diresa_init_entry = e;
-            organism->diresa_init_num_replicas = 1;
-            init_diresa_device(organism);
-
-            organism->diresa_init_target_weights = e->diresa_hw_weights;
-            organism->diresa_init_target_pool = entry_hw_pool;
-            organism->diresa_init_stride = entry_hw_stride;
-            organism->diresa_init_input_dim = HARDWARE_FEATURES_DIM;
-            organism->diresa_init_output_dim = dims.hw_dim;
-            organism->diresa_init_seed = seed + 999999 + entry_idx;
-            organism->diresa_init_entry = e;
-            organism->diresa_init_num_replicas = 1;
-            init_diresa_device(organism);
-
-            organism->diresa_init_target_weights = e->diresa_gen_weights;
-            organism->diresa_init_target_pool = entry_gen_pool;
-            organism->diresa_init_stride = entry_gen_stride;
-            organism->diresa_init_input_dim = 1;
-            organism->diresa_init_output_dim = dims.gen_dim;
-            organism->diresa_init_seed = seed + 777777 + entry_idx;
-            organism->diresa_init_entry = e;
-            organism->diresa_init_num_replicas = 1;
-            init_diresa_device(organism);
+            // Gen DIRESA
+            init_diresa_entry_device(
+                e->diresa_gen_weights,
+                entry_gen_pool,
+                0,
+                1,
+                BEHAVIORAL_DIM_GEN,
+                e->diresa_hidden1,
+                e->diresa_hidden2,
+                e->distance_exponent,
+                e->quality_weight,
+                primary_genome,
+                e->gradients,
+                seed + 777777 + my_entry
+            );
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
-        if (global_tid == 0) printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", dims.hw_dim, dims.task_dim, dims.gen_dim, num_classes);
-        seed_archive_from_pool_device(organism, POOL_CAPACITY_MIN);
-        if (global_tid == 0) printf("V:p2_sync_seed_archive_post archive_size=%d\n", organism->archive_size);
-        DEVICE_FATAL_IF(organism->archive_size <= 0, "init2 seed_archive failed to seed any entries");
+        if (global_tid == 0) printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", BEHAVIORAL_DIM_HW, BEHAVIORAL_DIM_TASK, BEHAVIORAL_DIM_GEN, num_classes);
+        seed_archive_from_pool_device(organism, POOL_CAPACITY_MIN, num_classes);
+        cg::this_grid().sync();
+        if (global_tid == 0) {
+            printf("V:p2_sync_seed_archive_post archive_size=%d\n", organism->archive_size);
+            DEVICE_FATAL_IF(organism->archive_size <= 0, "init2 seed_archive failed to seed any entries");
+        }
+        cg::this_grid().sync();
 
         organism->latent_genome_pool = buffers->latent_genome_pool;
 
@@ -463,7 +504,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->rng_states = buffers->rng_states;
         organism->init_seed = CURAND_DEFAULT_SEED;
         init_rng_states_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
         if (global_tid == 0) printf("V:p2_sync3 rng\n");
 
         organism->param_map = buffers->param_map;
@@ -515,8 +556,11 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->classifier_workspace = buffers->classifier_workspace;
         organism->classifier_num_classes = num_classes;
         organism->classifier_seed = seed + 777777;
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_pre_classifier\n");
         init_classifier_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_classifier\n");
 
         organism->training_mode->classifier = organism->classifier;
         organism->training_mode->batch_images = buffers->batch_images_pool;
@@ -524,10 +568,6 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         organism->training_mode->adam_m = organism->adam_m_ca_pool;
         organism->training_mode->adam_v = organism->adam_v_ca_pool;
-        organism->training_mode->perception_size = arch.num_heads * arch.channels * arch.head_dim;
-        organism->training_mode->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
-        organism->training_mode->value_size = arch.num_heads * arch.head_dim * arch.channels;
-        organism->training_mode->policy_size = num_classes * (arch.num_heads * arch.channels);
 
         organism->curriculum = buffers->curriculum;
 
@@ -536,9 +576,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->pool_task_accuracies = buffers->pool_task_accuracies;
 
         organism->dataset_array = dataset_array;
-        organism->current_dataset = dataset_array[0];
         organism->test_dataset_array = test_dataset_array;
-        organism->current_test_dataset = test_dataset_array[0];
 
         organism->behavioral_slots.agent_embedding_scale = GenomeParamTable::chemotaxis_agent_embedding_scale;
         organism->behavioral_slots.init_exploration = GenomeParamTable::chemotaxis_init_exploration;
@@ -547,21 +585,34 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->behavioral_slots.ctx_stress = GenomeParamTable::init_context_stress;
         organism->behavioral_slots.ctx_morphogen = GenomeParamTable::init_context_morphogen;
 
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_pre_behavioral\n");
         init_behavioral_state_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_behavioral\n");
 
-        int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
+        int behavioral_dim = BEHAVIORAL_DIM_TOTAL;
         organism->embedding_weights = buffers->behavioral_embedding_weights;
         organism->init_seed = seed + 1;
+        if (global_tid == 0) printf("V:p2_pre_embedding\n");
         init_embedding_weights_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_embedding\n");
 
         organism->chem_grid_size = arch.grid_size;
+        if (global_tid == 0) printf("V:p2_pre_chemfield\n");
         init_chemical_field_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_chemfield\n");
 
+        cg::this_grid().sync();
+        mark_checkpoint(12);  // pre_chemsources - after grid sync
         set_chemical_sources_from_agents_device(organism);
+        mark_checkpoint(13);  // function returned
         __syncthreads();
+        mark_checkpoint(14);  // block sync done, about to grid sync
+        cg::this_grid().sync();
+        mark_checkpoint(15);  // post_chemsources - grid sync completed
 
         int voronoi_init_dt_slot = GenomeParamTable::voronoi_init_dt;
         float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
@@ -569,31 +620,38 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         organism->diffusion_dt = voronoi_init_dt;
         init_training_mode_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         diffusion_reaction_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         organism->snapshot_field_size = field_size;
         store_chemical_snapshot_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         init_curriculum_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
+
+        // Set current_dataset from curriculum index
+        if (global_tid == 0) {
+            int dataset_idx = organism->curriculum->current_dataset_idx;
+            organism->current_dataset = organism->dataset_array[dataset_idx];
+        }
+        cg::this_grid().sync();
 
         organism->clear_buffer_ptr = organism->fitness_history;
         organism->clear_buffer_size = 2 * POOL_CAPACITY_MAX;
         clear_buffer_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         organism->clear_buffer_ptr = organism->coherence_history;
         clear_buffer_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         organism->clear_buffer_ptr = organism->effective_rank_history;
         organism->clear_buffer_size = 2;
         clear_buffer_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
     }
 }
 
@@ -611,14 +669,13 @@ __global__ void persistent_evolution_kernel(
     if (global_tid == 0) printf("V:kernel_entry blocks=%d threads=%d\n", gridDim.x, blockDim.x);
 
     // Parallel genome initialization - each thread handles a slice
-    float* organism_workspace_genomes = organism->organism_workspace_genomes;
     for (int i = global_tid; i < GENOME_SIZE; i += total_threads) {
         PRNGState rng;
         rng.s0 = (seed + i) * XORSHIFT_GOLDEN_RATIO_A;
         rng.s1 = (seed + i) * XORSHIFT_GOLDEN_RATIO_B;
-        organism_workspace_genomes[i] = prng_next(&rng) * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
+        organism->organism_workspace_genomes[i] = prng_next(&rng) * GENOME_RANGE_SCALE + GENOME_VALUE_MIN;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     // Parallel scalar init - distribute field writes across threads
     int num_init_fields = 8;
@@ -626,26 +683,26 @@ __global__ void persistent_evolution_kernel(
         switch (field) {
             case 0: {
                 int pool_capacity_slot = GenomeParamTable::pool_capacity;
-                float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism_workspace_genomes, pool_capacity_slot)));
+                float pool_capacity_norm = fmaxf(0.0f, fminf(1.0f, genome_slot_to_unit(organism->organism_workspace_genomes, pool_capacity_slot)));
                 int pool_capacity = POOL_CAPACITY_MIN + (int)(pool_capacity_norm * (POOL_CAPACITY_MAX - POOL_CAPACITY_MIN));
                 organism->init_pool_capacity = pool_capacity;
             } break;
             case 1: organism->dataset_array = dataset_array; break;
             case 2: organism->test_dataset_array = test_dataset_array; break;
-            case 3: organism->workspace_genomes = organism_workspace_genomes; break;
+            case 3: organism->workspace_genomes = organism->organism_workspace_genomes; break;
             case 4: organism->buffers = organism; break;
             case 5: organism->init_seed = seed; break;
             case 6: organism->audit_buffer = audit; break;
             case 7: break; // Reserved
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     init_organism_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     init_organism_phase2_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     int capacity = organism->pool->capacity;
 
@@ -661,7 +718,7 @@ __global__ void persistent_evolution_kernel(
             case 3: organism->diffusion_dt = CHEMICAL_DIFFUSION_DT_MAX; break;
         }
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     unsigned long long tick = 0;
 
@@ -676,10 +733,10 @@ __global__ void persistent_evolution_kernel(
             organism->current_arch = arch_local;
             organism->snapshot_field_size = arch_local.grid_size * arch_local.grid_size;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         reset_trace_buffer_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         int alive_count = organism->pool->alive_indices_count;
         int num_waves = (alive_count + WAVE_SIZE - 1) / WAVE_SIZE;
@@ -691,34 +748,34 @@ __global__ void persistent_evolution_kernel(
                 organism->current_wave_start = wave_start;
                 organism->current_wave_size = wave_size;
             }
-            __syncthreads();
+            cg::this_grid().sync();
 
             load_batch_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
 
             hybrid_organism_lifecycle_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
         }
 
         aggregate_hardware_geometry_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         reduce_concentration_mean_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
         finalize_concentration_mean_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         selection_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         update_voronoi_density_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         component_evolution_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         compute_fitness_from_diresa_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         // Spawn probability - all threads compute same value, one writes
         int active = Atomics::load_int(organism->pool->active_count);
@@ -726,26 +783,26 @@ __global__ void persistent_evolution_kernel(
         if (global_tid == 0) {
             organism->spawn_probability = spawn_prob;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (spawn_prob > SPAWN_PROBABILITY_MIN_MIN) {
             spawn_wave_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
         }
 
         archive_driven_lifecycle_device(organism, organism->hunger_threshold);
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (organism->generation >= 1) {
             memory_update_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
         }
 
         diffusion_reaction_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         store_chemical_snapshot_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         // Attractor field update - single write but check is parallel
         int hist_count = organism->chemical_field->history->count;
@@ -755,7 +812,7 @@ __global__ void persistent_evolution_kernel(
                   % organism->chemical_field->history->capacity;
             organism->attractor_field = organism->chemical_field->history->entries[history_idx].data;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         // Process alive entries - each block handles different entries in parallel
         int p2_alive_count = organism->pool->alive_indices_count;
@@ -765,9 +822,9 @@ __global__ void persistent_evolution_kernel(
             if (global_tid == 0) {
                 organism->current_entry_idx = entry_idx;
             }
-            __syncthreads();
+            cg::this_grid().sync();
             initialize_ca_from_field_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
         }
 
         for (int compact = blockIdx.x; compact < p2_alive_count; compact += gridDim.x) {
@@ -775,13 +832,13 @@ __global__ void persistent_evolution_kernel(
             if (global_tid == 0) {
                 organism->current_entry_idx = entry_idx;
             }
-            __syncthreads();
+            cg::this_grid().sync();
             update_field_from_ca_device(organism);
-            __syncthreads();
+            cg::this_grid().sync();
         }
 
         behavioral_update_device(organism);
-        __syncthreads();
+        cg::this_grid().sync();
 
         // Generation increment - atomic ensures correctness, all threads can observe
         if (global_tid == 0) {
@@ -790,7 +847,7 @@ __global__ void persistent_evolution_kernel(
                 printf("V:gen=%d\n", old_gen);
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
         tick++;
     }
 }

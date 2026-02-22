@@ -68,9 +68,9 @@ bool test_full_lifecycle_iteration() {
     TEST_CHECK(cudaMalloc(&archive_host.genome_hash, sizeof(uint64_t) * MAX_ARCHIVE_SIZE));
     TEST_CHECK(cudaMalloc(&archive_host.parent_ids, sizeof(uint32_t) * MAX_ARCHIVE_SIZE * PARENT_COUNT));
     TEST_CHECK(cudaMalloc(&archive_host.generation, sizeof(uint16_t) * MAX_ARCHIVE_SIZE));
-    TEST_CHECK(cudaMalloc(&archive_host.hw_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_MAX));
-    TEST_CHECK(cudaMalloc(&archive_host.task_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_MAX));
-    TEST_CHECK(cudaMalloc(&archive_host.gen_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_MAX));
+    TEST_CHECK(cudaMalloc(&archive_host.hw_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_HW));
+    TEST_CHECK(cudaMalloc(&archive_host.task_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_TASK));
+    TEST_CHECK(cudaMalloc(&archive_host.gen_coords, sizeof(float) * MAX_ARCHIVE_SIZE * BEHAVIORAL_DIM_GEN));
     TEST_CHECK(cudaMalloc(&archive_host.latent_genome, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX));
     TEST_CHECK(cudaMalloc(&archive_host.hardware_features, sizeof(float) * MAX_ARCHIVE_SIZE * HARDWARE_FEATURE_DIM));
     TEST_CHECK(cudaMalloc(&archive_host.task_performance, sizeof(float) * MAX_ARCHIVE_SIZE));
@@ -94,14 +94,14 @@ bool test_full_lifecycle_iteration() {
     float* voronoi_hw_centroid_buffer;
     float* voronoi_task_centroid_buffer;
     float* voronoi_gen_centroid_buffer;
-    TEST_CHECK(cudaMalloc(&voronoi_hw_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_MAX));
-    TEST_CHECK(cudaMalloc(&voronoi_task_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_MAX));
-    TEST_CHECK(cudaMalloc(&voronoi_gen_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_MAX));
+    TEST_CHECK(cudaMalloc(&voronoi_hw_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_HW));
+    TEST_CHECK(cudaMalloc(&voronoi_task_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_TASK));
+    TEST_CHECK(cudaMalloc(&voronoi_gen_centroid_buffer, sizeof(float) * TEST_NUM_CELLS * BEHAVIORAL_DIM_GEN));
 
     for (int i = 0; i < TEST_NUM_CELLS; i++) {
-        voronoi_cells_host[i].hw_centroid = voronoi_hw_centroid_buffer + i * BEHAVIORAL_DIM_MAX;
-        voronoi_cells_host[i].task_centroid = voronoi_task_centroid_buffer + i * BEHAVIORAL_DIM_MAX;
-        voronoi_cells_host[i].gen_centroid = voronoi_gen_centroid_buffer + i * BEHAVIORAL_DIM_MAX;
+        voronoi_cells_host[i].hw_centroid = voronoi_hw_centroid_buffer + i * BEHAVIORAL_DIM_HW;
+        voronoi_cells_host[i].task_centroid = voronoi_task_centroid_buffer + i * BEHAVIORAL_DIM_TASK;
+        voronoi_cells_host[i].gen_centroid = voronoi_gen_centroid_buffer + i * BEHAVIORAL_DIM_GEN;
     }
 
     VoronoiCell* d_voronoi_cells;

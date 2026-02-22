@@ -45,7 +45,7 @@ __device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -56,7 +56,7 @@ __device__ void block_inclusive_scan(int* data, int n, int lane, int warp_id) {
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     if (threadIdx.x < n) {
@@ -88,7 +88,7 @@ __device__ void scan_phase1_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -101,7 +101,7 @@ __device__ void scan_phase1_device(Organism* organism) {
 
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -137,7 +137,7 @@ __device__ void exclusive_scan_single_device(Organism* organism) {
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         temp[i] = input[i];
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int stride = 1; stride < N; stride *= 2) {
         for (int i = threadIdx.x; i < N; i += blockDim.x) {
@@ -145,9 +145,9 @@ __device__ void exclusive_scan_single_device(Organism* organism) {
             if (i >= stride) {
                 val += temp[i - stride];
             }
-            __syncthreads();
+            cg::this_grid().sync();
             temp[i] = val;
-            __syncthreads();
+            cg::this_grid().sync();
         }
     }
 
@@ -181,7 +181,7 @@ __device__ void exclusive_scan_coop_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -192,7 +192,7 @@ __device__ void exclusive_scan_coop_device(Organism* organism) {
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -223,7 +223,7 @@ __device__ void exclusive_scan_coop_device(Organism* organism) {
         if (lane == WARP_SIZE - 1) {
             bsum_shared[warp_id] = bval;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (warp_id == 0) {
             int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
@@ -234,7 +234,7 @@ __device__ void exclusive_scan_coop_device(Organism* organism) {
             }
             bsum_shared[lane] = ws;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
         int b_inclusive = bprefix + bval;
@@ -302,7 +302,7 @@ __device__ void finalize_and_copy_compacted_device(Organism* organism) {
         int last_valid_flag = valid_flags[old_count - 1];
         new_count = last_write_idx + last_valid_flag;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < new_count) {
@@ -362,7 +362,7 @@ __device__ void compact_memory_tubes_coop_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -373,7 +373,7 @@ __device__ void compact_memory_tubes_coop_device(Organism* organism) {
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -404,7 +404,7 @@ __device__ void compact_memory_tubes_coop_device(Organism* organism) {
         if (lane == WARP_SIZE - 1) {
             bsum_shared[warp_id] = bval;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (warp_id == 0) {
             int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
@@ -415,7 +415,7 @@ __device__ void compact_memory_tubes_coop_device(Organism* organism) {
             }
             bsum_shared[lane] = ws;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
         int b_inclusive = bprefix + bval;
@@ -514,7 +514,7 @@ __device__ void prune_and_compact_coop_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -525,7 +525,7 @@ __device__ void prune_and_compact_coop_device(Organism* organism) {
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -556,7 +556,7 @@ __device__ void prune_and_compact_coop_device(Organism* organism) {
         if (lane == WARP_SIZE - 1) {
             bsum_shared[warp_id] = bval;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (warp_id == 0) {
             int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
@@ -567,7 +567,7 @@ __device__ void prune_and_compact_coop_device(Organism* organism) {
             }
             bsum_shared[lane] = ws;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
         int b_inclusive = bprefix + bval;
@@ -630,7 +630,7 @@ __device__ void refine_elite_coop_device(Organism* organism) {
             int output_idx = tape->entries[tape->current_size - 1].output_idx;
             tape->grad_buffer[output_idx] = 1.0f;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         for (int op_idx = tape->current_size - 1; op_idx >= 0; op_idx--) {
             TapeEntry* entry = &tape->entries[op_idx];
@@ -681,7 +681,7 @@ __device__ void refine_elite_coop_device(Organism* organism) {
                         break;
                 }
             }
-            __syncthreads();
+            cg::this_grid().sync();
         }
     }
 
@@ -698,12 +698,13 @@ __device__ void refine_elite_coop_device(Organism* organism) {
 }
 
 __device__ void memory_update_params_device(Organism* organism) {
+    int entry_idx = blockIdx.x;
     MemoryUpdateParams* params = organism->memory_update_params;
     TemporalTube* tubes = organism->temporal_tube;
     float* fitness_history = organism->fitness_history;
     int generation = organism->generation;
-    float* genome = organism->genome;
-    float* gradients = organism->gradients;
+    float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    float* gradients = organism->pool->entries[entry_idx].gradients;
     float ctx_metabolic = organism->ctx_metabolic;
     float ctx_stress = organism->ctx_stress;
     float ctx_morphogen = organism->ctx_morphogen;
@@ -712,45 +713,45 @@ __device__ void memory_update_params_device(Organism* organism) {
     float ctx_learning = organism->ctx_learning;
     float ctx_performance = organism->ctx_performance;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_device: tubes is null");
+        DEVICE_FATAL_IF(tubes->count <= 0, "memory_update_params_device: tubes->count non-positive");
+        DEVICE_FATAL_IF(generation < 1, "memory_update_params_device: generation < 1 - no previous data exists for fitness_trend");
+        DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_device: fitness_history is null");
 
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_device: tubes is null");
-    DEVICE_FATAL_IF(tubes->count <= 0, "memory_update_params_device: tubes->count non-positive");
-    DEVICE_FATAL_IF(generation < 1, "memory_update_params_device: generation < 1 - no previous data exists for fitness_trend");
-    DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_device: fitness_history is null");
+        int decay_threshold_slot = GenomeParamTable::memory_decay_threshold;
+        int consolidation_threshold_slot = GenomeParamTable::memory_consolidation_threshold;
+        int flow_dt_slot = GenomeParamTable::memory_flow_lenia_dt;
 
-    int decay_threshold_slot = GenomeParamTable::memory_decay_threshold;
-    int consolidation_threshold_slot = GenomeParamTable::memory_consolidation_threshold;
-    int flow_dt_slot = GenomeParamTable::memory_flow_lenia_dt;
+        params->decay_threshold = genome_to_param(
+            genome, gradients, decay_threshold_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
+        );
 
-    params->decay_threshold = genome_to_param(
-        genome, gradients, decay_threshold_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        DECAY_THRESHOLD_MIN, DECAY_THRESHOLD_MAX
-    );
+        params->consolidation_threshold = genome_to_param(
+            genome, gradients, consolidation_threshold_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
+        );
 
-    params->consolidation_threshold = genome_to_param(
-        genome, gradients, consolidation_threshold_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        CONSOLIDATION_THRESHOLD_MIN, CONSOLIDATION_THRESHOLD_MAX
-    );
+        params->flow_lenia_dt = genome_to_param(
+            genome, gradients, flow_dt_slot,
+            ctx_metabolic, ctx_stress, ctx_morphogen,
+            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
+            FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
+        );
 
-    params->flow_lenia_dt = genome_to_param(
-        genome, gradients, flow_dt_slot,
-        ctx_metabolic, ctx_stress, ctx_morphogen,
-        ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-        FLOW_LENIA_DT_MIN, FLOW_LENIA_DT_MAX
-    );
+        params->old_count = tubes->count;
 
-    params->old_count = tubes->count;
-
-    int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
-    int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
-    float curr_fitness = fitness_history[curr_gen_offset];
-    float prev_fitness = fitness_history[prev_gen_offset];
-    params->fitness_trend = curr_fitness - prev_fitness;
+        int curr_gen_offset = (generation % 2) * POOL_CAPACITY_MAX;
+        int prev_gen_offset = ((generation - 1) % 2) * POOL_CAPACITY_MAX;
+        float curr_fitness = fitness_history[curr_gen_offset];
+        float prev_fitness = fitness_history[prev_gen_offset];
+        params->fitness_trend = curr_fitness - prev_fitness;
+    }
 }
 
 __device__ void memory_decay_device(Organism* organism) {
@@ -797,39 +798,40 @@ __device__ void memory_consolidate_device(Organism* organism) {
     TemporalTube* tubes = organism->temporal_tube;
     MemoryUpdateParams* params = organism->memory_update_params;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
-    DEVICE_FATAL_IF(tubes == nullptr, "memory_consolidate_device: tubes is null");
-    DEVICE_FATAL_IF(params->old_count <= 0, "memory_consolidate_device: old_count non-positive");
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        DEVICE_FATAL_IF(tubes == nullptr, "memory_consolidate_device: tubes is null");
+        DEVICE_FATAL_IF(params->old_count <= 0, "memory_consolidate_device: old_count non-positive");
 
-    int tube_count = params->old_count;
-    int capacity = tubes->capacity;
-    float consolidation_threshold = params->consolidation_threshold;
+        int tube_count = params->old_count;
+        int capacity = tubes->capacity;
+        float consolidation_threshold = params->consolidation_threshold;
 
-    for (int i = 0; i < tube_count; i++) {
-        int entry_i = (tubes->head - tube_count + i + capacity) % capacity;
-        MemoryEntry* mi = &tubes->entries[entry_i];
-        if (mi->size == 0) continue;
+        for (int i = 0; i < tube_count; i++) {
+            int entry_i = (tubes->head - tube_count + i + capacity) % capacity;
+            MemoryEntry* mi = &tubes->entries[entry_i];
+            if (mi->size == 0) continue;
 
-        for (int j = i + 1; j < tube_count; j++) {
-            int entry_j = (tubes->head - tube_count + j + capacity) % capacity;
-            MemoryEntry* mj = &tubes->entries[entry_j];
-            if (mj->size == 0) continue;
+            for (int j = i + 1; j < tube_count; j++) {
+                int entry_j = (tubes->head - tube_count + j + capacity) % capacity;
+                MemoryEntry* mj = &tubes->entries[entry_j];
+                if (mj->size == 0) continue;
 
-            int min_size = (mi->size < mj->size) ? mi->size : mj->size;
-            if (min_size > 0) {
-                float similarity = 0.0f;
-                for (int k = 0; k < min_size; k++) {
-                    float diff = mi->data[k] - mj->data[k];
-                    similarity += diff * diff;
-                }
-                similarity = 1.0f - sqrtf(similarity / min_size);
-
-                if (similarity > consolidation_threshold) {
+                int min_size = (mi->size < mj->size) ? mi->size : mj->size;
+                if (min_size > 0) {
+                    float similarity = 0.0f;
                     for (int k = 0; k < min_size; k++) {
-                        mi->data[k] = 0.5f * (mi->data[k] + mj->data[k]);
+                        float diff = mi->data[k] - mj->data[k];
+                        similarity += diff * diff;
                     }
-                    mi->decay_factor = fmaxf(mi->decay_factor, mj->decay_factor);
-                    mj->size = 0;
+                    similarity = 1.0f - sqrtf(similarity / min_size);
+
+                    if (similarity > consolidation_threshold) {
+                        for (int k = 0; k < min_size; k++) {
+                            mi->data[k] = 0.5f * (mi->data[k] + mj->data[k]);
+                        }
+                        mi->decay_factor = fmaxf(mi->decay_factor, mj->decay_factor);
+                        mj->size = 0;
+                    }
                 }
             }
         }
@@ -882,7 +884,7 @@ __device__ void memory_scan_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         warp_sums[warp_id] = val;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int warp_sum = (lane < (blockDim.x / WARP_SIZE)) ? warp_sums[lane] : 0;
@@ -893,7 +895,7 @@ __device__ void memory_scan_device(Organism* organism) {
         }
         warp_sums[lane] = warp_sum;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int warp_offset = (warp_id > 0) ? warp_sums[warp_id - 1] : 0;
     int inclusive_val = warp_offset + val;
@@ -927,7 +929,7 @@ __device__ void memory_scan_block_sums_device(Organism* organism) {
     if (lane == WARP_SIZE - 1) {
         bsum_shared[warp_id] = bval;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (warp_id == 0) {
         int ws = (lane < (blockDim.x / WARP_SIZE)) ? bsum_shared[lane] : 0;
@@ -938,7 +940,7 @@ __device__ void memory_scan_block_sums_device(Organism* organism) {
         }
         bsum_shared[lane] = ws;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int bprefix = (warp_id > 0) ? bsum_shared[warp_id - 1] : 0;
     int b_inclusive = bprefix + bval;
@@ -1033,39 +1035,39 @@ __device__ void memory_update_device(Organism* organism) {
     DEVICE_FATAL_IF(params == nullptr, "memory_update_device: params is null");
 
     memory_update_params_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     DEVICE_FATAL_IF(params->old_count <= 0, "memory_update_device: old_count non-positive after params");
 
     memory_decay_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_prune_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_consolidate_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_mark_valid_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_scan_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_scan_block_sums_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_add_block_offsets_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_compact_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_finalize_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 
     memory_copy_back_device(organism);
-    __syncthreads();
+    cg::this_grid().sync();
 }
 
 #endif

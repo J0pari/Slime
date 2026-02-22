@@ -30,8 +30,7 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
 
     const int tile_x = (blockIdx.x * WMMA_TILE_DIM) % grid_size;
     const int tile_y = (blockIdx.y * WMMA_TILE_DIM) % grid_size;
-
-    if (tile_x >= grid_size || tile_y >= grid_size) return;
+    bool valid_tile = (tile_x < grid_size && tile_y < grid_size);
 
     float mass_before = 0.0f;
     float mass_after = 0.0f;
@@ -47,7 +46,7 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
     __shared__ half tile_shared[WMMA_TILE_DIM][WMMA_TILE_DIM + BANK_PAD];
     __shared__ half kernel_shared[WMMA_TILE_DIM][WMMA_TILE_DIM + BANK_PAD];
 
-    if (threadIdx.x < BLOCK_SIZE) {
+    if (valid_tile && threadIdx.x < BLOCK_SIZE) {
         int ti = threadIdx.x / WMMA_TILE_DIM;
         int tj = threadIdx.x % WMMA_TILE_DIM;
         int y = tile_y + ti;
@@ -62,13 +61,15 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
 
     mass_before = WarpReduce<WARP_SIZE>::sum(mass_before);
 
-    __syncthreads();
+    cg::this_grid().sync();
 
-    load_matrix_sync(a_frag, (half*)tile_shared, WMMA_TILE_DIM);
+    if (valid_tile) {
+        load_matrix_sync(a_frag, (half*)tile_shared, WMMA_TILE_DIM);
+    }
 
     for (int ky = 0; ky < 3; ky++) {
         for (int kx = 0; kx < 3; kx++) {
-            if (threadIdx.x < BLOCK_SIZE) {
+            if (valid_tile && threadIdx.x < BLOCK_SIZE) {
                 int ki = threadIdx.x / WMMA_TILE_DIM;
                 int kj = threadIdx.x % WMMA_TILE_DIM;
                 if (ki < channels && kj < channels) {
@@ -77,18 +78,22 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
                     kernel_shared[ki][kj] = __float2half(0.0f);
                 }
             }
-            __syncthreads();
+            cg::this_grid().sync();
 
-            load_matrix_sync(b_frag, (half*)kernel_shared, WMMA_TILE_DIM);
-            mma_sync(c_frag, a_frag, b_frag, c_frag);
+            if (valid_tile) {
+                load_matrix_sync(b_frag, (half*)kernel_shared, WMMA_TILE_DIM);
+                mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
         }
     }
 
     __shared__ float result_shared[WMMA_TILE_DIM][WMMA_TILE_DIM + BANK_PAD];
-    store_matrix_sync(result_shared[0], c_frag, 16, mem_row_major);
-    __syncthreads();
+    if (valid_tile) {
+        store_matrix_sync(result_shared[0], c_frag, 16, mem_row_major);
+    }
+    cg::this_grid().sync();
 
-    if (threadIdx.x < BLOCK_SIZE) {
+    if (valid_tile && threadIdx.x < BLOCK_SIZE) {
         int ri = threadIdx.x / WMMA_TILE_DIM;
         int rj = threadIdx.x % WMMA_TILE_DIM;
         int y = tile_y + ri;
@@ -109,14 +114,14 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
     if (laneId == 0) {
         warp_ballots[warpId] = ballot;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     int all_converged = WarpReduce<WARP_SIZE>::all(
         (threadIdx.x < (blockDim.x / WARP_SIZE)) ?
         (warp_ballots[threadIdx.x] == 0xFFFFFFFF) : 1
     );
 
-    if (all_converged && laneId == 0 && is_meaningful(mass_after, mass_before)) {
+    if (valid_tile && all_converged && laneId == 0 && is_meaningful(mass_after, mass_before)) {
         float scale = mass_before / mass_after;
 
         auto tile = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
@@ -142,10 +147,7 @@ __device__ void compute_coherence_tensor_device(Organism* organism) {
         float current_loss = loss_history[tid];
         float next_loss = loss_history[tid + 1];
 
-        if (current_loss <= 0.0f) {
-            printf("FATAL [compute_coherence_tensor]: current_loss[%d]=%f\n", tid, current_loss);
-            return;
-        }
+        DEVICE_FATAL_IF(current_loss <= 0.0f, "compute_coherence_tensor: current_loss[%d]=%f", tid, current_loss);
         local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
     }
 
@@ -210,49 +212,53 @@ __device__ void pipelined_ca_device(Organism* organism) {
 
     int cell_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int batch_id = blockIdx.y;
-
-    if (cell_idx >= grid_size * grid_size || batch_id >= batch_size) return;
+    bool valid = (cell_idx < grid_size * grid_size && batch_id < batch_size);
 
     __shared__ float input_tile[BLOCK_SIZE];
     __shared__ float perception_out[BLOCK_SIZE];
     __shared__ float interaction_out[BLOCK_SIZE];
-
-    AsyncCopy<WARP_SIZE>::memcpy_async_tile(&input_tile[threadIdx.x],
-                                 &ca_state_in[batch_id * grid_size * grid_size * arch.channels + cell_idx],
-                                 sizeof(float));
-    AsyncCopy<WARP_SIZE>::commit_group();
 
     int head_id = blockIdx.z;
     half* perc_w = perception_weights + head_id * arch.channels * arch.head_dim;
     half* inter_w = interaction_weights + head_id * arch.head_dim * arch.head_dim;
     half* val_w = value_weights + head_id * arch.head_dim * arch.channels;
 
-    AsyncCopy<WARP_SIZE>::wait_group();
+    if (valid) {
+        AsyncCopy<WARP_SIZE>::memcpy_async_tile(&input_tile[threadIdx.x],
+                                     &ca_state_in[batch_id * grid_size * grid_size * arch.channels + cell_idx],
+                                     sizeof(float));
+        AsyncCopy<WARP_SIZE>::commit_group();
+        AsyncCopy<WARP_SIZE>::wait_group();
 
-    float perc_accum = 0.0f;
-    for (int i = 0; i < arch.channels; i++) {
-        perc_accum += input_tile[threadIdx.x] * __half2float(perc_w[i]);
+        float perc_accum = 0.0f;
+        for (int i = 0; i < arch.channels; i++) {
+            perc_accum += input_tile[threadIdx.x] * __half2float(perc_w[i]);
+        }
+        perception_out[threadIdx.x] = activation_relu(perc_accum);
     }
-    perception_out[threadIdx.x] = activation_relu(perc_accum);
-    __syncthreads();
+    cg::this_grid().sync();
 
-    float inter_accum = 0.0f;
-    for (int i = 0; i < arch.head_dim; i++) {
-        inter_accum += perception_out[threadIdx.x] * __half2float(inter_w[i]);
+    if (valid) {
+        float inter_accum = 0.0f;
+        for (int i = 0; i < arch.head_dim; i++) {
+            inter_accum += perception_out[threadIdx.x] * __half2float(inter_w[i]);
+        }
+        interaction_out[threadIdx.x] = activation_relu(inter_accum);
     }
-    interaction_out[threadIdx.x] = activation_relu(inter_accum);
-    __syncthreads();
+    cg::this_grid().sync();
 
-    float value_accum = 0.0f;
-    for (int i = 0; i < arch.channels; i++) {
-        value_accum += interaction_out[threadIdx.x] * __half2float(val_w[i]);
+    if (valid) {
+        float value_accum = 0.0f;
+        for (int i = 0; i < arch.channels; i++) {
+            value_accum += interaction_out[threadIdx.x] * __half2float(val_w[i]);
+        }
+
+        AsyncCopy<WARP_SIZE>::memcpy_async_tile(&ca_state_out[batch_id * grid_size * grid_size * arch.channels + cell_idx],
+                                     &value_accum,
+                                     sizeof(float));
+        AsyncCopy<WARP_SIZE>::commit_group();
+        AsyncCopy<WARP_SIZE>::wait_group();
     }
-
-    AsyncCopy<WARP_SIZE>::memcpy_async_tile(&ca_state_out[batch_id * grid_size * grid_size * arch.channels + cell_idx],
-                                 &value_accum,
-                                 sizeof(float));
-    AsyncCopy<WARP_SIZE>::commit_group();
-    AsyncCopy<WARP_SIZE>::wait_group();
 }
 
 #endif

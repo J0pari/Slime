@@ -24,30 +24,30 @@ __device__ void extract_head_gradient_magnitudes_device(Organism* organism) {
     DEVICE_FATAL_IF(num_heads <= 0, "extract_head_gradient_magnitudes: num_heads must be positive");
 
     int head_id = blockIdx.x;
-    if (head_id >= num_heads) return;
+    if (head_id < num_heads) {
+        int start_idx = param_start_indices[head_id];
+        int count = param_counts[head_id];
 
-    int start_idx = param_start_indices[head_id];
-    int count = param_counts[head_id];
+        DEVICE_FATAL_IF(start_idx < 0, "extract_head_gradient_magnitudes: negative start_idx");
+        DEVICE_FATAL_IF(count <= 0, "extract_head_gradient_magnitudes: non-positive count");
+        DEVICE_FATAL_IF(start_idx + count > tape->value_capacity, "extract_head_gradient_magnitudes: param range exceeds tape capacity");
 
-    DEVICE_FATAL_IF(start_idx < 0, "extract_head_gradient_magnitudes: negative start_idx");
-    DEVICE_FATAL_IF(count <= 0, "extract_head_gradient_magnitudes: non-positive count");
-    DEVICE_FATAL_IF(start_idx + count > tape->value_capacity, "extract_head_gradient_magnitudes: param range exceeds tape capacity");
+        float local_sum = 0.0f;
+        for (int i = threadIdx.x; i < count; i += blockDim.x) {
+            float grad = tape->grad_buffer[start_idx + i];
+            DEVICE_FATAL_IF(isnan(grad), "extract_head_gradient_magnitudes: gradient is NaN");
+            local_sum += grad * grad;
+        }
 
-    float local_sum = 0.0f;
-    for (int i = threadIdx.x; i < count; i += blockDim.x) {
-        float grad = tape->grad_buffer[start_idx + i];
-        DEVICE_FATAL_IF(isnan(grad), "extract_head_gradient_magnitudes: gradient is NaN");
-        local_sum += grad * grad;
-    }
+        unsigned mask = __activemask();
+        #pragma unroll
+        for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
+            local_sum += __shfl_down_sync(mask, local_sum, offset);
+        }
 
-    unsigned mask = __activemask();
-    #pragma unroll
-    for (int offset = WMMA_TILE_DIM; offset > 0; offset /= 2) {
-        local_sum += __shfl_down_sync(mask, local_sum, offset);
-    }
-
-    if (threadIdx.x == 0) {
-        gradient_magnitudes[head_id] = sqrtf(local_sum / (float)count);
+        if (threadIdx.x == 0) {
+            gradient_magnitudes[head_id] = sqrtf(local_sum / (float)count);
+        }
     }
 }
 
@@ -75,7 +75,7 @@ __device__ void compute_effective_rank_from_gradients_device(Organism* organism)
         local_sq += __shfl_down_sync(mask, local_sq, offset);
     }
     if (tid == 0) s_total_sq = local_sq;
-    __syncthreads();
+    cg::this_grid().sync();
 
     float total_sq = s_total_sq;
 
@@ -104,7 +104,7 @@ __device__ void compute_effective_rank_from_gradients_device(Organism* organism)
         local_entropy += __shfl_down_sync(mask, local_entropy, offset);
     }
     if (tid == 0) s_entropy_sum = local_entropy;
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (tid == 0) {
         float entropy;
@@ -135,23 +135,23 @@ __device__ void compute_multiplicative_fitness_device(Organism* organism) {
     float gamma = organism->gf_gamma;
     float delta = organism->gf_delta;
     float* fitness_out = organism->gf_fitness_out;
-    if (threadIdx.x != 0) return;
+    if (threadIdx.x == 0) {
+        DEVICE_FATAL_IF(fitness_out == nullptr, "compute_multiplicative_fitness: fitness_out is null");
+        DEVICE_FATAL_IF(task_accuracy < 0.0f || task_accuracy > 1.0f, "compute_multiplicative_fitness: task_accuracy out of range");
+        DEVICE_FATAL_IF(generalization_gap < 0.0f || generalization_gap > 1.0f, "compute_multiplicative_fitness: gen_gap out of range");
+        DEVICE_FATAL_IF(effective_rank < 1.0f, "compute_multiplicative_fitness: effective_rank below 1");
+        DEVICE_FATAL_IF(hardware_efficiency <= 0.0f, "compute_multiplicative_fitness: hw_efficiency non-positive");
 
-    DEVICE_FATAL_IF(fitness_out == nullptr, "compute_multiplicative_fitness: fitness_out is null");
-    DEVICE_FATAL_IF(task_accuracy < 0.0f || task_accuracy > 1.0f, "compute_multiplicative_fitness: task_accuracy out of range");
-    DEVICE_FATAL_IF(generalization_gap < 0.0f || generalization_gap > 1.0f, "compute_multiplicative_fitness: gen_gap out of range");
-    DEVICE_FATAL_IF(effective_rank < 1.0f, "compute_multiplicative_fitness: effective_rank below 1");
-    DEVICE_FATAL_IF(hardware_efficiency <= 0.0f, "compute_multiplicative_fitness: hw_efficiency non-positive");
+        float fitness = powf(task_accuracy + 1e-6f, alpha) *
+                        powf(1.0f - generalization_gap + 1e-6f, beta) *
+                        powf(effective_rank, gamma) *
+                        powf(hardware_efficiency + 1e-6f, delta);
 
-    float fitness = powf(task_accuracy + 1e-6f, alpha) *
-                    powf(1.0f - generalization_gap + 1e-6f, beta) *
-                    powf(effective_rank, gamma) *
-                    powf(hardware_efficiency + 1e-6f, delta);
+        DEVICE_FATAL_IF(isnan(fitness), "compute_multiplicative_fitness: fitness is NaN");
+        DEVICE_FATAL_IF(isinf(fitness), "compute_multiplicative_fitness: fitness is Inf");
 
-    DEVICE_FATAL_IF(isnan(fitness), "compute_multiplicative_fitness: fitness is NaN");
-    DEVICE_FATAL_IF(isinf(fitness), "compute_multiplicative_fitness: fitness is Inf");
-
-    fitness_out[0] = fitness;
+        fitness_out[0] = fitness;
+    }
 }
 
 __device__ void update_fitness_ema_device(Organism* organism) {
@@ -165,15 +165,15 @@ __device__ void update_fitness_ema_device(Organism* organism) {
     DEVICE_FATAL_IF(alpha < 0.0f || alpha > 1.0f, "update_fitness_ema: alpha must be in [0,1]");
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_entries) return;
+    if (idx < num_entries) {
+        float curr = current_fitness[idx];
+        float prev_ema = fitness_ema[idx];
 
-    float curr = current_fitness[idx];
-    float prev_ema = fitness_ema[idx];
+        DEVICE_FATAL_IF(isnan(curr), "update_fitness_ema: current_fitness is NaN");
+        DEVICE_FATAL_IF(isnan(prev_ema), "update_fitness_ema: prev_ema is NaN");
 
-    DEVICE_FATAL_IF(isnan(curr), "update_fitness_ema: current_fitness is NaN");
-    DEVICE_FATAL_IF(isnan(prev_ema), "update_fitness_ema: prev_ema is NaN");
-
-    fitness_ema[idx] = alpha * curr + (1.0f - alpha) * prev_ema;
+        fitness_ema[idx] = alpha * curr + (1.0f - alpha) * prev_ema;
+    }
 }
 
 __device__ void compute_relative_fitness_device(Organism* organism) {
@@ -191,63 +191,63 @@ __device__ void compute_relative_fitness_device(Organism* organism) {
     DEVICE_FATAL_IF(k_neighbors <= 0 || k_neighbors > 5, "compute_relative_fitness: k_neighbors must be in [1,5]");
 
     int comp_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (comp_id >= num_components) return;
+    if (comp_id < num_components) {
+        float distances[5];
+        int neighbor_ids[5];
 
-    float distances[5];
-    int neighbor_ids[5];
-
-    for (int i = 0; i < k_neighbors; i++) {
-        distances[i] = 1e9f;
-        neighbor_ids[i] = -1;
-    }
-
-    for (int other = 0; other < num_components; other++) {
-        if (other == comp_id) continue;
-
-        float dist_sq = 0.0f;
-        for (int d = 0; d < behavioral_dim; d++) {
-            float diff = behavioral_coords[comp_id * behavioral_dim + d] -
-                        behavioral_coords[other * behavioral_dim + d];
-            dist_sq += diff * diff;
+        for (int i = 0; i < k_neighbors; i++) {
+            distances[i] = 1e9f;
+            neighbor_ids[i] = -1;
         }
 
-        float dist = sqrtf(dist_sq);
-        for (int i = 0; i < k_neighbors; i++) {
-            if (dist < distances[i]) {
-                for (int j = k_neighbors - 1; j > i; j--) {
-                    distances[j] = distances[j-1];
-                    neighbor_ids[j] = neighbor_ids[j-1];
+        for (int other = 0; other < num_components; other++) {
+            if (other == comp_id) continue;
+
+            float dist_sq = 0.0f;
+            for (int d = 0; d < behavioral_dim; d++) {
+                float diff = behavioral_coords[comp_id * behavioral_dim + d] -
+                            behavioral_coords[other * behavioral_dim + d];
+                dist_sq += diff * diff;
+            }
+
+            float dist = sqrtf(dist_sq);
+            for (int i = 0; i < k_neighbors; i++) {
+                if (dist < distances[i]) {
+                    for (int j = k_neighbors - 1; j > i; j--) {
+                        distances[j] = distances[j-1];
+                        neighbor_ids[j] = neighbor_ids[j-1];
+                    }
+                    distances[i] = dist;
+                    neighbor_ids[i] = other;
+                    break;
                 }
-                distances[i] = dist;
-                neighbor_ids[i] = other;
-                break;
             }
         }
-    }
 
-    float neighbor_mean = 0.0f;
-    int valid_neighbors = 0;
-    for (int i = 0; i < k_neighbors; i++) {
-        if (neighbor_ids[i] >= 0) {
-            neighbor_mean += absolute_fitness[neighbor_ids[i]];
-            valid_neighbors++;
+        float neighbor_mean = 0.0f;
+        int valid_neighbors = 0;
+        for (int i = 0; i < k_neighbors; i++) {
+            if (neighbor_ids[i] >= 0) {
+                neighbor_mean += absolute_fitness[neighbor_ids[i]];
+                valid_neighbors++;
+            }
         }
-    }
-    DEVICE_FATAL_IF(valid_neighbors <= 0, "compute_relative_fitness: no valid neighbors found");
-    neighbor_mean /= valid_neighbors;
+        DEVICE_FATAL_IF(valid_neighbors <= 0, "compute_relative_fitness: no valid neighbors found");
+        neighbor_mean /= valid_neighbors;
 
-    float neighbor_var = 0.0f;
-    for (int i = 0; i < k_neighbors; i++) {
-        if (neighbor_ids[i] >= 0) {
-            float diff = absolute_fitness[neighbor_ids[i]] - neighbor_mean;
-            neighbor_var += diff * diff;
+        float neighbor_var = 0.0f;
+        for (int i = 0; i < k_neighbors; i++) {
+            if (neighbor_ids[i] >= 0) {
+                float diff = absolute_fitness[neighbor_ids[i]] - neighbor_mean;
+                neighbor_var += diff * diff;
+            }
         }
-    }
-    float neighbor_std = sqrtf(neighbor_var / valid_neighbors);
+        float neighbor_std = sqrtf(neighbor_var / valid_neighbors);
 
-    float my_fitness = absolute_fitness[comp_id];
-    relative_fitness[comp_id] = is_meaningful(neighbor_std, 1.0f) ?
-        (my_fitness - neighbor_mean) / neighbor_std : NAN;
+        float my_fitness = absolute_fitness[comp_id];
+        relative_fitness[comp_id] = is_meaningful(neighbor_std, 1.0f) ?
+            (my_fitness - neighbor_mean) / neighbor_std : NAN;
+    }
 }
 
 __device__ __forceinline__ uint64_t compute_fitness_input_hash(
@@ -300,10 +300,10 @@ __device__ void compute_fitness_from_diresa_device(Organism* organism) {
     int generation = organism->generation;
 
     int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (entry_idx >= pool->capacity || !pool->alive_flags[entry_idx]) return;
-
-    PoolEntry* entry = &pool->entries[entry_idx];
-    compute_fitness(entry, generation);
+    if (entry_idx < pool->capacity && pool->alive_flags[entry_idx]) {
+        PoolEntry* entry = &pool->entries[entry_idx];
+        compute_fitness(entry, generation);
+    }
 }
 
 #endif

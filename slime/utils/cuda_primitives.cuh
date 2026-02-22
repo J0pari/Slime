@@ -332,13 +332,13 @@ __device__ void convert_fp32_to_fp16_strided_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch_size * slice_size;
-    if (idx >= total) return;
+    if (idx < total) {
+        int batch_id = idx / slice_size;
+        int local_idx = idx % slice_size;
+        int src_idx = batch_id * src_stride + local_idx;
 
-    int batch_id = idx / slice_size;
-    int local_idx = idx % slice_size;
-    int src_idx = batch_id * src_stride + local_idx;
-
-    dst[idx] = __float2half(src[src_idx]);
+        dst[idx] = __float2half(src[src_idx]);
+    }
 }
 
 __device__ void memcpy_to_strided_device(Organism* organism) {
@@ -350,13 +350,13 @@ __device__ void memcpy_to_strided_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch_size * slice_size;
-    if (idx >= total) return;
+    if (idx < total) {
+        int batch_id = idx / slice_size;
+        int local_idx = idx % slice_size;
+        int dst_idx = batch_id * dst_stride + local_idx;
 
-    int batch_id = idx / slice_size;
-    int local_idx = idx % slice_size;
-    int dst_idx = batch_id * dst_stride + local_idx;
-
-    dst[dst_idx] = src[idx];
+        dst[dst_idx] = src[idx];
+    }
 }
 
 template<typename T, int ALIGN = 16>
@@ -682,7 +682,7 @@ struct BlockReduce {
         val = WarpReduce<WARP_SIZE>::sum(val);
 
         if (lane == 0) shared[wid] = val;
-        __syncthreads();
+        cg::this_grid().sync();
 
         val = (threadIdx.x < BLOCK_SIZE / WARP_SIZE) ? shared[lane] : 0.0f;
         if (wid == 0) val = WarpReduce<WARP_SIZE>::sum(val);
@@ -701,14 +701,14 @@ struct BlockScan {
         int inclusive = warp_scan_int(val);
 
         if (lane == WARP_SIZE - 1) warp_sums[wid] = inclusive;
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (wid == 0) {
             int warp_val = (lane < BLOCK_SIZE / WARP_SIZE) ? warp_sums[lane] : 0;
             int warp_inclusive = warp_scan_int(warp_val);
             warp_sums[lane] = warp_inclusive;
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         int warp_prefix = (wid > 0) ? warp_sums[wid - 1] : 0;
         int exclusive = inclusive - val + warp_prefix;
@@ -793,7 +793,7 @@ struct AsyncCopy {
         #if __CUDA_ARCH__ >= 800
         __pipeline_commit();
         #else
-        __syncthreads();
+        cg::this_grid().sync();
         #endif
     }
 
@@ -801,7 +801,7 @@ struct AsyncCopy {
         #if __CUDA_ARCH__ >= 800
         __pipeline_wait_prior(0);
         #else
-        __syncthreads();
+        cg::this_grid().sync();
         #endif
     }
 };
@@ -1063,22 +1063,22 @@ struct TensorCoreMatmul {
         int warp_m = (blockIdx.y * blockDim.y + threadIdx.y) * M;
         int warp_n = (blockIdx.x * blockDim.x + threadIdx.x) * N;
 
-        if (warp_m >= m || warp_n >= n) return;
+        if (warp_m < m && warp_n < n) {
+            fragment<accumulator, M, N, K, half> acc_frag;
+            fill_fragment(acc_frag, __float2half(0.0f));
 
-        fragment<accumulator, M, N, K, half> acc_frag;
-        fill_fragment(acc_frag, __float2half(0.0f));
+            for (int i = 0; i < k; i += K) {
+                fragment<matrix_a, M, N, K, half, row_major> a_frag;
+                fragment<matrix_b, M, N, K, half, row_major> b_frag;
 
-        for (int i = 0; i < k; i += K) {
-            fragment<matrix_a, M, N, K, half, row_major> a_frag;
-            fragment<matrix_b, M, N, K, half, row_major> b_frag;
+                load_matrix_sync(a_frag, A + warp_m * lda + i, lda);
+                load_matrix_sync(b_frag, B + i * ldb + warp_n, ldb);
 
-            load_matrix_sync(a_frag, A + warp_m * lda + i, lda);
-            load_matrix_sync(b_frag, B + i * ldb + warp_n, ldb);
+                mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            }
 
-            mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+            store_matrix_sync(C + warp_m * ldc + warp_n, acc_frag, ldc, mem_row_major);
         }
-
-        store_matrix_sync(C + warp_m * ldc + warp_n, acc_frag, ldc, mem_row_major);
     }
 };
 #endif
@@ -1206,26 +1206,26 @@ __device__ void batched_tensor_core_gemm_device(Organism* organism) {
     const int tile_row = warpM * WMMA_TILE_DIM;
     const int tile_col = warpN * WMMA_TILE_DIM;
 
-    if (tile_row >= M || tile_col >= N) return;
+    if (tile_row < M && tile_col < N) {
+        const half* A_head = A + head_id * A_head_stride;
+        const half* B_head = B + head_id * B_head_stride;
+        float* C_head = C + head_id * C_head_stride;
 
-    const half* A_head = A + head_id * A_head_stride;
-    const half* B_head = B + head_id * B_head_stride;
-    float* C_head = C + head_id * C_head_stride;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> b_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> b_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
 
-    nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
-        if (k_tile + WMMA_TILE_DIM <= K) {
-            nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * K + k_tile, K);
-            nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
-            nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+            if (k_tile + WMMA_TILE_DIM <= K) {
+                nvcuda::wmma::load_matrix_sync(a_frag, A_head + tile_row * K + k_tile, K);
+                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
+                nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
         }
+        nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
     }
-    nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
 }
 
 __device__ void batched_tensor_core_gemm_transA_device(Organism* organism) {
@@ -1246,26 +1246,26 @@ __device__ void batched_tensor_core_gemm_transA_device(Organism* organism) {
     const int tile_row = warpM * WMMA_TILE_DIM;
     const int tile_col = warpN * WMMA_TILE_DIM;
 
-    if (tile_row >= M || tile_col >= N) return;
+    if (tile_row < M && tile_col < N) {
+        const half* A_head = A + head_id * A_head_stride;
+        const half* B_head = B + head_id * B_head_stride;
+        float* C_head = C + head_id * C_head_stride;
 
-    const half* A_head = A + head_id * A_head_stride;
-    const half* B_head = B + head_id * B_head_stride;
-    float* C_head = C + head_id * C_head_stride;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
+        nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
 
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+        nvcuda::wmma::fill_fragment(c_frag, 0.0f);
 
-    nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-    for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
-        if (k_tile + WMMA_TILE_DIM <= K) {
-            nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * M + tile_row, M);
-            nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
-            nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        for (int k_tile = 0; k_tile < K; k_tile += WMMA_TILE_DIM) {
+            if (k_tile + WMMA_TILE_DIM <= K) {
+                nvcuda::wmma::load_matrix_sync(a_frag, A_head + k_tile * M + tile_row, M);
+                nvcuda::wmma::load_matrix_sync(b_frag, B_head + k_tile * N + tile_col, N);
+                nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+            }
         }
+        nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
     }
-    nvcuda::wmma::store_matrix_sync(C_head + tile_row * N + tile_col, c_frag, N, nvcuda::wmma::mem_row_major);
 }
 
 __device__ void batched_transpose_fp16_device(Organism* organism) {
@@ -1286,7 +1286,7 @@ __device__ void batched_transpose_fp16_device(Organism* organism) {
     half* B_head = B + head_id * B_head_stride;
 
     if (y < M && x < N) tile[threadIdx.y][threadIdx.x] = A_head[y * N + x];
-    __syncthreads();
+    cg::this_grid().sync();
 
     int out_x = by + threadIdx.x, out_y = bx + threadIdx.y;
     if (out_y < N && out_x < M) B_head[out_y * M + out_x] = tile[threadIdx.x][threadIdx.y];
@@ -1306,17 +1306,17 @@ __device__ void batched_convert_fp32_to_fp16_strided_device(Organism* organism) 
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / (batch_size * slice_size);
+        int remainder = idx % (batch_size * slice_size);
+        int batch_id = remainder / slice_size;
+        int local_idx = remainder % slice_size;
 
-    int head_id = idx / (batch_size * slice_size);
-    int remainder = idx % (batch_size * slice_size);
-    int batch_id = remainder / slice_size;
-    int local_idx = remainder % slice_size;
+        int src_idx = head_id * src_head_stride + (batch_offset + batch_id) * src_batch_stride + local_idx;
+        int dst_idx = head_id * dst_head_stride + batch_id * slice_size + local_idx;
 
-    int src_idx = head_id * src_head_stride + (batch_offset + batch_id) * src_batch_stride + local_idx;
-    int dst_idx = head_id * dst_head_stride + batch_id * slice_size + local_idx;
-
-    dst[dst_idx] = __float2half(src[src_idx]);
+        dst[dst_idx] = __float2half(src[src_idx]);
+    }
 }
 
 __device__ void batched_memcpy_to_strided_device(Organism* organism) {
@@ -1333,17 +1333,17 @@ __device__ void batched_memcpy_to_strided_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * batch_size * slice_size;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / (batch_size * slice_size);
+        int remainder = idx % (batch_size * slice_size);
+        int batch_id = remainder / slice_size;
+        int local_idx = remainder % slice_size;
 
-    int head_id = idx / (batch_size * slice_size);
-    int remainder = idx % (batch_size * slice_size);
-    int batch_id = remainder / slice_size;
-    int local_idx = remainder % slice_size;
+        int src_idx = head_id * src_head_stride + batch_id * slice_size + local_idx;
+        int dst_idx = head_id * dst_head_stride + (batch_offset + batch_id) * dst_batch_stride + local_idx;
 
-    int src_idx = head_id * src_head_stride + batch_id * slice_size + local_idx;
-    int dst_idx = head_id * dst_head_stride + (batch_offset + batch_id) * dst_batch_stride + local_idx;
-
-    dst[dst_idx] = src[src_idx];
+        dst[dst_idx] = src[src_idx];
+    }
 }
 
 __device__ void batched_accumulate_weight_grads_device(Organism* organism) {
@@ -1357,15 +1357,15 @@ __device__ void batched_accumulate_weight_grads_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * weight_size;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / weight_size;
+        int local_idx = idx % weight_size;
 
-    int head_id = idx / weight_size;
-    int local_idx = idx % weight_size;
+        int src_idx = head_id * dW_head_stride + local_idx;
+        int dst_idx = head_offsets[head_id] + local_idx;
 
-    int src_idx = head_id * dW_head_stride + local_idx;
-    int dst_idx = head_offsets[head_id] + local_idx;
-
-    grad_buffer[dst_idx] = dW[src_idx];
+        grad_buffer[dst_idx] = dW[src_idx];
+    }
 }
 
 __device__ void batched_gelu_backward_device(Organism* organism) {
@@ -1380,15 +1380,15 @@ __device__ void batched_gelu_backward_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * elements_per_head;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / elements_per_head;
+        int local_idx = idx % elements_per_head;
 
-    int head_id = idx / elements_per_head;
-    int local_idx = idx % elements_per_head;
+        int src_idx = head_id * src_head_stride + local_idx;
+        int dst_idx = head_id * dst_head_stride + local_idx;
 
-    int src_idx = head_id * src_head_stride + local_idx;
-    int dst_idx = head_id * dst_head_stride + local_idx;
-
-    dL_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu[src_idx], dL_dI[src_idx]);
+        dL_dpregelu[dst_idx] = activation_gelu_backward(pre_gelu[src_idx], dL_dI[src_idx]);
+    }
 }
 
 __device__ void batched_relu_backward_device(Organism* organism) {
@@ -1403,15 +1403,15 @@ __device__ void batched_relu_backward_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = num_heads * elements_per_head;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / elements_per_head;
+        int local_idx = idx % elements_per_head;
 
-    int head_id = idx / elements_per_head;
-    int local_idx = idx % elements_per_head;
+        int src_idx = head_id * src_head_stride + local_idx;
+        int dst_idx = head_id * dst_head_stride + local_idx;
 
-    int src_idx = head_id * src_head_stride + local_idx;
-    int dst_idx = head_id * dst_head_stride + local_idx;
-
-    dL_dprerelu[dst_idx] = dL_dP[src_idx] * ((P[src_idx] > 0.0f) ? 1.0f : 0.0f);
+        dL_dprerelu[dst_idx] = dL_dP[src_idx] * ((P[src_idx] > 0.0f) ? 1.0f : 0.0f);
+    }
 }
 
 __device__ void batched_im2col_device(Organism* organism) {
@@ -1428,33 +1428,33 @@ __device__ void batched_im2col_device(Organism* organism) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     int total = num_heads * batch_size * num_cells;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / (batch_size * num_cells);
+        int remainder = idx % (batch_size * num_cells);
+        int batch_id = remainder / num_cells;
+        int cell_idx = remainder % num_cells;
+        int cell_y = cell_idx / grid_size;
+        int cell_x = cell_idx % grid_size;
 
-    int head_id = idx / (batch_size * num_cells);
-    int remainder = idx % (batch_size * num_cells);
-    int batch_id = remainder / num_cells;
-    int cell_idx = remainder % num_cells;
-    int cell_y = cell_idx / grid_size;
-    int cell_x = cell_idx % grid_size;
+        int col_width = 9 * channels;
+        int col_row = batch_id * num_cells + cell_idx;
 
-    int col_width = 9 * channels;
-    int col_row = batch_id * num_cells + cell_idx;
+        const float* input_head = input + head_id * input_head_stride;
+        float* col_head = col + head_id * col_head_stride;
 
-    const float* input_head = input + head_id * input_head_stride;
-    float* col_head = col + head_id * col_head_stride;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int ny = max(0, min(grid_size - 1, cell_y + dy));
+                int nx = max(0, min(grid_size - 1, cell_x + dx));
+                int patch_idx = (dy + 1) * 3 + (dx + 1);
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int ny = max(0, min(grid_size - 1, cell_y + dy));
-            int nx = max(0, min(grid_size - 1, cell_x + dx));
-            int patch_idx = (dy + 1) * 3 + (dx + 1);
+                int input_base = batch_id * grid_size * grid_size * channels +
+                                ny * grid_size * channels + nx * channels;
 
-            int input_base = batch_id * grid_size * grid_size * channels +
-                            ny * grid_size * channels + nx * channels;
-
-            for (int c = 0; c < channels; c++) {
-                col_head[col_row * col_width + patch_idx * channels + c] =
-                    input_head[input_base + c];
+                for (int c = 0; c < channels; c++) {
+                    col_head[col_row * col_width + patch_idx * channels + c] =
+                        input_head[input_base + c];
+                }
             }
         }
     }
@@ -1474,35 +1474,35 @@ __device__ void batched_col2im_device(Organism* organism) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int num_cells = grid_size * grid_size;
     int total = num_heads * batch_size * num_cells;
-    if (idx >= total) return;
+    if (idx < total) {
+        int head_id = idx / (batch_size * num_cells);
+        int remainder = idx % (batch_size * num_cells);
+        int batch_id = remainder / num_cells;
+        int cell_idx = remainder % num_cells;
+        int cell_y = cell_idx / grid_size;
+        int cell_x = cell_idx % grid_size;
 
-    int head_id = idx / (batch_size * num_cells);
-    int remainder = idx % (batch_size * num_cells);
-    int batch_id = remainder / num_cells;
-    int cell_idx = remainder % num_cells;
-    int cell_y = cell_idx / grid_size;
-    int cell_x = cell_idx % grid_size;
+        int col_width = 9 * channels;
 
-    int col_width = 9 * channels;
+        const float* col_head = col + head_id * col_head_stride;
+        float* output_head = output_grad + head_id * output_head_stride;
 
-    const float* col_head = col + head_id * col_head_stride;
-    float* output_head = output_grad + head_id * output_head_stride;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int out_y = cell_y - dy;
+                int out_x = cell_x - dx;
+                if (out_y >= 0 && out_y < grid_size && out_x >= 0 && out_x < grid_size) {
+                    int out_cell = batch_id * num_cells + out_y * grid_size + out_x;
+                    int patch_idx = (dy + 1) * 3 + (dx + 1);
 
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            int out_y = cell_y - dy;
-            int out_x = cell_x - dx;
-            if (out_y < 0 || out_y >= grid_size || out_x < 0 || out_x >= grid_size) continue;
+                    int output_base = batch_id * grid_size * grid_size * channels +
+                                     cell_y * grid_size * channels + cell_x * channels;
 
-            int out_cell = batch_id * num_cells + out_y * grid_size + out_x;
-            int patch_idx = (dy + 1) * 3 + (dx + 1);
-
-            int output_base = batch_id * grid_size * grid_size * channels +
-                             cell_y * grid_size * channels + cell_x * channels;
-
-            for (int c = 0; c < channels; c++) {
-                atomicAdd(&output_head[output_base + c],
-                         col_head[out_cell * col_width + patch_idx * channels + c]);
+                    for (int c = 0; c < channels; c++) {
+                        atomicAdd(&output_head[output_base + c],
+                                 col_head[out_cell * col_width + patch_idx * channels + c]);
+                    }
+                }
             }
         }
     }
@@ -1515,7 +1515,7 @@ struct CooperativeSync {
     }
 
     __device__ static void sync_block() {
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     __device__ static void sync_grid() {

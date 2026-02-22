@@ -6,7 +6,7 @@
 #include "../utils/genome_params.cuh"
 #include "pseudopod.cu"
 #include "../memory/pool.cu"
-#include "../kernels/warp_ca.cu"
+#include "../compute/warp_ca.cu"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
@@ -15,34 +15,24 @@
 
 namespace cg = cooperative_groups;
 
-__device__ void store_chemical_snapshot(ChemicalField* field, int field_size, float global_time, uint64_t genome_hash, const float* genome, const float* gradients) {
+__device__ void store_chemical_snapshot_device(Organism* organism) {
+    ChemicalField* field = organism->chemical_field;
+    int field_size = organism->field_size;
+    float global_time = organism->global_time;
     TemporalTube* history = field->history;
 
     int next_head = (history->head + 1) % history->capacity;
-
     float* dest = history->entries[next_head].data;
 
     for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < field_size; i += blockDim.x * gridDim.x) {
         dest[i] = field->concentration[i];
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        int decay_slot = GenomeParamTable::memory_decay_factor;
-        int importance_slot = GenomeParamTable::memory_importance;
-        int decay_min_slot = GenomeParamTable::memory_decay_factor_min;
-        int decay_max_slot = GenomeParamTable::memory_decay_factor_max;
-        int importance_min_slot = GenomeParamTable::memory_importance_min;
-        int importance_max_slot = GenomeParamTable::memory_importance_max;
-
-        float decay_min = genome_slot_to_unit(genome, decay_min_slot);
-        float decay_max = decay_min + genome_slot_to_unit(genome, decay_max_slot) * (NORMALIZED_MAX - decay_min);
-        float importance_min = genome_slot_to_unit(genome, importance_min_slot);
-        float importance_max = importance_min + genome_slot_to_unit(genome, importance_max_slot) * (NORMALIZED_MAX - importance_min);
-
         history->entries[next_head].timestamp = global_time;
-        history->entries[next_head].decay_factor = genome_to_bootstrap_param(genome, gradients, decay_slot, decay_min, decay_max);
-        history->entries[next_head].importance = genome_to_bootstrap_param(genome, gradients, importance_slot, importance_min, importance_max);
+        history->entries[next_head].decay_factor = FIELD_MEMORY_DECAY;
+        history->entries[next_head].importance = FIELD_MEMORY_IMPORTANCE;
 
         history->head = next_head;
         if (history->count < history->capacity) {
@@ -50,16 +40,6 @@ __device__ void store_chemical_snapshot(ChemicalField* field, int field_size, fl
         }
         history->global_time = global_time;
     }
-}
-
-__device__ void store_chemical_snapshot_device(Organism* organism) {
-    ChemicalField* field = organism->chemical_field;
-    int field_size = organism->field_size;
-    float global_time = organism->global_time;
-    uint64_t genome_hash = organism->genome_hash;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
-    store_chemical_snapshot(field, field_size, global_time, genome_hash, genome, gradients);
 }
 
 __device__ void update_field_from_ca_device(Organism* organism) {
@@ -77,14 +57,14 @@ __device__ void update_field_from_ca_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int cell_idx = y * grid_size + x;
+        float* ca_concentration = entry->ca_state->ca_concentration;
 
-    int cell_idx = y * grid_size + x;
-    float* ca_concentration = entry->ca_state->ca_concentration;
-
-    float val = ca_concentration[cell_idx * channels + 0];
-    if (isfinite(val)) {
-        atomicAdd(&chemical_concentration[cell_idx], val);
+        float val = ca_concentration[cell_idx * channels + 0];
+        if (isfinite(val)) {
+            atomicAdd(&chemical_concentration[cell_idx], val);
+        }
     }
 }
 
@@ -115,47 +95,47 @@ __device__ void initialize_ca_from_field_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int cell_idx = y * grid_size + x;
+        float* ca_conc = entry->ca_state->ca_concentration;
+        int base_idx = cell_idx * channels;
 
-    int cell_idx = y * grid_size + x;
-    float* ca_conc = entry->ca_state->ca_concentration;
-    int base_idx = cell_idx * channels;
+        ca_conc[base_idx + 0] = chem_concentration[cell_idx];
+        ca_conc[base_idx + 1] = chem_gradient_x[cell_idx];
+        ca_conc[base_idx + 2] = chem_gradient_y[cell_idx];
+        ca_conc[base_idx + 3] = chem_laplacian[cell_idx];
+        ca_conc[base_idx + 4] = chem_sources[cell_idx];
+        DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
+        ca_conc[base_idx + 5] = chem_decay_factors[cell_idx];
 
-    ca_conc[base_idx + 0] = chem_concentration[cell_idx];
-    ca_conc[base_idx + 1] = chem_gradient_x[cell_idx];
-    ca_conc[base_idx + 2] = chem_gradient_y[cell_idx];
-    ca_conc[base_idx + 3] = chem_laplacian[cell_idx];
-    ca_conc[base_idx + 4] = chem_sources[cell_idx];
-    DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
-    ca_conc[base_idx + 5] = chem_decay_factors[cell_idx];
+        ca_conc[base_idx + 6] = rd_resource_density[cell_idx];
+        ca_conc[base_idx + 7] = rd_fitness_landscape[cell_idx];
+        ca_conc[base_idx + 8] = rd_resource_gradient_x[cell_idx];
+        ca_conc[base_idx + 9] = rd_resource_gradient_y[cell_idx];
 
-    ca_conc[base_idx + 6] = rd_resource_density[cell_idx];
-    ca_conc[base_idx + 7] = rd_fitness_landscape[cell_idx];
-    ca_conc[base_idx + 8] = rd_resource_gradient_x[cell_idx];
-    ca_conc[base_idx + 9] = rd_resource_gradient_y[cell_idx];
+        ca_conc[base_idx + 10] = behavioral_field[cell_idx];
 
-    ca_conc[base_idx + 10] = behavioral_field[cell_idx];
+        if (channels > 11) ca_conc[base_idx + 11] = 0.0f;
+        if (channels > 12) ca_conc[base_idx + 12] = 0.0f;
+        if (channels > 13) ca_conc[base_idx + 13] = 0.0f;
 
-    if (channels > 11) ca_conc[base_idx + 11] = 0.0f;
-    if (channels > 12) ca_conc[base_idx + 12] = 0.0f;
-    if (channels > 13) ca_conc[base_idx + 13] = 0.0f;
-
-    if (channels > 14) {
-        float* ca_output = entry->ca_state->ca_output;
-        DEVICE_FATAL_IF(ca_output == nullptr, "ca_output null but ca_state exists");
-        int num_heads = entry->num_heads;
-        int head_dim = entry->head_dim;
-        float recurrence = 0.0f;
-        for (int h = 0; h < num_heads; h++) {
-            int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
-            recurrence += ca_output[output_idx];
+        if (channels > 14) {
+            float* ca_output = entry->ca_state->ca_output;
+            DEVICE_FATAL_IF(ca_output == nullptr, "ca_output null but ca_state exists");
+            int num_heads = entry->num_heads;
+            int head_dim = entry->head_dim;
+            float recurrence = 0.0f;
+            for (int h = 0; h < num_heads; h++) {
+                int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
+                recurrence += ca_output[output_idx];
+            }
+            ca_conc[base_idx + 14] = recurrence / (float)max(1, num_heads);
         }
-        ca_conc[base_idx + 14] = recurrence / (float)max(1, num_heads);
-    }
 
-    if (channels > 15) {
-        DEVICE_FATAL_IF(attractor_field == nullptr, "initialize_ca_from_field_device: attractor_field required for channel 15");
-        ca_conc[base_idx + 15] = attractor_field[cell_idx];
+        if (channels > 15) {
+            DEVICE_FATAL_IF(attractor_field == nullptr, "initialize_ca_from_field_device: attractor_field required for channel 15");
+            ca_conc[base_idx + 15] = attractor_field[cell_idx];
+        }
     }
 }
 
@@ -169,47 +149,26 @@ __device__ void diffusion_reaction_device(Organism* organism) {
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     float dt = organism->dt;
-    const float* genome = organism->genome;
-    const float* epigenetic = organism->gradients;
-    float ctx_metabolic = organism->ctx_metabolic;
-    float ctx_stress = organism->ctx_stress;
-    float ctx_morphogen = organism->ctx_morphogen;
-    float ctx_complexity = organism->ctx_complexity;
-    float ctx_niche = organism->ctx_niche;
-    float ctx_learning = organism->ctx_learning;
-    float ctx_performance = organism->ctx_performance;
 
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
 
-    int idx = y * grid_size + x;
+        float c_center;
+        Stencils::all_operators(gradient_x[idx], gradient_y[idx], laplacian[idx], c_center,
+                                concentration, x, y, grid_size, 1);
 
-    float c_center;
-    Stencils::all_operators(gradient_x[idx], gradient_y[idx], laplacian[idx], c_center,
-                            concentration, x, y, grid_size, 1);
+        float source_contribution = sources[idx];
 
-    float source_contribution = sources[idx];
+        float diffusion = FIELD_DIFFUSIVITY * laplacian[idx];
+        float reaction = FIELD_REACTION_RATE * powf(c_center, FIELD_REACTION_ORDER);
+        float decay = -FIELD_DECAY_RATE * c_center;
 
-    int diffusivity_slot = GenomeParamTable::chem_diffusivity;
-    float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
-
-    int reaction_order_slot = GenomeParamTable::chem_reaction_order;
-    float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
-
-    int reaction_rate_slot = GenomeParamTable::chem_reaction_rate;
-    float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
-
-    int decay_rate_slot = GenomeParamTable::chem_decay_rate;
-    float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
-
-    float diffusion = diffusivity * laplacian[idx];
-    float reaction = reaction_rate * powf(c_center, reaction_order);
-    float decay = -decay_rate * c_center;
-
-    concentration[idx] = c_center + dt * (diffusion + reaction + decay + source_contribution);
-    concentration[idx] = clamp(concentration[idx], NORMALIZED_MIN, NORMALIZED_MAX);
+        concentration[idx] = c_center + dt * (diffusion + reaction + decay + source_contribution);
+        concentration[idx] = clamp(concentration[idx], NORMALIZED_MIN, NORMALIZED_MAX);
+    }
 }
 
 __device__ void diffusion_reaction_backward_device(Organism* organism) {
@@ -237,37 +196,37 @@ __device__ void diffusion_reaction_backward_device(Organism* organism) {
     float ctx_learning = organism->training_mode->learning_rate;
     float ctx_performance = entry->task_accuracy.value;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
+        float d_concentration = grad_concentration[idx];
+        float c_center = concentration[idx];
+        float lap = laplacian[idx];
 
-    int idx = y * grid_size + x;
-    float d_concentration = grad_concentration[idx];
-    float c_center = concentration[idx];
-    float lap = laplacian[idx];
+        int diffusivity_slot = GenomeParamTable::chem_diffusivity;
+        float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
 
-    int diffusivity_slot = GenomeParamTable::chem_diffusivity;
-    float diffusivity = genome_to_param(genome, epigenetic, diffusivity_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DIFFUSIVITY_BASE_MIN, DIFFUSIVITY_BASE_MAX);
+        int reaction_order_slot = GenomeParamTable::chem_reaction_order;
+        float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
 
-    int reaction_order_slot = GenomeParamTable::chem_reaction_order;
-    float reaction_order = genome_to_param(genome, epigenetic, reaction_order_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_ORDER_MIN, REACTION_ORDER_MAX);
+        int reaction_rate_slot = GenomeParamTable::chem_reaction_rate;
+        float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
 
-    int reaction_rate_slot = GenomeParamTable::chem_reaction_rate;
-    float reaction_rate = genome_to_param(genome, epigenetic, reaction_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, REACTION_RATE_MIN, REACTION_RATE_MAX);
+        int decay_rate_slot = GenomeParamTable::chem_decay_rate;
+        float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
 
-    int decay_rate_slot = GenomeParamTable::chem_decay_rate;
-    float decay_rate = genome_to_param(genome, epigenetic, decay_rate_slot, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, DECAY_RATE_MIN, DECAY_RATE_MAX);
+        float c_safe = fmaxf(fabsf(c_center), safe_epsilon(c_center));
+        float c_pow = powf(c_safe, reaction_order);
 
-    float c_safe = fmaxf(fabsf(c_center), safe_epsilon(c_center));
-    float c_pow = powf(c_safe, reaction_order);
+        float d_diffusivity = d_concentration * dt * lap;
+        float d_reaction_rate = d_concentration * dt * c_pow;
+        float d_reaction_order = d_concentration * dt * reaction_rate * c_pow * logf(c_safe);
+        float d_decay_rate = d_concentration * dt * (-c_center);
 
-    float d_diffusivity = d_concentration * dt * lap;
-    float d_reaction_rate = d_concentration * dt * c_pow;
-    float d_reaction_order = d_concentration * dt * reaction_rate * c_pow * logf(c_safe);
-    float d_decay_rate = d_concentration * dt * (-c_center);
-
-    atomicAdd(&grad_genome[diffusivity_slot], d_diffusivity);
-    atomicAdd(&grad_genome[reaction_rate_slot], d_reaction_rate);
-    atomicAdd(&grad_genome[reaction_order_slot], d_reaction_order);
-    atomicAdd(&grad_genome[decay_rate_slot], d_decay_rate);
+        atomicAdd(&grad_genome[diffusivity_slot], d_diffusivity);
+        atomicAdd(&grad_genome[reaction_rate_slot], d_reaction_rate);
+        atomicAdd(&grad_genome[reaction_order_slot], d_reaction_order);
+        atomicAdd(&grad_genome[decay_rate_slot], d_decay_rate);
+    }
 }
 
 __device__ void behavioral_gradient_device(Organism* organism) {
@@ -284,19 +243,19 @@ __device__ void behavioral_gradient_device(Organism* organism) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int dim = blockIdx.z;
 
-    if (x >= grid_size || y >= grid_size || dim >= behavioral_dim) return;
+    if (x < grid_size && y < grid_size && dim < behavioral_dim) {
+        float grad_x, grad_y;
+        Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size, behavioral_dim);
 
-    float grad_x, grad_y;
-    Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size, behavioral_dim);
+        float grad_sq = grad_x * grad_x + grad_y * grad_y;
+        float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
+        grad_x /= magnitude;
+        grad_y /= magnitude;
 
-    float grad_sq = grad_x * grad_x + grad_y * grad_y;
-    float magnitude = sqrtf(grad_sq) + safe_epsilon(grad_sq);
-    grad_x /= magnitude;
-    grad_y /= magnitude;
-
-    int grad_idx = ((y * grid_size + x) * behavioral_dim + dim) * 2;
-    behavioral_gradients[grad_idx] = grad_x;
-    behavioral_gradients[grad_idx + 1] = grad_y;
+        int grad_idx = ((y * grid_size + x) * behavioral_dim + dim) * 2;
+        behavioral_gradients[grad_idx] = grad_x;
+        behavioral_gradients[grad_idx + 1] = grad_y;
+    }
 }
 
 __device__ void chemotactic_navigation_device(Organism* organism) {
@@ -309,8 +268,6 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     float dt = organism->dt;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
     float ctx_complexity = organism->ctx_complexity;
     float ctx_niche = organism->ctx_niche;
     float ctx_learning = organism->ctx_learning;
@@ -320,7 +277,9 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
     int gen_dim = organism->gen_dim;
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (agent_id >= num_agents) return;
+    if (agent_id < num_agents) {
+        const float* genome = &organism->workspace_genomes[agent_id * GENOME_SIZE * 2];
+    const float* gradients = organism->pool->entries[agent_id].gradients;
 
     BehavioralState* agent = &agents[agent_id];
 
@@ -431,39 +390,19 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
     float levy_num = sinf(alpha_phi);
 
     float cos_phi = cosf(phi);
-    if (cos_phi <= 0.0f) {
-        agent->velocity[0] = 0.0f;
-        agent->velocity[1] = 0.0f;
-        return;
-    }
+    DEVICE_FATAL_IF(cos_phi <= 0.0f, "cos_phi <= 0: phi=%f agent=%d", phi, agent_id);
     float levy_denom = powf(cos_phi, (NORMALIZED_MAX / levy_alpha));
 
-    if (W <= 0.0f) {
-        agent->velocity[0] = 0.0f;
-        agent->velocity[1] = 0.0f;
-        return;
-    }
+    DEVICE_FATAL_IF(W <= 0.0f, "W <= 0: W=%f agent=%d", W, agent_id);
     float log_w = -logf(W);
-    if (log_w <= 0.0f) {
-        agent->velocity[0] = 0.0f;
-        agent->velocity[1] = 0.0f;
-        return;
-    }
+    DEVICE_FATAL_IF(log_w <= 0.0f, "log_w <= 0: W=%f log_w=%f agent=%d", W, log_w, agent_id);
     float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
-    if (cos_one_minus_alpha_phi <= 0.0f) {
-        agent->velocity[0] = 0.0f;
-        agent->velocity[1] = 0.0f;
-        return;
-    }
+    DEVICE_FATAL_IF(cos_one_minus_alpha_phi <= 0.0f, "cos_one_minus_alpha_phi <= 0: val=%f agent=%d", cos_one_minus_alpha_phi, agent_id);
     float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - levy_alpha) / levy_alpha));
 
     float levy_sample = levy_num / levy_denom * levy_factor;
 
-    if (U <= 0.0f) {
-        agent->velocity[0] = 0.0f;
-        agent->velocity[1] = 0.0f;
-        return;
-    }
+    DEVICE_FATAL_IF(U <= 0.0f, "U <= 0: U=%f agent=%d", U, agent_id);
     float gaussian_component = sqrtf(-2.0f * logf(U)) * cosf(TAU * V);
     float tempering_weight = expf(-levy_alpha * fabsf(levy_sample));
     float tempered_sample = tempering_weight * levy_sample + (NORMALIZED_MAX - tempering_weight) * gaussian_component;
@@ -479,9 +418,7 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
 
     for (int i = 0; i < GRADIENT_HISTORY; i++) {
         float age = (float)(GRADIENT_HISTORY - i);
-        if (age <= 0.0f) {
-            return;
-        }
+        DEVICE_FATAL_IF(age <= 0.0f, "age <= 0 in friction loop: i=%d GRADIENT_HISTORY=%d agent=%d", i, GRADIENT_HISTORY, agent_id);
         float kernel_weight = powf(age, kernel_exponent);
         fractional_friction_x += kernel_weight * agent->velocity_history[i][0];
         fractional_friction_y += kernel_weight * agent->velocity_history[i][1];
@@ -525,6 +462,7 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
         agent->exploration = fmaxf(min_exploration_clamp, agent->exploration * exploration_decay);
         agent->sensitivity = fminf(max_sensitivity_clamp, agent->sensitivity * sensitivity_growth);
     }
+    }
 }
 
 __device__ void create_attractors_device(Organism* organism) {
@@ -534,55 +472,42 @@ __device__ void create_attractors_device(Organism* organism) {
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     int num_attractors = organism->num_attractors;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
-    float ctx_complexity = organism->ctx_complexity;
-    float ctx_niche = organism->ctx_niche;
-    float ctx_learning = organism->ctx_learning;
-    float ctx_performance = organism->ctx_performance;
 
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
+        float source_value = 0.0f;
 
-    int idx = y * grid_size + x;
-    float source_value = 0.0f;
+        float px = (float)x / grid_size;
+        float py = (float)y / grid_size;
 
-    float context_metabolic = attractor_strengths[0];
-    float context_stress = attractor_strengths[1];
-    float context_morphogen = attractor_strengths[2];
+        for (int a = 0; a < num_attractors; a++) {
+            float ax = attractor_positions[a * 2];
+            float ay = attractor_positions[a * 2 + 1];
+            float strength = attractor_strengths[a];
 
-    ChemotaxisParams params;
+            float dx = fminf(fabsf(px - ax), NORMALIZED_MAX - fabsf(px - ax));
+            float dy = fminf(fabsf(py - ay), NORMALIZED_MAX - fabsf(py - ay));
+            float dist_sq = dx * dx + dy * dy;
 
-    float attractor_sigma = params.get_attractor_sigma(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+            source_value += strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * FIELD_ATTRACTOR_SIGMA * FIELD_ATTRACTOR_SIGMA));
+        }
 
-    float px = (float)x / grid_size;
-    float py = (float)y / grid_size;
-
-    for (int a = 0; a < num_attractors; a++) {
-        float ax = attractor_positions[a * 2];
-        float ay = attractor_positions[a * 2 + 1];
-        float strength = attractor_strengths[a];
-
-        float dx = fminf(fabsf(px - ax), NORMALIZED_MAX - fabsf(px - ax));
-        float dy = fminf(fabsf(py - ay), NORMALIZED_MAX - fabsf(py - ay));
-        float dist_sq = dx * dx + dy * dy;
-
-        source_value += strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * attractor_sigma * attractor_sigma));
+        sources[idx] = source_value;
     }
-
-    sources[idx] = source_value;
 }
 
 __device__ void update_behavioral_embedding_device(Organism* organism) {
+    int entry_idx = blockIdx.x;
     BehavioralState* agents = organism->behavioral_agents;
     float* embedding_weights = organism->embedding_weights;
     float* reconstruction_error = organism->reconstruction_error;
     int num_agents = organism->pool->capacity;
     float learning_rate = organism->embedding_learning_rate;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
+    const float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    const float* gradients = organism->pool->entries[entry_idx].gradients;
     float ctx_complexity = organism->ctx_complexity;
     float ctx_niche = organism->ctx_niche;
     float ctx_learning = organism->ctx_learning;
@@ -597,9 +522,8 @@ __device__ void update_behavioral_embedding_device(Organism* organism) {
     int grid_size = arch.grid_size;
 
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (agent_id >= num_agents) return;
-
-    BehavioralState* agent = &agents[agent_id];
+    if (agent_id < num_agents) {
+        BehavioralState* agent = &agents[agent_id];
 
     float* features = &features_buffer[agent_id * behavioral_dim];
 
@@ -646,9 +570,7 @@ __device__ void update_behavioral_embedding_device(Organism* organism) {
         }
 
         float magnitude = sqrtf(cos_sum * cos_sum + sin_sum * sin_sum) / GRADIENT_HISTORY;
-        if (freq <= 0.0f) {
-            return;
-        }
+        DEVICE_FATAL_IF(freq <= 0.0f, "freq <= 0 in fourier: k=%d base=%f agent=%d", k, fourier_base_freq, agent_id);
         float amplitude_weight = powf(freq, -fourier_spectrum_exponent);
         features[BASE_FEATURES_COUNT + k] = magnitude * amplitude_weight;
     }
@@ -677,6 +599,7 @@ __device__ void update_behavioral_embedding_device(Organism* organism) {
 
         atomicAdd(reconstruction_error, error * error);
     }
+    }
 }
 
 __device__ void init_embedding_weights_device(Organism* organism) {
@@ -689,31 +612,33 @@ __device__ void init_embedding_weights_device(Organism* organism) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_weights = behavioral_dim * behavioral_dim;
-    if (idx >= total_weights) return;
 
-    curandState state;
-    curand_init(seed, idx, 0, &state);
-    int row = idx / behavioral_dim;
-    int col = idx % behavioral_dim;
+    if (idx < total_weights) {
+        curandState state;
+        curand_init(seed, idx, 0, &state);
+        int row = idx / behavioral_dim;
+        int col = idx % behavioral_dim;
 
-    float val;
-    if (row == col) {
-        val = 1.0f + 0.01f * curand_normal(&state);
-    } else {
-        val = 0.01f * curand_normal(&state);
+        float val;
+        if (row == col) {
+            val = 1.0f + 0.01f * curand_normal(&state);
+        } else {
+            val = 0.01f * curand_normal(&state);
+        }
+        DEVICE_FATAL_IF(isnan(val) || isinf(val), "init_embedding_weights: NaN/Inf from curand");
+        embedding_weights[idx] = val;
     }
-    DEVICE_FATAL_IF(isnan(val) || isinf(val), "init_embedding_weights: NaN/Inf from curand");
-    embedding_weights[idx] = val;
 }
 
 __device__ void init_behavioral_state_device(Organism* organism) {
+    int entry_idx = blockIdx.x;
     BehavioralState* agents = organism->behavioral_agents;
     int num_agents = organism->pool->capacity;
     unsigned int seed = organism->init_seed;
-    const float* genome = organism->genome;
-    const float* epigenetic = organism->pool->entries[0].gradients;
-    uint64_t genome_hash = organism->pool->entries[0].genome_hash;
-    int organism_id = 0;
+    const float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
+    const float* epigenetic = organism->pool->entries[entry_idx].gradients;
+    uint64_t genome_hash = organism->pool->entries[entry_idx].genome_hash;
+    int organism_id = entry_idx;
     BehavioralInitSlots slots = organism->behavioral_slots;
     float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
     float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
@@ -726,88 +651,76 @@ __device__ void init_behavioral_state_device(Organism* organism) {
     int behavioral_dim = hw_dim + task_dim + gen_dim;
     int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (agent_id == 0) {
-    }
+    if (agent_id < num_agents) {
+        uint64_t stream_seed = ((uint64_t)seed << 32) | (uint64_t)agent_id;
+        stream_seed ^= stream_seed >> 33;
+        stream_seed *= HASH_MIX_CONSTANT_A;
+        stream_seed ^= stream_seed >> 33;
+        stream_seed *= HASH_MIX_CONSTANT_B;
+        stream_seed ^= stream_seed >> 33;
 
-    if (agent_id >= num_agents) return;
+        PRNGState rng;
+        rng.s0 = stream_seed;
+        rng.s1 = stream_seed ^ XORSHIFT_GOLDEN_RATIO_A;
 
-    uint64_t stream_seed = ((uint64_t)seed << 32) | (uint64_t)agent_id;
-    stream_seed ^= stream_seed >> 33;
-    stream_seed *= HASH_MIX_CONSTANT_A;
-    stream_seed ^= stream_seed >> 33;
-    stream_seed *= HASH_MIX_CONSTANT_B;
-    stream_seed ^= stream_seed >> 33;
+        BehavioralState* agent = &agents[agent_id];
 
-    PRNGState rng;
-    rng.s0 = stream_seed;
-    rng.s1 = stream_seed ^ XORSHIFT_GOLDEN_RATIO_A;
+        InitContext ctx;
+        ctx.derive_from_genome(genome, epigenetic);
 
-    BehavioralState* agent = &agents[agent_id];
+        int embedding_scale_min_slot = GenomeParamTable::agent_embedding_scale_min;
+        int embedding_scale_max_slot = GenomeParamTable::agent_embedding_scale_max;
+        float embedding_scale_min = genome_slot_to_unit(genome, embedding_scale_min_slot) * AGENT_EMBEDDING_SCALE_BASE_MAX;
+        float embedding_scale_max = embedding_scale_min + genome_slot_to_unit(genome, embedding_scale_max_slot) * (AGENT_EMBEDDING_SCALE_BASE_MAX - embedding_scale_min);
 
-    InitContext ctx;
-    ctx.derive_from_genome(genome, epigenetic);
+        float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, embedding_scale_min, embedding_scale_max);
+        int exploration_min_slot = GenomeParamTable::init_exploration_min;
+        int exploration_max_slot = GenomeParamTable::init_exploration_max;
+        float exploration_min = genome_slot_to_unit(genome, exploration_min_slot) * INIT_EXPLORATION_BASE_MAX;
+        float exploration_max = exploration_min + genome_slot_to_unit(genome, exploration_max_slot) * (INIT_EXPLORATION_BASE_MAX - exploration_min);
+        float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, exploration_min, exploration_max);
 
-    int embedding_scale_min_slot = GenomeParamTable::agent_embedding_scale_min;
-    int embedding_scale_max_slot = GenomeParamTable::agent_embedding_scale_max;
-    float embedding_scale_min = genome_slot_to_unit(genome, embedding_scale_min_slot) * AGENT_EMBEDDING_SCALE_BASE_MAX;
-    float embedding_scale_max = embedding_scale_min + genome_slot_to_unit(genome, embedding_scale_max_slot) * (AGENT_EMBEDDING_SCALE_BASE_MAX - embedding_scale_min);
+        int sensitivity_min_slot = GenomeParamTable::init_sensitivity_min;
+        int sensitivity_max_slot = GenomeParamTable::init_sensitivity_max;
+        float sensitivity_min = genome_slot_to_unit(genome, sensitivity_min_slot) * INIT_SENSITIVITY_BASE_MAX;
+        float sensitivity_max = sensitivity_min + genome_slot_to_unit(genome, sensitivity_max_slot) * (INIT_SENSITIVITY_BASE_MAX - sensitivity_min);
+        float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, sensitivity_min, sensitivity_max);
 
-    float embedding_scale = genome_to_param(genome, epigenetic, slots.agent_embedding_scale, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, embedding_scale_min, embedding_scale_max);
-    int exploration_min_slot = GenomeParamTable::init_exploration_min;
-    int exploration_max_slot = GenomeParamTable::init_exploration_max;
-    float exploration_min = genome_slot_to_unit(genome, exploration_min_slot) * INIT_EXPLORATION_BASE_MAX;
-    float exploration_max = exploration_min + genome_slot_to_unit(genome, exploration_max_slot) * (INIT_EXPLORATION_BASE_MAX - exploration_min);
-    float init_exploration = genome_to_param(genome, epigenetic, slots.init_exploration, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, exploration_min, exploration_max);
+        int levy_alpha_min_slot = GenomeParamTable::levy_alpha_min;
+        int levy_alpha_max_slot = GenomeParamTable::levy_alpha_max;
+        float levy_alpha_min = genome_slot_to_unit(genome, levy_alpha_min_slot) * CHEMOTAXIS_LEVY_ALPHA_MAX;
+        float levy_alpha_max = levy_alpha_min + genome_slot_to_unit(genome, levy_alpha_max_slot) * (CHEMOTAXIS_LEVY_ALPHA_MAX - levy_alpha_min);
+        float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, levy_alpha_min, levy_alpha_max);
 
-    int sensitivity_min_slot = GenomeParamTable::init_sensitivity_min;
-    int sensitivity_max_slot = GenomeParamTable::init_sensitivity_max;
-    float sensitivity_min = genome_slot_to_unit(genome, sensitivity_min_slot) * INIT_SENSITIVITY_BASE_MAX;
-    float sensitivity_max = sensitivity_min + genome_slot_to_unit(genome, sensitivity_max_slot) * (INIT_SENSITIVITY_BASE_MAX - sensitivity_min);
-    float init_sensitivity = genome_to_param(genome, epigenetic, slots.init_sensitivity, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, sensitivity_min, sensitivity_max);
+        agent->position[0] = prng_next(&rng);
+        agent->position[1] = prng_next(&rng);
 
-    int levy_alpha_min_slot = GenomeParamTable::levy_alpha_min;
-    int levy_alpha_max_slot = GenomeParamTable::levy_alpha_max;
-    float levy_alpha_min = genome_slot_to_unit(genome, levy_alpha_min_slot) * CHEMOTAXIS_LEVY_ALPHA_MAX;
-    float levy_alpha_max = levy_alpha_min + genome_slot_to_unit(genome, levy_alpha_max_slot) * (CHEMOTAXIS_LEVY_ALPHA_MAX - levy_alpha_min);
-    float levy_alpha = genome_to_param(genome, epigenetic, slots.levy_alpha, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, levy_alpha_min, levy_alpha_max);
+        agent->velocity[0] = 0.0f;
+        agent->velocity[1] = 0.0f;
 
-    agent->position[0] = prng_next(&rng);
-    agent->position[1] = prng_next(&rng);
+        for (int i = 0; i < hw_dim; i++) {
+            agent->hw_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
+        }
+        for (int i = 0; i < task_dim; i++) {
+            agent->task_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
+        }
+        for (int i = 0; i < gen_dim; i++) {
+            agent->gen_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
+        }
 
-    agent->velocity[0] = 0.0f;
-    agent->velocity[1] = 0.0f;
+        for (int i = 0; i < GRADIENT_HISTORY; i++) {
+            agent->gradient_memory[i][0] = 0.0f;
+            agent->gradient_memory[i][1] = 0.0f;
+            agent->velocity_history[i][0] = 0.0f;
+            agent->velocity_history[i][1] = 0.0f;
+        }
 
-    if (agent_id == 0) {
-    }
-
-    for (int i = 0; i < hw_dim; i++) {
-        agent->hw_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
-    }
-    for (int i = 0; i < task_dim; i++) {
-        agent->task_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
-    }
-    for (int i = 0; i < gen_dim; i++) {
-        agent->gen_coords[i] = prng_levy_stable(&rng, levy_alpha, embedding_scale);
-    }
-
-    if (agent_id == 0) {
-    }
-
-    for (int i = 0; i < GRADIENT_HISTORY; i++) {
-        agent->gradient_memory[i][0] = 0.0f;
-        agent->gradient_memory[i][1] = 0.0f;
-        agent->velocity_history[i][0] = 0.0f;
-        agent->velocity_history[i][1] = 0.0f;
-    }
-
-    agent->exploration_noise = init_exploration;
-    agent->exploration = init_exploration;
-    agent->sensitivity = init_sensitivity;
-    agent->memory_index = 0;
-    agent->genome_hash = genome_hash;
-    agent->organism_id = organism_id;
-
-    if (agent_id == 0) {
+        agent->exploration_noise = init_exploration;
+        agent->exploration = init_exploration;
+        agent->sensitivity = init_sensitivity;
+        agent->memory_index = 0;
+        agent->genome_hash = genome_hash;
+        agent->organism_id = organism_id;
     }
 }
 
@@ -815,34 +728,19 @@ __device__ void init_chemical_field_device(Organism* organism) {
     ChemicalField* field = organism->chemical_field;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
-    float ctx_complexity = organism->ctx_complexity;
-    float ctx_niche = organism->ctx_niche;
-    float ctx_learning = organism->ctx_learning;
-    float ctx_performance = organism->ctx_performance;
 
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
 
-    int idx = y * grid_size + x;
-
-    ChemotaxisParams params;
-    InitContext ctx;
-    ctx.derive_from_genome(genome, gradients);
-    float chemical_decay = params.get_chemical_decay(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-
-    field->concentration[idx] = 0.0f;
-    field->gradient_x[idx] = 0.0f;
-    field->gradient_y[idx] = 0.0f;
-    field->laplacian[idx] = 0.0f;
-    field->sources[idx] = 0.0f;
-    field->decay_factors[idx] = chemical_decay;
-
-    if (x == 0 && y == 0) {
-        int null_check = (field->concentration == nullptr) + (field->gradient_x == nullptr) + (field->gradient_y == nullptr) + (field->laplacian == nullptr);
+        field->concentration[idx] = 0.0f;
+        field->gradient_x[idx] = 0.0f;
+        field->gradient_y[idx] = 0.0f;
+        field->laplacian[idx] = 0.0f;
+        field->sources[idx] = 0.0f;
+        field->decay_factors[idx] = FIELD_CHEMICAL_DECAY;
     }
 }
 
@@ -862,11 +760,11 @@ __device__ void reduce_concentration_mean_device(Organism* organism) {
         sum += field->concentration[i];
     }
     sdata[tid] = sum;
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     if (tid < 32) {
@@ -899,59 +797,64 @@ __device__ void finalize_concentration_mean_device(Organism* organism) {
 }
 
 __device__ void set_chemical_sources_from_agents_device(Organism* organism) {
-    float* sources = organism->chemical_field->sources;
-    BehavioralState* agents = organism->behavioral_agents;
-    int num_agents = organism->pool->capacity;
-    Architecture arch = Architecture::maxBounds();
-    int grid_size = arch.grid_size;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
-    const float* chemical_field = organism->chemical_field->concentration;
-    float ctx_complexity = organism->ctx_complexity;
-    float ctx_niche = organism->ctx_niche;
-    float ctx_learning = organism->ctx_learning;
-    float ctx_performance = organism->ctx_performance;
+    int entry_idx = blockIdx.x;
+    int num_entries = organism->pool->capacity;
 
-    int agent_id = threadIdx.x;
-    if (agent_id >= num_agents) return;
+    if (entry_idx < num_entries) {
+        float* sources = organism->chemical_field->sources;
+        BehavioralState* agents = organism->behavioral_agents;
+        Architecture arch = Architecture::maxBounds();
+        int grid_size = arch.grid_size;
 
-    BehavioralState* agent = &agents[agent_id];
+        // Per-entry genome determines this organism's secretion behavior
+        const float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
+        const float* gradients = organism->pool->entries[entry_idx].gradients;
+        const float* chemical_field = organism->chemical_field->concentration;
+        float ctx_complexity = organism->ctx_complexity;
+        float ctx_niche = organism->ctx_niche;
+        float ctx_learning = organism->ctx_learning;
+        float ctx_performance = organism->ctx_performance;
 
-    ChemotaxisParams params;
+        // 1:1 mapping: entry i owns agent i
+        int agent_id = entry_idx;
+        BehavioralState* agent = &agents[agent_id];
 
-    int grid_x_temp = (int)(agent->position[0] * grid_size);
-    int grid_y_temp = (int)(agent->position[1] * grid_size);
-    grid_x_temp = min(max(grid_x_temp, 0), grid_size - 1);
-    grid_y_temp = min(max(grid_y_temp, 0), grid_size - 1);
-    int idx_temp = grid_y_temp * grid_size + grid_x_temp;
+        ChemotaxisParams params;
 
-    float context_metabolic = agent->sensitivity;
-    float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] + agent->velocity[1] * agent->velocity[1]);
-    float context_morphogen = chemical_field[idx_temp];
+        int grid_x_temp = (int)(agent->position[0] * grid_size);
+        int grid_y_temp = (int)(agent->position[1] * grid_size);
+        grid_x_temp = min(max(grid_x_temp, 0), grid_size - 1);
+        grid_y_temp = min(max(grid_y_temp, 0), grid_size - 1);
+        int idx_temp = grid_y_temp * grid_size + grid_x_temp;
 
-    float source_sigma = params.get_agent_source_sigma(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-    float source_strength = params.get_agent_source_strength(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        float context_metabolic = agent->sensitivity;
+        float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] + agent->velocity[1] * agent->velocity[1]);
+        float context_morphogen = chemical_field[idx_temp];
 
-    int grid_x = (int)(agent->position[0] * grid_size);
-    int grid_y = (int)(agent->position[1] * grid_size);
-    grid_x = min(max(grid_x, 0), grid_size - 1);
-    grid_y = min(max(grid_y, 0), grid_size - 1);
+        float source_sigma = params.get_agent_source_sigma(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+        float source_strength = params.get_agent_source_strength(genome, gradients, context_metabolic, context_stress, context_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
 
-    for (int dy = -4; dy <= 4; dy++) {
-        for (int dx = -4; dx <= 4; dx++) {
-            int x = grid_x + dx;
-            int y = grid_y + dy;
+        int grid_x = (int)(agent->position[0] * grid_size);
+        int grid_y = (int)(agent->position[1] * grid_size);
+        grid_x = min(max(grid_x, 0), grid_size - 1);
+        grid_y = min(max(grid_y, 0), grid_size - 1);
 
-            x = (x + grid_size) % grid_size;
-            y = (y + grid_size) % grid_size;
+        for (int dy = -4; dy <= 4; dy++) {
+            for (int dx = -4; dx <= 4; dx++) {
+                int x = grid_x + dx;
+                int y = grid_y + dy;
 
-            int idx = y * grid_size + x;
+                x = (x + grid_size) % grid_size;
+                y = (y + grid_size) % grid_size;
 
-            float dist_sq = dx * dx + dy * dy;
-            float contribution = source_strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * source_sigma * source_sigma));
+                int idx = y * grid_size + x;
 
-            if (isfinite(contribution)) {
-                atomicAdd(&sources[idx], contribution);
+                float dist_sq = dx * dx + dy * dy;
+                float contribution = source_strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * source_sigma * source_sigma));
+
+                if (isfinite(contribution)) {
+                    atomicAdd(&sources[idx], contribution);
+                }
             }
         }
     }
@@ -963,12 +866,6 @@ __device__ void compute_behavioral_field_device(Organism* organism) {
     int num_agents = organism->pool->capacity;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
-    const float* genome = organism->genome;
-    const float* gradients = organism->gradients;
-    float ctx_complexity = organism->ctx_complexity;
-    float ctx_niche = organism->ctx_niche;
-    float ctx_learning = organism->ctx_learning;
-    float ctx_performance = organism->ctx_performance;
     int hw_dim = organism->hw_dim;
     int task_dim = organism->task_dim;
     int gen_dim = organism->gen_dim;
@@ -976,14 +873,8 @@ __device__ void compute_behavioral_field_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
-
-    ChemotaxisParams params;
-
-    InitContext ctx;
-    ctx.derive_from_genome(genome, gradients);
-
-    float behavioral_field_sigma = params.get_behavioral_field_sigma(genome, gradients, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
+    if (x < grid_size && y < grid_size) {
+        float behavioral_field_sigma = FIELD_BEHAVIORAL_SIGMA;
 
     float px = (float)x / grid_size;
     float py = (float)y / grid_size;
@@ -1068,6 +959,7 @@ __device__ void compute_behavioral_field_device(Organism* organism) {
         }
         d_offset++;
     }
+    }
 }
 
 __device__ void init_resource_fields_device(Organism* organism) {
@@ -1076,9 +968,6 @@ __device__ void init_resource_fields_device(Organism* organism) {
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     unsigned int seed = organism->init_seed * RNG_SEED_MULTIPLIER;
-    float* genome = organism->genome;
-    const float* epigenetic = organism->pool->entries[0].gradients;
-    uint64_t genome_hash = organism->pool->entries[0].genome_hash;
 
     int thread_x = threadIdx.x + blockIdx.x * blockDim.x;
     int thread_y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -1091,22 +980,8 @@ __device__ void init_resource_fields_device(Organism* organism) {
             curandState_t state;
             curand_init(seed, idx, 0, &state);
 
-            int resource_init_slot = GenomeParamTable::resource_density_initial;
-            int resource_init_min_slot = GenomeParamTable::resource_density_initial_min;
-            int resource_init_max_slot = GenomeParamTable::resource_density_initial_max;
-            float resource_init_min = genome_slot_to_unit(genome, resource_init_min_slot) * RESOURCE_INIT_MAX;
-            float resource_init_max = resource_init_min + genome_slot_to_unit(genome, resource_init_max_slot) * (RESOURCE_INIT_MAX - resource_init_min);
-            float resource_init = genome_to_bootstrap_param(genome, epigenetic, resource_init_slot, resource_init_min, resource_init_max);
-
-            int resource_noise_slot = GenomeParamTable::resource_density_noise;
-            int resource_noise_min_slot = GenomeParamTable::resource_density_noise_min;
-            int resource_noise_max_slot = GenomeParamTable::resource_density_noise_max;
-            float resource_noise_min = genome_slot_to_unit(genome, resource_noise_min_slot) * RESOURCE_NOISE_MAX;
-            float resource_noise_max = resource_noise_min + genome_slot_to_unit(genome, resource_noise_max_slot) * (RESOURCE_NOISE_MAX - resource_noise_min);
-            float resource_noise = genome_to_bootstrap_param(genome, epigenetic, resource_noise_slot, resource_noise_min, resource_noise_max);
-
             float rand_val = validated_curand_uniform(&state, "init_resource_fields", idx);
-            resource_density[idx] = resource_init + resource_noise * (rand_val - CENTERED_DIFFERENCE_SCALE);
+            resource_density[idx] = RESOURCE_INIT + RESOURCE_NOISE * (rand_val - CENTERED_DIFFERENCE_SCALE);
 
             fitness_landscape[idx] = 0.0f;
         }
@@ -1115,8 +990,6 @@ __device__ void init_resource_fields_device(Organism* organism) {
 
 __device__ void initialize_chemical_field_device(Organism* organism) {
     float* chemical_field = organism->chemical_field->concentration;
-    const float* genome = organism->genome;
-    const float* epigenetic = organism->gradients;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     unsigned int seed = organism->init_seed;
@@ -1124,42 +997,17 @@ __device__ void initialize_chemical_field_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
 
-    int idx = y * grid_size + x;
+        curandState state;
+        curand_init(seed, idx, 0, &state);
 
-    curandState state;
-    curand_init(seed, idx, 0, &state);
+        float rand_val = validated_curand_uniform(&state, "initialize_chemical_field", idx);
+        float noise = (rand_val - CENTERED_DIFFERENCE_SCALE) * CHEM_INIT_NOISE;
 
-    int base_slot = GenomeParamTable::chem_init_base_value;
-    int base_min_slot = GenomeParamTable::chem_init_base_value_min;
-    int base_max_slot = GenomeParamTable::chem_init_base_value_max;
-    float base_min = genome_slot_to_unit(genome, base_min_slot) * CHEM_INIT_BASE_MAX;
-    float base_max = base_min + genome_slot_to_unit(genome, base_max_slot) * (CHEM_INIT_BASE_MAX - base_min);
-    float base_value = genome_to_bootstrap_param(genome, epigenetic, base_slot, base_min, base_max);
-
-    int influence_slot = GenomeParamTable::chem_init_genome_influence;
-    int influence_min_slot = GenomeParamTable::chem_init_genome_influence_min;
-    int influence_max_slot = GenomeParamTable::chem_init_genome_influence_max;
-    float influence_min = genome_slot_to_unit(genome, influence_min_slot) * CHEM_INIT_GENOME_INFLUENCE_MAX;
-    float influence_max = influence_min + genome_slot_to_unit(genome, influence_max_slot) * (CHEM_INIT_GENOME_INFLUENCE_MAX - influence_min);
-    float influence_scale = genome_to_bootstrap_param(genome, epigenetic, influence_slot, influence_min, influence_max);
-
-    int genome_idx = (x + y * grid_size) % GENOME_SIZE;
-    float genome_influence = genome[genome_idx] * influence_scale;
-
-    int noise_slot = GenomeParamTable::chem_init_noise_scale;
-    int noise_min_slot = GenomeParamTable::chem_init_noise_scale_min;
-    int noise_max_slot = GenomeParamTable::chem_init_noise_scale_max;
-    float noise_min = genome_slot_to_unit(genome, noise_min_slot) * CHEM_INIT_NOISE_MAX;
-    float noise_max = noise_min + genome_slot_to_unit(genome, noise_max_slot) * (CHEM_INIT_NOISE_MAX - noise_min);
-    float noise_scale = genome_to_bootstrap_param(genome, epigenetic, noise_slot, noise_min, noise_max);
-
-    float rand_val = validated_curand_uniform(&state, "initialize_chemical_field", idx);
-    float noise = (rand_val - CENTERED_DIFFERENCE_SCALE) * noise_scale;
-
-    chemical_field[idx] = base_value + genome_influence + noise;
-    chemical_field[idx] = clamp(chemical_field[idx], NORMALIZED_MIN, NORMALIZED_MAX);
+        chemical_field[idx] = clamp(CHEM_INIT_BASE + noise, NORMALIZED_MIN, NORMALIZED_MAX);
+    }
 }
 
 __device__ void resource_flow_device(Organism* organism) {
@@ -1177,39 +1025,37 @@ __device__ void resource_flow_device(Organism* organism) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= grid_size || y >= grid_size) return;
+    if (x < grid_size && y < grid_size) {
+        int idx = y * grid_size + x;
 
-    int idx = y * grid_size + x;
+        float grad_fitness_x, grad_fitness_y;
+        Stencils::gradients_at(grad_fitness_x, grad_fitness_y, fitness_landscape, x, y, grid_size, 1);
 
-    float grad_fitness_x, grad_fitness_y;
-    Stencils::gradients_at(grad_fitness_x, grad_fitness_y, fitness_landscape, x, y, grid_size, 1);
+        float2 velocity = make_float2(-grad_fitness_x * flow_strength, -grad_fitness_y * flow_strength);
 
-    float2 velocity = make_float2(-grad_fitness_x * flow_strength, -grad_fitness_y * flow_strength);
+        float rho = resource_density[idx];
 
-    float rho = resource_density[idx];
+        float rho_left = (x > 0) ? resource_density[idx - 1] : rho;
+        float rho_right = (x < grid_size - 1) ? resource_density[idx + 1] : rho;
+        float rho_up = (y > 0) ? resource_density[idx - grid_size] : rho;
+        float rho_down = (y < grid_size - 1) ? resource_density[idx + grid_size] : rho;
 
-    float rho_left = (x > 0) ? resource_density[idx - 1] : rho;
-    float rho_right = (x < grid_size - 1) ? resource_density[idx + 1] : rho;
-    float rho_up = (y > 0) ? resource_density[idx - grid_size] : rho;
-    float rho_down = (y < grid_size - 1) ? resource_density[idx + grid_size] : rho;
+        float flux_x = (rho_right * velocity.x - rho_left * velocity.x) * CENTERED_DIFFERENCE_SCALE;
+        float flux_y = (rho_down * velocity.y - rho_up * velocity.y) * CENTERED_DIFFERENCE_SCALE;
+        float divergence = flux_x + flux_y;
 
-    float flux_x = (rho_right * velocity.x - rho_left * velocity.x) * CENTERED_DIFFERENCE_SCALE;
-    float flux_y = (rho_down * velocity.y - rho_up * velocity.y) * CENTERED_DIFFERENCE_SCALE;
-    float divergence = flux_x + flux_y;
+        float grad_rho_x, grad_rho_y, lap_rho, rho_center;
+        Stencils::all_operators(grad_rho_x, grad_rho_y, lap_rho, rho_center, resource_density, x, y, grid_size, 1);
 
-    float grad_rho_x, grad_rho_y, lap_rho, rho_center;
-    Stencils::all_operators(grad_rho_x, grad_rho_y, lap_rho, rho_center, resource_density, x, y, grid_size, 1);
+        resource_gradient_x[idx] = grad_rho_x;
+        resource_gradient_y[idx] = grad_rho_y;
 
-    resource_gradient_x[idx] = grad_rho_x;
-    resource_gradient_y[idx] = grad_rho_y;
+        float drho_dt = -divergence + diffusivity * lap_rho;
 
-    float drho_dt = -divergence + diffusivity * lap_rho;
-
-    float new_rho = rho + dt * drho_dt;
-    if (new_rho < -0.1f) {
-        return;
+        float new_rho = rho + dt * drho_dt;
+        DEVICE_FATAL_IF(new_rho < -0.1f, "new_rho < -0.1: rho=%f drho_dt=%f dt=%f x=%d y=%d", rho, drho_dt, dt, x, y);
+        resource_next[idx] = fmaxf(0.0f, new_rho);
     }
-    resource_next[idx] = fmaxf(0.0f, new_rho);
 }
 
 __device__ void update_fitness_landscape_device(Organism* organism) {
@@ -1220,18 +1066,18 @@ __device__ void update_fitness_landscape_device(Organism* organism) {
     int grid_size = arch.grid_size;
 
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (compact_idx >= pool->alive_indices_count) return;
+    if (compact_idx < pool->alive_indices_count) {
+        int entry_idx = pool->alive_indices[compact_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_fitness_landscape_device: dead entry in alive_indices");
 
-    int entry_idx = pool->alive_indices[compact_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_fitness_landscape_device: dead entry in alive_indices");
+        float px = agents[entry_idx].position[0];
+        float py = agents[entry_idx].position[1];
+        int gx = min((int)(px * grid_size), grid_size - 1);
+        int gy = min((int)(py * grid_size), grid_size - 1);
+        int idx = gy * grid_size + gx;
 
-    float px = agents[entry_idx].position[0];
-    float py = agents[entry_idx].position[1];
-    int gx = min((int)(px * grid_size), grid_size - 1);
-    int gy = min((int)(py * grid_size), grid_size - 1);
-    int idx = gy * grid_size + gx;
-
-    atomicAdd(&fitness_landscape[idx], pool->fitness_values[entry_idx]);
+        atomicAdd(&fitness_landscape[idx], pool->fitness_values[entry_idx]);
+    }
 }
 
 __device__ void populate_organism_flow_params_device(Organism* organism) {
@@ -1240,9 +1086,8 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     float* workspace_genomes = organism->workspace_genomes;
 
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (compact_idx >= pool->alive_indices_count) return;
-
-    int entry_idx = pool->alive_indices[compact_idx];
+    if (compact_idx < pool->alive_indices_count) {
+        int entry_idx = pool->alive_indices[compact_idx];
     PoolEntry* entry = &pool->entries[entry_idx];
     DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "populate_organism_flow_params_device: dead entry in alive_indices");
 
@@ -1352,6 +1197,7 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
         organism->telemetry->task_performance.accuracy,
         RESOURCE_FLOW_DT_MIN, RESOURCE_FLOW_DT_MAX
     );
+    }
 }
 
 __device__ void behavioral_update_device(Organism* organism) {
@@ -1363,16 +1209,9 @@ __device__ void behavioral_update_device(Organism* organism) {
     int entry_idx = blockIdx.x;
     ComponentPool* pool = organism->pool;
 
-    if (entry_idx >= pool->capacity) {
-        return;
-    }
-
-    PoolEntry* entry = &pool->entries[entry_idx];
-    if (!pool->alive_flags[entry_idx]) {
-        return;
-    }
-
-    int num_agents = POOL_CAPACITY_MAX;
+    if (entry_idx < pool->capacity && pool->alive_flags[entry_idx]) {
+        PoolEntry* entry = &pool->entries[entry_idx];
+        int num_agents = POOL_CAPACITY_MAX;
 
     float* primary_genome = &workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* primary_parent_temp = &workspace_genomes[entry_idx * GENOME_SIZE * 2 + GENOME_SIZE];
@@ -1390,7 +1229,7 @@ __device__ void behavioral_update_device(Organism* organism) {
     float ctx_morphogen = chemical_field->cached_mean;
 
     BehavioralDimensions dims;
-    dims.derive_from_genome(primary_genome, gradients);
+    dims.derive_from_genome();
 
     int behavioral_dim = dims.hw_dim + dims.task_dim + dims.gen_dim;
     int behavioral_buffer_size = arch.grid_size * arch.grid_size * behavioral_dim;
@@ -1478,7 +1317,7 @@ __device__ void behavioral_update_device(Organism* organism) {
                 d_offset++;
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     {
@@ -1523,7 +1362,7 @@ __device__ void behavioral_update_device(Organism* organism) {
 
             behavioral_gradients_pool[tile_y * width + tile_x] = new_val;
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     {
@@ -1549,7 +1388,7 @@ __device__ void behavioral_update_device(Organism* organism) {
                 behavioral_gradients_pool[grad_idx + 1] = grad_y;
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     int chemotaxis_dt_slot = GenomeParamTable::chemotaxis_dt;
@@ -1635,7 +1474,7 @@ __device__ void behavioral_update_device(Organism* organism) {
             agent->position[0] = agent->position[0] - floorf(agent->position[0]);
             agent->position[1] = agent->position[1] - floorf(agent->position[1]);
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 
     {
@@ -1662,7 +1501,7 @@ __device__ void behavioral_update_device(Organism* organism) {
                 d_memory_data[offset++] = agents[agent_id].gen_coords[i];
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
 
         if (threadIdx.x == 0) {
             float importance = agents[0].exploration_noise;
@@ -1687,7 +1526,8 @@ __device__ void behavioral_update_device(Organism* organism) {
                 tube->count++;
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
+    }
     }
 }
 

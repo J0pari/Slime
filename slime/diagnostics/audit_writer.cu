@@ -267,19 +267,19 @@ int write_state_json(FILE* json_file, double elapsed_time, TelemetryAuditEntry* 
         fprintf(json_file, "{\"density\":%d,\"radius\":%.3f,\"best_elite\":%d,\"hw_centroid\":[",
                 audit->state_voronoi_density[i], audit->state_voronoi_radius[i],
                 audit->state_voronoi_best_elite_idx[i]);
-        for (int j = 0; j < BEHAVIORAL_DIM_HW_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_voronoi_hw_centroid[i * BEHAVIORAL_DIM_HW_MAX + j]);
-            if (j < BEHAVIORAL_DIM_HW_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_HW; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_hw_centroid[i * BEHAVIORAL_DIM_HW + j]);
+            if (j < BEHAVIORAL_DIM_HW - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "],\"task_centroid\":[");
-        for (int j = 0; j < BEHAVIORAL_DIM_TASK_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_voronoi_task_centroid[i * BEHAVIORAL_DIM_TASK_MAX + j]);
-            if (j < BEHAVIORAL_DIM_TASK_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_TASK; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_task_centroid[i * BEHAVIORAL_DIM_TASK + j]);
+            if (j < BEHAVIORAL_DIM_TASK - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "],\"gen_centroid\":[");
-        for (int j = 0; j < BEHAVIORAL_DIM_GEN_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_voronoi_gen_centroid[i * BEHAVIORAL_DIM_GEN_MAX + j]);
-            if (j < BEHAVIORAL_DIM_GEN_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_GEN; j++) {
+            fprintf(json_file, "%.3f", audit->state_voronoi_gen_centroid[i * BEHAVIORAL_DIM_GEN + j]);
+            if (j < BEHAVIORAL_DIM_GEN - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "]}");
         if (i < audit->state_voronoi_count - 1 && i < STATE_EXPORT_VORONOI_COUNT - 1) fprintf(json_file, ",");
@@ -296,19 +296,19 @@ int write_state_json(FILE* json_file, double elapsed_time, TelemetryAuditEntry* 
                 (unsigned long long)audit->state_archive_genome_hash[i],
                 audit->state_archive_parent_id_0[i],
                 audit->state_archive_parent_id_1[i]);
-        for (int j = 0; j < BEHAVIORAL_DIM_HW_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_archive_hw_coords[i * BEHAVIORAL_DIM_HW_MAX + j]);
-            if (j < BEHAVIORAL_DIM_HW_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_HW; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_hw_coords[i * BEHAVIORAL_DIM_HW + j]);
+            if (j < BEHAVIORAL_DIM_HW - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "],\"task_coords\":[");
-        for (int j = 0; j < BEHAVIORAL_DIM_TASK_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_archive_task_coords[i * BEHAVIORAL_DIM_TASK_MAX + j]);
-            if (j < BEHAVIORAL_DIM_TASK_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_TASK; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_task_coords[i * BEHAVIORAL_DIM_TASK + j]);
+            if (j < BEHAVIORAL_DIM_TASK - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "],\"gen_coords\":[");
-        for (int j = 0; j < BEHAVIORAL_DIM_GEN_MAX; j++) {
-            fprintf(json_file, "%.3f", audit->state_archive_gen_coords[i * BEHAVIORAL_DIM_GEN_MAX + j]);
-            if (j < BEHAVIORAL_DIM_GEN_MAX - 1) fprintf(json_file, ",");
+        for (int j = 0; j < BEHAVIORAL_DIM_GEN; j++) {
+            fprintf(json_file, "%.3f", audit->state_archive_gen_coords[i * BEHAVIORAL_DIM_GEN + j]);
+            if (j < BEHAVIORAL_DIM_GEN - 1) fprintf(json_file, ",");
         }
         fprintf(json_file, "],\"hardware_features\":[");
         for (int j = 0; j < HARDWARE_FEATURES_DIM; j++) {

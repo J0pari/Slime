@@ -341,7 +341,7 @@ __device__ void mel_filterbank_device(Organism* organism) {
 
 __device__ void sample_batch_device(Organism* organism) {
     Dataset* dataset = organism->dataset;
-    HybridTrainingMode* training = organism->training;
+    HybridTrainingMode* training = organism->training_mode;
     int batch_size = organism->dataset_batch_size;
     int offset = organism->dataset_batch_offset;
     int grid_size = organism->dataset_grid_size;
@@ -361,6 +361,8 @@ __device__ void sample_batch_device(Organism* organism) {
 
     int tid = threadIdx.x;
     int pixels_per_thread = (grid_size * grid_size + blockDim.x - 1) / blockDim.x;
+    int max_pixels_per_thread = (256 * 256 + 31) / 32;
+    if (pixels_per_thread > max_pixels_per_thread) pixels_per_thread = max_pixels_per_thread;
 
     int sample_rows = dataset->descriptor->sample_rows;
     int sample_cols = dataset->descriptor->sample_cols;
@@ -388,7 +390,8 @@ __device__ void sample_batch_device(Organism* organism) {
         int batch_stride = grid_size * grid_size;
 
         if (src_channels >= 3) {
-            for (int c = 0; c < 3; c++) {
+            int num_output_channels = (src_channels < 3) ? src_channels : 3;
+            for (int c = 0; c < num_output_channels; c++) {
                 int channel_offset = c * sample_rows * sample_cols;
                 float tl = all_images[src_idx * sample_size + channel_offset + y0 * sample_cols + x0] / (float)UINT8_MAX;
                 float tr = all_images[src_idx * sample_size + channel_offset + y0 * sample_cols + x1] / (float)UINT8_MAX;
@@ -427,7 +430,7 @@ __device__ void inject_sample_to_ca_device(Organism* organism) {
     float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
     float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
     float* behavioral_field = organism->behavioral_field;
-    float* batch_images = organism->training->batch_images;
+    float* batch_images = organism->training_mode->batch_images;
     float* prev_concentration = organism->ca_prev_concentration;
     float* attractor_field = organism->attractor_field;
 

@@ -127,74 +127,74 @@ __device__ void selection_device(Organism* organism) {
     float* workspace_genomes = organism->workspace_genomes;
 
     int compact_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (compact_idx >= pool->alive_indices_count) return;
+    if (compact_idx < pool->alive_indices_count) {
+        int entry_idx = pool->alive_indices[compact_idx];
+        PoolEntry* entry = &pool->entries[entry_idx];
+        DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_device: dead entry in alive_indices");
 
-    int entry_idx = pool->alive_indices[compact_idx];
-    PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_device: dead entry in alive_indices");
+        float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
+        float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
 
-    float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
-    float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
+        reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
+            entry->delta_indices, entry->delta_values, entry->num_deltas,
+            entry->max_deltas, organism_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
 
-    reconstruct_genome_from_archive(entry->parent_hash, archive, *archive_size,
-        entry->delta_indices, entry->delta_values, entry->num_deltas,
-        entry->max_deltas, organism_genome, GENOME_SIZE, temp_parent, organism->diresa_genome_weights);
+        float* latent_genome = organism->latent_genome_pool + entry_idx * GENOME_LATENT_DIM_MAX;
+        diresa_encode(organism_genome, latent_genome, &organism->diresa_genome_weights[0]);
 
-    float* latent_genome = organism->latent_genome_pool + entry_idx * GENOME_LATENT_DIM_MAX;
-    diresa_encode(organism_genome, latent_genome, &organism->diresa_genome_weights[0]);
+        int hw_dim = archive->hw_dim;
+        int task_dim = archive->task_dim;
+        int gen_dim = archive->gen_dim;
 
-    int hw_dim = archive->hw_dim;
-    int task_dim = archive->task_dim;
-    int gen_dim = archive->gen_dim;
+        float hw_features[1] = {entry->hardware_efficiency.value};
+        float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
+        diresa_encode(hw_features, hw_coords_component, entry->diresa_hw_weights);
 
-    float hw_features[1] = {entry->hardware_efficiency.value};
-    float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
-    diresa_encode(hw_features, hw_coords_component, entry->diresa_hw_weights);
+        float gen_features[1] = {entry->generalization_gap.value};
+        float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
+        diresa_encode(gen_features, gen_coords_component, entry->diresa_gen_weights);
 
-    float gen_features[1] = {entry->generalization_gap.value};
-    float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
-    diresa_encode(gen_features, gen_coords_component, entry->diresa_gen_weights);
+        float* entry_genome = organism_genome;
 
-    float* entry_genome = organism_genome;
+        uint32_t parent_id_0;
+        uint32_t parent_id_1 = 0;
 
-    uint32_t parent_id_0;
-    uint32_t parent_id_1 = 0;
+        if (entry->parent_hash == UINT64_MAX) {
+            parent_id_0 = 0;
+        } else {
+            int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
+            DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
+            parent_id_0 = parent_idx;
+        }
 
-    if (entry->parent_hash == UINT64_MAX) {
-        parent_id_0 = 0;
-    } else {
-        int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
-        DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
-        parent_id_0 = parent_idx;
-    }
+        DEVICE_FATAL_IF(entry->coherence.value <= 0.0f, "organism: entry coherence <= 0");
 
-    DEVICE_FATAL_IF(entry->coherence.value <= 0.0f, "organism: entry coherence <= 0");
+        insert_elite_device(
+            archive,
+            archive_size,
+            entry->fitness.value,
+            entry->coherence.value,
+            entry->fitness.value / entry->coherence.value,
+            entry->genome_hash,
+            parent_id_0,
+            parent_id_1,
+            organism->generation,
+            &organism->hw_coords_pool[entry_idx * hw_dim],
+            &organism->task_coords_pool[entry_idx * task_dim],
+            &organism->gen_coords_pool[entry_idx * gen_dim],
+            entry->task_accuracy.value,
+            &archive->per_class_accuracy[entry_idx * NUM_CLASSES_MAX],
+            NUM_CLASSES_MAX,
+            voronoi_cells,
+            num_cells,
+            latent_genome,
+            entry->fitness.input_hash,
+            entry->fitness.computed_at_generation
+        );
 
-    insert_elite_device(
-        archive,
-        archive_size,
-        entry->fitness.value,
-        entry->coherence.value,
-        entry->fitness.value / entry->coherence.value,
-        entry->genome_hash,
-        parent_id_0,
-        parent_id_1,
-        organism->generation,
-        &organism->hw_coords_pool[entry_idx * hw_dim],
-        &organism->task_coords_pool[entry_idx * task_dim],
-        &organism->gen_coords_pool[entry_idx * gen_dim],
-        entry->task_accuracy.value,
-        &archive->per_class_accuracy[entry_idx * NUM_CLASSES_MAX],
-        NUM_CLASSES_MAX,
-        voronoi_cells,
-        num_cells,
-        latent_genome,
-        entry->fitness.input_hash,
-        entry->fitness.computed_at_generation
-    );
-
-    if (entry->parent_hash == UINT64_MAX) {
-        entry->parent_hash = entry->genome_hash;
+        if (entry->parent_hash == UINT64_MAX) {
+            entry->parent_hash = entry->genome_hash;
+        }
     }
 }
 

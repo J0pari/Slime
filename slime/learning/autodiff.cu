@@ -151,9 +151,8 @@ __device__ int ad_relu(ADTape* tape, int x_idx) {
 
 __device__ void backward_op(TapeEntry* entry, float* value_buffer, float* grad_buffer) {
     float out_grad = grad_buffer[entry->output_idx];
-    if (out_grad == 0.0f) return;
-
-    switch (entry->op) {
+    if (out_grad != 0.0f) {
+        switch (entry->op) {
         case OP_ADD:
             atomicAdd(&grad_buffer[entry->input1_idx], out_grad);
             atomicAdd(&grad_buffer[entry->input2_idx], out_grad);
@@ -194,6 +193,7 @@ __device__ void backward_op(TapeEntry* entry, float* value_buffer, float* grad_b
             break;
         default:
             break;
+        }
     }
 }
 
@@ -210,7 +210,7 @@ __device__ void ad_backward_device(Organism* organism) {
     if (tid == 0) {
         tape->grad_buffer[output_idx] = output_grad;
     }
-    __syncthreads();
+    cg::this_grid().sync();
 
     for (int level = max_level; level >= 1; level--) {
         for (int i = tid; i < tape_size; i += num_threads) {
@@ -219,7 +219,7 @@ __device__ void ad_backward_device(Organism* organism) {
                 backward_op(entry, tape->value_buffer, tape->grad_buffer);
             }
         }
-        __syncthreads();
+        cg::this_grid().sync();
     }
 }
 
@@ -255,9 +255,10 @@ __device__ void extract_genome_gradients_device(Organism* organism) {
 }
 
 __device__ void apply_gradients_device(Organism* organism) {
-    float* genome = organism->genome;
+    int entry_idx = blockIdx.x;
+    float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
     float* gradients = organism->output_gradients;
-    int genome_size = organism->genome_size;
+    int genome_size = GENOME_SIZE;
     float learning_rate = organism->learning_rate;
     float gradient_clip_norm = organism->gradient_clip_norm;
 
