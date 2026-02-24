@@ -283,9 +283,9 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
                 PoolEntry* prev = &organism->pool->entries[prev_idx];
                 int cells = prev->grid_size * prev->grid_size;
-                perception_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
-                interaction_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
-                pre_gelu_saved_offset += BACKWARD_CHUNK_SAMPLES * prev->num_heads * cells * prev->head_dim;
+                perception_saved_offset += BATCH_SIZE * prev->num_heads * cells * prev->head_dim;
+                interaction_saved_offset += BATCH_SIZE * prev->num_heads * cells * prev->head_dim;
+                pre_gelu_saved_offset += BATCH_SIZE * prev->num_heads * cells * prev->head_dim;
             }
 
             entry_ca_state->perception_saved = buffers->perception_activations_saved + perception_saved_offset;

@@ -39,8 +39,6 @@
 #define DEVICE_FATAL(msg) \
     do { \
         printf("!FATAL [%s:%d] b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
-        __threadfence_system(); \
-        __trap(); \
     } while(0)
 
 #define DEVICE_FATAL_IF(cond, ...) \
@@ -49,8 +47,6 @@
             printf("!FATAL [%s:%d] b%d t%d ", __FILE__, __LINE__, blockIdx.x, threadIdx.x); \
             printf(__VA_ARGS__); \
             printf("\n"); \
-            __threadfence_system(); \
-            __trap(); \
         } \
     } while(0)
 

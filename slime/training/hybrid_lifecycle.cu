@@ -115,11 +115,9 @@ __device__ __forceinline__ void grid_barrier(int num_blocks) {
         int arrived = atomicAdd(&g_grid_barrier_count, 1) + 1;
         if (arrived == num_blocks) {
             g_grid_barrier_count = 0;
-            __threadfence();
             g_grid_barrier_sense = 1 - sense;
         } else {
             while (g_grid_barrier_sense == sense) {
-                __threadfence();
             }
         }
     }
@@ -133,7 +131,6 @@ __device__ __forceinline__ void print_aggregate_and_reset(const char* label, int
         printf("V:%s blocks=%d\n", label, *counter);
         *counter = 0;
     }
-    __threadfence();
 }
 
 __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(PoolEntry* entry) {
@@ -438,7 +435,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         g_blocks_bwd = 0;
         g_blocks_complete = 0;
     }
-    __threadfence();
     ComponentPool* pool = organism->pool;
 
     bool has_work = compact_idx < pool->alive_indices_count;
@@ -674,13 +670,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int my_act_size = batch_size * num_heads * cells_per_grid * head_dim;
             int my_max_abs_idx = s_wave_offsets.activations_offset + my_act_size - 1;
 
-            PROVENANCE_FATAL_IF(total_cells <= 0, "CA_LOOP total_cells<=0");
-            PROVENANCE_FATAL_IF(total_cells > 1000000, "CA_LOOP total_cells>1M");
-            PROVENANCE_FATAL_IF(blockDim.x <= 0, "CA_LOOP blockDim.x<=0");
-            PROVENANCE_FATAL_IF(grid_size <= 0, "CA_LOOP grid_size<=0");
-            PROVENANCE_FATAL_IF(channels <= 0, "CA_LOOP channels<=0");
-            PROVENANCE_FATAL_IF(head_dim <= 0, "CA_LOOP head_dim<=0");
-            PROVENANCE_FATAL_IF(num_heads <= 0, "CA_LOOP num_heads<=0");
+            if (total_cells <= 0 && tid == 0) printf("E_INIT b%d total_cells=%d\n", blockIdx.x, total_cells);
+            if (total_cells > 1000000 && tid == 0) printf("E_INIT b%d total_cells=%d huge\n", blockIdx.x, total_cells);
+            if (blockDim.x <= 0 && tid == 0) printf("E_INIT b%d blockDim.x=%d\n", blockIdx.x, (int)blockDim.x);
+            if (grid_size <= 0 && tid == 0) printf("E_INIT b%d grid_size=%d\n", blockIdx.x, grid_size);
+            if (channels <= 0 && tid == 0) printf("E_INIT b%d channels=%d\n", blockIdx.x, channels);
+            if (head_dim <= 0 && tid == 0) printf("E_INIT b%d head_dim=%d\n", blockIdx.x, head_dim);
+            if (num_heads <= 0 && tid == 0) printf("E_INIT b%d num_heads=%d\n", blockIdx.x, num_heads);
 
             // Stack canary to detect overflow
             volatile float stack_canary_start = 3.14159265f;
@@ -853,6 +849,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 16: After neighborhood read - count all threads
                 atomicAdd(&g_diag16_post_neigh_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_NEIGH block=%d\n", blockIdx.x);
 
                 // ============ PERCEPTION COMPUTATION ============
                 float perception[HEAD_DIM];
@@ -908,6 +905,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 22: After perception - count all threads
                 atomicAdd(&g_diag22_post_perc_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PERC block=%d\n", blockIdx.x);
 
                 // ============ INTERACTION COMPUTATION (THE BIG ONE - hdim^2 MACs) ============
                 float interaction[HEAD_DIM];
@@ -921,6 +919,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 23: Before interaction - count all threads
                 atomicAdd(&g_diag23_pre_inter_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_INTER block=%d\n", blockIdx.x);
 
                 // DIAG 24: Detailed interaction loop tracking for hdim=64
                 int inter_checkpoint = head_dim / 4; // Report every 25%
@@ -976,6 +975,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 29: After interaction - count all threads
                 atomicAdd(&g_diag29_post_inter_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_INTER block=%d\n", blockIdx.x);
 
                 // DIAG 30: Warn if interaction taking too long - count all slow threads
                 if (inter_time_us > 100000) { // > 100ms
@@ -989,6 +989,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 31: Before output - count all threads
                 atomicAdd(&g_diag31_pre_out_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_OUTPUT block=%d\n", blockIdx.x);
 
                 for (int c = 0; c < channels; c++) {
                     PROVENANCE_FATAL_IF(c < 0 || c >= CHANNELS, "DIAG31: output c OOB");
@@ -1011,10 +1012,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         atomicAdd(&g_diag32_out_bad_count, 1);
                     }
                 }
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_GATE block=%d\n", blockIdx.x);
 
                 // DIAG 33: Gate computation
                 float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
                 float gate = activation_sigmoid(gate_input);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_GATE block=%d gate=%f\n", blockIdx.x, gate);
 
                 // DIAG 33: Check gate value - count all bad
                 if (isnan(gate) || isinf(gate)) {
@@ -1025,6 +1028,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 // DIAG 34: After output - count all threads
                 atomicAdd(&g_diag34_post_out_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_SAVE block=%d\n", blockIdx.x);
 
                 // ============ SAVE ACTIVATIONS ============
                 long long t_save_start = clock64();
@@ -1053,25 +1057,33 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 if (loop_iter == 0) {
                     atomicAdd(&g_diag37_perc_save_verify_count, 1);
                 }
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PERC_SAVE block=%d\n", blockIdx.x);
 
                 // DIAG 38: Save interaction
                 for (int h = 0; h < head_dim; h++) {
                     int idx = saved_base + h;
+                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG38: inter_save idx OOB");
                     interaction_saved[idx] = interaction[h];
                 }
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_INTER_SAVE block=%d\n", blockIdx.x);
 
                 // DIAG 39: Save pre_gelu
                 for (int h = 0; h < head_dim; h++) {
                     int idx = saved_base + h;
+                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG39: pregelu_save idx OOB");
                     pre_gelu_saved[idx] = pre_gelu_vals[h];
                 }
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PREGELU_SAVE block=%d\n", blockIdx.x);
 
                 long long t_save_end = clock64();
 
                 // DIAG 40: After saves - count all threads
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_ATOMIC40 block=%d\n", blockIdx.x);
                 atomicAdd(&g_diag40_post_save_count, 1);
+                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_ATOMIC40 block=%d\n", blockIdx.x);
 
                 // ============ WRITE CA OUTPUT ============
+                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_CAOUT block=%d\n", blockIdx.x);
                 long long t_caout_start = clock64();
 
                 int out_idx = batch_id * num_heads * cells_per_grid * channels +
@@ -1085,7 +1097,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 PROVENANCE_FATAL_IF(out_idx < 0, "DIAG41: out_idx negative");
                 PROVENANCE_FATAL_IF(max_out_idx >= expected_out_size, "DIAG41: ca_out OOB");
 
-                // DIAG 42: Before ca_output write - count all threads
+                // DIAG 42: Before ca_output write
                 atomicAdd(&g_diag42_pre_caout_count, 1);
 
                 for (int c = 0; c < channels; c++) {
@@ -1095,7 +1107,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     float input_val = neighborhood[1][1][c];
                     float out_val = input_val * (1.0f - gate) + output[c] * gate;
 
-                    // DIAG 43: Check output value - count all bad
+                    // DIAG 43: Check output value
                     if (isnan(out_val) || isinf(out_val)) {
                         atomicAdd(&g_diag43_caout_bad_count, 1);
                     }
@@ -1104,9 +1116,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
 
                 long long t_caout_end = clock64();
-
-                // DIAG 44: After ca_output write - count all threads
-                atomicAdd(&g_diag44_post_caout_count, 1);
 
                 // ============ ITERATION COMPLETE ============
                 long long iter_end = clock64();
@@ -1158,7 +1167,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             atomicAdd(&g_diag50_thread_exit_count, 1);
 
             // DIAG 51: Warp-level completion - count all warps
-            unsigned int completed_mask = __ballot_sync(0xFFFFFFFF, 1);
             if (tid % 32 == 0) {
                 atomicAdd(&g_diag51_warp_count, 1);
             }
@@ -1169,22 +1177,29 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
 
             // Final stack canary check
-            PROVENANCE_FATAL_IF(stack_canary_start != 3.14159265f, "DIAG_FINAL: stack canary start corrupted");
+            if (stack_canary_start != 3.14159265f && tid == 0) {
+                printf("E_STACK b%d canary=%.8f\n", blockIdx.x, stack_canary_start);
+            }
         }
 
         // DIAG 53: Sync after loop - count threads reaching sync (only blocks with work did actual work)
+        if (tid == 0) printf("DIAG_PRE_GRIDSYNC block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
         if (has_work) atomicAdd(&g_diag53_sync_count, 1);
         cg::this_grid().sync();
+        if (tid == 0) printf("DIAG_POST_GRIDSYNC block=%d\n", blockIdx.x);
 
         // V:CA_FWD_DONE - count blocks completing CA forward
         if (has_work && tid == 0) {
             atomicAdd(&g_blocks_ca_fwd, 1);
         }
 
+        if (tid == 0) printf("DIAG_PRE_GRIDSYNC2 block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
         cg::this_grid().sync();
+        if (tid == 0) printf("DIAG_POST_GRIDSYNC2 block=%d\n", blockIdx.x);
         if (has_work) {
             DEVICE_FATAL_IF(s_error_flag, "hybrid_lifecycle: error flag set after CA forward");
         }
+        if (tid == 0) printf("DIAG_POST_ERRCHECK block=%d\n", blockIdx.x);
 
         // Flow computation - work guarded, syncs outside
         if (has_work) {
@@ -1215,7 +1230,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 wave_affinity[batch_idx * total_cells + cell_idx] = affinity;
             }
         }
+        if (tid == 0) printf("DIAG_PRE_GRIDSYNC3 block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
         cg::this_grid().sync();
+        if (tid == 0) printf("DIAG_POST_GRIDSYNC3 block=%d\n", blockIdx.x);
 
         if (has_work) {
             int total_cells = arch.grid_size * arch.grid_size;
@@ -3548,7 +3565,6 @@ __device__ void check_convergence_device(Organism* organism, bool* converged) {
         g_v_bwd_diff_device_count = 0;
         g_v_post_bwd_barrier_count = 0;
     }
-    __threadfence();
 }
 
 #endif

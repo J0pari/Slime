@@ -165,7 +165,6 @@ __device__ __forceinline__ void record_header_init(RecordHeader* hdr, uint64_t s
 __device__ __forceinline__ void record_header_finalize(RecordHeader* hdr, const void* payload, size_t payload_size) {
     hdr->checksum = crc32_compute(payload, payload_size);
     hdr->checksum_valid = 1;
-    __threadfence_system();
 }
 
 __host__ __forceinline__ bool record_header_verify(const RecordHeader* hdr, const void* payload, size_t payload_size) {
@@ -201,7 +200,6 @@ struct RingBuffer {
                 slots[i].header.checksum_valid = 0;
             }
         }
-        __threadfence_system();
     }
 
     __device__ T* acquire_write_slot(uint32_t source_id) {
@@ -213,7 +211,6 @@ struct RingBuffer {
         }
 
         slots[slot_idx].committed = 0;
-        __threadfence_system();
 
         record_header_init(&slots[slot_idx].header, seq, source_id, sizeof(T));
         return &slots[slot_idx].payload;
@@ -222,7 +219,6 @@ struct RingBuffer {
     __device__ void commit_write_slot(int slot_idx) {
         record_header_finalize(&slots[slot_idx].header, &slots[slot_idx].payload, sizeof(T));
         slots[slot_idx].committed = 1;
-        __threadfence_system();
     }
 
     __device__ void commit_write(T* payload_ptr) {
@@ -317,8 +313,6 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
 
 #define PROVENANCE_FATAL(msg) do { \
     printf("E_PROV %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
-    __threadfence_system(); \
-    asm("trap;"); \
 } while(0)
 
 #define PROVENANCE_FATAL_IF(cond, msg) do { \
@@ -328,16 +322,12 @@ __host__ __forceinline__ bool host_is_uninitialized_float(float val) {
 #define PROVENANCE_ASSERT_INITIALIZED_INT(val, name) do { \
     if (is_uninitialized_int(val)) { \
         printf("E_UNINIT %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, name); \
-        __threadfence_system(); \
-        asm("trap;"); \
     } \
 } while(0)
 
 #define PROVENANCE_ASSERT_INITIALIZED_FLOAT(val, name) do { \
     if (is_uninitialized_float(val)) { \
         printf("E_UNINIT %s:%d b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, name); \
-        __threadfence_system(); \
-        asm("trap;"); \
     } \
 } while(0)
 
