@@ -36,14 +36,12 @@ __device__ void mark_checkpoint(int checkpoint_id) {
         g_checkpoint_per_block[blockIdx.x] = checkpoint_id;
         atomicAdd(&g_checkpoint_blocks_reached, 1);
         g_checkpoint_id = checkpoint_id;
-        __threadfence_system();  // Ensure host can see immediately
     }
 }
 
 // Reset checkpoint counter - call from single thread before starting
 __device__ void reset_checkpoint_counter() {
     g_checkpoint_blocks_reached = 0;
-    __threadfence_system();
 }
 
 // Trace a checkpoint with optional values

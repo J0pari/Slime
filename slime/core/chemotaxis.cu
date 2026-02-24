@@ -1338,7 +1338,7 @@ __device__ void behavioral_update_device(Organism* organism) {
             int tile_y = cell_idx / width;
 
             float my_state = behavioral_field[tile_y * width + tile_x];
-
+            unsigned mask = 0xffffffff;
             float sum = 0.0f;
             sum += get_neighbor_2d(my_state, -1, -1, width, mask);
             sum += get_neighbor_2d(my_state, 0, -1, width, mask);

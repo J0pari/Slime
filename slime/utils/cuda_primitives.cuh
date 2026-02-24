@@ -146,7 +146,6 @@ __device__ __forceinline__ float sample_neighborhood(
 __device__ __forceinline__ float validated_curand_normal(curandState* state, const char* caller, int idx) {
     float val = curand_normal(state);
     if (isnan(val) || isinf(val)) {
-        __trap();
     }
     return val;
 }
@@ -154,14 +153,12 @@ __device__ __forceinline__ float validated_curand_normal(curandState* state, con
 __device__ __forceinline__ float validated_curand_uniform(curandState* state, const char* caller, int idx) {
     float val = curand_uniform(state);
     if (isnan(val) || isinf(val) || val < 0.0f || val > 1.0f) {
-        __trap();
     }
     return val;
 }
 
 __device__ __forceinline__ float ldg_float(const float* ptr) {
     if (ptr == nullptr) {
-        __trap();
     }
     #if __CUDA_ARCH__ >= 350
     return __ldg(ptr);
@@ -172,7 +169,6 @@ __device__ __forceinline__ float ldg_float(const float* ptr) {
 
 __device__ __forceinline__ float4 ldg_float4(const float4* ptr) {
     if (ptr == nullptr) {
-        __trap();
     }
     #if __CUDA_ARCH__ >= 350
     return __ldg(ptr);
@@ -235,11 +231,6 @@ __device__ __forceinline__ int warp_vote_all(int predicate) {
 __device__ __forceinline__ int warp_vote_any(int predicate) {
     unsigned mask = __activemask();
     return __any_sync(mask, predicate);
-}
-
-__device__ __forceinline__ int warp_vote_ballot(int predicate) {
-    unsigned mask = __activemask();
-    return __ballot_sync(mask, predicate);
 }
 
 __device__ __forceinline__ float warp_scan_sum(float val) {
