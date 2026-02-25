@@ -354,7 +354,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_reintegration_buffer");
     CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_prev_concentration");
     CUDA_ALLOC_CHECK(buffers_host.batch_labels_pool, sizeof(int) * BATCH_SIZE, "batch_labels_pool");
-    CUDA_ALLOC_CHECK(buffers_host.batch_images_pool, sizeof(float) * BATCH_SIZE * CA_FIELD_SIZE * 3, "batch_images_pool");
+    CUDA_ALLOC_CHECK(buffers_host.batch_samples_pool, sizeof(float) * BATCH_SIZE * CA_FIELD_SIZE * 3, "batch_samples_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_loss_pool, sizeof(float), "task_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.reg_loss_pool, sizeof(float), "reg_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.rank_loss_pool, sizeof(float), "rank_loss_pool");

@@ -351,7 +351,7 @@ __device__ void sample_batch_device(Organism* organism) {
 
     unsigned char* all_images = dataset->samples;
     unsigned char* all_labels = dataset->labels;
-    float* batch_images = training->batch_images;
+    float* batch_samples = training->batch_samples;
     int* batch_labels = training->batch_labels;
     int dataset_size = dataset->num_samples;
 
@@ -397,7 +397,7 @@ __device__ void sample_batch_device(Organism* organism) {
                 float tr = all_images[src_idx * sample_size + channel_offset + y0 * sample_cols + x1] / (float)UINT8_MAX;
                 float bl = all_images[src_idx * sample_size + channel_offset + y1 * sample_cols + x0] / (float)UINT8_MAX;
                 float br = all_images[src_idx * sample_size + channel_offset + y1 * sample_cols + x1] / (float)UINT8_MAX;
-                batch_images[idx * batch_stride * 3 + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+                batch_samples[idx * batch_stride * 3 + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
             }
         } else {
             float tl = all_images[src_idx * sample_size + y0 * sample_cols + x0] / (float)UINT8_MAX;
@@ -405,9 +405,9 @@ __device__ void sample_batch_device(Organism* organism) {
             float bl = all_images[src_idx * sample_size + y1 * sample_cols + x0] / (float)UINT8_MAX;
             float br = all_images[src_idx * sample_size + y1 * sample_cols + x1] / (float)UINT8_MAX;
             float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
-            batch_images[idx * batch_stride * 3 + 0 * batch_stride + pixel_idx] = vg.x;
-            batch_images[idx * batch_stride * 3 + 1 * batch_stride + pixel_idx] = vg.y;
-            batch_images[idx * batch_stride * 3 + 2 * batch_stride + pixel_idx] = vg.z;
+            batch_samples[idx * batch_stride * 3 + 0 * batch_stride + pixel_idx] = vg.x;
+            batch_samples[idx * batch_stride * 3 + 1 * batch_stride + pixel_idx] = vg.y;
+            batch_samples[idx * batch_stride * 3 + 2 * batch_stride + pixel_idx] = vg.z;
         }
     }
 }
@@ -430,7 +430,7 @@ __device__ void inject_sample_to_ca_device(Organism* organism) {
     float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
     float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
     float* behavioral_field = organism->behavioral_field;
-    float* batch_images = organism->training_mode->batch_images;
+    float* batch_samples = organism->training_mode->batch_samples;
     float* prev_concentration = organism->ca_prev_concentration;
     float* attractor_field = organism->attractor_field;
 
@@ -466,9 +466,9 @@ __device__ void inject_sample_to_ca_device(Organism* organism) {
 
     int batch_stride = grid_size * grid_size;
     int img_base = batch_idx * batch_stride * 3;
-    ca_state[base_idx + 11] = batch_images[img_base + 0 * batch_stride + spatial_idx];
-    ca_state[base_idx + 12] = batch_images[img_base + 1 * batch_stride + spatial_idx];
-    ca_state[base_idx + 13] = batch_images[img_base + 2 * batch_stride + spatial_idx];
+    ca_state[base_idx + 11] = batch_samples[img_base + 0 * batch_stride + spatial_idx];
+    ca_state[base_idx + 12] = batch_samples[img_base + 1 * batch_stride + spatial_idx];
+    ca_state[base_idx + 13] = batch_samples[img_base + 2 * batch_stride + spatial_idx];
 
     int prev_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
     ca_state[base_idx + 14] = prev_concentration[prev_idx + 0];

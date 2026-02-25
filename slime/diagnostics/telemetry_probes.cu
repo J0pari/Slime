@@ -405,7 +405,7 @@ __device__ void populate_audit_buffer(
     int generation,
     float* logits,
     int* labels,
-    float* batch_images,
+    float* batch_samples,
     int batch_size,
     int num_classes,
     float* ca_concentration,
@@ -421,7 +421,7 @@ __device__ void populate_audit_buffer(
     TelemetryAuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
 
     printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
-           generation, (void*)logits, (void*)labels, (void*)batch_images,
+           generation, (void*)logits, (void*)labels, (void*)batch_samples,
            batch_size, num_classes, (void*)ca_concentration, grid_size);
 
     audit->generation = generation;
@@ -485,11 +485,11 @@ __device__ void populate_audit_buffer(
     audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
     printf("V:audit_cp3 correct=%d/%d acc=%.4f\n", correct, batch_size, audit->accuracy);
 
-    if (batch_images) {
+    if (batch_samples) {
         int img_size = grid_size * grid_size;
         for (int s = 0; s < samples_to_copy; s++) {
             for (int p = 0; p < img_size; p++) {
-                float val = batch_images[s * img_size + p];
+                float val = batch_samples[s * img_size + p];
                 val = (val < 0.0f) ? 0.0f : ((val > 1.0f) ? 1.0f : val);
                 audit->sample_images[s * img_size + p] = (unsigned char)(val * 255.0f);
             }

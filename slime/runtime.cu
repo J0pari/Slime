@@ -77,7 +77,7 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
                 case 8:  val = rd_resource_gradient_x[cell_idx]; break;
                 case 9:  val = rd_resource_gradient_y[cell_idx]; break;
                 case 10: val = behavioral_field[cell_idx]; break;
-                case 11: // TODO: needs batch_images loaded first
+                case 11: // TODO: needs batch_samples loaded first
                 case 12:
                 case 13:
                 case 14: // TODO: needs ca_output initialized first
@@ -643,7 +643,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         if (global_tid == 0) printf("V:p2_post_classifier\n");
 
         organism->training_mode->classifier = organism->classifier;
-        organism->training_mode->batch_images = buffers->batch_images_pool;
+        organism->training_mode->batch_samples = buffers->batch_samples_pool;
         organism->training_mode->batch_labels = buffers->batch_labels_pool;
 
         organism->training_mode->adam_m = organism->adam_m_ca_pool;
