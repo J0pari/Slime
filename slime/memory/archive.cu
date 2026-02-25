@@ -97,6 +97,8 @@ __device__ void hash_table_remove(
     }
 }
 
+#include "../lifecycle/genealogy.cu"
+
 __device__ void restore_fitness_from_archive(
     PoolEntry* entry,
     const GPUElite* archive,
@@ -368,8 +370,7 @@ __device__ void insert_elite_device(
         archive->coherence[idx] = coherence_val;
         archive->effective_rank[idx] = effective_rank_val;
         archive->genome_hash[idx] = genome_hash_val;
-        archive->parent_ids[idx * PARENT_COUNT] = parent_id_0;
-        archive->parent_ids[idx * PARENT_COUNT + 1] = parent_id_1;
+        set_parent_ids(archive, idx, parent_id_0, parent_id_1);
         archive->generation[idx] = generation_val;
         archive->fitness_input_hash[idx] = fitness_input_hash;
         archive->fitness_computed_at_generation[idx] = fitness_computed_at_generation;

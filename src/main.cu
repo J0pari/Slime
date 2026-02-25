@@ -371,6 +371,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.pool_task_accuracies, sizeof(float) * POOL_CAPACITY_MAX, "pool_task_accuracies");
     CUDA_ALLOC_CHECK(buffers_host.organism, sizeof(Organism), "organism");
     CUDA_ALLOC_CHECK(buffers_host.reduction_workspace, sizeof(float) * ((CA_FIELD_SIZE * CHANNELS + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_workspace");
+    CUDA_ALLOC_CHECK(buffers_host.reduction_partial_sums, sizeof(float) * ((CA_FIELD_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_partial_sums");
+    CUDA_ALLOC_CHECK(buffers_host.correlation_matrix, sizeof(float) * GENOME_SIZE * GENOME_SIZE, "correlation_matrix");
     CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_counter, sizeof(int), "phase_barrier_counter");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_generation, sizeof(int), "phase_barrier_generation");

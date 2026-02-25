@@ -703,7 +703,7 @@ struct HybridTrainingMode {
     bool use_selection;
     float gradient_fitness_weight;
     float coherence_fitness_weight;
-    float* batch_images;
+    float* batch_samples;
     int* batch_labels;
     int batch_size;
     ClassificationHead* classifier;
@@ -1593,7 +1593,7 @@ struct Organism {
     float* batch_flow_field;
     float* batch_reintegration_buffer;
     float* batch_prev_concentration;
-    float* batch_images_pool;
+    float* batch_samples_pool;
 
     // Behavioral buffers
     float* behavioral_features_buffer;
