@@ -30,11 +30,11 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
     const float* chem_laplacian = chem->laplacian;
     const float* chem_sources = chem->sources;
     const float* chem_decay_factors = chem->decay_factors;
-    const float* rd_resource_density = organism->rd_resource_density;
-    const float* rd_fitness_landscape = organism->rd_fitness_landscape;
-    const float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
-    const float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
-    const float* behavioral_field = organism->behavioral_field;
+    int chem_channels = chem->channels;
+    const float* resource_density = organism->resource_density;
+    const float* fitness_landscape = organism->fitness_landscape;
+    const float* resource_gradient_x = organism->resource_gradient_x;
+    const float* resource_gradient_y = organism->resource_gradient_y;
     const float* attractor_field = organism->attractor_field;
 
     float* prev_conc = organism->buffers->batch_prev_concentration;
@@ -42,6 +42,9 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
 
     int batch_size = training_mode->batch_size;
     int alive_count = pool->alive_indices_count;
+
+    // behavioral_dim for computing per-entry behavioral_field offset
+    int behavioral_dim = organism->behavioral_dim_hw + organism->behavioral_dim_task + organism->behavioral_dim_gen;
 
     // Compute wave offsets for each alive entry
     size_t current_offset = 0;
@@ -51,38 +54,73 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
         PoolEntry* entry = &pool->entries[entry_idx];
 
         int grid_size = entry->grid_size;
-        int channels = entry->channels;
+        int ca_channels = entry->channels;
         int cells = grid_size * grid_size;
-        int entry_buffer_size = batch_size * cells * channels;
+        int entry_buffer_size = batch_size * cells * ca_channels;
 
         float* entry_prev_conc = prev_conc + current_offset;
 
+        // Compute per-entry behavioral_field from pool
+        int behavioral_buffer_size = cells * behavioral_dim;
+        const float* entry_behavioral_field = organism->behavioral_field_pool + entry_idx * behavioral_buffer_size;
+
         // Initialize all batch samples with the same field values
         for (int idx = global_tid; idx < entry_buffer_size; idx += total_threads) {
-            int batch_idx = idx / (cells * channels);
-            int remainder = idx % (cells * channels);
-            int cell_idx = remainder / channels;
-            int c = remainder % channels;
+            int batch_idx = idx / (cells * ca_channels);
+            int remainder = idx % (cells * ca_channels);
+            int cell_idx = remainder / ca_channels;
+            int c = remainder % ca_channels;
 
             float val;
             switch (c) {
-                case 0:  val = chem_concentration[cell_idx]; break;
-                case 1:  val = chem_gradient_x[cell_idx]; break;
-                case 2:  val = chem_gradient_y[cell_idx]; break;
-                case 3:  val = chem_laplacian[cell_idx]; break;
-                case 4:  val = chem_sources[cell_idx]; break;
+                case 0: case 1: case 2: case 3: case 4: {
+                    // Aggregate multi-channel chemical field into CA channels 0-4
+                    float sum = 0.0f;
+                    for (int cc = 0; cc < chem_channels; cc++) {
+                        int field_idx = cc * cells + cell_idx;
+                        switch (c) {
+                            case 0: sum += chem_concentration[field_idx]; break;
+                            case 1: sum += chem_gradient_x[field_idx]; break;
+                            case 2: sum += chem_gradient_y[field_idx]; break;
+                            case 3: sum += chem_laplacian[field_idx]; break;
+                            case 4: sum += chem_sources[field_idx]; break;
+                        }
+                    }
+                    val = sum / chem_channels;
+                    break;
+                }
                 case 5:  val = chem_decay_factors[cell_idx]; break;
-                case 6:  val = rd_resource_density[cell_idx]; break;
-                case 7:  val = rd_fitness_landscape[cell_idx]; break;
-                case 8:  val = rd_resource_gradient_x[cell_idx]; break;
-                case 9:  val = rd_resource_gradient_y[cell_idx]; break;
-                case 10: val = behavioral_field[cell_idx]; break;
-                case 11: // TODO: needs batch_samples loaded first
-                case 12:
-                case 13:
-                case 14: // TODO: needs ca_output initialized first
-                case 15:
-                default: DEVICE_FATAL("init_batch_prev_concentration: channel %d not yet available", c); break;
+                case 6:  val = resource_density[cell_idx]; break;
+                case 7:  val = fitness_landscape[cell_idx]; break;
+                case 8:  val = resource_gradient_x[cell_idx]; break;
+                case 9:  val = resource_gradient_y[cell_idx]; break;
+                case 10: val = entry_behavioral_field[cell_idx]; break;
+                case 11: {
+                    int sample_base = batch_idx * cells * 3;
+                    val = training_mode->batch_samples[sample_base + 0 * cells + cell_idx];
+                    break;
+                }
+                case 12: {
+                    int sample_base = batch_idx * cells * 3;
+                    val = training_mode->batch_samples[sample_base + 1 * cells + cell_idx];
+                    break;
+                }
+                case 13: {
+                    int sample_base = batch_idx * cells * 3;
+                    val = training_mode->batch_samples[sample_base + 2 * cells + cell_idx];
+                    break;
+                }
+                case 14: {
+                    // Bootstrap: recurrence starts as average concentration
+                    float sum = 0.0f;
+                    for (int cc = 0; cc < chem_channels; cc++) {
+                        sum += chem_concentration[cc * cells + cell_idx];
+                    }
+                    val = sum / chem_channels;
+                    break;
+                }
+                case 15: val = attractor_field[cell_idx]; break;
+                default: DEVICE_FATAL("init_batch_prev_concentration: unhandled channel %d", c); break;
             }
             entry_prev_conc[idx] = val;
         }
@@ -376,12 +414,15 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         init_organism_ca_weights_device(organism);
 
         float* all_chem_fields = buffers->all_chem_fields;
-        organism->chemical_field->concentration = all_chem_fields + CA_FIELD_SIZE * CHEM_CONCENTRATION;
-        organism->chemical_field->gradient_x = all_chem_fields + CA_FIELD_SIZE * CHEM_GRADIENT_X;
-        organism->chemical_field->gradient_y = all_chem_fields + CA_FIELD_SIZE * CHEM_GRADIENT_Y;
-        organism->chemical_field->laplacian = all_chem_fields + CA_FIELD_SIZE * CHEM_LAPLACIAN;
-        organism->chemical_field->sources = all_chem_fields + CA_FIELD_SIZE * CHEM_SOURCES;
-        organism->chemical_field->decay_factors = all_chem_fields + CA_FIELD_SIZE * CHEM_DECAY_FACTORS;
+        // Multi-channel fields: CA_FIELD_SIZE * CHEM_CHANNELS each
+        organism->chemical_field->channels = CHEM_CHANNELS;
+        organism->chemical_field->concentration = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 0;
+        organism->chemical_field->gradient_x = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 1;
+        organism->chemical_field->gradient_y = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 2;
+        organism->chemical_field->laplacian = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 3;
+        organism->chemical_field->sources = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 4;
+        // Single-channel decay_factors (shared across all channels)
+        organism->chemical_field->decay_factors = all_chem_fields + CA_FIELD_SIZE * CHEM_CHANNELS * 5;
 
         organism->fitness_history = buffers->fitness_history;
         organism->effective_rank_history = buffers->effective_rank_history;
@@ -595,7 +636,8 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->reduction_workspace = buffers->reduction_workspace;
         organism->reduction_partial_sums = buffers->reduction_partial_sums;
         organism->correlation_matrix = buffers->correlation_matrix;
-        int total_cells = arch.grid_size * arch.grid_size * arch.channels;
+        // Spatial cells only - reduce_concentration_mean loops over CHEM_CHANNELS separately
+        int total_cells = arch.grid_size * arch.grid_size;
         organism->reduction_total_cells = total_cells;
         organism->reduction_num_blocks = (total_cells + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
@@ -680,6 +722,31 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         if (global_tid == 0) printf("V:p2_post_embedding\n");
 
         organism->chem_grid_size = arch.grid_size;
+
+        // Initialize training mode first so batch_samples buffer is ready
+        int voronoi_init_dt_slot = GenomeParamTable::voronoi_init_dt;
+        float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
+        float voronoi_init_dt = VORONOI_INIT_DT_MIN + voronoi_init_dt_norm * (VORONOI_INIT_DT_MAX - VORONOI_INIT_DT_MIN);
+        organism->diffusion_dt = voronoi_init_dt;
+        init_training_mode_device(organism);
+        cg::this_grid().sync();
+
+        // Initialize curriculum and set current_dataset before loading samples
+        init_curriculum_device(organism);
+        cg::this_grid().sync();
+        if (global_tid == 0) {
+            int dataset_idx = organism->curriculum->current_dataset_idx;
+            organism->current_dataset = organism->dataset_array[dataset_idx];
+        }
+        cg::this_grid().sync();
+
+        // Load initial batch samples before init_chemical_field_device
+        // (init_chemical_field_device seeds concentration from samples)
+        if (global_tid == 0) printf("V:p2_pre_initial_batch\n");
+        load_batch_device(organism);
+        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_post_initial_batch\n");
+
         if (global_tid == 0) printf("V:p2_pre_chemfield\n");
         init_chemical_field_device(organism);
         cg::this_grid().sync();
@@ -694,14 +761,6 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         cg::this_grid().sync();
         mark_checkpoint(15);  // post_chemsources - grid sync completed
 
-        int voronoi_init_dt_slot = GenomeParamTable::voronoi_init_dt;
-        float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
-        float voronoi_init_dt = VORONOI_INIT_DT_MIN + voronoi_init_dt_norm * (VORONOI_INIT_DT_MAX - VORONOI_INIT_DT_MIN);
-
-        organism->diffusion_dt = voronoi_init_dt;
-        init_training_mode_device(organism);
-        cg::this_grid().sync();
-
         diffusion_reaction_device(organism);
         cg::this_grid().sync();
 
@@ -709,15 +768,17 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         store_chemical_snapshot_device(organism);
         cg::this_grid().sync();
 
-        init_curriculum_device(organism);
-        cg::this_grid().sync();
-
-        // Set current_dataset from curriculum index
+        // Bootstrap attractor_field from first history entry
         if (global_tid == 0) {
-            int dataset_idx = organism->curriculum->current_dataset_idx;
-            organism->current_dataset = organism->dataset_array[dataset_idx];
+            int hist_count = organism->chemical_field->history->count;
+            DEVICE_FATAL_IF(hist_count <= 0, "init_organism_phase2: chemical history empty after first snapshot");
+            int history_idx = (organism->chemical_field->history->head + hist_count - 1)
+                  % organism->chemical_field->history->capacity;
+            organism->attractor_field = organism->chemical_field->history->entries[history_idx].data;
         }
         cg::this_grid().sync();
+
+        // curriculum and current_dataset already initialized earlier before load_batch_device
 
         organism->clear_buffer_ptr = organism->fitness_history;
         organism->clear_buffer_size = 2 * POOL_CAPACITY_MAX;
@@ -800,6 +861,8 @@ __global__ void persistent_evolution_kernel(
     }
     cg::this_grid().sync();
 
+    // load_batch_device handles generation 0 bootstrap internally
+    // (initializes from fields at gen 0, from prev_concentration at gen > 0)
     load_batch_device(organism);
     cg::this_grid().sync();
 

@@ -1230,7 +1230,11 @@ __device__ void culling_device(Organism* organism, float fitness_threshold, floa
             float ctx_metabolic = entry->fitness.value;
             float ctx_stress = entry->hunger.value;
 
-            float ctx_morphogen = chemical_field->cached_mean;
+            float ctx_morphogen = 0.0f;
+            for (int c = 0; c < chemical_field->channels; c++) {
+                ctx_morphogen += chemical_field->cached_mean[c];
+            }
+            ctx_morphogen /= chemical_field->channels;
 
             int fitness_cull_mult_slot = GenomeParamTable::lifecycle_fitness_culling_mult;
             float fitness_cull_mult = genome_to_param(entry_genome, entry->gradients, fitness_cull_mult_slot, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy, FITNESS_CULLING_MULT_MIN, FITNESS_CULLING_MULT_MAX);

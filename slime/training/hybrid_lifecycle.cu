@@ -237,7 +237,7 @@ __device__ void zero_buffer_device(Organism* organism, float* buffer, int n) {
     }
 }
 
-// Load initial batch images during initialization (before first training iteration)
+// Load initial batch samples during initialization (before first training iteration)
 // This must be called before init_batch_prev_concentration_device so channels 11-13 have real data
 __device__ void load_initial_batch_samples_device(Organism* organism) {
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -257,7 +257,8 @@ __device__ void load_initial_batch_samples_device(Organism* organism) {
     int sample_rows = dataset->descriptor->sample_rows;
     int sample_cols = dataset->descriptor->sample_cols;
     int sample_channels = dataset->descriptor->channels;
-    unsigned char* all_images = dataset->samples;
+    FeatureEncoding encoding = dataset->descriptor->encoding;
+    unsigned char* all_samples = dataset->samples;
     unsigned char* all_labels = dataset->labels;
     int sample_size = sample_rows * sample_cols * sample_channels;
 
@@ -275,45 +276,83 @@ __device__ void load_initial_batch_samples_device(Organism* organism) {
         }
     }
 
-    // Load and interpolate images
-    int total_pixels = batch_size * batch_stride;
-    for (int work_idx = global_tid; work_idx < total_pixels; work_idx += total_threads) {
-        int idx = work_idx / batch_stride;
-        int pixel_idx = work_idx % batch_stride;
-        int src_idx = (offset + idx) % dataset_size;
-        int out_y = pixel_idx / grid_size;
-        int out_x = pixel_idx % grid_size;
+    // Load and interpolate samples based on encoding
+    int total_cells = batch_size * batch_stride;
 
-        float src_y = out_y * (float)sample_rows / grid_size;
-        float src_x = out_x * (float)sample_cols / grid_size;
-        int y0 = (int)src_y;
-        int x0 = (int)src_x;
-        int y1 = min(y0 + 1, sample_rows - 1);
-        int x1 = min(x0 + 1, sample_cols - 1);
-        float fy = src_y - y0;
-        float fx = src_x - x0;
-        int out_idx_base = idx * batch_stride * 3;
+    if (encoding == ENCODING_TEMPORAL_1D) {
+        // Timeseries: resample 1D temporal data to 2D grid
+        int timesteps = sample_rows;
+        int features = sample_cols;
 
-        if (sample_channels >= 3) {
-            for (int c = 0; c < 3; c++) {
-                int channel_offset = c * sample_rows * sample_cols;
-                int img_idx = src_idx * sample_size + channel_offset;
-                float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
-                float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
-                float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
-                float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
-                batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+        for (int work_idx = global_tid; work_idx < total_cells; work_idx += total_threads) {
+            int idx = work_idx / batch_stride;
+            int cell_idx = work_idx % batch_stride;
+            int src_idx = (offset + idx) % dataset_size;
+            int cell_y = cell_idx / grid_size;
+            int cell_x = cell_idx % grid_size;
+
+            float src_t = cell_y * (float)timesteps / grid_size;
+            float src_f = cell_x * (float)features / grid_size;
+            int t0 = (int)src_t;
+            int f0 = (int)src_f;
+            int t1 = min(t0 + 1, timesteps - 1);
+            int f1 = min(f0 + 1, features - 1);
+            float ft = src_t - t0;
+            float ff = src_f - f0;
+
+            int out_base = idx * batch_stride * 3;
+            int sample_base = src_idx * sample_size;
+
+            float v00 = all_samples[sample_base + t0 * features + f0] / 255.0f;
+            float v01 = all_samples[sample_base + t0 * features + f1] / 255.0f;
+            float v10 = all_samples[sample_base + t1 * features + f0] / 255.0f;
+            float v11 = all_samples[sample_base + t1 * features + f1] / 255.0f;
+            float val = Interpolation::bilinear(v00, v01, v10, v11, ff, ft);
+
+            batch_samples_out[out_base + 0 * batch_stride + cell_idx] = val;
+            batch_samples_out[out_base + 1 * batch_stride + cell_idx] = ft;
+            batch_samples_out[out_base + 2 * batch_stride + cell_idx] = ff;
+        }
+    } else {
+        // ENCODING_SPATIAL_2D or ENCODING_SPECTRAL_AUDIO: 2D bilinear interpolation
+        for (int work_idx = global_tid; work_idx < total_cells; work_idx += total_threads) {
+            int idx = work_idx / batch_stride;
+            int pixel_idx = work_idx % batch_stride;
+            int src_idx = (offset + idx) % dataset_size;
+            int out_y = pixel_idx / grid_size;
+            int out_x = pixel_idx % grid_size;
+
+            float src_y = out_y * (float)sample_rows / grid_size;
+            float src_x = out_x * (float)sample_cols / grid_size;
+            int y0 = (int)src_y;
+            int x0 = (int)src_x;
+            int y1 = min(y0 + 1, sample_rows - 1);
+            int x1 = min(x0 + 1, sample_cols - 1);
+            float fy = src_y - y0;
+            float fx = src_x - x0;
+            int out_idx_base = idx * batch_stride * 3;
+
+            if (sample_channels >= 3) {
+                for (int c = 0; c < 3; c++) {
+                    int channel_offset = c * sample_rows * sample_cols;
+                    int sample_base = src_idx * sample_size + channel_offset;
+                    float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                    float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                    float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                    float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                    batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+                }
+            } else {
+                int sample_base = src_idx * sample_size;
+                float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
+                batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
+                batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
+                batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
             }
-        } else {
-            int img_idx = src_idx * sample_size;
-            float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
-            float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
-            float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
-            float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
-            float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
-            batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
-            batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
-            batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
         }
     }
 }
@@ -363,7 +402,8 @@ __device__ void load_batch_device(Organism* organism) {
     int sample_rows = dataset->descriptor->sample_rows;
     int sample_cols = dataset->descriptor->sample_cols;
     int sample_channels = dataset->descriptor->channels;
-    unsigned char* all_images = dataset->samples;
+    FeatureEncoding encoding = dataset->descriptor->encoding;
+    unsigned char* all_samples = dataset->samples;
     unsigned char* all_labels = dataset->labels;
 
     float* batch_samples_out = training_mode->batch_samples;
@@ -382,53 +422,91 @@ __device__ void load_batch_device(Organism* organism) {
 
     cg::this_grid().sync();  // SYNC 2: after label loading
 
-    // Phase 2: Load and interpolate images
+    // Phase 2: Load samples - dispatch based on encoding
     if (has_work) {
-        int total_pixels = batch_size * batch_stride;
-        for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
-            int idx = work_idx / batch_stride;
-            int pixel_idx = work_idx % batch_stride;
-            int src_idx = (offset + idx) % dataset_size;
-            int out_y = pixel_idx / grid_size;
-            int out_x = pixel_idx % grid_size;
+        if (encoding == ENCODING_TEMPORAL_1D) {
+            // Timeseries: resample 1D temporal data to 2D grid
+            int timesteps = sample_rows;
+            int features = sample_cols;
+            int total_cells = batch_size * batch_stride;
 
-            float src_y = out_y * (float)sample_rows / grid_size;
-            float src_x = out_x * (float)sample_cols / grid_size;
-            int y0 = (int)src_y;
-            int x0 = (int)src_x;
-            int y1 = min(y0 + 1, sample_rows - 1);
-            int x1 = min(x0 + 1, sample_cols - 1);
-            float fy = src_y - y0;
-            float fx = src_x - x0;
-            int out_idx_base = idx * batch_stride * 3;
+            for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x) {
+                int idx = work_idx / batch_stride;
+                int cell_idx = work_idx % batch_stride;
+                int src_idx = (offset + idx) % dataset_size;
+                int cell_y = cell_idx / grid_size;
+                int cell_x = cell_idx % grid_size;
 
-            if (sample_channels >= 3) {
-                for (int c = 0; c < 3; c++) {
-                    int channel_offset = c * sample_rows * sample_cols;
-                    int img_idx = src_idx * sample_size + channel_offset;
-                    float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
-                    float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
-                    float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
-                    float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
-                    batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+                float src_t = cell_y * (float)timesteps / grid_size;
+                float src_f = cell_x * (float)features / grid_size;
+                int t0 = (int)src_t;
+                int f0 = (int)src_f;
+                int t1 = min(t0 + 1, timesteps - 1);
+                int f1 = min(f0 + 1, features - 1);
+                float ft = src_t - t0;
+                float ff = src_f - f0;
+
+                int out_base = idx * batch_stride * 3;
+                int sample_base = src_idx * sample_size;
+
+                float v00 = all_samples[sample_base + t0 * features + f0] / 255.0f;
+                float v01 = all_samples[sample_base + t0 * features + f1] / 255.0f;
+                float v10 = all_samples[sample_base + t1 * features + f0] / 255.0f;
+                float v11 = all_samples[sample_base + t1 * features + f1] / 255.0f;
+                float val = Interpolation::bilinear(v00, v01, v10, v11, ff, ft);
+
+                batch_samples_out[out_base + 0 * batch_stride + cell_idx] = val;
+                batch_samples_out[out_base + 1 * batch_stride + cell_idx] = ft;
+                batch_samples_out[out_base + 2 * batch_stride + cell_idx] = ff;
+            }
+        } else {
+            // ENCODING_SPATIAL_2D or ENCODING_SPECTRAL_AUDIO: 2D bilinear interpolation
+            int total_pixels = batch_size * batch_stride;
+            for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
+                int idx = work_idx / batch_stride;
+                int pixel_idx = work_idx % batch_stride;
+                int src_idx = (offset + idx) % dataset_size;
+                int out_y = pixel_idx / grid_size;
+                int out_x = pixel_idx % grid_size;
+
+                float src_y = out_y * (float)sample_rows / grid_size;
+                float src_x = out_x * (float)sample_cols / grid_size;
+                int y0 = (int)src_y;
+                int x0 = (int)src_x;
+                int y1 = min(y0 + 1, sample_rows - 1);
+                int x1 = min(x0 + 1, sample_cols - 1);
+                float fy = src_y - y0;
+                float fx = src_x - x0;
+                int out_idx_base = idx * batch_stride * 3;
+
+                if (sample_channels >= 3) {
+                    for (int c = 0; c < 3; c++) {
+                        int channel_offset = c * sample_rows * sample_cols;
+                        int sample_base = src_idx * sample_size + channel_offset;
+                        float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                        float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                        float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                        float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                        batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+                    }
+                } else {
+                    int sample_base = src_idx * sample_size;
+                    float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                    float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                    float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                    float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                    float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
+                    batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
+                    batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
+                    batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
                 }
-            } else {
-                int img_idx = src_idx * sample_size;
-                float tl = all_images[img_idx + y0 * sample_cols + x0] / 255.0f;
-                float tr = all_images[img_idx + y0 * sample_cols + x1] / 255.0f;
-                float bl = all_images[img_idx + y1 * sample_cols + x0] / 255.0f;
-                float br = all_images[img_idx + y1 * sample_cols + x1] / 255.0f;
-                float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
-                batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
-                batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
-                batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
             }
         }
     }
 
-    cg::this_grid().sync();  // SYNC 3: after image loading
+    cg::this_grid().sync();  // SYNC 3: after sample loading
 
-    // Phase 3: Initialize CA state from previous concentration + inject images
+    // Phase 3: Initialize CA state from previous concentration + inject samples
     float* ca_out;
     float* prev_concentration;
     float* batch_samples = training_mode->batch_samples;
@@ -438,25 +516,77 @@ __device__ void load_batch_device(Organism* organism) {
         prev_concentration = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
     }
 
-    constexpr int IMG_CHANNEL_START = 11;
-    constexpr int IMG_CHANNEL_COUNT = 3;
+    // Field pointers for generation 0 bootstrap
+    ChemicalField* chem = organism->chemical_field;
+    const float* chem_concentration = chem->concentration;
+    const float* chem_gradient_x = chem->gradient_x;
+    const float* chem_gradient_y = chem->gradient_y;
+    const float* chem_laplacian = chem->laplacian;
+    const float* chem_sources = chem->sources;
+    const float* chem_decay_factors = chem->decay_factors;
+    int chem_channels = chem->channels;
+    const float* resource_density = organism->resource_density;
+    const float* fitness_landscape_field = organism->fitness_landscape;
+    const float* resource_gradient_x = organism->resource_gradient_x;
+    const float* resource_gradient_y = organism->resource_gradient_y;
+    const float* attractor_field = organism->attractor_field;
+
+    // Per-entry behavioral_field from pool
+    int behavioral_dim = organism->behavioral_dim_hw + organism->behavioral_dim_task + organism->behavioral_dim_gen;
+    int behavioral_buffer_size = has_work ? (grid_size * grid_size * behavioral_dim) : 0;
+    const float* entry_behavioral_field = has_work ?
+        (organism->behavioral_field_pool + entry_idx * behavioral_buffer_size) : nullptr;
+
+    constexpr int SAMPLE_CHANNEL_START = 11;
+    constexpr int SAMPLE_CHANNEL_COUNT = 3;
 
     // Loop with sync - all blocks iterate same count, work guarded inside
     for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
         if (has_work) {
             for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
                 int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
-                int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
 
-                for (int c = 0; c < channels_out; c++) {
-                    ca_out[base_idx + c] = prev_concentration[prev_idx + c];
+                if (generation == 0) {
+                    // Bootstrap: initialize from fields, not prev_concentration
+                    // Aggregate multi-channel chemical field into CA channels 0-4
+                    float conc_sum = 0.0f, gx_sum = 0.0f, gy_sum = 0.0f, lap_sum = 0.0f, src_sum = 0.0f;
+                    for (int cc = 0; cc < chem_channels; cc++) {
+                        int field_idx = cc * batch_stride + spatial_idx;
+                        conc_sum += chem_concentration[field_idx];
+                        gx_sum += chem_gradient_x[field_idx];
+                        gy_sum += chem_gradient_y[field_idx];
+                        lap_sum += chem_laplacian[field_idx];
+                        src_sum += chem_sources[field_idx];
+                    }
+                    float inv_chem_channels = 1.0f / chem_channels;
+                    ca_out[base_idx + 0] = conc_sum * inv_chem_channels;
+                    if (channels_out > 1) ca_out[base_idx + 1] = gx_sum * inv_chem_channels;
+                    if (channels_out > 2) ca_out[base_idx + 2] = gy_sum * inv_chem_channels;
+                    if (channels_out > 3) ca_out[base_idx + 3] = lap_sum * inv_chem_channels;
+                    if (channels_out > 4) ca_out[base_idx + 4] = src_sum * inv_chem_channels;
+                    if (channels_out > 5) ca_out[base_idx + 5] = chem_decay_factors[spatial_idx];
+                    if (channels_out > 6) ca_out[base_idx + 6] = resource_density[spatial_idx];
+                    if (channels_out > 7) ca_out[base_idx + 7] = fitness_landscape_field[spatial_idx];
+                    if (channels_out > 8) ca_out[base_idx + 8] = resource_gradient_x[spatial_idx];
+                    if (channels_out > 9) ca_out[base_idx + 9] = resource_gradient_y[spatial_idx];
+                    if (channels_out > 10) ca_out[base_idx + 10] = entry_behavioral_field[spatial_idx];
+                    // Channels 11-13 set below from batch_samples
+                    if (channels_out > 14) ca_out[base_idx + 14] = conc_sum * inv_chem_channels;  // Bootstrap recurrence
+                    if (channels_out > 15) ca_out[base_idx + 15] = attractor_field ? attractor_field[spatial_idx] : conc_sum * inv_chem_channels;
+                } else {
+                    // Normal: copy from prev_concentration
+                    int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
+                    for (int c = 0; c < channels_out; c++) {
+                        ca_out[base_idx + c] = prev_concentration[prev_idx + c];
+                    }
                 }
 
-                if (channels_out > IMG_CHANNEL_START + IMG_CHANNEL_COUNT - 1) {
-                    int img_base = batch_idx * batch_stride * 3;
-                    ca_out[base_idx + 11] = batch_samples[img_base + 0 * batch_stride + spatial_idx];
-                    ca_out[base_idx + 12] = batch_samples[img_base + 1 * batch_stride + spatial_idx];
-                    ca_out[base_idx + 13] = batch_samples[img_base + 2 * batch_stride + spatial_idx];
+                // Always inject samples into channels 11-13
+                if (channels_out > SAMPLE_CHANNEL_START + SAMPLE_CHANNEL_COUNT - 1) {
+                    int sample_base = batch_idx * batch_stride * 3;
+                    ca_out[base_idx + 11] = batch_samples[sample_base + 0 * batch_stride + spatial_idx];
+                    ca_out[base_idx + 12] = batch_samples[sample_base + 1 * batch_stride + spatial_idx];
+                    ca_out[base_idx + 13] = batch_samples[sample_base + 2 * batch_stride + spatial_idx];
                 }
             }
         }
@@ -1611,7 +1741,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                             int x = entry_offset_x + tile_x * tile_size + dx;
                             if (y < grid_size && x < grid_size) {
                                 int pos = y * grid_size + x;
-                                organism->chemical_field->concentration[pos] = sample_accuracy;
+                                int cells = grid_size * grid_size;
+                                int chem_ch = organism->chemical_field->channels;
+                                for (int cc = 0; cc < chem_ch; cc++) {
+                                    organism->chemical_field->concentration[cc * cells + pos] = sample_accuracy;
+                                }
                             }
                         }
                     }
@@ -2679,15 +2813,17 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         int channel_idx = idx % arch.channels;
 
                         float d_input_accum = 0.0f;
+                        int max_perc_weights = arch.num_heads * weights_per_head;
                         for (int h = 0; h < arch.num_heads; h++) {
-                            int head_start = param_map->perception_start[h];
-                            int head_max = head_start + weights_per_head;
+                            // perception_weights is stored as [num_heads][channels][head_dim]
+                            // Index for head h: h * channels * head_dim + channel * head_dim + dim
+                            int head_weight_start = h * weights_per_head;
                             for (int hd = 0; hd < arch.head_dim; hd++) {
                                 int local_idx = channel_idx * arch.head_dim + hd;
-                                int W_idx = head_start + local_idx;
+                                int W_idx = head_weight_start + local_idx;
                                 int dprerelu_idx = h * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd;
                                 PROVENANCE_FATAL_IF(local_idx < 0 || local_idx >= weights_per_head, "BWD input: local_idx OOB");
-                                PROVENANCE_FATAL_IF(W_idx < head_start || W_idx >= head_max, "BWD input: W_idx OOB");
+                                PROVENANCE_FATAL_IF(W_idx < 0 || W_idx >= max_perc_weights, "BWD input: W_idx OOB");
                                 PROVENANCE_FATAL_IF(dprerelu_idx < 0 || dprerelu_idx >= max_dpregelu, "BWD input: dprerelu_idx OOB");
                                 float W_val = __half2float(ca_state->perception_weights[W_idx]);
                                 PROVENANCE_FATAL_IF(!isfinite(W_val), "BWD input: W_val NaN/Inf");
@@ -2824,7 +2960,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 float ctx_metabolic = entry->fitness.value;
                 float ctx_stress = entry->hunger.value;
-                float ctx_morphogen = organism->chemical_field->cached_mean;
+                float ctx_morphogen = 0.0f;
+                for (int c = 0; c < organism->chemical_field->channels; c++) {
+                    ctx_morphogen += organism->chemical_field->cached_mean[c];
+                }
+                ctx_morphogen /= organism->chemical_field->channels;
                 float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
                 float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
                 float ctx_learning = training_mode->learning_rate;
@@ -3247,15 +3387,19 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     if (training_mode->use_gradients) {
         {
             int grid_size = arch.grid_size;
-            int channels = arch.channels;
+            int ca_channels = arch.channels;
             int total_cells = grid_size * grid_size;
+            int chem_channels = organism->chemical_field->channels;
             float* ca_concentration = entry->ca_state->ca_concentration;
             float* chemical_concentration = organism->chemical_field->concentration;
 
             for (int cell_idx = tid; cell_idx < total_cells; cell_idx += blockDim.x) {
-                float val = ca_concentration[cell_idx * channels + 0];
-                if (isfinite(val)) {
-                    atomicAdd(&chemical_concentration[cell_idx], val);
+                // Map CA channels 0..chem_channels-1 to chemical field channels
+                for (int c = 0; c < chem_channels && c < ca_channels; c++) {
+                    float val = ca_concentration[cell_idx * ca_channels + c];
+                    if (isfinite(val)) {
+                        atomicAdd(&chemical_concentration[c * total_cells + cell_idx], val);
+                    }
                 }
             }
         }
@@ -3278,14 +3422,14 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     float* behavioral_workspace_genomes = organism->buffers->behavioral_workspace_genomes_buffer;
 
 
-    if (entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
+    if (has_work && entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
         if (tid == 0) {
             *organism->buffers->behavioral_reconstruction_error = 0.0f;
         }
     }
     cg::this_grid().sync();
 
-    if (entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
+    if (has_work && entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
         int hw_dim = BEHAVIORAL_DIM_HW;
         int task_dim = BEHAVIORAL_DIM_TASK;
         int gen_dim = BEHAVIORAL_DIM_GEN;
@@ -3298,7 +3442,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int num_agents = POOL_CAPACITY_MAX;
             float* features_buffer = organism->buffers->behavioral_features_buffer;
             float* chemical_concentration = organism->chemical_field->concentration;
+            int chem_channels = organism->chemical_field->channels;
             int grid_size = arch.grid_size;
+            int cells = grid_size * grid_size;
 
             float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
             float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
@@ -3328,7 +3474,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                                              agent->velocity[1] * agent->velocity[1]);
                 int cx = (int)(agent->position[0] * grid_size) % grid_size;
                 int cy = (int)(agent->position[1] * grid_size) % grid_size;
-                float context_morphogen = chemical_concentration[cy * grid_size + cx];
+                int spatial_idx = cy * grid_size + cx;
+                float context_morphogen = 0.0f;
+                for (int cc = 0; cc < chem_channels; cc++) {
+                    context_morphogen += chemical_concentration[cc * cells + spatial_idx];
+                }
+                context_morphogen /= chem_channels;
 
                 int base_freq_slot = GenomeParamTable::fourier_base_freq;
                 float fourier_base_freq = genome_to_param(primary_genome, entry->gradients, base_freq_slot,

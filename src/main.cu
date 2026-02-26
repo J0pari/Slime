@@ -268,10 +268,10 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.chemical_field, sizeof(ChemicalField), "chemical_field");
     CUDA_ALLOC_CHECK(buffers_host.chemical_field_history, sizeof(TemporalTube), "chemical_field_history");
     CUDA_ALLOC_CHECK(buffers_host.chemical_field_history_entries, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "chemical_field_history_entries");
-    CUDA_ALLOC_CHECK(buffers_host.history_data_buffer, sizeof(float) * CA_FIELD_SIZE * MAX_HISTORY_LENGTH, "history_data_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.history_data_buffer, sizeof(float) * CA_FIELD_SIZE * CHEM_CHANNELS * MAX_HISTORY_LENGTH, "history_data_buffer");
     CUDA_ALLOC_CHECK(buffers_host.all_ca_weights, sizeof(half) * POOL_CAPACITY_MAX * CA_WEIGHTS_PER_ENTRY_STRIDE, "all_ca_weights");
     CUDA_ALLOC_CHECK(buffers_host.all_ca_state, sizeof(float) * POOL_CAPACITY_MAX * CA_STATE_STRIDE, "all_ca_state");
-    CUDA_ALLOC_CHECK(buffers_host.all_chem_fields, sizeof(float) * CHEM_FIELD_COUNT * CA_FIELD_SIZE, "all_chem_fields");
+    CUDA_ALLOC_CHECK(buffers_host.all_chem_fields, sizeof(float) * CHEM_BUFFER_SIZE * CA_FIELD_SIZE, "all_chem_fields");
     CUDA_ALLOC_CHECK(buffers_host.all_rd_fields, sizeof(float) * RD_FIELD_COUNT * CA_FIELD_SIZE, "all_rd_fields");
     CUDA_ALLOC_CHECK(buffers_host.shared_workspace, sizeof(float) * POOL_CAPACITY_MAX * POOL_CAPACITY_MAX, "shared_workspace");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_states, sizeof(LocalOrganismState<BLOCK_SIZE>) * ((POOL_CAPACITY_MAX + BLOCK_SIZE - 1) / BLOCK_SIZE), "lifecycle_states");
@@ -371,7 +371,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.pool_task_accuracies, sizeof(float) * POOL_CAPACITY_MAX, "pool_task_accuracies");
     CUDA_ALLOC_CHECK(buffers_host.organism, sizeof(Organism), "organism");
     CUDA_ALLOC_CHECK(buffers_host.reduction_workspace, sizeof(float) * ((CA_FIELD_SIZE * CHANNELS + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_workspace");
-    CUDA_ALLOC_CHECK(buffers_host.reduction_partial_sums, sizeof(float) * ((CA_FIELD_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE), "reduction_partial_sums");
+    CUDA_ALLOC_CHECK(buffers_host.reduction_partial_sums, sizeof(float) * ((CA_FIELD_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE) * CHEM_CHANNELS, "reduction_partial_sums");
     CUDA_ALLOC_CHECK(buffers_host.correlation_matrix, sizeof(float) * GENOME_SIZE * GENOME_SIZE, "correlation_matrix");
     CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_counter, sizeof(int), "phase_barrier_counter");

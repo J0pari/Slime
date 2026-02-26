@@ -629,24 +629,30 @@ __device__ void populate_audit_buffer(
     DEVICE_FATAL_IF(chemical_field->sources == nullptr, "populate_audit_buffer: chemical_field sources is null");
     DEVICE_FATAL_IF(chemical_field->decay_factors == nullptr, "populate_audit_buffer: chemical_field decay_factors is null");
     int total_cells = grid_size * grid_size;
+    int chem_channels = chemical_field->channels;
     float conc_sum = 0.0f, conc_max = 0.0f;
     float grad_mag_sum = 0.0f;
     float source_sum = 0.0f;
     float decay_sum = 0.0f;
     for (int i = 0; i < total_cells; i++) {
-        float c = chemical_field->concentration[i];
-        conc_sum += c;
-        if (c > conc_max) conc_max = c;
-        float gx = chemical_field->gradient_x[i];
-        float gy = chemical_field->gradient_y[i];
-        grad_mag_sum += sqrtf(gx * gx + gy * gy);
-        source_sum += chemical_field->sources[i];
+        // Aggregate across all chemical channels
+        for (int c = 0; c < chem_channels; c++) {
+            int field_idx = c * total_cells + i;
+            float conc = chemical_field->concentration[field_idx];
+            conc_sum += conc;
+            if (conc > conc_max) conc_max = conc;
+            float gx = chemical_field->gradient_x[field_idx];
+            float gy = chemical_field->gradient_y[field_idx];
+            grad_mag_sum += sqrtf(gx * gx + gy * gy);
+            source_sum += chemical_field->sources[field_idx];
+        }
         decay_sum += chemical_field->decay_factors[i];
     }
-    audit->chemical_concentration_mean = conc_sum / total_cells;
+    int total_field_elements = total_cells * chem_channels;
+    audit->chemical_concentration_mean = conc_sum / total_field_elements;
     audit->chemical_concentration_max = conc_max;
-    audit->chemical_gradient_magnitude_mean = grad_mag_sum / total_cells;
-    audit->chemical_source_activity = source_sum / total_cells;
+    audit->chemical_gradient_magnitude_mean = grad_mag_sum / total_field_elements;
+    audit->chemical_source_activity = source_sum / total_field_elements;
     audit->chemical_decay_rate_mean = decay_sum / total_cells;
 
     DEVICE_FATAL_IF(ca_state == nullptr, "populate_audit_buffer: ca_state is null");

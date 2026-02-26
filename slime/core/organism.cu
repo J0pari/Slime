@@ -121,14 +121,16 @@ struct BehavioralInitSlots {
 };
 
 struct ChemicalField {
-    float* concentration;
-    float* gradient_x;
-    float* gradient_y;
-    float* laplacian;
-    float* sources;
-    float* decay_factors;
+    static constexpr int NUM_CHANNELS = 3;  // Match sample channels
+    int channels;           // Runtime channel count
+    float* concentration;   // [cells * channels] - multi-channel concentration
+    float* gradient_x;      // [cells * channels] - per-channel x gradient
+    float* gradient_y;      // [cells * channels] - per-channel y gradient
+    float* laplacian;       // [cells * channels] - per-channel laplacian
+    float* sources;         // [cells * channels] - per-channel sources
+    float* decay_factors;   // [cells] - shared decay (same for all channels)
     TemporalTube* history;
-    float cached_mean;
+    float cached_mean[NUM_CHANNELS];  // Per-channel mean
 };
 
 struct BehavioralState {

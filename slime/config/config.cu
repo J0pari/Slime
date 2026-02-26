@@ -68,15 +68,23 @@ enum SpawnWorkspaceSlot {
     SPAWN_WS_COUNT
 };
 
+constexpr int CHEM_CHANNELS = 3;  // Multi-channel chemical field (matches sample channels)
+
+// Field slots - multi-channel fields use CHEM_CHANNELS * CA_FIELD_SIZE
+// Single-channel fields use CA_FIELD_SIZE
 enum ChemFieldSlot {
-    CHEM_CONCENTRATION = 0,
-    CHEM_GRADIENT_X,
-    CHEM_GRADIENT_Y,
-    CHEM_LAPLACIAN,
-    CHEM_SOURCES,
-    CHEM_DECAY_FACTORS,
+    CHEM_CONCENTRATION = 0,     // Multi-channel: CHEM_CHANNELS * CA_FIELD_SIZE
+    CHEM_GRADIENT_X,            // Multi-channel: CHEM_CHANNELS * CA_FIELD_SIZE
+    CHEM_GRADIENT_Y,            // Multi-channel: CHEM_CHANNELS * CA_FIELD_SIZE
+    CHEM_LAPLACIAN,             // Multi-channel: CHEM_CHANNELS * CA_FIELD_SIZE
+    CHEM_SOURCES,               // Multi-channel: CHEM_CHANNELS * CA_FIELD_SIZE
+    CHEM_DECAY_FACTORS,         // Single-channel: CA_FIELD_SIZE (shared decay)
     CHEM_FIELD_COUNT
 };
+
+// Total size of all chem fields buffer
+// 5 multi-channel fields + 1 single-channel field
+constexpr int CHEM_BUFFER_SIZE = 5 * CHEM_CHANNELS + 1;  // Multiplier for CA_FIELD_SIZE
 
 enum RDFieldSlot {
     RD_RESOURCE_DENSITY = 0,
