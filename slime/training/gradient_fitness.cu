@@ -302,7 +302,17 @@ __device__ void compute_fitness_from_diresa_device(Organism* organism) {
     int entry_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (entry_idx < pool->capacity && pool->alive_flags[entry_idx]) {
         PoolEntry* entry = &pool->entries[entry_idx];
+
+        // Skip entries whose metrics haven't been computed yet (e.g. freshly spawned)
+        if (entry->task_accuracy.state != ComputeState::COMPUTED ||
+            entry->hardware_efficiency.state != ComputeState::COMPUTED ||
+            entry->effective_rank.state != ComputeState::COMPUTED ||
+            entry->generalization_gap.state != ComputeState::COMPUTED) {
+            return;
+        }
+
         compute_fitness(entry, generation);
+        pool->fitness_values[entry_idx] = entry->fitness.value;
     }
 }
 

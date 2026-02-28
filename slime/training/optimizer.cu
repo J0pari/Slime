@@ -7,9 +7,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-__device__ void adam_update_perception_device(Organism* organism) {
+__device__ void adam_update_perception_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     MultiHeadCAState* ca_state = &organism->ca_state_pool[entry_idx];
     PoolEntry* entry = &organism->pool->entries[entry_idx];
@@ -54,9 +53,8 @@ __device__ void adam_update_perception_device(Organism* organism) {
     }
 }
 
-__device__ void adam_update_interaction_device(Organism* organism) {
+__device__ void adam_update_interaction_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     MultiHeadCAState* ca_state = &organism->ca_state_pool[entry_idx];
     PoolEntry* entry = &organism->pool->entries[entry_idx];
@@ -104,9 +102,8 @@ __device__ void adam_update_interaction_device(Organism* organism) {
     }
 }
 
-__device__ void adam_update_value_device(Organism* organism) {
+__device__ void adam_update_value_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     MultiHeadCAState* ca_state = &organism->ca_state_pool[entry_idx];
     PoolEntry* entry = &organism->pool->entries[entry_idx];
@@ -155,9 +152,8 @@ __device__ void adam_update_value_device(Organism* organism) {
     }
 }
 
-__device__ void adam_update_pooling_device(Organism* organism) {
+__device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     ClassificationHead* classifier = &organism->classifier[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;
@@ -195,9 +191,8 @@ __device__ void adam_update_pooling_device(Organism* organism) {
     }
 }
 
-__device__ void adam_update_fc_weights_device(Organism* organism) {
+__device__ void adam_update_fc_weights_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     ClassificationHead* classifier = &organism->classifier[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;
@@ -236,9 +231,8 @@ __device__ void adam_update_fc_weights_device(Organism* organism) {
     }
 }
 
-__device__ void adam_update_fc_bias_device(Organism* organism) {
+__device__ void adam_update_fc_bias_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
-    int entry_idx = blockIdx.x;
 
     ClassificationHead* classifier = &organism->classifier[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;

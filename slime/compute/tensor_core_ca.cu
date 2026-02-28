@@ -188,17 +188,24 @@ __device__ void multi_head_ca_tensor_device(Organism* organism) {
     int num_cells = grid_size * grid_size;
     MultiHeadCAState* ca_state = entry->ca_state;
 
-    if (valid_head && tid == 0) {
+    half* fp16_workspace = ca_state->fp16_workspace;
+
+    if (valid_head) {
         TraceBuffer* trace_buffer = &ca_state->trace;
-        if (trace_buffer->current_idx < trace_buffer->capacity) {
-            int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-            if (trace_idx < trace_buffer->capacity) {
-                record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
+        int trace_idx = -1;
+        if (tid == 0 && trace_buffer->traces != nullptr &&
+            trace_buffer->current_idx < trace_buffer->capacity) {
+            trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+        }
+        if (tid < WARP_SIZE) {
+            trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
+            if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
+                ExecutionTrace* t = &trace_buffer->traces[trace_idx];
+                record_warp_metrics(t, blockIdx.x);
+                record_memory_access(t, (void*)&fp16_workspace[tid], true);
             }
         }
     }
-
-    half* fp16_workspace = ca_state->fp16_workspace;
     float* fp32_workspace = ca_state->fp32_workspace;
     half* perception_weights = ca_state->perception_weights;
     half* interaction_weights = ca_state->interaction_weights;

@@ -444,11 +444,6 @@ constexpr float DIRESA_TEMP_BASE_MAX = 2.0f;
 constexpr float DIRESA_TEMP_SCALE_MIN = 0.1f;
 constexpr float DIRESA_TEMP_SCALE_MAX = 1.0f;
 
-constexpr float VORONOI_CORRELATION_EXPONENT_MIN = 0.5f;
-constexpr float VORONOI_CORRELATION_EXPONENT_MAX = 1.0f;
-constexpr float VORONOI_BASE_RADIUS_MIN = 0.01f;
-constexpr float VORONOI_BASE_RADIUS_MAX = 0.5f;
-
 constexpr float RANK_RENYI_ORDER_MIN = 0.5f;
 constexpr float RANK_RENYI_ORDER_MAX = 2.0f;
 
@@ -463,13 +458,6 @@ constexpr float FITNESS_COHERENCE_EXPONENT_MIN = 0.3f;
 constexpr float FITNESS_COHERENCE_EXPONENT_MAX = 2.0f;
 constexpr float FITNESS_COUPLING_EXPONENT_MIN = -0.5f;
 constexpr float FITNESS_COUPLING_EXPONENT_MAX = 0.5f;
-
-constexpr float FOURIER_SPECTRUM_EXPONENT_MIN = 0.0f;
-constexpr float FOURIER_SPECTRUM_EXPONENT_MAX = 2.0f;
-constexpr float FOURIER_BASE_FREQ_MIN = 0.1f;
-constexpr float FOURIER_BASE_FREQ_MAX = 2.0f;
-constexpr int FOURIER_NUM_OCTAVES_MIN = 2;
-constexpr int FOURIER_NUM_OCTAVES_MAX = 6;
 
 constexpr int COHERENCE_WINDOW_SIZE_MIN = 10;
 constexpr int COHERENCE_WINDOW_SIZE_MAX = 200;
@@ -653,6 +641,9 @@ constexpr float FIELD_BEHAVIORAL_SIGMA = 0.15f;
 constexpr float FIELD_AGENT_SOURCE_SIGMA = 2.5f;
 constexpr float FIELD_MEMORY_DECAY = 0.9f;
 constexpr float FIELD_MEMORY_IMPORTANCE = 0.5f;
+constexpr float FOURIER_BASE_FREQ = 1.0f;
+constexpr int FOURIER_NUM_OCTAVES = 4;
+constexpr float FOURIER_SPECTRUM_EXPONENT = 1.0f;
 
 // Per-entry parameter ranges (genome-derived)
 constexpr float AGENT_SOURCE_STRENGTH_MIN = 0.1f;
@@ -847,8 +838,6 @@ constexpr float CHEMOTAXIS_DT_MIN = 0.01f;
 constexpr float CHEMOTAXIS_DT_MAX = 0.5f;
 constexpr float FLOW_LENIA_DT_MIN = 0.01f;
 constexpr float FLOW_LENIA_DT_MAX = 0.5f;
-constexpr float VORONOI_INIT_DT_MIN = 0.001f;
-constexpr float VORONOI_INIT_DT_MAX = 0.1f;
 constexpr float DEFAULT_DECAY_RATE_MIN = 0.9f;
 constexpr float DEFAULT_DECAY_RATE_MAX = 0.999f;
 constexpr float WARP_CA_GROWTH_RATE_MIN = 0.01f;

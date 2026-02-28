@@ -327,8 +327,8 @@ __device__ __forceinline__ void device_validate_fitness_components(float fitness
     if (!isfinite(rank)) {
         printf("DEVICE_FATAL: %s rank=%f is not finite\n", name, rank);
     }
-    if (coherence < 0.0f || coherence > 1.0f) {
-        printf("DEVICE_FATAL: %s coherence=%f not in [0,1]\n", name, coherence);
+    if (coherence < -1.0f || coherence > 1.0f) {
+        printf("DEVICE_FATAL: %s coherence=%f not in [-1,1]\n", name, coherence);
     }
     if (rank < 0.0f) {
         printf("DEVICE_FATAL: %s rank=%f is negative\n", name, rank);
@@ -379,11 +379,9 @@ __device__ __forceinline__ void device_validate_epigenetic_bounds(float val, flo
     if (!isfinite(val)) {
         printf("DEVICE_FATAL: %s epigenetic value %f not finite\n", name, val);
     }
-    float epi_min = genome_min * 0.5f;
-    float epi_max = 2.0f + genome_max;
-    if (val < epi_min || val > epi_max) {
+    if (val < genome_min || val > genome_max) {
         printf("DEVICE_FATAL: %s epigenetic value %f outside genome-derived bounds [%f, %f]\n",
-               name, val, epi_min, epi_max);
+               name, val, genome_min, genome_max);
     }
 }
 

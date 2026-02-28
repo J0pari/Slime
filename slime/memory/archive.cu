@@ -202,30 +202,53 @@ __device__ void create_elite_device(
 }
 
 
-__device__ void update_voronoi_density_device(Organism* organism) {
-    int entry_idx = blockIdx.x;
-    const float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
-    PoolEntry* primary = &organism->pool->entries[entry_idx];
-    const float* gradients = primary->gradients;
-    InitContext ctx;
-    ctx.derive_from_genome(genome, gradients);
-    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
-    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
-    float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
-    float ctx_performance = organism->telemetry->task_performance.accuracy;
+__device__ void derive_organism_params_device(Organism* organism) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        GPUElite* archive = organism->archive;
+        VoronoiCell* cells = organism->voronoi_cells;
+        int num_elites = organism->archive_size;
+        int num_cells = organism->num_voronoi_cells;
+        int total_dims = archive->hw_dim + archive->task_dim + archive->gen_dim;
 
+        int occupied_cells = 0;
+        float density_sum = 0.0f;
+        for (int i = 0; i < num_cells; i++) {
+            if (cells[i].density > 0) occupied_cells++;
+            density_sum += (float)cells[i].density;
+        }
+        float density_mean = density_sum / fmaxf((float)num_cells, 1.0f);
+
+        float density_var_sum = 0.0f;
+        for (int i = 0; i < num_cells; i++) {
+            float diff = (float)cells[i].density - density_mean;
+            density_var_sum += diff * diff;
+        }
+        float density_std = sqrtf(density_var_sum / fmaxf((float)num_cells, 1.0f));
+        float density_cv = density_std / fmaxf(density_mean, 1e-6f);
+
+        float occupancy = (float)occupied_cells / fmaxf((float)num_cells, 1.0f);
+        float dim_factor = 1.0f / sqrtf((float)total_dims);
+
+        organism->voronoi_correlation_exponent = occupancy * dim_factor * (1.0f + density_cv);
+    }
+}
+
+
+// Compute neighbor density for each voronoi cell
+// Cells are synced from archive - cell i corresponds to elite i
+// best_elite_idx is already set correctly by sync_voronoi_from_archive_device
+__device__ void update_voronoi_density_device(Organism* organism) {
     VoronoiCell* cells = organism->voronoi_cells;
     GPUElite* archive = organism->archive;
     int num_elites = organism->archive_size;
     int num_cells = organism->num_voronoi_cells;
 
-    DEVICE_FATAL_IF(num_cells <= 0, "update_voronoi_density: num_cells must be > 0");
+    // Skip if archive is empty (no cells to update)
+    if (num_cells <= 0) return;
 
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Work for threads within bounds
     VoronoiCell* cell = nullptr;
-    float best_fitness = -1.0f;
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;
     int gen_dim = archive->gen_dim;
@@ -236,8 +259,8 @@ __device__ void update_voronoi_density_device(Organism* organism) {
 
     if (cell_id < num_cells) {
         cell = &cells[cell_id];
+        // Count neighbors within radius (cell's own elite is at distance 0, always counted)
         cell->density = 0;
-        cell->best_elite_idx = -1;
 
         for (int i = 0; i < num_elites; i++) {
             float dist_sq = 0.0f;
@@ -256,43 +279,28 @@ __device__ void update_voronoi_density_device(Organism* organism) {
 
             if (sqrtf(dist_sq) < cell->radius) {
                 cell->density++;
-                if (archive->fitness[i] > best_fitness) {
-                    best_fitness = archive->fitness[i];
-                    cell->best_elite_idx = i;
-                }
             }
         }
+        // best_elite_idx is already set to cell_id by sync - don't reassign
     }
 
     __shared__ float shared_densities[256];
     shared_densities[threadIdx.x] = (cell_id < num_cells && cell != nullptr) ? (float)cell->density : 0.0f;
     cg::this_grid().sync();
 
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 0 && blockIdx.x * blockDim.x < num_cells) {
         float density_mean = 0.0f;
+        int cells_this_block = 0;
         for (int i = 0; i < blockDim.x && (blockIdx.x * blockDim.x + i) < num_cells; i++) {
             density_mean += shared_densities[i];
+            cells_this_block++;
         }
         density_mean /= num_cells;
 
-        float density_variance = 0.0f;
-        for (int i = 0; i < blockDim.x && (blockIdx.x * blockDim.x + i) < num_cells; i++) {
-            float diff = shared_densities[i] - density_mean;
-            density_variance += diff * diff;
-        }
-        density_variance /= num_cells;
-
-        int correlation_exponent_slot = GenomeParamTable::voronoi_correlation_exponent;
-        float correlation_exponent = genome_to_param(
-            genome, gradients, correlation_exponent_slot,
-            ctx.metabolic, ctx.stress, ctx.morphogen,
-            ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-            VORONOI_CORRELATION_EXPONENT_MIN, VORONOI_CORRELATION_EXPONENT_MAX
-        );
-
         DEVICE_FATAL_IF(density_mean <= 0.0f, "update_voronoi_density: density_mean must be > 0");
+        float correlation_exponent = organism->voronoi_correlation_exponent;
 
-        for (int i = 0; i < blockDim.x && (blockIdx.x * blockDim.x + i) < num_cells; i++) {
+        for (int i = 0; i < cells_this_block; i++) {
             int idx = blockIdx.x * blockDim.x + i;
 
             cells[idx].density_fluctuation = fabsf((float)cells[idx].density - (float)cells[idx].density_prev) / density_mean;
@@ -436,42 +444,82 @@ __device__ void adapt_embedding_dim_device(
     }
 }
 
-__device__ void init_voronoi_cells_device(Organism* organism, unsigned int seed) {
+// Sync voronoi cells from archive - each cell corresponds to exactly one elite
+// Cell i's centroid = elite i's behavioral coords, best_elite_idx = i
+// Initial radius = distance to nearest neighbor (derived from actual elite distribution)
+__device__ void sync_voronoi_from_archive_device(Organism* organism) {
     VoronoiCell* cells = organism->voronoi_cells;
-    int num_cells = organism->num_voronoi_cells;
-    int hw_dim = organism->archive->hw_dim;
-    int task_dim = organism->archive->task_dim;
-    int gen_dim = organism->archive->gen_dim;
+    GPUElite* archive = organism->archive;
+    int archive_size = organism->archive_size;
+    int hw_dim = archive->hw_dim;
+    int task_dim = archive->task_dim;
+    int gen_dim = archive->gen_dim;
+
+    // num_voronoi_cells tracks archive_size
+    organism->num_voronoi_cells = archive_size;
 
     int cell_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "init_voronoi: hw_dim invalid");
-    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "init_voronoi: task_dim invalid");
-    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "init_voronoi: gen_dim invalid");
+    DEVICE_FATAL_IF(hw_dim <= 0 || hw_dim > BEHAVIORAL_DIM_HW, "sync_voronoi: hw_dim invalid");
+    DEVICE_FATAL_IF(task_dim <= 0 || task_dim > BEHAVIORAL_DIM_TASK, "sync_voronoi: task_dim invalid");
+    DEVICE_FATAL_IF(gen_dim <= 0 || gen_dim > BEHAVIORAL_DIM_GEN, "sync_voronoi: gen_dim invalid");
 
-    if (cell_id < num_cells) {
-        curandState_t state;
-        curand_init(seed, cell_id, 0, &state);
-
+    if (cell_id < archive_size) {
         VoronoiCell* cell = &cells[cell_id];
 
+        // Set up centroid pointers
+        float* hw_buffer = organism->voronoi_hw_centroids;
+        float* task_buffer = organism->voronoi_task_centroids;
+        float* gen_buffer = organism->voronoi_gen_centroids;
+        cell->hw_centroid = &hw_buffer[cell_id * hw_dim];
+        cell->task_centroid = &task_buffer[cell_id * task_dim];
+        cell->gen_centroid = &gen_buffer[cell_id * gen_dim];
+
+        // Centroid = elite's behavioral coordinates
         for (int d = 0; d < hw_dim; d++) {
-            cell->hw_centroid[d] = validated_curand_normal(&state, "init_voronoi_hw", cell_id * hw_dim + d) * 0.5f;
+            cell->hw_centroid[d] = archive->hw_coords[cell_id * hw_dim + d];
         }
         for (int d = 0; d < task_dim; d++) {
-            cell->task_centroid[d] = validated_curand_normal(&state, "init_voronoi_task", cell_id * task_dim + d) * 0.5f;
+            cell->task_centroid[d] = archive->task_coords[cell_id * task_dim + d];
         }
         for (int d = 0; d < gen_dim; d++) {
-            cell->gen_centroid[d] = validated_curand_normal(&state, "init_voronoi_gen", cell_id * gen_dim + d) * 0.5f;
+            cell->gen_centroid[d] = archive->gen_coords[cell_id * gen_dim + d];
         }
 
-        int total_dims = hw_dim + task_dim + gen_dim;
-        float typical_spacing = powf((float)num_cells, -1.0f / total_dims);
-        cell->radius = typical_spacing * 2.0f;
+        // Initial radius = distance to nearest neighbor elite
+        // This derives radius from actual elite distribution, not static formula
+        float min_dist_sq = FLT_MAX;
+        for (int j = 0; j < archive_size; j++) {
+            if (j == cell_id) continue;
+            float dist_sq = 0.0f;
+            for (int d = 0; d < hw_dim; d++) {
+                float diff = archive->hw_coords[j * hw_dim + d] - archive->hw_coords[cell_id * hw_dim + d];
+                dist_sq += diff * diff;
+            }
+            for (int d = 0; d < task_dim; d++) {
+                float diff = archive->task_coords[j * task_dim + d] - archive->task_coords[cell_id * task_dim + d];
+                dist_sq += diff * diff;
+            }
+            for (int d = 0; d < gen_dim; d++) {
+                float diff = archive->gen_coords[j * gen_dim + d] - archive->gen_coords[cell_id * gen_dim + d];
+                dist_sq += diff * diff;
+            }
+            if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
+            }
+        }
 
-        cell->density = 0;
-        cell->best_elite_idx = -1;
-        cell->quality_threshold = 0.0f;
+        // Radius = nearest neighbor distance (captures local density)
+        // Single elite case uses archive stats instead
+        if (archive_size <= 1) {
+            // No neighbors - use archive coordinate variance as scale
+            cell->radius = 1.0f;
+        } else {
+            cell->radius = sqrtf(min_dist_sq);
+        }
+
+        cell->best_elite_idx = cell_id;
+        cell->quality_threshold = archive->fitness[cell_id];
     }
 }
 

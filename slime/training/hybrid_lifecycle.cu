@@ -131,9 +131,11 @@ __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(Po
 
     size_t fp16_a_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
     size_t fp16_b_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
-    size_t dW_elements = (size_t)num_heads * head_dim * head_dim;
+    // dW stores: value(head_dim*channels) + interaction(head_dim*head_dim) + perception(channels*head_dim)
+    size_t dW_elements = (size_t)num_heads * (head_dim * channels + head_dim * head_dim + channels * head_dim);
     size_t dI_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
-    size_t W_T_elements = (size_t)num_heads * head_dim * head_dim;
+    // W_T stores: value(channels*head_dim) + interaction(head_dim*head_dim)
+    size_t W_T_elements = (size_t)num_heads * (channels * head_dim + head_dim * head_dim);
     size_t im2col_elements = (size_t)channels * cells * CA_KERNEL_CELL_COUNT;
     size_t dpregelu_elements = (size_t)BACKWARD_CHUNK_SAMPLES * num_heads * cells * head_dim;
 
@@ -807,16 +809,24 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         // Trace recording and CA setup - work guarded
         if (has_work) {
             TraceBuffer* trace_buffer = &ca_state->trace;
-            if (tid == 0 && trace_buffer->traces != nullptr) {
-                int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-                if (trace_idx < trace_buffer->capacity) {
-                    record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
+            int trace_idx = -1;
+            if (tid == 0 && trace_buffer->traces != nullptr &&
+                trace_buffer->current_idx < trace_buffer->capacity) {
+                trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+            }
+            if (tid < WARP_SIZE) {
+                trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
+                if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
+                    ExecutionTrace* t = &trace_buffer->traces[trace_idx];
+                    record_warp_metrics(t, blockIdx.x);
+                    record_memory_access(t, (void*)&ca_state->perception_weights[tid], true);
+                    record_shared_memory_access(t, false, false);
                 }
             }
 
-            float* perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
-            float* interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
-            float* pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
+            float* perception_saved = ca_state->perception_saved;
+            float* interaction_saved = ca_state->interaction_saved;
+            float* pre_gelu_saved = ca_state->pre_gelu_saved;
 
             int batch_size = training_mode->batch_size;
             int grid_size = arch.grid_size;
@@ -1994,10 +2004,20 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
             if (has_work) {
                 trace_buffer = &ca_state->trace;
-                if (tid == 0 && trace_buffer->traces != nullptr) {
-                    int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-                    if (trace_idx < trace_buffer->capacity) {
-                        record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
+                {
+                    int trace_idx = -1;
+                    if (tid == 0 && trace_buffer->traces != nullptr &&
+                        trace_buffer->current_idx < trace_buffer->capacity) {
+                        trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+                    }
+                    if (tid < WARP_SIZE) {
+                        trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
+                        if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
+                            ExecutionTrace* t = &trace_buffer->traces[trace_idx];
+                            record_warp_metrics(t, blockIdx.x);
+                            record_memory_access(t, (void*)&ca_state->perception_weights[tid], true);
+                            record_shared_memory_access(t, false, false);
+                        }
                     }
                 }
 
@@ -2047,9 +2067,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 DEVICE_FATAL_IF(param_map->interaction_start == nullptr, "BWD: param_map->interaction_start is null");
                 DEVICE_FATAL_IF(param_map->perception_start == nullptr, "BWD: param_map->perception_start is null");
                 DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "BWD: batch_ca_states_pool is null");
-                perception_saved = ca_state->perception_saved + s_wave_offsets.activations_offset;
-                interaction_saved = ca_state->interaction_saved + s_wave_offsets.activations_offset;
-                pre_gelu_saved = ca_state->pre_gelu_saved + s_wave_offsets.activations_offset;
+                perception_saved = ca_state->perception_saved;
+                interaction_saved = ca_state->interaction_saved;
+                pre_gelu_saved = ca_state->pre_gelu_saved;
 
                 I_head_stride = num_cells * arch.head_dim;
                 I_batch_stride = arch.num_heads * I_head_stride;
@@ -2353,14 +2373,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 ws_dW_perception = ws_dW_interaction + arch.num_heads * ws_dW_interaction_stride;
                 ws_W_T_interaction = ws_W_T + arch.num_heads * ws_W_T_value_stride;
 
-                d_ca_input = organism->batch_ca_input_grads ?
-                    organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset : nullptr;
-                if (d_ca_input != nullptr) {
-                    int max_d_ca = total_samples * arch.channels;
-                    PROVENANCE_FATAL_IF(max_d_ca <= 0, "BWD d_ca_input: max_d_ca overflow");
-                    for (int idx = tid; idx < max_d_ca; idx += blockDim.x) {
-                        d_ca_input[idx] = 0.0f;
-                    }
+                DEVICE_FATAL_IF(organism->batch_ca_input_grads == nullptr,
+                    "batch_ca_input_grads must be allocated for backward pass");
+                d_ca_input = organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset;
+                int max_d_ca = total_samples * arch.channels;
+                PROVENANCE_FATAL_IF(max_d_ca <= 0, "BWD d_ca_input: max_d_ca overflow");
+                for (int idx = tid; idx < max_d_ca; idx += blockDim.x) {
+                    d_ca_input[idx] = 0.0f;
                 }
             }
             cg::this_grid().sync();
@@ -2738,10 +2757,17 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 if (chunk_has_work) {
                     int total_D = arch.num_heads * chunk_samples_aligned * arch.head_dim;
+                    int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
+                    int max_dst_D = arch.num_heads * chunk_ws_a_stride;
                     for (int idx = tid; idx < total_D; idx += blockDim.x) {
-                        float val = ws_dpregelu[idx];
-                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD D fp16: ws_dpregelu NaN/Inf");
-                        ws_fp16_b[idx] = __float2half(val);
+                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
+                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
+                        int src_idx = head_id * chunk_ws_dpregelu_stride + remainder;
+                        int dst_idx = head_id * chunk_ws_a_stride + remainder;
+                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_dpregelu, "BWD D fp16: src_idx OOB");
+                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_D, "BWD D fp16: dst_idx OOB");
+                        float val = ws_dpregelu[src_idx];
+                        ws_fp16_b[dst_idx] = __float2half(val);
                     }
                 }
                 cg::this_grid().sync();
@@ -2804,7 +2830,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 cg::this_grid().sync();
 
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_input_grad_count, 1);
-                if (chunk_has_work && d_ca_input != nullptr) {
+                if (chunk_has_work) {
                     int weights_per_head = arch.channels * arch.head_dim;
                     int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
                     int max_im2col = chunk_samples_aligned * arch.channels;
@@ -2840,9 +2866,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 cg::this_grid().sync();
                 if (tid == 0 && blockIdx.x == 0 && chunk_idx == 0) printf("V:bwd_input_grad\n");
 
-                if (chunk_has_work && d_ca_input != nullptr) {
+                if (chunk_has_work) {
                     if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_scatter_count, 1);
-                    PROVENANCE_FATAL_IF(d_ca_input == nullptr, "d_ca_input null");
                     PROVENANCE_FATAL_IF(ws_im2col == nullptr, "ws_im2col null");
                     PROVENANCE_ASSERT_INITIALIZED_INT(training_mode->batch_size, "batch_size");
                     PROVENANCE_ASSERT_INITIALIZED_INT(num_cells, "num_cells");
@@ -2946,36 +2971,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
             }
             cg::this_grid().sync();
-
-            if (has_work && tid == 0) atomicAdd(&g_v_bwd_diffusion_launch_count, 1);
-            if (has_work && d_ca_input != nullptr && tid == 0) {
-                dim3 diff_grid((arch.grid_size + 15) / 16, (arch.grid_size + 15) / 16);
-                dim3 diff_block(16, 16);
-
-                DEVICE_FATAL_IF(organism->chemical_field == nullptr, "BWD diff: chemical_field is null");
-                DEVICE_FATAL_IF(organism->chemical_field->concentration == nullptr, "BWD diff: concentration is null");
-                DEVICE_FATAL_IF(organism->chemical_field->laplacian == nullptr, "BWD diff: laplacian is null");
-                DEVICE_FATAL_IF(entry->gradients == nullptr, "BWD diff: entry->gradients is null");
-                DEVICE_FATAL_IF(primary_genome == nullptr, "BWD diff: primary_genome is null");
-
-                float ctx_metabolic = entry->fitness.value;
-                float ctx_stress = entry->hunger.value;
-                float ctx_morphogen = 0.0f;
-                for (int c = 0; c < organism->chemical_field->channels; c++) {
-                    ctx_morphogen += organism->chemical_field->cached_mean[c];
-                }
-                ctx_morphogen /= organism->chemical_field->channels;
-                float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
-                float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
-                float ctx_learning = training_mode->learning_rate;
-                float ctx_performance = entry->task_accuracy.value;
-
-                atomicAdd(&g_v_bwd_diff_device_count, 1);
-                diffusion_reaction_backward_device(organism);
-            }
-            cg::this_grid().sync();
-            if (has_work && tid == 0 && blockIdx.x == 0) printf("V:HYB_diffusion_bwd_done\n");
-
         }
 
         // Flow Lenia backward - work guarded, syncs outside
@@ -3217,35 +3212,23 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         }
         if (tid == 0 && blockIdx.x == 0) printf("V:HYB_effrank_done\n");
 
-        if (entry_idx == 0 && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
-            int perception_params = arch.num_heads * arch.channels * arch.head_dim;
-            int interaction_params = arch.num_heads * arch.head_dim * arch.head_dim;
-            int value_params = arch.num_heads * arch.head_dim * arch.channels;
+    int alive_ct = pool->alive_indices_count;
+    int wave_end_compact = min(wave_start + (int)gridDim.x, alive_ct);
+    bool is_last_wave = (wave_end_compact >= alive_ct);
 
-            float ctx_metabolic = entry->fitness.value;
-            float ctx_stress = entry->hunger.value;
-            float ctx_morphogen = local_ca_mean;
-
-            TrainingParams train_params;
-            float adam_beta1 = train_params.get_adam_beta1(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
-            float adam_beta2 = train_params.get_adam_beta2(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
-            float adam_epsilon = train_params.get_adam_epsilon(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
-            float gradient_clip_norm = train_params.get_gradient_clip_norm(primary_genome, entry->gradients, ctx_metabolic, ctx_stress, ctx_morphogen, organism->telemetry->genome_complexity.hash_entropy, organism->telemetry->archive_topology.novelty_gradient, organism->telemetry->diresa_evolution.behavioral_drift_rate, organism->telemetry->task_performance.accuracy);
-
-            adam_update_perception_device(organism);
-            adam_update_interaction_device(organism);
-            adam_update_value_device(organism);
+        // Per-entry Adam updates: each block updates its own entry using actual entry_idx
+        if (has_work && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
+            adam_update_perception_device(organism, entry_idx);
+            adam_update_interaction_device(organism, entry_idx);
+            adam_update_value_device(organism, entry_idx);
+            adam_update_pooling_device(organism, entry_idx);
+            adam_update_fc_weights_device(organism, entry_idx);
+            adam_update_fc_bias_device(organism, entry_idx);
         }
         cg::this_grid().sync();
 
-        if (entry_idx == 0 && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
-            adam_update_pooling_device(organism);
-            adam_update_fc_weights_device(organism);
-            adam_update_fc_bias_device(organism);
-        }
-        cg::this_grid().sync();
-
-        if (entry_idx == 0 && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
+        // Adam timestep: increment once per generation (last wave only)
+        if (has_work && blockIdx.x == 0 && is_last_wave && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
             if (tid == 0) {
                 training_mode->adam_timestep++;
             }
@@ -3258,10 +3241,45 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     float* component_workspace_genomes = organism->buffers->component_workspace_genomes_buffer;
     GPUElite* archive = organism->archive;
     int archive_size_val = organism->archive_size;
-    int alive_ct = pool->alive_indices_count;
 
-    if (entry_idx == 0) {
-        for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
+    // Aggregate per-entry trace buffers into PoolEntry HW counters
+    // Wave-scoped: only aggregate entries processed by this wave
+    // Scan trace data directly — current_idx is unreliable
+    if (has_work && blockIdx.x == 0) {
+        for (int compact = wave_start + tid; compact < wave_end_compact; compact += blockDim.x) {
+            int eid = pool->alive_indices[compact];
+            PoolEntry* ent = &pool->entries[eid];
+            TraceBuffer* tb = &organism->ca_state_pool[eid].trace;
+            ent->cycles_elapsed = 0;
+            ent->inst_executed = 0;
+            ent->inst_issued = 0;
+            ent->tensor_core_cycles = 0;
+            ent->divergent_branches = 0;
+            ent->total_branches = 0;
+            int trace_count = tb->current_idx;
+            if (trace_count == 0 && tb->traces != nullptr && tb->capacity > 0) {
+                // current_idx counter lost — scan for recorded traces
+                for (int i = 0; i < tb->capacity; i++) {
+                    if (tb->traces[i].total_branches == 0) break;
+                    trace_count++;
+                }
+            }
+            for (int i = 0; i < trace_count; i++) {
+                ExecutionTrace* t = &tb->traces[i];
+                ent->cycles_elapsed += t->cycles_elapsed;
+                ent->inst_executed += t->inst_executed;
+                ent->inst_issued += t->inst_issued;
+                ent->tensor_core_cycles += t->tensor_core_cycles;
+                ent->divergent_branches += t->divergent_branches;
+                ent->total_branches += t->total_branches;
+            }
+        }
+    }
+    cg::this_grid().sync();
+
+    // Wave-scoped: compute metrics for entries processed by this wave
+    if (has_work && blockIdx.x == 0) {
+        for (int compact = wave_start + tid; compact < wave_end_compact; compact += blockDim.x) {
             int eid = pool->alive_indices[compact];
             DEVICE_FATAL_IF(!pool->alive_flags[eid], "hybrid_lifecycle: dead entry in alive_indices (metrics loop)");
 
@@ -3276,39 +3294,39 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float gen_gap_val = fabsf(ent->train_accuracy.value - ent->test_accuracy.value);
             measured_value_set_computed(&ent->generalization_gap, gen_gap_val, generation, ent->genome_hash);
 
-            DEVICE_FATAL_IF(ent->cycles_elapsed == 0, "cycles_elapsed is 0 - no execution data");
-            DEVICE_FATAL_IF(ent->total_branches == 0, "total_branches is 0 - no branch data");
-
             float ipc = (float)ent->inst_executed / (float)ent->cycles_elapsed;
             float tensor_util = (float)ent->tensor_core_cycles / (float)ent->cycles_elapsed;
             float branch_efficiency = (float)(ent->total_branches - ent->divergent_branches) / (float)ent->total_branches;
             float hw_eff_val = ipc * tensor_util * branch_efficiency;
             measured_value_set_computed(&ent->hardware_efficiency, hw_eff_val, generation, ent->genome_hash);
 
-            DEVICE_FATAL_IF(generation == 0, "coherence requires previous generation");
-            float prev_acc = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
-            float coherence_val = ent->task_accuracy.value - prev_acc;
-            measured_value_set_computed(&ent->coherence, coherence_val, generation, ent->genome_hash);
-
             DEVICE_VALIDATE_FINITE(ent->task_accuracy.value);
-            DEVICE_VALIDATE_FINITE(ent->coherence.value);
             DEVICE_VALIDATE_FINITE(ent->hardware_efficiency.value);
             DEVICE_VALIDATE_FINITE(ent->generalization_gap.value);
             DEVICE_VALIDATE_PROBABILITY(ent->task_accuracy.value);
             DEVICE_VALIDATE_HW_COUNTER(ent->cycles_elapsed, 1ULL, 0xFFFFFFFFFFFFULL);
             DEVICE_VALIDATE_HW_COUNTER(ent->inst_executed, 1ULL, 0xFFFFFFFFFFFFULL);
             DEVICE_VALIDATE_HW_COUNTER(ent->tensor_core_cycles, 0ULL, ent->cycles_elapsed);
-            device_validate_fitness_components(pool->fitness_values[eid], ent->coherence.value, ent->effective_rank.value, "pool_entry_fitness");
 
             organism->fitness_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->task_accuracy.value;
-            organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence.value;
+
+            if (generation > 0) {
+                float prev_acc = organism->fitness_history[((generation - 1) % 2) * POOL_CAPACITY_MAX + eid];
+                float coherence_val = ent->task_accuracy.value - prev_acc;
+                measured_value_set_computed(&ent->coherence, coherence_val, generation, ent->genome_hash);
+                DEVICE_VALIDATE_FINITE(ent->coherence.value);
+                device_validate_fitness_components(pool->fitness_values[eid], ent->coherence.value, ent->effective_rank.value, "pool_entry_fitness");
+                organism->coherence_history[(generation % 2) * POOL_CAPACITY_MAX + eid] = ent->coherence.value;
+            }
         }
     }
     cg::this_grid().sync();
 
     {
+        // Population-level reduction: must sum ALL entries, so only run on last wave
+        // (all per-entry metrics have been computed by now across all waves)
         float local_acc = 0.0f, local_gap = 0.0f, local_hw = 0.0f, local_fit = 0.0f;
-        if (entry_idx == 0) {
+        if (is_last_wave && has_work && blockIdx.x == 0) {
             for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
                 int eid = pool->alive_indices[compact];
                 local_acc += pool->entries[eid].task_accuracy.value;
@@ -3349,7 +3367,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         }
         float total_fit = sdata[0];
 
-        if (tid == 0 && entry_idx == 0) {
+        if (tid == 0 && is_last_wave && has_work && blockIdx.x == 0) {
             organism->telemetry->population_metrics.total_accuracy = total_acc;
             organism->telemetry->population_metrics.total_generalization_gap = total_gap;
             organism->telemetry->population_metrics.total_hardware_efficiency = total_hw;
@@ -3358,8 +3376,9 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    if (entry_idx == 0 && generation > 0) {
-        for (int compact = tid; compact < alive_ct; compact += blockDim.x) {
+    // Wave-scoped: Baldwin learning for entries in this wave
+    if (has_work && blockIdx.x == 0 && generation > 0) {
+        for (int compact = wave_start + tid; compact < wave_end_compact; compact += blockDim.x) {
             int eid = pool->alive_indices[compact];
             DEVICE_FATAL_IF(!pool->alive_flags[eid], "hybrid_lifecycle: dead entry in alive_indices (baldwin loop)");
 
@@ -3422,14 +3441,15 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     float* behavioral_workspace_genomes = organism->buffers->behavioral_workspace_genomes_buffer;
 
 
-    if (has_work && entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
+    // Behavioral embedding: runs once over all agents, so last wave only
+    if (is_last_wave && has_work && blockIdx.x == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
         if (tid == 0) {
             *organism->buffers->behavioral_reconstruction_error = 0.0f;
         }
     }
     cg::this_grid().sync();
 
-    if (has_work && entry_idx == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
+    if (is_last_wave && has_work && blockIdx.x == 0 && generation % EMBEDDING_UPDATE_FREQ == 0) {
         int hw_dim = BEHAVIORAL_DIM_HW;
         int task_dim = BEHAVIORAL_DIM_TASK;
         int gen_dim = BEHAVIORAL_DIM_GEN;
@@ -3441,10 +3461,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float* reconstruction_error = organism->buffers->behavioral_reconstruction_error;
             int num_agents = POOL_CAPACITY_MAX;
             float* features_buffer = organism->buffers->behavioral_features_buffer;
-            float* chemical_concentration = organism->chemical_field->concentration;
-            int chem_channels = organism->chemical_field->channels;
-            int grid_size = arch.grid_size;
-            int cells = grid_size * grid_size;
 
             float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
             float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
@@ -3465,40 +3481,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 ctx_complexity, ctx_niche, ctx_learning, ctx_performance
             );
 
+            float fourier_base_freq = FOURIER_BASE_FREQ;
+            int fourier_num_octaves = min(FOURIER_NUM_OCTAVES, embed_behavioral_dim - 4);
+            float fourier_spectrum_exponent = FOURIER_SPECTRUM_EXPONENT;
+
             for (int agent_id = tid; agent_id < num_agents; agent_id += blockDim.x) {
                 BehavioralState* agent = &agents[agent_id];
                 float* features = &features_buffer[agent_id * embed_behavioral_dim];
-
-                float context_metabolic = agent->sensitivity;
-                float context_stress = sqrtf(agent->velocity[0] * agent->velocity[0] +
-                                             agent->velocity[1] * agent->velocity[1]);
-                int cx = (int)(agent->position[0] * grid_size) % grid_size;
-                int cy = (int)(agent->position[1] * grid_size) % grid_size;
-                int spatial_idx = cy * grid_size + cx;
-                float context_morphogen = 0.0f;
-                for (int cc = 0; cc < chem_channels; cc++) {
-                    context_morphogen += chemical_concentration[cc * cells + spatial_idx];
-                }
-                context_morphogen /= chem_channels;
-
-                int base_freq_slot = GenomeParamTable::fourier_base_freq;
-                float fourier_base_freq = genome_to_param(primary_genome, entry->gradients, base_freq_slot,
-                    context_metabolic, context_stress, context_morphogen,
-                    ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-                    FOURIER_BASE_FREQ_MIN, FOURIER_BASE_FREQ_MAX);
-
-                int num_octaves_slot = GenomeParamTable::fourier_num_octaves;
-                int fourier_num_octaves_raw = (int)genome_to_param(primary_genome, entry->gradients, num_octaves_slot,
-                    context_metabolic, context_stress, context_morphogen,
-                    ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-                    (float)FOURIER_NUM_OCTAVES_MIN, (float)FOURIER_NUM_OCTAVES_MAX);
-                int fourier_num_octaves = min(fourier_num_octaves_raw, embed_behavioral_dim - 4);
-
-                int spectrum_exp_slot = GenomeParamTable::fourier_spectrum_exponent;
-                float fourier_spectrum_exponent = genome_to_param(primary_genome, entry->gradients, spectrum_exp_slot,
-                    context_metabolic, context_stress, context_morphogen,
-                    ctx_complexity, ctx_niche, ctx_learning, ctx_performance,
-                    FOURIER_SPECTRUM_EXPONENT_MIN, FOURIER_SPECTRUM_EXPONENT_MAX);
 
                 features[0] = sqrtf(agent->velocity[0] * agent->velocity[0] +
                                    agent->velocity[1] * agent->velocity[1]);
@@ -3558,7 +3547,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    if (entry_idx == 0 && organism->batch_ca_states_pool) {
+    // CA state sync: iterates all pool entries, so last wave only
+    if (is_last_wave && has_work && blockIdx.x == 0 && organism->batch_ca_states_pool) {
         int grid_size_sync = arch.grid_size;
         int channels_sync = arch.channels;
         int spatial = grid_size_sync * grid_size_sync;

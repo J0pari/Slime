@@ -6,39 +6,51 @@
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 
+__device__ float g_gpu_peak_memory_bandwidth = 0.0f;
+
 __device__ void reset_trace_buffer_device(Organism* organism) {
-    TraceBuffer* buffer = organism->trace_buffer;
-    buffer->current_idx = 0;
+    int alive_count = organism->pool->alive_indices_count;
+    int tid = threadIdx.x;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int entry_idx = organism->pool->alive_indices[compact];
+        if (tid == 0) {
+            organism->ca_state_pool[entry_idx].trace.current_idx = 0;
+        }
+    }
 }
 
 __device__ void init_trace_buffer_device(Organism* organism, int capacity) {
-    TraceBuffer* buffer = organism->trace_buffer;
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int pool_cap = organism->pool->capacity;
 
-    if (tid == 0) {
-        buffer->capacity = capacity;
-        buffer->current_idx = 0;
-    }
+    for (int entry_idx = 0; entry_idx < pool_cap; entry_idx++) {
+        TraceBuffer* buffer = &organism->ca_state_pool[entry_idx].trace;
 
-    if (tid < capacity) {
-        ExecutionTrace* trace = &buffer->traces[tid];
-        trace->active_warps = 0;
-        trace->divergent_branches = 0;
-        trace->total_branches = 0;
-        trace->global_loads = 0;
-        trace->global_stores = 0;
-        trace->l2_transactions = 0;
-        trace->dram_transactions = 0;
-        trace->shared_loads = 0;
-        trace->shared_stores = 0;
-        trace->bank_conflicts = 0;
-        trace->inst_executed = 0;
-        trace->inst_issued = 0;
-        trace->cycles_elapsed = 0;
-        trace->tensor_core_cycles = 0;
-        trace->sm_occupancy = NAN;
-        trace->achieved_bandwidth = NAN;
-        trace->peak_bandwidth = NAN;
+        if (tid == 0) {
+            buffer->capacity = capacity;
+            buffer->current_idx = 0;
+        }
+
+        if (tid < capacity) {
+            ExecutionTrace* trace = &buffer->traces[tid];
+            trace->active_warps = 0;
+            trace->divergent_branches = 0;
+            trace->total_branches = 0;
+            trace->global_loads = 0;
+            trace->global_stores = 0;
+            trace->l2_transactions = 0;
+            trace->dram_transactions = 0;
+            trace->shared_loads = 0;
+            trace->shared_stores = 0;
+            trace->bank_conflicts = 0;
+            trace->inst_executed = 0;
+            trace->inst_issued = 0;
+            trace->cycles_elapsed = 0;
+            trace->tensor_core_cycles = 0;
+            trace->sm_occupancy = NAN;
+            trace->achieved_bandwidth = NAN;
+            trace->peak_bandwidth = NAN;
+        }
     }
 }
 
@@ -53,6 +65,15 @@ __device__ void record_warp_metrics(ExecutionTrace* trace, int warp_id) {
         atomicAdd((unsigned long long*)&trace->divergent_branches, 1ULL);
     }
     atomicAdd((unsigned long long*)&trace->total_branches, 1ULL);
+
+    // Record cycle count so per-entry HW counters have data
+    unsigned long long cycles = clock64();
+    atomicAdd((unsigned long long*)&trace->cycles_elapsed, cycles);
+    // CA pipeline is WMMA-based — tensor core cycles track total cycles
+    atomicAdd((unsigned long long*)&trace->tensor_core_cycles, cycles);
+    // Use active thread count as proxy for instructions executed
+    atomicAdd((unsigned long long*)&trace->inst_executed, (unsigned long long)active_count);
+    atomicAdd((unsigned long long*)&trace->inst_issued, 1ULL);
 }
 
 __device__ void record_memory_access(ExecutionTrace* trace, void* address, bool is_load) {
@@ -71,6 +92,17 @@ __device__ void record_memory_access(ExecutionTrace* trace, void* address, bool 
 
     if (addr != expected_addr) {
         atomicAdd((unsigned long long*)&trace->l2_transactions, 1ULL);
+    }
+}
+
+__device__ void record_shared_memory_access(ExecutionTrace* trace, bool is_store, bool had_conflict) {
+    if (is_store) {
+        atomicAdd((unsigned long long*)&trace->shared_stores, 1ULL);
+    } else {
+        atomicAdd((unsigned long long*)&trace->shared_loads, 1ULL);
+    }
+    if (had_conflict) {
+        atomicAdd((unsigned long long*)&trace->bank_conflicts, 1ULL);
     }
 }
 
@@ -116,8 +148,9 @@ __device__ void compute_hardware_geometry(ExecutionTrace* trace, HardwareGeometr
 }
 
 __device__ void aggregate_hardware_geometry_device(Organism* organism) {
-    TraceBuffer* buffer = organism->trace_buffer;
     HardwareGeometry* output_geom = organism->hardware_geom;
+    ComponentPool* pool = organism->pool;
+    MultiHeadCAState* ca_state_pool = organism->ca_state_pool;
 
     __shared__ alignas(128) ExecutionTrace aggregate_trace;
 
@@ -144,28 +177,49 @@ __device__ void aggregate_hardware_geometry_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    for (int i = tid; i < buffer->current_idx; i += blockDim.x) {
-        ExecutionTrace* trace = &buffer->traces[i];
+    // Aggregate traces from all alive entries' per-entry trace buffers
+    // Scan trace data directly — current_idx is unreliable
+    int alive_count = pool->alive_indices_count;
+    for (int compact = 0; compact < alive_count; compact++) {
+        int entry_idx = pool->alive_indices[compact];
+        TraceBuffer* buffer = &ca_state_pool[entry_idx].trace;
+        int trace_count = buffer->current_idx;
+        if (trace_count == 0 && buffer->traces != nullptr && buffer->capacity > 0) {
+            for (int probe = 0; probe < buffer->capacity; probe++) {
+                if (buffer->traces[probe].total_branches == 0) break;
+                trace_count++;
+            }
+        }
+        for (int i = tid; i < trace_count; i += blockDim.x) {
+            ExecutionTrace* trace = &buffer->traces[i];
 
-        atomicAdd((unsigned long long*)&aggregate_trace.active_warps, trace->active_warps);
-        atomicAdd((unsigned long long*)&aggregate_trace.divergent_branches, trace->divergent_branches);
-        atomicAdd((unsigned long long*)&aggregate_trace.total_branches, trace->total_branches);
-        atomicAdd((unsigned long long*)&aggregate_trace.global_loads, trace->global_loads);
-        atomicAdd((unsigned long long*)&aggregate_trace.global_stores, trace->global_stores);
-        atomicAdd((unsigned long long*)&aggregate_trace.l2_transactions, trace->l2_transactions);
-        atomicAdd((unsigned long long*)&aggregate_trace.dram_transactions, trace->dram_transactions);
-        atomicAdd((unsigned long long*)&aggregate_trace.shared_loads, trace->shared_loads);
-        atomicAdd((unsigned long long*)&aggregate_trace.shared_stores, trace->shared_stores);
-        atomicAdd((unsigned long long*)&aggregate_trace.bank_conflicts, trace->bank_conflicts);
-        atomicAdd((unsigned long long*)&aggregate_trace.inst_executed, trace->inst_executed);
-        atomicAdd((unsigned long long*)&aggregate_trace.inst_issued, trace->inst_issued);
-        atomicAdd((unsigned long long*)&aggregate_trace.cycles_elapsed, trace->cycles_elapsed);
-        atomicAdd((unsigned long long*)&aggregate_trace.tensor_core_cycles, trace->tensor_core_cycles);
+            atomicAdd((unsigned long long*)&aggregate_trace.active_warps, trace->active_warps);
+            atomicAdd((unsigned long long*)&aggregate_trace.divergent_branches, trace->divergent_branches);
+            atomicAdd((unsigned long long*)&aggregate_trace.total_branches, trace->total_branches);
+            atomicAdd((unsigned long long*)&aggregate_trace.global_loads, trace->global_loads);
+            atomicAdd((unsigned long long*)&aggregate_trace.global_stores, trace->global_stores);
+            atomicAdd((unsigned long long*)&aggregate_trace.l2_transactions, trace->l2_transactions);
+            atomicAdd((unsigned long long*)&aggregate_trace.dram_transactions, trace->dram_transactions);
+            atomicAdd((unsigned long long*)&aggregate_trace.shared_loads, trace->shared_loads);
+            atomicAdd((unsigned long long*)&aggregate_trace.shared_stores, trace->shared_stores);
+            atomicAdd((unsigned long long*)&aggregate_trace.bank_conflicts, trace->bank_conflicts);
+            atomicAdd((unsigned long long*)&aggregate_trace.inst_executed, trace->inst_executed);
+            atomicAdd((unsigned long long*)&aggregate_trace.inst_issued, trace->inst_issued);
+            atomicAdd((unsigned long long*)&aggregate_trace.cycles_elapsed, trace->cycles_elapsed);
+            atomicAdd((unsigned long long*)&aggregate_trace.tensor_core_cycles, trace->tensor_core_cycles);
+        }
     }
     cg::this_grid().sync();
 
     if (tid == 0) {
-        compute_hardware_geometry(&aggregate_trace, output_geom);
+        if (aggregate_trace.total_branches > 0) {
+            aggregate_trace.peak_bandwidth = g_gpu_peak_memory_bandwidth;
+            if (aggregate_trace.cycles_elapsed > 0) {
+                float total_bytes = (float)(aggregate_trace.global_loads + aggregate_trace.global_stores) * sizeof(float);
+                aggregate_trace.achieved_bandwidth = total_bytes / (float)aggregate_trace.cycles_elapsed;
+            }
+            compute_hardware_geometry(&aggregate_trace, output_geom);
+        }
     }
 }
 

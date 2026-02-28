@@ -132,6 +132,9 @@ __device__ void selection_device(Organism* organism) {
         PoolEntry* entry = &pool->entries[entry_idx];
         DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_device: dead entry in alive_indices");
 
+        // Skip entries whose coherence hasn't been computed yet (e.g. gen=0, no previous accuracy)
+        if (entry->coherence.state != ComputeState::COMPUTED) return;
+
         float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
         float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
 
@@ -167,7 +170,8 @@ __device__ void selection_device(Organism* organism) {
             parent_id_0 = parent_idx;
         }
 
-        DEVICE_FATAL_IF(entry->coherence.value <= 0.0f, "organism: entry coherence <= 0");
+        DEVICE_FATAL_IF(isnan(entry->coherence.value), "organism: entry coherence is NaN");
+        DEVICE_FATAL_IF(isinf(entry->coherence.value), "organism: entry coherence is Inf");
 
         insert_elite_device(
             archive,

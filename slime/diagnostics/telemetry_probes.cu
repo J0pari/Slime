@@ -498,12 +498,11 @@ __device__ void populate_audit_buffer(
     printf("V:audit_cp4 images_done\n");
 
     if (ca_concentration && pool) {
-        int snap_grid = 64;
         int channels = CHANNELS;
-        for (int y = 0; y < snap_grid && y < grid_size; y++) {
-            for (int x = 0; x < snap_grid && x < grid_size; x++) {
+        for (int y = 0; y < grid_size; y++) {
+            for (int x = 0; x < grid_size; x++) {
                 int cell_idx = y * grid_size + x;
-                int dst_idx = y * snap_grid + x;
+                int dst_idx = y * grid_size + x;  // Contiguous layout matching audit_writer
                 audit->ca_snapshot[dst_idx] = ca_concentration[cell_idx * channels + 0];
             }
         }
@@ -698,19 +697,23 @@ __device__ void run_telemetry_probes(Organism* organism, int generation) {
 
     if (organism->generation % TELEMETRY_DETAILED == 0) {
         genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
-        compute_correlation_matrix_device(organism);
+        if (organism->generation > 0) {
+            compute_correlation_matrix_device(organism);
+        }
         task_performance_probe(organism->pool, &organism->telemetry->task_performance);
     }
 
     if (organism->generation % TELEMETRY_COMPREHENSIVE == 0) {
-        archive_topology_probe(
-            arch, organism->archive_size,
-            organism->voronoi_cells, organism->num_voronoi_cells,
-            &organism->telemetry->archive_topology,
-            &organism->telemetry->last_checkpoint,
-            organism->telemetry->last_occupancy,
-            arch->hw_dim, arch->task_dim, arch->gen_dim
-        );
+        if (organism->archive_size > 0) {
+            archive_topology_probe(
+                arch, organism->archive_size,
+                organism->voronoi_cells, organism->num_voronoi_cells,
+                &organism->telemetry->archive_topology,
+                &organism->telemetry->last_checkpoint,
+                organism->telemetry->last_occupancy,
+                arch->hw_dim, arch->task_dim, arch->gen_dim
+            );
+        }
         int current_spawned = Atomics::load_int(organism->pool->total_spawned);
         int current_culled = Atomics::load_int(organism->pool->total_culled);
         organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;

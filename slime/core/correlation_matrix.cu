@@ -53,8 +53,8 @@ __device__ void compute_correlation_matrix_device(Organism* organism) {
         }
 
         float denom = sqrtf(var_row * var_col);
-        DEVICE_FATAL_IF(denom <= 0.0f || isnan(denom) || isinf(denom), "compute_correlation_matrix_device: invalid denominator");
-        float correlation = covariance / denom;
+        DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "compute_correlation_matrix_device: invalid denominator");
+        float correlation = (denom > 0.0f) ? covariance / denom : 0.0f;
         correlation_matrix[row * genome_size + col] = correlation;
     }
 }

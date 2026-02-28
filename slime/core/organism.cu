@@ -981,6 +981,7 @@ struct Organism {
     int archive_size;
     VoronoiCell* voronoi_cells;
     int num_voronoi_cells;
+    float voronoi_correlation_exponent;
     MultiHeadCAState* ca_state_pool;
     BehavioralState* behavioral_agents;
 
@@ -1030,7 +1031,6 @@ struct Organism {
 
     float* latent_genome_pool;  
 
-    TraceBuffer* trace_buffer;
     HardwareGeometry* hardware_geom;
 
     CAParameterMap* param_map;
@@ -1073,11 +1073,6 @@ struct Organism {
 
     // Reduction workspace
     float* reduction_partial_sums;
-
-    int* memory_compaction_valid_flags;
-    int* memory_compaction_scan;
-    int* memory_compaction_recursive_workspace;
-    MemoryEntry* memory_compaction_buffer;
 
     int* pool_compaction_flags;
     int* pool_compaction_scan;
@@ -1130,8 +1125,6 @@ struct Organism {
     float* coherence_loss_pool;
     float* diversity_loss_pool;
     float* total_loss_pool;
-
-    MemoryUpdateParams* memory_params;
 
     int* inherit_child_indices;
     int* inherit_parent_indices;
@@ -1334,8 +1327,6 @@ struct Organism {
     // Memory update fields
     MemoryUpdateParams* memory_update_params;
     TemporalTube* memory_tubes;
-    int* memory_valid_flags;
-    MemoryEntry* memory_temp_buffer;
 
     // Context fields
     float ctx_metabolic;
@@ -1560,6 +1551,10 @@ struct Organism {
     // Chemical field history
     TemporalTube* chemical_field_history;
     MemoryEntry* chemical_field_history_entries;
+
+    // Memory tubes (behavioral memory)
+    MemoryEntry* memory_tubes_entries;
+    float* memory_tubes_data;
 
     // Large workspace arrays
     half* all_ca_weights;

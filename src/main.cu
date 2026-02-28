@@ -106,6 +106,15 @@ int main() {
     printf("[H9] Device has %d SMs, max %d threads/block, max %d threads/SM\n",
         props.multiProcessorCount, props.maxThreadsPerBlock, props.maxThreadsPerMultiProcessor); fflush(stdout);
 
+    {
+        int mem_clock_khz = 0;
+        cudaDeviceGetAttribute(&mem_clock_khz, cudaDevAttrMemoryClockRate, device);
+        float peak_bw = 2.0f * (float)mem_clock_khz * 1000.0f * ((float)props.memoryBusWidth / 8.0f);
+        cudaMemcpyToSymbol(g_gpu_peak_memory_bandwidth, &peak_bw, sizeof(float));
+        printf("[H9b] Peak memory bandwidth: %.2f GB/s (memClk=%d kHz, busWidth=%d bits)\n",
+               peak_bw / 1e9f, mem_clock_khz, props.memoryBusWidth); fflush(stdout);
+    }
+
     cudaDeviceSetLimit(cudaLimitMallocHeapSize, DEVICE_MALLOC_HEAP_MB * BYTES_PER_MB);
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[H11] heap_limit=%zu MB, %zu MB free\n", DEVICE_MALLOC_HEAP_MB, free_mem / BYTES_PER_MB); fflush(stdout);
@@ -291,17 +300,20 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.behavioral_field_pool, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL, "behavioral_field_pool");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_gradient_pool, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL, "behavioral_gradient_pool");
     CUDA_ALLOC_CHECK(buffers_host.memory_data_pool, sizeof(float) * POOL_CAPACITY_MAX * (BEHAVIORAL_DIM_TOTAL + AGENT_SPATIAL_DIMS), "memory_data_pool");
+    CUDA_ALLOC_CHECK(buffers_host.memory_tubes, sizeof(TemporalTube), "memory_tubes");
+    CUDA_ALLOC_CHECK(buffers_host.memory_tubes_entries, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "memory_tubes_entries");
+    CUDA_ALLOC_CHECK(buffers_host.memory_tubes_data, sizeof(float) * MAX_HISTORY_LENGTH * (BEHAVIORAL_DIM_TOTAL + AGENT_SPATIAL_DIMS), "memory_tubes_data");
+    CUDA_ALLOC_CHECK(buffers_host.memory_update_params, sizeof(MemoryUpdateParams), "memory_update_params");
     CUDA_ALLOC_CHECK(buffers_host.prediction_error_history, sizeof(float) * TELEMETRY_DETAILED, "prediction_error_history");
-    CUDA_ALLOC_CHECK(buffers_host.trace_buffer, sizeof(TraceBuffer), "trace_buffer");
     CUDA_ALLOC_CHECK(buffers_host.trace_array, sizeof(ExecutionTrace) * TRACE_CAPACITY * POOL_CAPACITY_MAX, "trace_array");
     CUDA_ALLOC_CHECK(buffers_host.hardware_geom, sizeof(HardwareGeometry), "hardware_geom");
     CUDA_ALLOC_CHECK(buffers_host.delta_indices_pool, sizeof(uint16_t) * POOL_CAPACITY_MAX * MAX_DELTAS_PER_ENTRY, "delta_indices_pool");
     CUDA_ALLOC_CHECK(buffers_host.delta_values_pool, sizeof(float) * POOL_CAPACITY_MAX * MAX_DELTAS_PER_ENTRY, "delta_values_pool");
     CUDA_ALLOC_CHECK(buffers_host.delta_counts_pool, sizeof(uint16_t) * POOL_CAPACITY_MAX, "delta_counts_pool");
-    CUDA_ALLOC_CHECK(buffers_host.memory_compaction_valid_flags, sizeof(int) * MAX_HISTORY_LENGTH, "memory_compaction_valid_flags");
-    CUDA_ALLOC_CHECK(buffers_host.memory_compaction_scan, sizeof(int) * MAX_HISTORY_LENGTH, "memory_compaction_scan");
-    CUDA_ALLOC_CHECK(buffers_host.memory_compaction_recursive_workspace, sizeof(int) * MAX_HISTORY_LENGTH, "memory_compaction_recursive_workspace");
-    CUDA_ALLOC_CHECK(buffers_host.memory_compaction_buffer, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "memory_compaction_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.compact_valid_flags, sizeof(int) * MAX_HISTORY_LENGTH, "compact_valid_flags");
+    CUDA_ALLOC_CHECK(buffers_host.scan_output, sizeof(int) * MAX_HISTORY_LENGTH, "scan_output");
+    CUDA_ALLOC_CHECK(buffers_host.scan_block_sums, sizeof(int) * MAX_HISTORY_LENGTH, "scan_block_sums");
+    CUDA_ALLOC_CHECK(buffers_host.compact_temp_buffer, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "compact_temp_buffer");
     CUDA_ALLOC_CHECK(buffers_host.fitness_rank_pool, sizeof(float) * POOL_CAPACITY_MAX, "fitness_rank_pool");
     CUDA_ALLOC_CHECK(buffers_host.fitness_coherence_pool, sizeof(float) * POOL_CAPACITY_MAX, "fitness_coherence_pool");
     CUDA_ALLOC_CHECK(buffers_host.fitness_history, sizeof(float) * 2 * POOL_CAPACITY_MAX, "fitness_history");
@@ -376,19 +388,18 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_counter, sizeof(int), "phase_barrier_counter");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_generation, sizeof(int), "phase_barrier_generation");
-    CUDA_ALLOC_CHECK(buffers_host.memory_params, sizeof(MemoryUpdateParams), "memory_params");
     CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * BLOCK_SIZE * SPAWN_WS_COUNT * GENOME_SIZE, "organism_workspace_genomes");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_features_buffer, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_TOTAL, "behavioral_features_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_embedding_weights, sizeof(float) * BEHAVIORAL_DIM_TOTAL * BEHAVIORAL_DIM_TOTAL, "behavioral_embedding_weights");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_reconstruction_error, sizeof(float), "behavioral_reconstruction_error");
-    CUDA_ALLOC_CHECK(buffers_host.grad_concentration_buffer, sizeof(float) * CA_FIELD_SIZE, "grad_concentration_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.grad_concentration_buffer, sizeof(float) * CA_FIELD_SIZE * CHEM_CHANNELS, "grad_concentration_buffer");
 
     // Gradient buffers also use per-entry accumulated offsets, must size for POOL_CAPACITY_MAX
     CUDA_ALLOC_CHECK(buffers_host.ca_output_grad_buffer, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "ca_output_grad_buffer");
     CUDA_ALLOC_CHECK(buffers_host.dL_dperception_buffer, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * HEAD_DIM, "dL_dperception_buffer");
     CUDA_ALLOC_CHECK(buffers_host.dL_dinteraction_buffer, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * HEAD_DIM, "dL_dinteraction_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.component_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "component_workspace_genomes_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.behavioral_workspace_genomes_buffer, sizeof(float) * GENOME_SIZE * 2, "behavioral_workspace_genomes_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.component_workspace_genomes_buffer, sizeof(float) * POOL_CAPACITY_MAX * GENOME_SIZE * 2, "component_workspace_genomes_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.behavioral_workspace_genomes_buffer, sizeof(float) * POOL_CAPACITY_MAX * GENOME_SIZE * 2, "behavioral_workspace_genomes_buffer");
     CUDA_ALLOC_CHECK(buffers_host.inherit_child_indices, sizeof(int) * POOL_CAPACITY_MAX, "inherit_child_indices");
     CUDA_ALLOC_CHECK(buffers_host.inherit_parent_indices, sizeof(int) * POOL_CAPACITY_MAX, "inherit_parent_indices");
     CUDA_ALLOC_CHECK(buffers_host.num_pending_inherits, sizeof(int), "num_pending_inherits");

@@ -160,14 +160,26 @@ __device__ void multi_head_ca_with_tape_device(Organism* organism) {
     const int cell_x = blockIdx.x * blockDim.x + threadIdx.x;
     const int cell_y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (cell_x < grid_size && cell_y < grid_size) {
+    {
+        int linear_tid = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
         TraceBuffer* trace_buffer = &ca_heads->trace;
-    if (trace_buffer->current_idx < trace_buffer->capacity && threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-        int trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-        if (trace_idx < trace_buffer->capacity) {
-            record_warp_metrics(&trace_buffer->traces[trace_idx], blockIdx.x);
+        int trace_idx = -1;
+        if (linear_tid == 0 && trace_buffer->traces != nullptr &&
+            trace_buffer->current_idx < trace_buffer->capacity) {
+            trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+        }
+        if (linear_tid < WARP_SIZE) {
+            trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
+            if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
+                ExecutionTrace* t = &trace_buffer->traces[trace_idx];
+                record_warp_metrics(t, blockIdx.x);
+                record_memory_access(t, (void*)&ca_state[linear_tid], true);
+                record_shared_memory_access(t, true, false);
+            }
         }
     }
+
+    if (cell_x < grid_size && cell_y < grid_size) {
 
     const int cells_per_grid = grid_size * grid_size;
     const int saved_base = micro_batch_id * arch.num_heads * cells_per_grid * arch.head_dim +

@@ -161,7 +161,7 @@ __device__ void init_organism_device(Organism* organism) {
     cg::this_grid().sync();
 
     // Phase 2: Set pool sub-fields and other dependent pointers (parallel safe now)
-    int num_scalar_fields = 33;
+    int num_scalar_fields = 32;
     for (int field = global_tid; field < num_scalar_fields; field += total_threads) {
         switch (field) {
             case 0: organism->generation = 0; break;
@@ -178,31 +178,38 @@ __device__ void init_organism_device(Organism* organism) {
             case 11: organism->pool_compaction_scan = buffers->pool_compaction_scan; break;
             case 12: organism->pool_compaction_recursive_workspace = buffers->pool_compaction_recursive_workspace; break;
             case 13: organism->pool_compaction_scan_recursive = buffers->pool_compaction_recursive_workspace; break;
-            case 14: organism->memory_params = buffers->memory_params; break;
-            case 15: organism->inherit_child_indices = buffers->inherit_child_indices; break;
-            case 16: organism->inherit_parent_indices = buffers->inherit_parent_indices; break;
-            case 17: organism->num_pending_inherits = buffers->num_pending_inherits; break;
-            case 18: organism->voronoi_cells = buffers->voronoi_cells; break;
-            case 19: organism->behavioral_agents = buffers->behavioral_agents; break;
-            case 20: organism->buffers = buffers; break;
-            case 21: organism->phase_barrier_counter = buffers->phase_barrier_counter; break;
-            case 22: organism->phase_barrier_generation = buffers->phase_barrier_generation; break;
-            case 23: organism->phase_barrier_num_blocks = PROVENANCE_UNINITIALIZED_INT; break;
-            case 24: *((volatile int*)organism->phase_barrier_counter) = 0; break;
-            case 25: *((volatile int*)organism->phase_barrier_generation) = 0; break;
-            case 26: organism->archive_size = 0; break;
-            case 27: organism->num_voronoi_cells = pool_capacity; break;
-            case 28: organism->active_components = POOL_CAPACITY_MIN; break;
-            case 29: organism->delta_indices_buffer = buffers->delta_indices_buffer; break;
-            case 30: organism->delta_values_buffer = buffers->delta_values_buffer; break;
-            case 31: organism->gradients_buffer = buffers->gradients_buffer; break;
-            case 32: organism->output_gradients = buffers->gradients_buffer; break;
+            case 14: organism->inherit_child_indices = buffers->inherit_child_indices; break;
+            case 15: organism->inherit_parent_indices = buffers->inherit_parent_indices; break;
+            case 16: organism->num_pending_inherits = buffers->num_pending_inherits; break;
+            case 17: organism->voronoi_cells = buffers->voronoi_cells; break;
+            case 18: organism->behavioral_agents = buffers->behavioral_agents; break;
+            case 19: organism->buffers = buffers; break;
+            case 20: organism->phase_barrier_counter = buffers->phase_barrier_counter; break;
+            case 21: organism->phase_barrier_generation = buffers->phase_barrier_generation; break;
+            case 22: organism->phase_barrier_num_blocks = PROVENANCE_UNINITIALIZED_INT; break;
+            case 23: *((volatile int*)organism->phase_barrier_counter) = 0; break;
+            case 24: *((volatile int*)organism->phase_barrier_generation) = 0; break;
+            case 25: organism->archive_size = 0; break;
+            case 26: organism->num_voronoi_cells = pool_capacity; break;
+            case 27: organism->active_components = POOL_CAPACITY_MIN; break;
+            case 28: organism->delta_indices_buffer = buffers->delta_indices_buffer; break;
+            case 29: organism->delta_values_buffer = buffers->delta_values_buffer; break;
+            case 30: organism->gradients_buffer = buffers->gradients_buffer; break;
+            case 31: organism->output_gradients = buffers->gradients_buffer; break;
         }
     }
     cg::this_grid().sync();
 
     // init_pool_device uses all threads for parallel work - each thread handles one pool entry
     init_pool_device(organism);
+    cg::this_grid().sync();
+
+    // Initialize wave state - derived from alive_indices_count set by init_pool_device
+    if (global_tid == 0) {
+        int alive_count = organism->pool->alive_indices_count;
+        organism->current_wave_start = 0;  // First wave starts at index 0
+        organism->current_wave_size = min(WAVE_SIZE, alive_count);
+    }
     cg::this_grid().sync();
 }
 
@@ -306,7 +313,10 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         init_voronoi_pointers_device(organism);
 
-        init_voronoi_cells_device(organism, seed + 555555);
+        // Voronoi cells are synced from archive each generation via sync_voronoi_from_archive_device
+        // At init time, archive is empty so num_voronoi_cells = 0
+        organism->num_voronoi_cells = 0;
+
         int default_decay_rate_slot = GenomeParamTable::memory_default_decay_rate;
         float default_decay_rate_norm = genome_slot_to_unit(primary_genome, default_decay_rate_slot);
         float default_decay_rate = DEFAULT_DECAY_RATE_MIN + default_decay_rate_norm * (DEFAULT_DECAY_RATE_MAX - DEFAULT_DECAY_RATE_MIN);
@@ -333,7 +343,8 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->tube_entry_size = field_size;
 
         organism->temporal_tube = organism->chemical_field->history;
-        init_tube_device(organism);
+        init_tube_device(organism->temporal_tube, organism->history_data_buffer,
+                         organism->tube_capacity, organism->tube_entry_size, organism->tube_decay_rate);
 
         int perception_size = arch.num_heads * arch.channels * arch.head_dim;
         int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
@@ -410,6 +421,9 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
             entry->ca_state = entry_ca_state;
         }
+
+        init_trace_buffer_device(organism, TRACE_CAPACITY);
+        cg::this_grid().sync();
 
         init_organism_ca_weights_device(organism);
 
@@ -588,31 +602,33 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         }
         cg::this_grid().sync();
 
-        if (global_tid == 0) printf("V:p2_seed_archive_pre dim=%d,%d,%d classes=%d\n", BEHAVIORAL_DIM_HW, BEHAVIORAL_DIM_TASK, BEHAVIORAL_DIM_GEN, num_classes);
-        seed_archive_from_pool_device(organism, POOL_CAPACITY_MIN, num_classes);
-        cg::this_grid().sync();
-        if (global_tid == 0) {
-            printf("V:p2_sync_seed_archive_post archive_size=%d\n", organism->archive_size);
-            DEVICE_FATAL_IF(organism->archive_size <= 0, "init2 seed_archive failed to seed any entries");
-        }
-        cg::this_grid().sync();
+        if (global_tid == 0) printf("V:p2_archive_init archive_size=%d\n", organism->archive_size);
 
         organism->latent_genome_pool = buffers->latent_genome_pool;
 
         organism->behavioral_field_pool = buffers->behavioral_field_pool;
         organism->behavioral_gradient_pool = buffers->behavioral_gradient_pool;
         organism->memory_data_pool = buffers->memory_data_pool;
+
+        // Wire memory tubes and sub-buffers
+        organism->memory_tubes = buffers->memory_tubes;
+        organism->memory_tubes->entries = buffers->memory_tubes_entries;
+        organism->memory_update_params = buffers->memory_update_params;
+
+        init_tube_device(organism->memory_tubes, buffers->memory_tubes_data,
+                         organism->tube_capacity, BEHAVIORAL_DIM_TOTAL + AGENT_SPATIAL_DIMS,
+                         organism->tube_decay_rate);
+        cg::this_grid().sync();
+
         organism->prediction_error_history = buffers->prediction_error_history;
-        organism->trace_buffer = buffers->trace_buffer;
-        organism->trace_buffer->traces = buffers->trace_array;
         organism->hardware_geom = buffers->hardware_geom;
         organism->delta_indices_pool = buffers->delta_indices_pool;
         organism->delta_values_pool = buffers->delta_values_pool;
         organism->delta_counts_pool = buffers->delta_counts_pool;
-        organism->memory_compaction_valid_flags = buffers->memory_compaction_valid_flags;
-        organism->memory_compaction_scan = buffers->memory_compaction_scan;
-        organism->memory_compaction_recursive_workspace = buffers->memory_compaction_recursive_workspace;
-        organism->memory_compaction_buffer = buffers->memory_compaction_buffer;
+        organism->compact_valid_flags = buffers->compact_valid_flags;
+        organism->scan_output = buffers->scan_output;
+        organism->scan_block_sums = buffers->scan_block_sums;
+        organism->compact_temp_buffer = buffers->compact_temp_buffer;
 
         organism->fitness_rank_pool = buffers->fitness_rank_pool;
         organism->fitness_coherence_pool = buffers->fitness_coherence_pool;
@@ -723,11 +739,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         organism->chem_grid_size = arch.grid_size;
 
-        // Initialize training mode first so batch_samples buffer is ready
-        int voronoi_init_dt_slot = GenomeParamTable::voronoi_init_dt;
-        float voronoi_init_dt_norm = genome_slot_to_unit(primary_genome, voronoi_init_dt_slot);
-        float voronoi_init_dt = VORONOI_INIT_DT_MIN + voronoi_init_dt_norm * (VORONOI_INIT_DT_MAX - VORONOI_INIT_DT_MIN);
-        organism->diffusion_dt = voronoi_init_dt;
+        organism->diffusion_dt = CHEMICAL_DIFFUSION_DT_MAX;
         init_training_mode_device(organism);
         cg::this_grid().sync();
 
@@ -866,6 +878,22 @@ __global__ void persistent_evolution_kernel(
     load_batch_device(organism);
     cg::this_grid().sync();
 
+    // Initialize per-entry CA state from chemical field BEFORE main loop
+    // This ensures ca_concentration is valid when hybrid_organism_lifecycle_device
+    // reads it on the first tick (generation 0)
+    {
+        int init_alive_count = organism->pool->alive_indices_count;
+        for (int compact = blockIdx.x; compact < init_alive_count; compact += gridDim.x) {
+            int entry_idx = organism->pool->alive_indices[compact];
+            if (global_tid == 0) {
+                organism->current_entry_idx = entry_idx;
+            }
+            cg::this_grid().sync();
+            initialize_ca_from_field_device(organism);
+            cg::this_grid().sync();
+        }
+    }
+
     unsigned long long tick = 0;
 
     while (true) {
@@ -879,6 +907,17 @@ __global__ void persistent_evolution_kernel(
             organism->current_arch = arch_local;
             organism->snapshot_field_size = arch_local.grid_size * arch_local.grid_size;
         }
+        cg::this_grid().sync();
+
+        if (organism->archive_size > 0) {
+            sync_voronoi_from_archive_device(organism);
+            cg::this_grid().sync();
+            update_voronoi_density_device(organism);
+            cg::this_grid().sync();
+        }
+
+        // Derive organism params from density statistics
+        derive_organism_params_device(organism);
         cg::this_grid().sync();
 
         reset_trace_buffer_device(organism);
@@ -914,8 +953,8 @@ __global__ void persistent_evolution_kernel(
         selection_device(organism);
         cg::this_grid().sync();
 
-        update_voronoi_density_device(organism);
-        cg::this_grid().sync();
+        // Voronoi sync moved to start of loop (before training) so telemetry probes have valid cells
+        // Selection updates archive here; voronoi will sync from it at start of next iteration
 
         component_evolution_device(organism);
         cg::this_grid().sync();
@@ -936,7 +975,9 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
-        archive_driven_lifecycle_device(organism, organism->hunger_threshold);
+        if (organism->archive_size > 0 && organism->num_voronoi_cells > 0) {
+            archive_driven_lifecycle_device(organism, organism->hunger_threshold);
+        }
         cg::this_grid().sync();
 
         if (organism->generation >= 1) {
@@ -983,7 +1024,9 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
-        behavioral_update_device(organism);
+        if (organism->archive_size > 0) {
+            behavioral_update_device(organism);
+        }
         cg::this_grid().sync();
 
         // Generation increment - atomic ensures correctness, all threads can observe

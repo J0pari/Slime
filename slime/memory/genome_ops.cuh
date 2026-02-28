@@ -196,14 +196,10 @@ namespace GenomeParamTable {
     constexpr int chem_init_genome_influence = CHEM_INIT_BLOCK + 5;
     constexpr int chem_init_noise_scale = CHEM_INIT_BLOCK + 6;
 
-    
+
     constexpr int AGENT_BLOCK = 20 * BLOCK_SIZE;
     constexpr int max_agent_velocity = AGENT_BLOCK + 0;
-    constexpr int fourier_base_freq = AGENT_BLOCK + 1;
-    constexpr int fourier_num_octaves = AGENT_BLOCK + 2;
-    constexpr int fourier_spectrum_exponent = AGENT_BLOCK + 3;
 
-    
     constexpr int RESOURCE_BLOCK = 22 * BLOCK_SIZE;
     constexpr int resource_density_initial = RESOURCE_BLOCK + 0;
     constexpr int resource_density_noise = RESOURCE_BLOCK + 1;
@@ -234,10 +230,8 @@ namespace GenomeParamTable {
     constexpr int DELTA_BLOCK = 30 * BLOCK_SIZE;
     constexpr int delta_threshold = DELTA_BLOCK + 0;
 
-    
+
     constexpr int VORONOI_BLOCK = 31 * BLOCK_SIZE;
-    constexpr int voronoi_init_dt = VORONOI_BLOCK + 0;
-    constexpr int voronoi_correlation_exponent = VORONOI_BLOCK + 1;
     constexpr int weight_delta_threshold = VORONOI_BLOCK + 2;
 
     
@@ -343,8 +337,10 @@ __device__ __forceinline__ float genome_to_bootstrap_param(
 
     int epi_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
     DEVICE_VALIDATE_GENOME_SLOT(epi_bounds_slot);
-    float epi_min = genome[epi_bounds_slot] * 0.5f;
-    float epi_max = 2.0f + genome[epi_bounds_slot];
+    float raw_epi_lo = genome[epi_bounds_slot] * 0.5f;
+    float raw_epi_hi = 2.0f + genome[epi_bounds_slot];
+    float epi_min = fminf(raw_epi_lo, raw_epi_hi);
+    float epi_max = fmaxf(raw_epi_lo, raw_epi_hi);
 
     float epigenetic_factor = 1.0f;
     if (epigenetic != nullptr) {
@@ -435,8 +431,10 @@ __device__ __forceinline__ float genome_to_param_impl(
     float epigenetic_sensitivity = genome_slot_to_unit(genome, epi_slot);
 
     int epi_bounds_slot = GenomeParamTable::BOUNDS_BLOCK + (primary_slot % GenomeParamTable::BLOCK_SIZE);
-    float epi_min = genome[epi_bounds_slot] * 0.5f;
-    float epi_max = 2.0f + genome[epi_bounds_slot];
+    float raw_epi_lo2 = genome[epi_bounds_slot] * 0.5f;
+    float raw_epi_hi2 = 2.0f + genome[epi_bounds_slot];
+    float epi_min = fminf(raw_epi_lo2, raw_epi_hi2);
+    float epi_max = fmaxf(raw_epi_lo2, raw_epi_hi2);
 
     float epigenetic_factor = 1.0f + epigenetic_sensitivity * epigenetic[primary_slot];
     epigenetic_factor = fminf(fmaxf(epigenetic_factor, epi_min), epi_max);

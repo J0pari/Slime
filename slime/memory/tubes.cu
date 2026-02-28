@@ -73,13 +73,7 @@ __device__ void recall_memory_device(
     }
 }
 
-__device__ void init_tube_device(Organism* organism) {
-    TemporalTube* tube = organism->temporal_tube;
-    int capacity = organism->tube_capacity;
-    float decay_rate = organism->tube_decay_rate;
-    float* data_buffer = organism->history_data_buffer;
-    int entry_size = organism->tube_entry_size;
-
+__device__ void init_tube_device(TemporalTube* tube, float* data_buffer, int capacity, int entry_size, float decay_rate) {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = blockDim.x * gridDim.x;
 
