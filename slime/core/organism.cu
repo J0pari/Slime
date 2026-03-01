@@ -836,6 +836,20 @@ struct DIRESAWeights {
     float* decoder_w3;
     float* decoder_b3;
 
+    float* encoder_w1_grad;
+    float* encoder_b1_grad;
+    float* encoder_w2_grad;
+    float* encoder_b2_grad;
+    float* encoder_w3_grad;
+    float* encoder_b3_grad;
+
+    float* decoder_w1_grad;
+    float* decoder_b1_grad;
+    float* decoder_w2_grad;
+    float* decoder_b2_grad;
+    float* decoder_w3_grad;
+    float* decoder_b3_grad;
+
     float cov_weight;
     float learning_rate;
     uint32_t training_step;
@@ -1013,17 +1027,24 @@ struct Organism {
     
     DIRESAWeights* diresa_genome_weights;
     float* diresa_genome_weight_pool;
-    
+    float* diresa_genome_grad_pool;
+
     DIRESAWeights* per_entry_diresa_task_weights;  
     DIRESAWeights* per_entry_diresa_hw_weights;    
     DIRESAWeights* per_entry_diresa_gen_weights;   
     float* per_entry_diresa_task_weight_pool;
     float* per_entry_diresa_hw_weight_pool;
     float* per_entry_diresa_gen_weight_pool;
+    float* per_entry_diresa_task_grad_pool;
+    float* per_entry_diresa_hw_grad_pool;
+    float* per_entry_diresa_gen_grad_pool;
 
-    float* hw_coords_pool;     
-    float* task_coords_pool;   
-    float* gen_coords_pool;    
+    float* hw_coords_pool;
+    float* task_coords_pool;
+    float* gen_coords_pool;
+    float* prev_hw_coords_pool;
+    float* prev_task_coords_pool;
+    float* prev_gen_coords_pool;
 
     uint16_t* delta_indices_pool;
     float* delta_values_pool;

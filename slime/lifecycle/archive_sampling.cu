@@ -9,6 +9,7 @@
 #include "../memory/archive.cu"
 #include "../memory/pool.cu"
 #include "../core/chemotaxis.cu"
+#include "../metrics/hardware_geometry.cu"
 #include "genealogy.cu"
 
 __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, curandState* rand_state, int* sparse_cells_buffer) {
@@ -149,13 +150,112 @@ __device__ void selection_device(Organism* organism) {
         int task_dim = archive->task_dim;
         int gen_dim = archive->gen_dim;
 
-        float hw_features[1] = {entry->hardware_efficiency.value};
-        float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
-        diresa_encode(hw_features, hw_coords_component, entry->diresa_hw_weights);
+        // Save previous coords for behavioral_drift_rate
+        float* prev_hw = &organism->prev_hw_coords_pool[entry_idx * hw_dim];
+        float* prev_task = &organism->prev_task_coords_pool[entry_idx * task_dim];
+        float* prev_gen = &organism->prev_gen_coords_pool[entry_idx * gen_dim];
+        float* cur_hw = &organism->hw_coords_pool[entry_idx * hw_dim];
+        float* cur_task = &organism->task_coords_pool[entry_idx * task_dim];
+        float* cur_gen = &organism->gen_coords_pool[entry_idx * gen_dim];
+        for (int i = 0; i < hw_dim; i++) prev_hw[i] = cur_hw[i];
+        for (int i = 0; i < task_dim; i++) prev_task[i] = cur_task[i];
+        for (int i = 0; i < gen_dim; i++) prev_gen[i] = cur_gen[i];
 
+        // === HW DIRESA: full 15-dim hardware feature vector, train step ===
+        float hw_features[HARDWARE_FEATURES_DIM];
+        extract_hardware_features(organism->hardware_geom, hw_features);
+        float* hw_coords_component = &organism->hw_coords_pool[entry_idx * hw_dim];
+        float hw_mse = diresa_train_step(hw_features, hw_coords_component, entry->diresa_hw_weights);
+        measured_value_set_computed(&entry->recon_loss_hw, hw_mse, organism->generation, entry->genome_hash);
+
+        // === Gen DIRESA: generalization gap as 1-dim feature, train step ===
         float gen_features[1] = {entry->generalization_gap.value};
         float* gen_coords_component = &organism->gen_coords_pool[entry_idx * gen_dim];
-        diresa_encode(gen_features, gen_coords_component, entry->diresa_gen_weights);
+        float gen_mse = diresa_train_step(gen_features, gen_coords_component, entry->diresa_gen_weights);
+        measured_value_set_computed(&entry->recon_loss_gen, gen_mse, organism->generation, entry->genome_hash);
+
+        // === Task DIRESA: batch-averaged pooled classifier features, train step ===
+        int num_features = entry->num_heads * entry->channels;
+        int batch_size = organism->training_mode->batch_size;
+        float* batch_features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
+        float task_features[NUM_HEADS * CHANNELS];
+        for (int i = 0; i < num_features; i++) {
+            float sum = 0.0f;
+            for (int b = 0; b < batch_size; b++) {
+                sum += batch_features[b * num_features + i];
+            }
+            task_features[i] = sum / batch_size;
+        }
+        float* task_coords_component = &organism->task_coords_pool[entry_idx * task_dim];
+        float task_mse = diresa_train_step(task_features, task_coords_component, entry->diresa_task_weights);
+        measured_value_set_computed(&entry->recon_loss_task, task_mse, organism->generation, entry->genome_hash);
+
+        // Total reconstruction loss
+        float total_recon = hw_mse + task_mse + gen_mse;
+        measured_value_set_computed(&entry->recon_loss_total, total_recon, organism->generation, entry->genome_hash);
+
+        // === DIRESA-derived metrics (C3) ===
+        // behavioral_drift_rate: L2 distance between prev and current task coords
+        float drift_sq = 0.0f;
+        for (int i = 0; i < task_dim; i++) {
+            float diff = task_coords_component[i] - prev_task[i];
+            drift_sq += diff * diff;
+        }
+        measured_value_set_computed(&entry->behavioral_drift_rate, sqrtf(drift_sq), organism->generation, entry->genome_hash);
+
+        // compression_ratio: input_dim / output_dim (static per DIRESA type, use task as representative)
+        float comp_ratio = (float)entry->diresa_task_weights->input_dim / (float)entry->diresa_task_weights->output_dim;
+        measured_value_set_computed(&entry->compression_ratio, comp_ratio, organism->generation, entry->genome_hash);
+
+        // latent_utilization: fraction of task latent dims with variance > threshold
+        // Use per-batch latent variance: encode each batch sample, measure dim variance
+        {
+            float latent_means[BEHAVIORAL_DIM_TASK] = {};
+            float latent_sq_means[BEHAVIORAL_DIM_TASK] = {};
+            float sample_latent[BEHAVIORAL_DIM_TASK];
+            for (int b = 0; b < batch_size; b++) {
+                float* sample_features = batch_features + b * num_features;
+                diresa_encode(sample_features, sample_latent, entry->diresa_task_weights);
+                for (int d = 0; d < task_dim; d++) {
+                    latent_means[d] += sample_latent[d];
+                    latent_sq_means[d] += sample_latent[d] * sample_latent[d];
+                }
+            }
+            int active_dims = 0;
+            for (int d = 0; d < task_dim; d++) {
+                float mean = latent_means[d] / batch_size;
+                float var = latent_sq_means[d] / batch_size - mean * mean;
+                if (var > 1e-6f) active_dims++;
+            }
+            float utilization = (float)active_dims / (float)task_dim;
+            measured_value_set_computed(&entry->latent_utilization, utilization, organism->generation, entry->genome_hash);
+        }
+
+        // hardware_feature_correlation: correlation between hw_features and hw latent coords
+        {
+            float hw_feat_mean = 0.0f, hw_coord_mean = 0.0f;
+            int corr_dim = (hw_dim < HARDWARE_FEATURES_DIM) ? hw_dim : HARDWARE_FEATURES_DIM;
+            for (int i = 0; i < corr_dim; i++) {
+                hw_feat_mean += hw_features[i];
+                hw_coord_mean += hw_coords_component[i];
+            }
+            hw_feat_mean /= corr_dim;
+            hw_coord_mean /= corr_dim;
+            float cov = 0.0f, var_feat = 0.0f, var_coord = 0.0f;
+            for (int i = 0; i < corr_dim; i++) {
+                float df = hw_features[i] - hw_feat_mean;
+                float dc = hw_coords_component[i] - hw_coord_mean;
+                cov += df * dc;
+                var_feat += df * df;
+                var_coord += dc * dc;
+            }
+            float denom = sqrtf(var_feat * var_coord);
+            float corr = (denom > 1e-8f) ? (cov / denom) : 0.0f;
+            measured_value_set_computed(&entry->hardware_feature_correlation, corr, organism->generation, entry->genome_hash);
+        }
+
+        // gradient_magnitude: L2 norm of total recon loss (approximation from per-entry recon losses)
+        measured_value_set_computed(&entry->gradient_magnitude, sqrtf(total_recon), organism->generation, entry->genome_hash);
 
         float* entry_genome = organism_genome;
 

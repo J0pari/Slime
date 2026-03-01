@@ -245,6 +245,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
     {
         organism->diresa_genome_weights = buffers->diresa_genome_weights;
         organism->diresa_genome_weight_pool = buffers->diresa_genome_weight_pool;
+        organism->diresa_genome_grad_pool = buffers->diresa_genome_grad_pool;
         
         organism->per_entry_diresa_task_weights = buffers->per_entry_diresa_task_weights;
         organism->per_entry_diresa_hw_weights = buffers->per_entry_diresa_hw_weights;
@@ -252,6 +253,9 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->per_entry_diresa_task_weight_pool = buffers->per_entry_diresa_task_weight_pool;
         organism->per_entry_diresa_hw_weight_pool = buffers->per_entry_diresa_hw_weight_pool;
         organism->per_entry_diresa_gen_weight_pool = buffers->per_entry_diresa_gen_weight_pool;
+        organism->per_entry_diresa_task_grad_pool = buffers->per_entry_diresa_task_grad_pool;
+        organism->per_entry_diresa_hw_grad_pool = buffers->per_entry_diresa_hw_grad_pool;
+        organism->per_entry_diresa_gen_grad_pool = buffers->per_entry_diresa_gen_grad_pool;
 
         float* primary_genome = &organism->workspace_genomes[GENOME_SIZE * 2];
 
@@ -306,6 +310,9 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->hw_coords_pool = buffers->hw_coords_pool;
         organism->task_coords_pool = buffers->task_coords_pool;
         organism->gen_coords_pool = buffers->gen_coords_pool;
+        organism->prev_hw_coords_pool = buffers->prev_hw_coords_pool;
+        organism->prev_task_coords_pool = buffers->prev_task_coords_pool;
+        organism->prev_gen_coords_pool = buffers->prev_gen_coords_pool;
 
         organism->voronoi_hw_centroids = buffers->voronoi_hw_centroid_buffer;
         organism->voronoi_task_centroids = buffers->voronoi_task_centroid_buffer;
@@ -520,6 +527,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             init_diresa_entry_device(
                 organism->diresa_genome_weights,
                 organism->diresa_genome_weight_pool,
+                organism->diresa_genome_grad_pool,
                 genome_stride,
                 GENOME_SIZE,
                 GENOME_LATENT_DIM_MAX,
@@ -551,11 +559,15 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
             float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + my_entry * DIRESA_HW_STRIDE;
             float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + my_entry * DIRESA_GEN_STRIDE;
+            float* entry_task_grad = organism->per_entry_diresa_task_grad_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+            float* entry_hw_grad = organism->per_entry_diresa_hw_grad_pool + my_entry * DIRESA_HW_STRIDE;
+            float* entry_gen_grad = organism->per_entry_diresa_gen_grad_pool + my_entry * DIRESA_GEN_STRIDE;
 
             // Task DIRESA
             init_diresa_entry_device(
                 e->diresa_task_weights,
                 entry_task_pool,
+                entry_task_grad,
                 0,
                 entry_task_input_dim,
                 BEHAVIORAL_DIM_TASK,
@@ -572,6 +584,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             init_diresa_entry_device(
                 e->diresa_hw_weights,
                 entry_hw_pool,
+                entry_hw_grad,
                 0,
                 HARDWARE_FEATURES_DIM,
                 BEHAVIORAL_DIM_HW,
@@ -588,6 +601,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             init_diresa_entry_device(
                 e->diresa_gen_weights,
                 entry_gen_pool,
+                entry_gen_grad,
                 0,
                 1,
                 BEHAVIORAL_DIM_GEN,

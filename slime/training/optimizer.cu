@@ -25,6 +25,8 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
     float* m = training_mode->adam_m + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* v = training_mode->adam_v + entry_idx * ADAM_CA_ENTRY_STRIDE;
     int num_params = entry->num_heads * entry->channels * entry->head_dim;
+    int per_head_perception = entry->channels * entry->head_dim;
+    int per_head_total = per_head_perception + entry->head_dim * entry->head_dim + entry->head_dim * entry->channels;
     float lr = training_mode->learning_rate;
     float beta1 = ADAM_BETA1;
     float beta2 = ADAM_BETA2;
@@ -33,8 +35,12 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
     if (tid < num_params) {
+        int head = tid / per_head_perception;
+        int local = tid % per_head_perception;
+        int grad_idx = head * per_head_total + local;
+
         float weight = __half2float(weights_fp16[tid]);
-        float g = gradients[tid];
+        float g = gradients[grad_idx];
 
         if (fabsf(g) > gradient_clip_norm) {
             g = copysignf(gradient_clip_norm, g);
@@ -49,7 +55,7 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
         weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
 
         weights_fp16[tid] = __float2half(weight);
-        gradients[tid] = 0.0f;
+        gradients[grad_idx] = 0.0f;
     }
 }
 
@@ -67,8 +73,11 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
         (NUM_CLASSES_MAX * NUM_HEADS * CHANNELS);
 
     int perception_params = entry->num_heads * entry->channels * entry->head_dim;
+    int per_head_perception = entry->channels * entry->head_dim;
+    int per_head_interaction = entry->head_dim * entry->head_dim;
+    int per_head_total = per_head_perception + per_head_interaction + entry->head_dim * entry->channels;
     half* weights_fp16 = ca_state->interaction_weights;
-    float* gradients = ca_state->tape.grad_buffer + perception_params;
+    float* gradients = ca_state->tape.grad_buffer;
     float* entry_adam_m = training_mode->adam_m + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* entry_adam_v = training_mode->adam_v + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* m = entry_adam_m + perception_params;
@@ -82,8 +91,12 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
     if (tid < num_params) {
+        int head = tid / per_head_interaction;
+        int local = tid % per_head_interaction;
+        int grad_idx = head * per_head_total + per_head_perception + local;
+
         float weight = __half2float(weights_fp16[tid]);
-        float g = gradients[tid];
+        float g = gradients[grad_idx];
 
         if (fabsf(g) > gradient_clip_norm) {
             g = copysignf(gradient_clip_norm, g);
@@ -98,7 +111,7 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
         weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
 
         weights_fp16[tid] = __float2half(weight);
-        gradients[tid] = 0.0f;
+        gradients[grad_idx] = 0.0f;
     }
 }
 
@@ -117,8 +130,12 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
 
     int perception_params = entry->num_heads * entry->channels * entry->head_dim;
     int interaction_params = entry->num_heads * entry->head_dim * entry->head_dim;
+    int per_head_perception = entry->channels * entry->head_dim;
+    int per_head_interaction = entry->head_dim * entry->head_dim;
+    int per_head_value = entry->head_dim * entry->channels;
+    int per_head_total = per_head_perception + per_head_interaction + per_head_value;
     half* weights_fp16 = ca_state->value_weights;
-    float* gradients = ca_state->tape.grad_buffer + perception_params + interaction_params;
+    float* gradients = ca_state->tape.grad_buffer;
     float* entry_adam_m = training_mode->adam_m + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* entry_adam_v = training_mode->adam_v + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* m = entry_adam_m + perception_params + interaction_params;
@@ -132,8 +149,12 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
     if (tid < num_params) {
+        int head = tid / per_head_value;
+        int local = tid % per_head_value;
+        int grad_idx = head * per_head_total + per_head_perception + per_head_interaction + local;
+
         float weight = __half2float(weights_fp16[tid]);
-        float g = gradients[tid];
+        float g = gradients[grad_idx];
 
         if (fabsf(g) > gradient_clip_norm) {
             g = copysignf(gradient_clip_norm, g);
@@ -148,7 +169,7 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
         weight -= lr * m_hat / (sqrtf(v_hat) + epsilon);
 
         weights_fp16[tid] = __float2half(weight);
-        gradients[tid] = 0.0f;
+        gradients[grad_idx] = 0.0f;
     }
 }
 
@@ -156,8 +177,8 @@ __device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
 
     ClassificationHead* classifier = &organism->classifier[entry_idx];
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;
-    Architecture arch = Architecture::maxBounds();
 
     constexpr int POOLING_ENTRY_STRIDE = NUM_HEADS * CHANNELS;
 
@@ -165,7 +186,7 @@ __device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
     float* gradients = organism->pooling_weights_grad + entry_idx * POOLING_ENTRY_STRIDE;
     float* m = organism->adam_m_pooling + entry_idx * POOLING_ENTRY_STRIDE;
     float* v = organism->adam_v_pooling + entry_idx * POOLING_ENTRY_STRIDE;
-    int num_params = arch.channels;
+    int num_params = entry->num_heads * entry->channels;
     float lr = training_mode->learning_rate;
     float beta1 = ADAM_BETA1;
     float beta2 = ADAM_BETA2;
@@ -197,7 +218,8 @@ __device__ void adam_update_fc_weights_device(Organism* organism, int entry_idx)
     ClassificationHead* classifier = &organism->classifier[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;
     int num_classes = organism->current_dataset->descriptor->num_classes;
-    int num_features = CLASSIFIER_FEATURES;
+    PoolEntry* entry = &organism->pool->entries[entry_idx];
+    int num_features = entry->num_heads * entry->channels;
 
     constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * NUM_HEADS * CHANNELS;
 

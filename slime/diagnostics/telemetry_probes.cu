@@ -294,11 +294,15 @@ __device__ void diresa_evolution_probe(
     float sum_compression = 0.0f;
     float sum_hw_corr = 0.0f;
     float sum_grad_mag = 0.0f;
+    int computed_count = 0;
 
     for (int compact = 0; compact < alive_count; compact++) {
         int i = pool->alive_indices[compact];
         DEVICE_FATAL_IF(!pool->alive_flags[i], "diresa_evolution_probe: dead entry in alive_indices");
         PoolEntry* e = &pool->entries[i];
+
+        if (e->recon_loss_total.state != ComputeState::COMPUTED) continue;
+        computed_count++;
 
         sum_recon_hw += e->recon_loss_hw.value;
         sum_recon_task += e->recon_loss_task.value;
@@ -310,15 +314,28 @@ __device__ void diresa_evolution_probe(
         sum_hw_corr += e->hardware_feature_correlation.value;
         sum_grad_mag += e->gradient_magnitude.value;
     }
-    metrics->recon_loss_hw = sum_recon_hw / alive_count;
-    metrics->recon_loss_task = sum_recon_task / alive_count;
-    metrics->recon_loss_gen = sum_recon_gen / alive_count;
-    metrics->recon_loss_total = sum_recon_total / alive_count;
-    metrics->behavioral_drift_rate = sum_drift / alive_count;
-    metrics->latent_utilization = sum_latent_util / alive_count;
-    metrics->compression_ratio = sum_compression / alive_count;
-    metrics->hardware_feature_correlation = sum_hw_corr / alive_count;
-    metrics->gradient_magnitude_avg = sum_grad_mag / alive_count;
+    if (computed_count == 0) {
+        metrics->recon_loss_hw = 0.0f;
+        metrics->recon_loss_task = 0.0f;
+        metrics->recon_loss_gen = 0.0f;
+        metrics->recon_loss_total = 0.0f;
+        metrics->behavioral_drift_rate = 0.0f;
+        metrics->latent_utilization = 0.0f;
+        metrics->compression_ratio = 0.0f;
+        metrics->hardware_feature_correlation = 0.0f;
+        metrics->gradient_magnitude_avg = 0.0f;
+        metrics->archive_injections = 0;
+        return;
+    }
+    metrics->recon_loss_hw = sum_recon_hw / computed_count;
+    metrics->recon_loss_task = sum_recon_task / computed_count;
+    metrics->recon_loss_gen = sum_recon_gen / computed_count;
+    metrics->recon_loss_total = sum_recon_total / computed_count;
+    metrics->behavioral_drift_rate = sum_drift / computed_count;
+    metrics->latent_utilization = sum_latent_util / computed_count;
+    metrics->compression_ratio = sum_compression / computed_count;
+    metrics->hardware_feature_correlation = sum_hw_corr / computed_count;
+    metrics->gradient_magnitude_avg = sum_grad_mag / computed_count;
     metrics->archive_injections = alive_count;
 }
 

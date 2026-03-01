@@ -287,13 +287,20 @@ int main() {
     
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weights, sizeof(DIRESAWeights) * NUM_TEMPERING_REPLICAS_MAX, "diresa_genome_weights");
     CUDA_ALLOC_CHECK(buffers_host.diresa_genome_weight_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_GENOME_STRIDE, "diresa_genome_weight_pool");
-    
+    CUDA_ALLOC_CHECK(buffers_host.diresa_genome_grad_pool, sizeof(float) * NUM_TEMPERING_REPLICAS_MAX * DIRESA_GENOME_STRIDE, "diresa_genome_grad_pool");
+
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_task_weights");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_hw_weights");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_weights, sizeof(DIRESAWeights) * POOL_CAPACITY_MAX, "per_entry_diresa_gen_weights");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_TASK_STRIDE_PER_ENTRY, "per_entry_diresa_task_weight_pool");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_HW_STRIDE, "per_entry_diresa_hw_weight_pool");
     CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_weight_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_GEN_STRIDE, "per_entry_diresa_gen_weight_pool");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_task_grad_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_TASK_STRIDE_PER_ENTRY, "per_entry_diresa_task_grad_pool");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_hw_grad_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_HW_STRIDE, "per_entry_diresa_hw_grad_pool");
+    CUDA_ALLOC_CHECK(buffers_host.per_entry_diresa_gen_grad_pool, sizeof(float) * POOL_CAPACITY_MAX * DIRESA_GEN_STRIDE, "per_entry_diresa_gen_grad_pool");
+    CUDA_ALLOC_CHECK(buffers_host.prev_hw_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_HW, "prev_hw_coords_pool");
+    CUDA_ALLOC_CHECK(buffers_host.prev_task_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_TASK, "prev_task_coords_pool");
+    CUDA_ALLOC_CHECK(buffers_host.prev_gen_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_GEN, "prev_gen_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (NUM_HEADS + 1) * HEAD_DIM, "fp32_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.fp16_ca_workspace, sizeof(half) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (CHANNELS + HEAD_DIM), "fp16_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.latent_genome_pool, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX, "latent_genome_pool");

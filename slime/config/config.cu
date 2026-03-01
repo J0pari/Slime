@@ -301,7 +301,7 @@ constexpr int BYTES_PER_KB = 1024;
 constexpr int BYTES_PER_MB = BYTES_PER_KB * BYTES_PER_KB;
 constexpr int TELEMETRY_EVERY_GEN = 1;
 constexpr int TELEMETRY_DETAILED = 10;
-constexpr int TELEMETRY_COMPREHENSIVE = 100;
+constexpr int TELEMETRY_COMPREHENSIVE = 1;
 constexpr int CHECKPOINT_INTERVAL = TELEMETRY_DETAILED;
 
 

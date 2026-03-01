@@ -13,6 +13,7 @@
 __device__ void init_diresa_entry_device(
     DIRESAWeights* weights,
     float* weight_pool,
+    float* grad_pool,
     size_t stride,
     int input_dim,
     int output_dim,
@@ -64,6 +65,21 @@ __device__ void init_diresa_entry_device(
         offset += DIRESA_HIDDEN1_MAX * input_dim;
 
         weights->decoder_b3 = &weight_pool[offset];
+
+        // Gradient pointers mirror weight layout
+        size_t goffset = 0;
+        weights->encoder_w1_grad = &grad_pool[goffset]; goffset += input_dim * DIRESA_HIDDEN1_MAX;
+        weights->encoder_b1_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN1_MAX;
+        weights->encoder_w2_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX;
+        weights->encoder_b2_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN2_MAX;
+        weights->encoder_w3_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN2_MAX * output_dim;
+        weights->encoder_b3_grad = &grad_pool[goffset]; goffset += output_dim;
+        weights->decoder_w1_grad = &grad_pool[goffset]; goffset += output_dim * DIRESA_HIDDEN2_MAX;
+        weights->decoder_b1_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN2_MAX;
+        weights->decoder_w2_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN2_MAX * DIRESA_HIDDEN1_MAX;
+        weights->decoder_b2_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN1_MAX;
+        weights->decoder_w3_grad = &grad_pool[goffset]; goffset += DIRESA_HIDDEN1_MAX * input_dim;
+        weights->decoder_b3_grad = &grad_pool[goffset];
 
         weights->input_dim = input_dim;
         weights->output_dim = output_dim;
@@ -220,12 +236,14 @@ __device__ void diresa_encode(const float* features, float* latent, const DIRESA
     }
 }
 
-__device__ void diresa_encode_backward(const float* features, const float* latent_grad, float* features_grad, const DIRESAWeights* weights) {
+// Encoder backward: computes feature gradients AND accumulates weight gradients
+__device__ void diresa_encode_backward(const float* features, const float* latent_grad, float* features_grad, DIRESAWeights* weights) {
     float hidden1[DIRESA_HIDDEN1_MAX];
     float hidden2[DIRESA_HIDDEN2_MAX];
     float hidden1_grad[DIRESA_HIDDEN1_MAX];
     float hidden2_grad[DIRESA_HIDDEN2_MAX];
 
+    // Forward pass to cache activations
     for (int i = 0; i < weights->hidden1; i++) {
         float sum = weights->encoder_b1[i];
         for (int j = 0; j < weights->input_dim; j++) {
@@ -242,36 +260,107 @@ __device__ void diresa_encode_backward(const float* features, const float* laten
         hidden2[i] = activation_relu(sum);
     }
 
+    // Layer 3 (hidden2 -> latent): weight grads and hidden2 grad
     for (int i = 0; i < weights->hidden2; i++) {
         hidden2_grad[i] = 0.0f;
     }
-
     for (int i = 0; i < weights->output_dim; i++) {
         float grad = latent_grad[i];
+        weights->encoder_b3_grad[i] += grad;
         for (int j = 0; j < weights->hidden2; j++) {
+            weights->encoder_w3_grad[j * weights->output_dim + i] += grad * hidden2[j];
             hidden2_grad[j] += grad * weights->encoder_w3[j * weights->output_dim + i];
         }
     }
 
+    // Layer 2 (hidden1 -> hidden2): apply ReLU derivative, weight grads, hidden1 grad
     for (int i = 0; i < weights->hidden1; i++) {
         hidden1_grad[i] = 0.0f;
     }
-
     for (int i = 0; i < weights->hidden2; i++) {
         float grad = hidden2_grad[i] * (hidden2[i] > 0.0f ? 1.0f : 0.0f);
+        weights->encoder_b2_grad[i] += grad;
         for (int j = 0; j < weights->hidden1; j++) {
+            weights->encoder_w2_grad[j * weights->hidden2 + i] += grad * hidden1[j];
             hidden1_grad[j] += grad * weights->encoder_w2[j * weights->hidden2 + i];
         }
     }
 
+    // Layer 1 (input -> hidden1): apply ReLU derivative, weight grads, features grad
     for (int i = 0; i < weights->input_dim; i++) {
         features_grad[i] = 0.0f;
     }
-
     for (int i = 0; i < weights->hidden1; i++) {
         float grad = hidden1_grad[i] * (hidden1[i] > 0.0f ? 1.0f : 0.0f);
+        weights->encoder_b1_grad[i] += grad;
         for (int j = 0; j < weights->input_dim; j++) {
+            weights->encoder_w1_grad[j * weights->hidden1 + i] += grad * features[j];
             features_grad[j] += grad * weights->encoder_w1[j * weights->hidden1 + i];
+        }
+    }
+}
+
+// Decoder backward: computes latent gradients AND accumulates weight gradients
+// Mirror structure of diresa_decode: latent -> hidden1(h2 size) -> hidden2(h1 size) -> reconstructed(input_dim)
+__device__ void diresa_decode_backward(const float* latent, const float* reconstructed_grad, float* latent_grad, DIRESAWeights* weights) {
+    float hidden1[DIRESA_HIDDEN2_MAX];  // decoder layer 1 has hidden2 units
+    float hidden2[DIRESA_HIDDEN1_MAX];  // decoder layer 2 has hidden1 units
+    float hidden1_grad[DIRESA_HIDDEN2_MAX];
+    float hidden2_grad[DIRESA_HIDDEN1_MAX];
+
+    // Forward pass to cache activations (mirrors diresa_decode)
+    for (int i = 0; i < weights->hidden2; i++) {
+        float sum = weights->decoder_b1[i];
+        for (int j = 0; j < weights->output_dim; j++) {
+            sum += latent[j] * weights->decoder_w1[j * weights->hidden2 + i];
+        }
+        hidden1[i] = activation_relu(sum);
+    }
+
+    for (int i = 0; i < weights->hidden1; i++) {
+        float sum = weights->decoder_b2[i];
+        for (int j = 0; j < weights->hidden2; j++) {
+            sum += hidden1[j] * weights->decoder_w2[j * weights->hidden1 + i];
+        }
+        hidden2[i] = activation_relu(sum);
+    }
+
+    // Layer 3 (hidden2 -> reconstructed): weight grads and hidden2 grad
+    for (int i = 0; i < weights->hidden1; i++) {
+        hidden2_grad[i] = 0.0f;
+    }
+    for (int i = 0; i < weights->input_dim; i++) {
+        float grad = reconstructed_grad[i];
+        weights->decoder_b3_grad[i] += grad;
+        for (int j = 0; j < weights->hidden1; j++) {
+            weights->decoder_w3_grad[j * weights->input_dim + i] += grad * hidden2[j];
+            hidden2_grad[j] += grad * weights->decoder_w3[j * weights->input_dim + i];
+        }
+    }
+
+    // Layer 2 (hidden1 -> hidden2): ReLU derivative, weight grads, hidden1 grad
+    for (int i = 0; i < weights->hidden2; i++) {
+        hidden1_grad[i] = 0.0f;
+    }
+    for (int i = 0; i < weights->hidden1; i++) {
+        float grad = hidden2_grad[i] * (hidden2[i] > 0.0f ? 1.0f : 0.0f);
+        weights->decoder_b2_grad[i] += grad;
+        for (int j = 0; j < weights->hidden2; j++) {
+            weights->decoder_w2_grad[j * weights->hidden1 + i] += grad * hidden1[j];
+            hidden1_grad[j] += grad * weights->decoder_w2[j * weights->hidden1 + i];
+        }
+    }
+
+    // Layer 1 (latent -> hidden1): ReLU derivative, weight grads, latent grad
+    for (int i = 0; i < weights->output_dim; i++) {
+        latent_grad[i] = 0.0f;
+    }
+    for (int i = 0; i < weights->hidden2; i++) {
+        float grad = hidden1_grad[i] * (hidden1[i] > 0.0f ? 1.0f : 0.0f);
+        weights->decoder_b1_grad[i] += grad;
+        for (int j = 0; j < weights->output_dim; j++) {
+            weights->decoder_w1_grad[j * weights->hidden2 + i] += grad * latent[j];
+            latent_grad[j] += grad * weights->decoder_w1[j * weights->hidden2 + i];
         }
     }
 }
@@ -316,10 +405,98 @@ __device__ void diresa_decode(const float* latent, float* reconstructed, const D
     }
 }
 
-__device__ void diresa_forward_device(Organism* organism) {
-    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
-    DIRESAWeights* weights = organism->diresa_genome_weights;
+// Zero all weight gradient accumulators
+__device__ void diresa_zero_grads(DIRESAWeights* w) {
+    int h1 = w->hidden1, h2 = w->hidden2;
+    int in_d = w->input_dim, out_d = w->output_dim;
+    for (int i = 0; i < in_d * h1; i++) w->encoder_w1_grad[i] = 0.0f;
+    for (int i = 0; i < h1; i++) w->encoder_b1_grad[i] = 0.0f;
+    for (int i = 0; i < h1 * h2; i++) w->encoder_w2_grad[i] = 0.0f;
+    for (int i = 0; i < h2; i++) w->encoder_b2_grad[i] = 0.0f;
+    for (int i = 0; i < h2 * out_d; i++) w->encoder_w3_grad[i] = 0.0f;
+    for (int i = 0; i < out_d; i++) w->encoder_b3_grad[i] = 0.0f;
+    for (int i = 0; i < out_d * h2; i++) w->decoder_w1_grad[i] = 0.0f;
+    for (int i = 0; i < h2; i++) w->decoder_b1_grad[i] = 0.0f;
+    for (int i = 0; i < h2 * h1; i++) w->decoder_w2_grad[i] = 0.0f;
+    for (int i = 0; i < h1; i++) w->decoder_b2_grad[i] = 0.0f;
+    for (int i = 0; i < h1 * in_d; i++) w->decoder_w3_grad[i] = 0.0f;
+    for (int i = 0; i < in_d; i++) w->decoder_b3_grad[i] = 0.0f;
+}
 
+// SGD weight update: w -= lr * grad, then zero grad
+__device__ void diresa_sgd_update(float* weight, float* grad, int count, float lr) {
+    for (int i = 0; i < count; i++) {
+        weight[i] -= lr * grad[i];
+        grad[i] = 0.0f;
+    }
+}
+
+__device__ void diresa_weight_update_sgd(DIRESAWeights* w) {
+    float lr = w->learning_rate;
+    int h1 = w->hidden1, h2 = w->hidden2;
+    int in_d = w->input_dim, out_d = w->output_dim;
+    diresa_sgd_update(w->encoder_w1, w->encoder_w1_grad, in_d * h1, lr);
+    diresa_sgd_update(w->encoder_b1, w->encoder_b1_grad, h1, lr);
+    diresa_sgd_update(w->encoder_w2, w->encoder_w2_grad, h1 * h2, lr);
+    diresa_sgd_update(w->encoder_b2, w->encoder_b2_grad, h2, lr);
+    diresa_sgd_update(w->encoder_w3, w->encoder_w3_grad, h2 * out_d, lr);
+    diresa_sgd_update(w->encoder_b3, w->encoder_b3_grad, out_d, lr);
+    diresa_sgd_update(w->decoder_w1, w->decoder_w1_grad, out_d * h2, lr);
+    diresa_sgd_update(w->decoder_b1, w->decoder_b1_grad, h2, lr);
+    diresa_sgd_update(w->decoder_w2, w->decoder_w2_grad, h2 * h1, lr);
+    diresa_sgd_update(w->decoder_b2, w->decoder_b2_grad, h1, lr);
+    diresa_sgd_update(w->decoder_w3, w->decoder_w3_grad, h1 * in_d, lr);
+    diresa_sgd_update(w->decoder_b3, w->decoder_b3_grad, in_d, lr);
+    w->training_step++;
+}
+
+// Per-entry DIRESA training step: forward -> recon loss -> backward -> SGD update
+// features: [input_dim] input vector
+// latent: [output_dim] output latent coords (written)
+// Returns recon_loss MSE
+__device__ float diresa_train_step(const float* features, float* latent, DIRESAWeights* weights) {
+    float reconstructed[DIRESA_TASK_INPUT_DIM];  // max(input_dim) across task/hw/gen
+    float recon_grad[DIRESA_TASK_INPUT_DIM];
+    float latent_grad[BEHAVIORAL_DIM_TASK];      // max(output_dim) across task/hw/gen
+    float features_grad[DIRESA_TASK_INPUT_DIM];
+
+    DEVICE_FATAL_IF(weights->input_dim > DIRESA_TASK_INPUT_DIM,
+        "diresa_train_step: input_dim %d > DIRESA_TASK_INPUT_DIM %d", weights->input_dim, DIRESA_TASK_INPUT_DIM);
+    DEVICE_FATAL_IF(weights->output_dim > BEHAVIORAL_DIM_TASK,
+        "diresa_train_step: output_dim %d > BEHAVIORAL_DIM_TASK %d", weights->output_dim, BEHAVIORAL_DIM_TASK);
+
+    // Forward: encode + decode
+    diresa_encode(features, latent, weights);
+    diresa_decode(latent, reconstructed, weights);
+
+    // Reconstruction loss: MSE
+    float mse = 0.0f;
+    for (int i = 0; i < weights->input_dim; i++) {
+        float diff = features[i] - reconstructed[i];
+        mse += diff * diff;
+        recon_grad[i] = 2.0f * diff / weights->input_dim;  // d(MSE)/d(reconstructed) = -2*(features-recon)/N, but we want to minimize so grad is negative of loss grad
+    }
+    mse /= weights->input_dim;
+
+    // Negate recon_grad: loss = mean((features - recon)^2), d_loss/d_recon = -2*(features - recon)/N
+    for (int i = 0; i < weights->input_dim; i++) {
+        recon_grad[i] = -recon_grad[i];
+    }
+
+    // Backward through decoder: recon_grad -> latent_grad, accumulates decoder weight grads
+    diresa_zero_grads(weights);
+    diresa_decode_backward(latent, recon_grad, latent_grad, weights);
+
+    // Backward through encoder: latent_grad -> features_grad, accumulates encoder weight grads
+    diresa_encode_backward(features, latent_grad, features_grad, weights);
+
+    // SGD update
+    diresa_weight_update_sgd(weights);
+
+    return mse;
+}
+
+__device__ void diresa_forward_device(DIRESABatch* batch, DIRESAWeights* weights) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < batch->batch_size) {
         const float* features = batch->features + tid * batch->input_dim;
@@ -339,9 +516,7 @@ __device__ void diresa_forward_device(Organism* organism) {
     }
 }
 
-__device__ void diresa_distance_device(Organism* organism) {
-    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
-
+__device__ void diresa_distance_device(DIRESABatch* batch) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid < batch->batch_size) {
         int shuffled_idx = batch->shuffle_indices[tid];
@@ -363,9 +538,7 @@ __device__ void diresa_distance_device(Organism* organism) {
     }
 }
 
-__device__ void diresa_loss_device(Organism* organism) {
-    DIRESABatch* batch = (DIRESABatch*)organism->diresa_batch_context;
-    const DIRESAWeights* weights = organism->diresa_genome_weights;
+__device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weights) {
     __shared__ float shared_recon[256];
     __shared__ float shared_orig_mean[1];
     __shared__ float shared_orig_var[1];
@@ -558,12 +731,7 @@ __device__ void update_annealing(DIRESAWeights* weights, float cov_loss, PoolEnt
     }
 }
 
-__device__ void replica_exchange_device(Organism* organism) {
-    DIRESAWeights* replicas = organism->diresa_genome_weights;
-    DIRESABatch* batches = (DIRESABatch*)organism->diresa_batch_context;
-    int entry_idx = organism->lifecycle_entry_idx;
-    PoolEntry* entry = &organism->pool->entries[entry_idx];
-    curandState* rand_states = organism->diresa_rng_states;
+__device__ void replica_exchange_device(DIRESAWeights* replicas, DIRESABatch* batches, PoolEntry* entry, curandState* rand_states) {
     int tid = threadIdx.x;
     if (tid < entry->num_tempering_replicas - 1) {
         int i = tid;

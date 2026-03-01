@@ -379,6 +379,10 @@ __device__ void load_batch_device(Organism* organism) {
     int batch_size = training_mode->batch_size;
     DEVICE_FATAL_IF(batch_size <= 0 || batch_size > BATCH_SIZE, "load_batch_kernel: batch_size invalid");
 
+    if (tid == 0 && blockIdx.x == 0) {
+        training_mode->is_train_batch = ((generation % 2) == 0);
+    }
+
     // Per-entry state - only assigned and accessed when has_work
     int entry_idx;
     PoolEntry* entry;
@@ -1839,10 +1843,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
             float* features_grad = organism->features_grad + entry_idx * batch_size * num_features;
             float* fc_weights = training_mode->classifier[entry_idx].fc_weights;
-            float* fc_weights_grad = organism->fc_weights_grad;
-            float* fc_bias_grad = organism->fc_bias_grad;
+            constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * NUM_HEADS * CHANNELS;
+            constexpr int FC_BIAS_ENTRY_STRIDE = NUM_CLASSES_MAX;
+            constexpr int POOLING_ENTRY_STRIDE = NUM_HEADS * CHANNELS;
+            float* fc_weights_grad = organism->fc_weights_grad + entry_idx * FC_WEIGHTS_ENTRY_STRIDE;
+            float* fc_bias_grad = organism->fc_bias_grad + entry_idx * FC_BIAS_ENTRY_STRIDE;
             float* pooling_weights = training_mode->classifier[entry_idx].pooling_weights;
-            float* pooling_weights_grad = organism->pooling_weights_grad;
+            float* pooling_weights_grad = organism->pooling_weights_grad + entry_idx * POOLING_ENTRY_STRIDE;
 
             int fc_weights_size = num_classes * num_features;
             int features_grad_size = batch_size * num_features;
@@ -1877,8 +1884,10 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float* logit_grads = organism->gradient_logit_grads_pool + entry_idx * batch_size * num_classes;
             float* features_grad = organism->features_grad + entry_idx * batch_size * num_features;
             float* fc_weights = training_mode->classifier[entry_idx].fc_weights;
-            float* fc_weights_grad = organism->fc_weights_grad;
-            float* fc_bias_grad = organism->fc_bias_grad;
+            constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * NUM_HEADS * CHANNELS;
+            constexpr int FC_BIAS_ENTRY_STRIDE = NUM_CLASSES_MAX;
+            float* fc_weights_grad = organism->fc_weights_grad + entry_idx * FC_WEIGHTS_ENTRY_STRIDE;
+            float* fc_bias_grad = organism->fc_bias_grad + entry_idx * FC_BIAS_ENTRY_STRIDE;
             float* pooling_weights = training_mode->classifier[entry_idx].pooling_weights;
 
             int total_class_bwd = batch_size * num_classes;
@@ -1909,7 +1918,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float* ca_out = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
             float* features_grad = organism->features_grad + entry_idx * batch_size * num_features;
             float* pooling_weights = training_mode->classifier[entry_idx].pooling_weights;
-            float* pooling_weights_grad = organism->pooling_weights_grad;
+            constexpr int POOLING_ENTRY_STRIDE = NUM_HEADS * CHANNELS;
+            float* pooling_weights_grad = organism->pooling_weights_grad + entry_idx * POOLING_ENTRY_STRIDE;
 
             int total_pool_bwd = batch_size * num_features;
             for (int work_idx = tid; work_idx < total_pool_bwd; work_idx += blockDim.x) {
