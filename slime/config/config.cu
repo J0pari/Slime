@@ -802,6 +802,7 @@ constexpr float DIVERSITY_NORMALIZATION_MAX = 10.0f;
 constexpr float GRADIENT_CLIP_MIN = 0.1f;
 constexpr float GRADIENT_CLIP_MAX = 10.0f;
 constexpr float GRADIENT_CLIP_NORM = 1.0f;
+constexpr float ELITE_REFINE_LR = 0.001f;
 constexpr float ADAM_BETA1 = 0.9f;
 constexpr float ADAM_BETA2 = 0.999f;
 constexpr float ADAM_EPSILON = 1e-8f;

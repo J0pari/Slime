@@ -658,6 +658,7 @@ struct ExecutionTrace {
     unsigned long long inst_executed;
     unsigned long long inst_issued;
     unsigned long long cycles_elapsed;
+    unsigned long long cycle_start;
     unsigned long long tensor_core_cycles;
 
     float sm_occupancy;
@@ -1200,21 +1201,7 @@ struct Organism {
     int task_dim;
     int gen_dim;
 
-    // Autodiff tape fields
-    ADTape* ad_tape;
-    TapeEntry* ad_entries_pool;
-    float* ad_values_pool;
-    float* ad_grads_pool;
-    int* ad_levels_pool;
-    int ad_tape_capacity;
-    int ad_value_capacity;
-    int ad_output_idx;
-    float ad_output_grad;
-
-    // Genome gradient fields
-    int* genome_param_indices;
-    int num_genome_params;
-    float* output_gradients;
+    // Per-entry autodiff tapes live in MultiHeadCAState.tape (no organism-level tape)
     int genome_size;
     float learning_rate;
     float gradient_clip_norm;
@@ -1465,8 +1452,7 @@ struct Organism {
     int cls_num_classes;
     float* classifier_workspace;
 
-    // CA fields for autodiff
-    CAParameterMap* ca_param_map;
+    // CA fields for autodiff (use organism->param_map, not a duplicate)
     float* ca_output;
     float* perception_saved;
     float* interaction_saved;
@@ -1558,6 +1544,14 @@ struct Organism {
     float* archive_hardware_features;
     float* archive_task_performance;
     float* archive_per_class_accuracy;
+
+    half* archive_weight_deltas;
+    uint32_t* archive_weight_delta_indices;
+    uint16_t* archive_num_weight_deltas;
+
+    int* archive_archived_num_heads;
+    int* archive_archived_channels;
+    int* archive_archived_head_dim;
 
     // Behavioral coord buffers (aliases for hw_coords_pool etc.)
     float* behavioral_hw_coords_buffer;

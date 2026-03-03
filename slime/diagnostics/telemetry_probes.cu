@@ -433,7 +433,8 @@ __device__ void populate_audit_buffer(
     ComponentPool* pool,
     ChemicalField* chemical_field,
     MultiHeadCAState* ca_state,
-    HardwareGeometry* hardware_geom
+    HardwareGeometry* hardware_geom,
+    int archive_size
 ) {
     TelemetryAuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
 
@@ -698,6 +699,26 @@ __device__ void populate_audit_buffer(
     audit->flow_lenia_mass_total = mass_total;
     audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
     audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
+
+    // Wire pool spawned/culled counters
+    audit->pool_total_spawned = pool->total_spawned.load(cuda::memory_order_relaxed);
+    audit->pool_total_culled = pool->total_culled.load(cuda::memory_order_relaxed);
+
+    // Wire archive size
+    audit->state_archive_count = archive_size;
+
+    // Subsample chemical field concentration into 16x16 export grid (channel 0)
+    if (chemical_field->concentration != nullptr && grid_size > 0) {
+        for (int sy = 0; sy < STATE_EXPORT_CHEM_SIZE; sy++) {
+            for (int sx = 0; sx < STATE_EXPORT_CHEM_SIZE; sx++) {
+                int src_y = sy * grid_size / STATE_EXPORT_CHEM_SIZE;
+                int src_x = sx * grid_size / STATE_EXPORT_CHEM_SIZE;
+                // Channel-major layout: concentration[channel * total_cells + cell_idx]
+                int src_idx = src_y * grid_size + src_x;
+                audit->state_chemical_sample[sy * STATE_EXPORT_CHEM_SIZE + sx] = chemical_field->concentration[src_idx];
+            }
+        }
+    }
 
     audit->provenance_source = PROVENANCE_SOURCE_TELEMETRY;
     audit->fields_written_mask = AUDIT_MASK_GENERATION | AUDIT_MASK_BATCH | AUDIT_MASK_ACCURACY |

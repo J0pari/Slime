@@ -794,23 +794,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         if (has_work && tid == 0 && blockIdx.x == 0) printf("V:GRAD_ENTER\n");
 
         if (has_work) {
-            ADTape* tape = &ca_state->tape;
-            int tape_capacity = tape->value_capacity;
-
-            for (int i = tid; i < tape_capacity; i += blockDim.x) {
-                tape->grad_buffer[i] = 0.0f;
-                tape->value_levels[i] = 0;
-            }
-
-            if (tid == 0) {
-                tape->current_size = 0;
-                tape->current_value_idx = 0;
-                tape->max_level = 0;
-            }
+            reset_tape_device(&ca_state->tape, tid);
         }
         cg::this_grid().sync();
 
         // Trace recording and CA setup - work guarded
+        ExecutionTrace* ca_trace_slot = nullptr;
+        unsigned long long ca_cycle_start = 0;
         if (has_work) {
             TraceBuffer* trace_buffer = &ca_state->trace;
             int trace_idx = -1;
@@ -821,12 +811,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             if (tid < WARP_SIZE) {
                 trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
                 if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
-                    ExecutionTrace* t = &trace_buffer->traces[trace_idx];
-                    record_warp_metrics(t, blockIdx.x);
-                    record_memory_access(t, (void*)&ca_state->perception_weights[tid], true);
-                    record_shared_memory_access(t, false, false);
+                    ca_trace_slot = &trace_buffer->traces[trace_idx];
+                    record_warp_metrics(ca_trace_slot, blockIdx.x);
+                    record_memory_access(ca_trace_slot, (void*)&ca_state->perception_weights[tid], true);
+                    record_shared_memory_access(ca_trace_slot, false, false);
                 }
             }
+            ca_cycle_start = clock64();
+            if (tid == 0) printf("TRACE_FWD b%d eid=%d slot=%p cidx=%d cap=%d traces=%p cidx_addr=%p ca_state=%p\n",
+                blockIdx.x, entry_idx, ca_trace_slot, trace_buffer->current_idx, trace_buffer->capacity, trace_buffer->traces,
+                &trace_buffer->current_idx, (void*)ca_state);
 
             float* perception_saved = ca_state->perception_saved;
             float* interaction_saved = ca_state->interaction_saved;
@@ -1370,6 +1364,15 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             if (stack_canary_start != 3.14159265f && tid == 0) {
                 printf("E_STACK b%d canary=%.8f\n", blockIdx.x, stack_canary_start);
             }
+
+            // Record elapsed cycles for this CA forward pass
+            if (ca_trace_slot != nullptr && tid == 0) {
+                unsigned long long ca_cycle_end = clock64();
+                unsigned long long elapsed = ca_cycle_end - ca_cycle_start;
+                ca_trace_slot->cycles_elapsed = elapsed;
+                ca_trace_slot->tensor_core_cycles = elapsed;
+                printf("TRACE_FWD_WRITE b%d elapsed=%llu\n", blockIdx.x, elapsed);
+            }
         }
 
         // DIAG 53: Sync after loop - count threads reaching sync (only blocks with work did actual work)
@@ -1825,7 +1828,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 organism->pool,
                 organism->chemical_field,
                 ca_state,
-                organism->hardware_geom
+                organism->hardware_geom,
+                organism->archive_size
             );
         }
         cg::this_grid().sync();
@@ -2012,6 +2016,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int chunk_ws_a_stride;
             int chunk_ws_b_stride;
 
+            ExecutionTrace* bwd_trace_slot = nullptr;
+            unsigned long long bwd_cycle_start = 0;
             if (has_work) {
                 trace_buffer = &ca_state->trace;
                 {
@@ -2019,16 +2025,22 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     if (tid == 0 && trace_buffer->traces != nullptr &&
                         trace_buffer->current_idx < trace_buffer->capacity) {
                         trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
+                        printf("TRACE_BWD_ALLOC b%d eid=%d idx=%d cidx_now=%d cidx_addr=%p\n",
+                            blockIdx.x, entry_idx, trace_idx, trace_buffer->current_idx, &trace_buffer->current_idx);
+                    } else if (tid == 0) {
+                        printf("TRACE_BWD_SKIP b%d traces=%p cidx=%d cap=%d\n",
+                            blockIdx.x, trace_buffer->traces, trace_buffer->current_idx, trace_buffer->capacity);
                     }
                     if (tid < WARP_SIZE) {
                         trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
                         if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
-                            ExecutionTrace* t = &trace_buffer->traces[trace_idx];
-                            record_warp_metrics(t, blockIdx.x);
-                            record_memory_access(t, (void*)&ca_state->perception_weights[tid], true);
-                            record_shared_memory_access(t, false, false);
+                            bwd_trace_slot = &trace_buffer->traces[trace_idx];
+                            record_warp_metrics(bwd_trace_slot, blockIdx.x);
+                            record_memory_access(bwd_trace_slot, (void*)&ca_state->perception_weights[tid], true);
+                            record_shared_memory_access(bwd_trace_slot, false, false);
                         }
                     }
+                    bwd_cycle_start = clock64();
                 }
 
                 num_cells = arch.grid_size * arch.grid_size;
@@ -2148,6 +2160,10 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 cg::this_grid().sync();
                 if (tid == 0 && blockIdx.x == 0 && chunk_idx == 0) printf("V:bwd_I_load\n");
+                if (has_work && tid == 0 && blockIdx.x == 0 && chunk_idx == 0) {
+                    TraceBuffer* mid_tb0 = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
+                    printf("TRACE_MID_0 cidx=%d cyc0=%llu\n", mid_tb0->current_idx, mid_tb0->traces[0].cycles_elapsed);
+                }
 
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_i_done_count, 1);
 
@@ -2365,6 +2381,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             }
             cg::this_grid().sync();
             if (tid == 0 && blockIdx.x == 0) printf("V:bwd_zero_dW\n");
+            if (has_work && tid == 0 && blockIdx.x == 0) {
+                TraceBuffer* mid_tb = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
+                printf("TRACE_MID_A eid=%d cidx=%d cyc0=%llu\n",
+                    pool->alive_indices[wave_start], mid_tb->current_idx, mid_tb->traces[0].cycles_elapsed);
+            }
 
             // Per-block variables for second chunk loop - uninitialized, only valid when has_work
             int chunk_ws_dI_stride;
@@ -2875,6 +2896,10 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 cg::this_grid().sync();
                 if (tid == 0 && blockIdx.x == 0 && chunk_idx == 0) printf("V:bwd_input_grad\n");
+                if (has_work && tid == 0 && blockIdx.x == 0 && chunk_idx == 0) {
+                    TraceBuffer* mid_tb2 = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
+                    printf("TRACE_MID_B cidx=%d cyc0=%llu\n", mid_tb2->current_idx, mid_tb2->traces[0].cycles_elapsed);
+                }
 
                 if (chunk_has_work) {
                     if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_scatter_count, 1);
@@ -3139,37 +3164,40 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 cg::this_grid().sync();
             }
+
+            // Record elapsed cycles for backward pass
+            if (bwd_trace_slot != nullptr && tid == 0) {
+                unsigned long long bwd_cycle_end = clock64();
+                unsigned long long elapsed = bwd_cycle_end - bwd_cycle_start;
+                bwd_trace_slot->cycles_elapsed = elapsed;
+                bwd_trace_slot->tensor_core_cycles = elapsed;
+            }
         }
 
-        // Effective rank computation - all blocks iterate NUM_HEADS times for sync alignment
-        {
-            int num_heads = has_work ? arch.num_heads : 0;
-            int perception_per_head = has_work ? arch.channels * arch.head_dim : 0;
-            int interaction_per_head = has_work ? arch.head_dim * arch.head_dim : 0;
-            int value_per_head = has_work ? arch.head_dim * arch.channels : 0;
-            int params_per_head = perception_per_head + interaction_per_head + value_per_head;
-            float* grad_buf = has_work ? ca_state->tape.grad_buffer : nullptr;
+        // CHECKPOINT: verify trace buffer state after backward
+        if (has_work && tid == 0 && blockIdx.x == 0) {
+            TraceBuffer* chk_tb = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
+            printf("TRACE_CHK1 eid=%d cidx=%d cyc0=%llu br0=%llu cidx_addr=%p ca_state=%p\n",
+                pool->alive_indices[wave_start], chk_tb->current_idx,
+                chk_tb->traces[0].cycles_elapsed, chk_tb->traces[0].total_branches,
+                &chk_tb->current_idx, (void*)&organism->ca_state_pool[pool->alive_indices[wave_start]]);
+        }
 
+        // Effective rank computation - uses param_map interleaved layout [P0|I0|V0|P1|I1|V1|...]
+        // Blocks without work only participate in syncs, never touch data.
+        {
             __shared__ float head_grad_sq[NUM_HEADS];
             __shared__ float warp_sums_eff[32];
 
             for (int h = 0; h < NUM_HEADS; h++) {
-                float local_sq = 0.0f;
-                if (has_work && h < num_heads) {
-                    int p_start = h * perception_per_head;
-                    int i_start = num_heads * perception_per_head + h * interaction_per_head;
-                    int v_start = num_heads * perception_per_head + num_heads * interaction_per_head + h * value_per_head;
+                if (has_work && h < arch.num_heads) {
+                    int head_start = param_map->head_param_offsets[h];
+                    int head_count = param_map->head_param_counts[h];
+                    float* grad_buf = ca_state->tape.grad_buffer;
 
-                    for (int i = tid; i < perception_per_head; i += blockDim.x) {
-                        float g = grad_buf[p_start + i];
-                        local_sq += g * g;
-                    }
-                    for (int i = tid; i < interaction_per_head; i += blockDim.x) {
-                        float g = grad_buf[i_start + i];
-                        local_sq += g * g;
-                    }
-                    for (int i = tid; i < value_per_head; i += blockDim.x) {
-                        float g = grad_buf[v_start + i];
+                    float local_sq = 0.0f;
+                    for (int i = tid; i < head_count; i += blockDim.x) {
+                        float g = grad_buf[head_start + i];
                         local_sq += g * g;
                     }
 
@@ -3183,16 +3211,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 }
                 cg::this_grid().sync();
 
-                if (has_work && h < num_heads) {
+                if (has_work && h < arch.num_heads) {
+                    float local_sq = warp_sums_eff[tid < blockDim.x / warpSize ? tid : 0];
                     if (tid < blockDim.x / warpSize) {
-                        local_sq = warp_sums_eff[tid];
                         unsigned active = __activemask();
                         for (int offset = (blockDim.x / warpSize) / 2; offset > 0; offset /= 2) {
                             local_sq += __shfl_down_sync(active, local_sq, offset);
                         }
                     }
                     if (tid == 0) {
-                        head_grad_sq[h] = sqrtf(local_sq / (float)params_per_head);
+                        head_grad_sq[h] = sqrtf(local_sq / (float)param_map->head_param_counts[h]);
                     }
                 }
                 cg::this_grid().sync();
@@ -3200,14 +3228,14 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
             if (has_work && tid == 0) {
                 float total_sq = 0.0f;
-                for (int h = 0; h < num_heads; h++) {
+                for (int h = 0; h < arch.num_heads; h++) {
                     total_sq += head_grad_sq[h] * head_grad_sq[h];
                 }
 
                 DEVICE_FATAL_IF(total_sq < 1e-12f, "effective_rank: zero gradient magnitude after backward pass - training catastrophically broken");
 
                 float entropy = 0.0f;
-                for (int h = 0; h < num_heads; h++) {
+                for (int h = 0; h < arch.num_heads; h++) {
                     float g = head_grad_sq[h];
                     float p = (g * g) / total_sq;
                     if (p > 1e-12f) {
@@ -3215,7 +3243,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     }
                 }
                 float eff_rank = expf(entropy);
-                float clamped_rank = fmaxf(1.0f, fminf((float)num_heads, eff_rank));
+                float clamped_rank = fmaxf(1.0f, fminf((float)arch.num_heads, eff_rank));
                 measured_value_set_computed(&entry->effective_rank, clamped_rank, organism->generation, entry->genome_hash);
             }
             cg::this_grid().sync();
@@ -3252,9 +3280,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     GPUElite* archive = organism->archive;
     int archive_size_val = organism->archive_size;
 
+    // CHECKPOINT 2: verify trace buffer state before aggregation
+    if (has_work && tid == 0 && blockIdx.x == 0) {
+        TraceBuffer* chk_tb2 = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
+        printf("TRACE_CHK2 eid=%d cidx=%d cyc0=%llu br0=%llu\n",
+            pool->alive_indices[wave_start], chk_tb2->current_idx,
+            chk_tb2->traces[0].cycles_elapsed, chk_tb2->traces[0].total_branches);
+    }
+
     // Aggregate per-entry trace buffers into PoolEntry HW counters
     // Wave-scoped: only aggregate entries processed by this wave
-    // Scan trace data directly — current_idx is unreliable
     if (has_work && blockIdx.x == 0) {
         for (int compact = wave_start + tid; compact < wave_end_compact; compact += blockDim.x) {
             int eid = pool->alive_indices[compact];
@@ -3267,13 +3302,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             ent->divergent_branches = 0;
             ent->total_branches = 0;
             int trace_count = tb->current_idx;
-            if (trace_count == 0 && tb->traces != nullptr && tb->capacity > 0) {
-                // current_idx counter lost — scan for recorded traces
-                for (int i = 0; i < tb->capacity; i++) {
-                    if (tb->traces[i].total_branches == 0) break;
-                    trace_count++;
-                }
-            }
+            printf("TRACE_AGG eid=%d cidx=%d cap=%d traces=%p cyc0=%llu br0=%llu inst0=%llu\n",
+                eid, trace_count, tb->capacity, tb->traces,
+                tb->traces[0].cycles_elapsed,
+                tb->traces[0].total_branches,
+                tb->traces[0].inst_executed);
             for (int i = 0; i < trace_count; i++) {
                 ExecutionTrace* t = &tb->traces[i];
                 ent->cycles_elapsed += t->cycles_elapsed;
@@ -3607,7 +3640,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             organism->pool,
             organism->chemical_field,
             ca_state,
-            organism->hardware_geom
+            organism->hardware_geom,
+            organism->archive_size
         );
     }
 }

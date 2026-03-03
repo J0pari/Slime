@@ -266,6 +266,12 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.archive_hardware_features, sizeof(float) * MAX_ARCHIVE_SIZE * (WMMA_TILE_DIM - 1), "archive_hardware_features");
     CUDA_ALLOC_CHECK(buffers_host.archive_task_performance, sizeof(float) * MAX_ARCHIVE_SIZE, "archive_task_performance");
     CUDA_ALLOC_CHECK(buffers_host.archive_per_class_accuracy, sizeof(float) * MAX_ARCHIVE_SIZE * NUM_CLASSES_MAX, "archive_per_class_accuracy");
+    CUDA_ALLOC_CHECK(buffers_host.archive_weight_deltas, sizeof(half) * MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE, "archive_weight_deltas");
+    CUDA_ALLOC_CHECK(buffers_host.archive_weight_delta_indices, sizeof(uint32_t) * MAX_ARCHIVE_SIZE * MAX_WEIGHT_DELTAS_PER_ELITE, "archive_weight_delta_indices");
+    CUDA_ALLOC_CHECK(buffers_host.archive_num_weight_deltas, sizeof(uint16_t) * MAX_ARCHIVE_SIZE, "archive_num_weight_deltas");
+    CUDA_ALLOC_CHECK(buffers_host.archive_archived_num_heads, sizeof(int) * MAX_ARCHIVE_SIZE, "archive_archived_num_heads");
+    CUDA_ALLOC_CHECK(buffers_host.archive_archived_channels, sizeof(int) * MAX_ARCHIVE_SIZE, "archive_archived_channels");
+    CUDA_ALLOC_CHECK(buffers_host.archive_archived_head_dim, sizeof(int) * MAX_ARCHIVE_SIZE, "archive_archived_head_dim");
     CUDA_ALLOC_CHECK(buffers_host.hw_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_HW, "hw_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_TASK, "task_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.gen_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_GEN, "gen_coords_pool");
@@ -395,7 +401,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.rng_states, sizeof(curandState) * POOL_CAPACITY_MAX, "rng_states");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_counter, sizeof(int), "phase_barrier_counter");
     CUDA_ALLOC_CHECK(buffers_host.phase_barrier_generation, sizeof(int), "phase_barrier_generation");
-    CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * BLOCK_SIZE * SPAWN_WS_COUNT * GENOME_SIZE, "organism_workspace_genomes");
+    CUDA_ALLOC_CHECK(buffers_host.organism_workspace_genomes, sizeof(float) * (BLOCK_SIZE * SPAWN_WS_COUNT + 4 + 2 * POOL_CAPACITY_MAX) * GENOME_SIZE, "organism_workspace_genomes");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_features_buffer, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_TOTAL, "behavioral_features_buffer");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_embedding_weights, sizeof(float) * BEHAVIORAL_DIM_TOTAL * BEHAVIORAL_DIM_TOTAL, "behavioral_embedding_weights");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_reconstruction_error, sizeof(float), "behavioral_reconstruction_error");

@@ -13,8 +13,27 @@ __device__ void reset_trace_buffer_device(Organism* organism) {
     int tid = threadIdx.x;
     for (int compact = 0; compact < alive_count; compact++) {
         int entry_idx = organism->pool->alive_indices[compact];
+        TraceBuffer* tb = &organism->ca_state_pool[entry_idx].trace;
         if (tid == 0) {
-            organism->ca_state_pool[entry_idx].trace.current_idx = 0;
+            tb->current_idx = 0;
+        }
+        for (int i = tid; i < tb->capacity; i += blockDim.x) {
+            ExecutionTrace* t = &tb->traces[i];
+            t->active_warps = 0;
+            t->divergent_branches = 0;
+            t->total_branches = 0;
+            t->global_loads = 0;
+            t->global_stores = 0;
+            t->l2_transactions = 0;
+            t->dram_transactions = 0;
+            t->shared_loads = 0;
+            t->shared_stores = 0;
+            t->bank_conflicts = 0;
+            t->inst_executed = 0;
+            t->inst_issued = 0;
+            t->cycles_elapsed = 0;
+            t->cycle_start = ULLONG_MAX;
+            t->tensor_core_cycles = 0;
         }
     }
 }
@@ -46,6 +65,7 @@ __device__ void init_trace_buffer_device(Organism* organism, int capacity) {
             trace->inst_executed = 0;
             trace->inst_issued = 0;
             trace->cycles_elapsed = 0;
+            trace->cycle_start = ULLONG_MAX;
             trace->tensor_core_cycles = 0;
             trace->sm_occupancy = NAN;
             trace->achieved_bandwidth = NAN;
@@ -66,11 +86,6 @@ __device__ void record_warp_metrics(ExecutionTrace* trace, int warp_id) {
     }
     atomicAdd((unsigned long long*)&trace->total_branches, 1ULL);
 
-    // Record cycle count so per-entry HW counters have data
-    unsigned long long cycles = clock64();
-    atomicAdd((unsigned long long*)&trace->cycles_elapsed, cycles);
-    // CA pipeline is WMMA-based — tensor core cycles track total cycles
-    atomicAdd((unsigned long long*)&trace->tensor_core_cycles, cycles);
     // Use active thread count as proxy for instructions executed
     atomicAdd((unsigned long long*)&trace->inst_executed, (unsigned long long)active_count);
     atomicAdd((unsigned long long*)&trace->inst_issued, 1ULL);
@@ -178,18 +193,11 @@ __device__ void aggregate_hardware_geometry_device(Organism* organism) {
     cg::this_grid().sync();
 
     // Aggregate traces from all alive entries' per-entry trace buffers
-    // Scan trace data directly — current_idx is unreliable
     int alive_count = pool->alive_indices_count;
     for (int compact = 0; compact < alive_count; compact++) {
         int entry_idx = pool->alive_indices[compact];
         TraceBuffer* buffer = &ca_state_pool[entry_idx].trace;
         int trace_count = buffer->current_idx;
-        if (trace_count == 0 && buffer->traces != nullptr && buffer->capacity > 0) {
-            for (int probe = 0; probe < buffer->capacity; probe++) {
-                if (buffer->traces[probe].total_branches == 0) break;
-                trace_count++;
-            }
-        }
         for (int i = tid; i < trace_count; i += blockDim.x) {
             ExecutionTrace* trace = &buffer->traces[i];
 

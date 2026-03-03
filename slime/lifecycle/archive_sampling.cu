@@ -134,7 +134,13 @@ __device__ void selection_device(Organism* organism) {
         DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "selection_device: dead entry in alive_indices");
 
         // Skip entries whose coherence hasn't been computed yet (e.g. gen=0, no previous accuracy)
-        if (entry->coherence.state != ComputeState::COMPUTED) return;
+        if (entry->coherence.state != ComputeState::COMPUTED) {
+            if (compact_idx == 0) printf("SEL_SKIP gen=%d eid=%d coherence_state=%d\n",
+                organism->generation, entry_idx, (int)entry->coherence.state);
+            return;
+        }
+        if (compact_idx == 0) printf("SEL_ENTER gen=%d eid=%d coherence=%.6f fitness=%.6f archive_size=%d\n",
+            organism->generation, entry_idx, entry->coherence.value, entry->fitness.value, *archive_size);
 
         float* organism_genome = &workspace_genomes[entry_idx * 2 * GENOME_SIZE];
         float* temp_parent = &workspace_genomes[entry_idx * 2 * GENOME_SIZE + GENOME_SIZE];
@@ -207,11 +213,11 @@ __device__ void selection_device(Organism* organism) {
         float comp_ratio = (float)entry->diresa_task_weights->input_dim / (float)entry->diresa_task_weights->output_dim;
         measured_value_set_computed(&entry->compression_ratio, comp_ratio, organism->generation, entry->genome_hash);
 
-        // latent_utilization: fraction of task latent dims with variance > threshold
-        // Use per-batch latent variance: encode each batch sample, measure dim variance
+        // latent_utilization + covariance decorrelation: encode each batch sample, measure dim variance and cross-covariance
         {
             float latent_means[BEHAVIORAL_DIM_TASK] = {};
             float latent_sq_means[BEHAVIORAL_DIM_TASK] = {};
+            float latent_cross[BEHAVIORAL_DIM_TASK * BEHAVIORAL_DIM_TASK] = {};
             float sample_latent[BEHAVIORAL_DIM_TASK];
             for (int b = 0; b < batch_size; b++) {
                 float* sample_features = batch_features + b * num_features;
@@ -219,6 +225,11 @@ __device__ void selection_device(Organism* organism) {
                 for (int d = 0; d < task_dim; d++) {
                     latent_means[d] += sample_latent[d];
                     latent_sq_means[d] += sample_latent[d] * sample_latent[d];
+                }
+                for (int d1 = 0; d1 < task_dim; d1++) {
+                    for (int d2 = d1 + 1; d2 < task_dim; d2++) {
+                        latent_cross[d1 * task_dim + d2] += sample_latent[d1] * sample_latent[d2];
+                    }
                 }
             }
             int active_dims = 0;
@@ -229,6 +240,21 @@ __device__ void selection_device(Organism* organism) {
             }
             float utilization = (float)active_dims / (float)task_dim;
             measured_value_set_computed(&entry->latent_utilization, utilization, organism->generation, entry->genome_hash);
+
+            // Off-diagonal covariance loss: penalizes correlated latent dimensions
+            float cov_loss_sum = 0.0f;
+            int num_pairs = 0;
+            for (int d1 = 0; d1 < task_dim; d1++) {
+                float mean_d1 = latent_means[d1] / batch_size;
+                for (int d2 = d1 + 1; d2 < task_dim; d2++) {
+                    float mean_d2 = latent_means[d2] / batch_size;
+                    float cov = latent_cross[d1 * task_dim + d2] / batch_size - mean_d1 * mean_d2;
+                    cov_loss_sum += cov * cov;
+                    num_pairs++;
+                }
+            }
+            float cov_loss = (num_pairs > 0) ? (cov_loss_sum / num_pairs) : 0.0f;
+            update_annealing(entry->diresa_task_weights, cov_loss, entry);
         }
 
         // hardware_feature_correlation: correlation between hw_features and hw latent coords

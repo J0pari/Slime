@@ -497,7 +497,8 @@ __device__ float diresa_train_step(const float* features, float* latent, DIRESAW
 }
 
 __device__ void diresa_forward_device(DIRESABatch* batch, DIRESAWeights* weights) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Single-block operation: threadIdx.x indexes into batch samples
+    int tid = threadIdx.x;
     if (tid < batch->batch_size) {
         const float* features = batch->features + tid * batch->input_dim;
         const float* features_shuffled = batch->features_shuffled + tid * batch->input_dim;
@@ -517,7 +518,8 @@ __device__ void diresa_forward_device(DIRESABatch* batch, DIRESAWeights* weights
 }
 
 __device__ void diresa_distance_device(DIRESABatch* batch) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Single-block operation: threadIdx.x indexes into batch samples
+    int tid = threadIdx.x;
     if (tid < batch->batch_size) {
         int shuffled_idx = batch->shuffle_indices[tid];
 
@@ -539,6 +541,8 @@ __device__ void diresa_distance_device(DIRESABatch* batch) {
 }
 
 __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weights) {
+    // NOTE: This function operates within a SINGLE BLOCK. All syncs are block-local.
+    // In the persistent cooperative kernel, blockIdx.x is global — do not use it for batch indexing.
     __shared__ float shared_recon[256];
     __shared__ float shared_orig_mean[1];
     __shared__ float shared_orig_var[1];
@@ -548,14 +552,15 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
     __shared__ int diresa_error_flag;  // 0 = ok, nonzero = error code
 
     int tid = threadIdx.x;
-    int sample_idx = blockIdx.x * blockDim.x + tid;
 
     if (tid == 0) diresa_error_flag = 0;
+    __syncthreads();
 
+    // === Reconstruction loss: each thread handles one sample ===
     float local_recon = 0.0f;
-    if (sample_idx < batch->batch_size) {
-        const float* orig = batch->features + sample_idx * batch->input_dim;
-        const float* recon = batch->reconstructed + sample_idx * batch->input_dim;
+    if (tid < batch->batch_size) {
+        const float* orig = batch->features + tid * batch->input_dim;
+        const float* recon = batch->reconstructed + tid * batch->input_dim;
         for (int i = 0; i < batch->input_dim; i++) {
             float diff = orig[i] - recon[i];
             local_recon += diff * diff;
@@ -563,19 +568,21 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
         local_recon /= batch->input_dim;
     }
     shared_recon[tid] = local_recon;
-    cg::this_grid().sync();
+    __syncthreads();
 
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
             shared_recon[tid] += shared_recon[tid + stride];
         }
-        cg::this_grid().sync();
+        __syncthreads();
     }
     if (tid == 0) {
-        atomicAdd(&batch->recon_loss, shared_recon[0] / batch->batch_size);
+        batch->recon_loss = shared_recon[0] / batch->batch_size;
     }
+    __syncthreads();
 
-    if (blockIdx.x == 0) {
+    // === Distance preservation loss ===
+    {
         float target_alpha = weights->distance_exponent;
 
         if (tid == 0) {
@@ -583,7 +590,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
             bool valid = true;
             for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    diresa_error_flag = 1;  // orig_distances <= 0
+                    diresa_error_flag = 1;
                     valid = false;
                 } else {
                     sum += logf(batch->orig_distances[i]);
@@ -591,7 +598,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
             }
             shared_orig_mean[0] = valid ? (sum / batch->batch_size) : 0.0f;
         }
-        cg::this_grid().sync();
+        __syncthreads();
 
         if (tid == 0 && diresa_error_flag == 0) {
             float sum_sq = 0.0f;
@@ -599,7 +606,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
             bool valid = true;
             for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->orig_distances[i] <= 0.0f) {
-                    diresa_error_flag = 2;  // orig_distances <= 0 (second check)
+                    diresa_error_flag = 2;
                     valid = false;
                 } else {
                     float diff = logf(batch->orig_distances[i]) - mean;
@@ -614,7 +621,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
             bool valid = true;
             for (int i = 0; i < batch->batch_size && valid; i++) {
                 if (batch->latent_distances[i] <= 0.0f) {
-                    diresa_error_flag = 3;  // latent_distances <= 0
+                    diresa_error_flag = 3;
                     valid = false;
                 } else {
                     sum += logf(batch->latent_distances[i]);
@@ -622,7 +629,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
             }
             if (valid) shared_latent_mean[0] = sum / batch->batch_size;
         }
-        cg::this_grid().sync();
+        __syncthreads();
 
         float latent_mean = shared_latent_mean[0];
         float orig_mean = shared_orig_mean[0];
@@ -633,7 +640,7 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
         if (diresa_error_flag == 0) {
             for (int i = tid; i < batch->batch_size; i += blockDim.x) {
                 if (batch->latent_distances[i] <= 0.0f || batch->orig_distances[i] <= 0.0f) {
-                    atomicCAS(&diresa_error_flag, 0, 4);  // distances <= 0 in loop
+                    atomicCAS(&diresa_error_flag, 0, 4);
                 } else {
                     float latent_diff = logf(batch->latent_distances[i]) - latent_mean;
                     float orig_diff = logf(batch->orig_distances[i]) - orig_mean;
@@ -645,39 +652,39 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
 
         shared_recon[tid] = local_var;
         shared_cov_sum[0] = 0.0f;
-        cg::this_grid().sync();
+        __syncthreads();
 
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 shared_recon[tid] += shared_recon[tid + stride];
             }
-            cg::this_grid().sync();
+            __syncthreads();
         }
         if (tid == 0) {
             shared_latent_var[0] = shared_recon[0] / batch->batch_size;
         }
 
         shared_recon[tid] = local_cov;
-        cg::this_grid().sync();
+        __syncthreads();
 
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
             if (tid < stride) {
                 shared_recon[tid] += shared_recon[tid + stride];
             }
-            cg::this_grid().sync();
+            __syncthreads();
         }
         if (tid == 0 && diresa_error_flag == 0) {
             shared_cov_sum[0] = shared_recon[0];
 
             float alpha_denom = shared_orig_var[0] * batch->batch_size;
             if (alpha_denom <= 0.0f) {
-                diresa_error_flag = 5;  // alpha_denom <= 0
+                diresa_error_flag = 5;
             } else {
                 float alpha_measured = shared_cov_sum[0] / alpha_denom;
 
                 float corr_denom = sqrtf(shared_orig_var[0] * shared_latent_var[0]) * batch->batch_size;
                 if (corr_denom <= 0.0f || isnan(corr_denom) || isinf(corr_denom)) {
-                    diresa_error_flag = 6;  // corr_denom invalid
+                    diresa_error_flag = 6;
                 } else {
                     float log_correlation = shared_cov_sum[0] / corr_denom;
 
@@ -689,8 +696,9 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
         }
     }
 
-    if (blockIdx.x == 0 && tid == 0) {
-        float latent_means[BEHAVIORAL_DIM_TASK] = {0};  // TASK is the largest single dimension
+    // === Covariance decorrelation loss (single-threaded) ===
+    if (tid == 0) {
+        float latent_means[BEHAVIORAL_DIM_TASK] = {0};
 
         for (int dim = 0; dim < batch->output_dim; dim++) {
             float sum = 0.0f;
@@ -715,12 +723,11 @@ __device__ void diresa_loss_device(DIRESABatch* batch, const DIRESAWeights* weig
         }
 
         int num_pairs = batch->output_dim * (batch->output_dim - 1) / 2;
-        batch->cov_loss = cov_sum / num_pairs;
+        batch->cov_loss = (num_pairs > 0) ? (cov_sum / num_pairs) : 0.0f;
     }
 
-    // Check error flag after all syncs - trap loudly if there was an error
     __syncthreads();
-    if (diresa_error_flag != 0 && tid == 0 && blockIdx.x == 0) {
+    if (diresa_error_flag != 0 && tid == 0) {
         printf("!E:DIRESA_LOSS code=%d batch_size=%d\n", diresa_error_flag, batch->batch_size);
     }
 }

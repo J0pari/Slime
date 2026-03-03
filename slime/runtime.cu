@@ -195,7 +195,8 @@ __device__ void init_organism_device(Organism* organism) {
             case 28: organism->delta_indices_buffer = buffers->delta_indices_buffer; break;
             case 29: organism->delta_values_buffer = buffers->delta_values_buffer; break;
             case 30: organism->gradients_buffer = buffers->gradients_buffer; break;
-            case 31: organism->output_gradients = buffers->gradients_buffer; break;
+            // case 31 removed: output_gradients was a duplicate of gradients_buffer (case 30)
+            case 31: break;
         }
     }
     cg::this_grid().sync();
@@ -302,6 +303,12 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->archive->hardware_features = buffers->archive_hardware_features;
         organism->archive->task_performance = buffers->archive_task_performance;
         organism->archive->per_class_accuracy = buffers->archive_per_class_accuracy;
+        organism->archive->weight_deltas = buffers->archive_weight_deltas;
+        organism->archive->weight_delta_indices = buffers->archive_weight_delta_indices;
+        organism->archive->num_weight_deltas = buffers->archive_num_weight_deltas;
+        organism->archive->archived_num_heads = buffers->archive_archived_num_heads;
+        organism->archive->archived_channels = buffers->archive_archived_channels;
+        organism->archive->archived_head_dim = buffers->archive_archived_head_dim;
         organism->archive->hash_table_keys = buffers->archive_hash_table_keys;
         organism->archive->hash_table_values = buffers->archive_hash_table_values;
 
@@ -897,7 +904,7 @@ __global__ void persistent_evolution_kernel(
     // reads it on the first tick (generation 0)
     {
         int init_alive_count = organism->pool->alive_indices_count;
-        for (int compact = blockIdx.x; compact < init_alive_count; compact += gridDim.x) {
+        for (int compact = 0; compact < init_alive_count; compact++) {
             int entry_idx = organism->pool->alive_indices[compact];
             if (global_tid == 0) {
                 organism->current_entry_idx = entry_idx;
@@ -976,6 +983,13 @@ __global__ void persistent_evolution_kernel(
         compute_fitness_from_diresa_device(organism);
         cg::this_grid().sync();
 
+        // Refine one elite's latent genome per generation via tape-recorded decode + backward
+        if (organism->archive_size > 0) {
+            int refine_idx = organism->generation % organism->archive_size;
+            refine_elite_coop_device(organism, refine_idx);
+        }
+        cg::this_grid().sync();
+
         // Spawn probability - all threads compute same value, one writes
         int active = Atomics::load_int(organism->pool->active_count);
         float spawn_prob = SPAWN_RATE_MAX * expf(-active / (float)capacity);
@@ -1015,10 +1029,10 @@ __global__ void persistent_evolution_kernel(
         }
         cg::this_grid().sync();
 
-        // Process alive entries - each block handles different entries in parallel
+        // Process alive entries - all blocks cooperate on one entry at a time
+        // Grid syncs inside require ALL blocks to iterate the same number of times
         int p2_alive_count = organism->pool->alive_indices_count;
-        for (int compact = blockIdx.x; compact < p2_alive_count; compact += gridDim.x) {
-            // All threads in block read the entry index (no guard needed for reads)
+        for (int compact = 0; compact < p2_alive_count; compact++) {
             int entry_idx = organism->pool->alive_indices[compact];
             if (global_tid == 0) {
                 organism->current_entry_idx = entry_idx;
@@ -1028,7 +1042,7 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
-        for (int compact = blockIdx.x; compact < p2_alive_count; compact += gridDim.x) {
+        for (int compact = 0; compact < p2_alive_count; compact++) {
             int entry_idx = organism->pool->alive_indices[compact];
             if (global_tid == 0) {
                 organism->current_entry_idx = entry_idx;
@@ -1043,12 +1057,35 @@ __global__ void persistent_evolution_kernel(
         }
         cg::this_grid().sync();
 
-        // Generation increment - atomic ensures correctness, all threads can observe
+        // Generation boundary validation - verify critical subsystems actually ran
         if (global_tid == 0) {
-            int old_gen = atomicAdd(&organism->generation, 1);
-            if (old_gen % 10 == 0) {
-                printf("V:gen=%d\n", old_gen);
+            int gen = organism->generation;
+            int arch_size = organism->archive_size;
+            int alive = organism->pool->alive_indices_count;
+
+            printf("V:gen_end gen=%d archive_size=%d alive=%d\n", gen, arch_size, alive);
+
+            // From gen 2+, archive MUST be populated (gen 1 computes coherence, selection inserts)
+            DEVICE_FATAL_IF(gen >= 2 && arch_size == 0,
+                "generation boundary: archive_size is 0 at gen >= 2 — selection/archival completely broken");
+
+            // Alive count must never be 0
+            DEVICE_FATAL_IF(alive == 0,
+                "generation boundary: alive_indices_count is 0 — population extinct");
+
+            // Validate sample entries have COMPUTED fitness from gen 1+
+            if (gen >= 1) {
+                int eid0 = organism->pool->alive_indices[0];
+                PoolEntry* e0 = &organism->pool->entries[eid0];
+                DEVICE_FATAL_IF(e0->task_accuracy.state != ComputeState::COMPUTED,
+                    "generation boundary: task_accuracy not COMPUTED after lifecycle");
+                DEVICE_FATAL_IF(e0->hardware_efficiency.state != ComputeState::COMPUTED,
+                    "generation boundary: hardware_efficiency not COMPUTED after lifecycle");
+                DEVICE_FATAL_IF(isnan(e0->fitness.value) || isinf(e0->fitness.value),
+                    "generation boundary: fitness is NaN/Inf");
             }
+
+            atomicAdd(&organism->generation, 1);
         }
         cg::this_grid().sync();
         tick++;

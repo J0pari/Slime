@@ -10,23 +10,18 @@
 
 namespace cg = cooperative_groups;
 
-__device__ void extract_head_gradient_magnitudes_device(Organism* organism) {
-    ADTape* tape = organism->ad_tape;
-    int* param_start_indices = organism->gf_param_start_indices;
-    int* param_counts = organism->gf_param_counts;
-    float* gradient_magnitudes = organism->gf_gradient_magnitudes;
-    int num_heads = organism->gf_num_heads;
+__device__ void extract_head_gradient_magnitudes_device(ADTape* tape, CAParameterMap* param_map,
+                                                        float* gradient_magnitudes, int num_heads) {
     DEVICE_FATAL_IF(tape == nullptr, "extract_head_gradient_magnitudes: tape is null");
     DEVICE_FATAL_IF(tape->grad_buffer == nullptr, "extract_head_gradient_magnitudes: grad_buffer is null");
-    DEVICE_FATAL_IF(param_start_indices == nullptr, "extract_head_gradient_magnitudes: param_start_indices is null");
-    DEVICE_FATAL_IF(param_counts == nullptr, "extract_head_gradient_magnitudes: param_counts is null");
+    DEVICE_FATAL_IF(param_map == nullptr, "extract_head_gradient_magnitudes: param_map is null");
     DEVICE_FATAL_IF(gradient_magnitudes == nullptr, "extract_head_gradient_magnitudes: gradient_magnitudes is null");
     DEVICE_FATAL_IF(num_heads <= 0, "extract_head_gradient_magnitudes: num_heads must be positive");
 
     int head_id = blockIdx.x;
     if (head_id < num_heads) {
-        int start_idx = param_start_indices[head_id];
-        int count = param_counts[head_id];
+        int start_idx = param_map->head_param_offsets[head_id];
+        int count = param_map->head_param_counts[head_id];
 
         DEVICE_FATAL_IF(start_idx < 0, "extract_head_gradient_magnitudes: negative start_idx");
         DEVICE_FATAL_IF(count <= 0, "extract_head_gradient_magnitudes: non-positive count");

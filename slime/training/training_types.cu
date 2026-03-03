@@ -114,7 +114,7 @@ __device__ void init_training_mode_device(Organism* organism) {
     HybridTrainingMode* mode = organism->training_mode;
     int grid_size = organism->ca_grid_size;
     float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
-    float* gradients = organism->output_gradients;
+    float* gradients = organism->gradients_buffer;
     float ctx_metabolic = organism->ctx_metabolic;
     float ctx_stress = organism->ctx_stress;
     float ctx_morphogen = organism->ctx_morphogen;
@@ -198,7 +198,7 @@ __device__ void init_curriculum_device(Organism* organism) {
     int entry_idx = blockIdx.x;
     AdaptiveCurriculum* curriculum = organism->curriculum;
     float* genome = &organism->workspace_genomes[entry_idx * GENOME_SIZE * 2];
-    float* gradients = organism->output_gradients;
+    float* gradients = organism->gradients_buffer;
     float ctx_metabolic = organism->ctx_metabolic;
     float ctx_stress = organism->ctx_stress;
     float ctx_morphogen = organism->ctx_morphogen;

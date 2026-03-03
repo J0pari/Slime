@@ -6,6 +6,7 @@
 #include "../core/organism.cu"
 #include "../utils/cuda_primitives.cuh"
 #include "../learning/autodiff.cu"
+#include "../learning/diresa.cu"
 #include "tubes.cu"
 #include "genome_ops.cuh"
 #include <cuda_runtime.h>
@@ -561,81 +562,85 @@ __device__ void prune_and_compact_coop_device(TemporalTube* tube, int* valid_fla
     }
 }
 
-__device__ void refine_elite_coop_device(GPUElite* elite, ADTape* tape, int elite_idx, float learning_rate, float gradient_clip_norm) {
-    cg::grid_group grid = cg::this_grid();
+// Cooperative grid elite refinement: tape-recorded DIRESA decode + backward.
+// Optimizes elite latent_genome to minimize reconstruction MSE via one gradient step.
+// All blocks participate — uses cg::this_grid().sync() for inter-block coordination.
+// Uses entry 0's AD tape (free after CA lifecycle completes).
+__device__ void refine_elite_coop_device(Organism* organism, int elite_idx) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_threads = blockDim.x * gridDim.x;
 
-    float* latent = &elite->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX];
+    GPUElite* archive = organism->archive;
+    DIRESAWeights* weights = organism->diresa_genome_weights;
+    float* latent = &archive->latent_genome[elite_idx * GENOME_LATENT_DIM_MAX];
+    ADTape* tape = &organism->pool->entries[0].ca_state->tape;
 
-    if (blockIdx.x == 0) {
-        if (tape->current_size > 0 && threadIdx.x == 0) {
-            int output_idx = tape->entries[tape->current_size - 1].output_idx;
-            tape->grad_buffer[output_idx] = 1.0f;
-        }
-        cg::this_grid().sync();
+    // Workspace for target genome reconstruction
+    float* target_genome = organism->workspace_genomes;
 
-        for (int op_idx = tape->current_size - 1; op_idx >= 0; op_idx--) {
-            TapeEntry* entry = &tape->entries[op_idx];
-            float grad_out = tape->grad_buffer[entry->output_idx];
-
-            if (threadIdx.x == 0 && grad_out != 0.0f) {
-                switch (entry->op) {
-                    case OP_ADD:
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out);
-                        atomicAdd(&tape->grad_buffer[entry->input2_idx], grad_out);
-                        break;
-                    case OP_MUL:
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * tape->value_buffer[entry->input2_idx]);
-                        atomicAdd(&tape->grad_buffer[entry->input2_idx], grad_out * tape->value_buffer[entry->input1_idx]);
-                        break;
-                    case OP_RELU:
-                        if (entry->aux_data > 0.0f) {
-                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out);
-                        }
-                        break;
-                    case OP_EXP:
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * tape->value_buffer[entry->output_idx]);
-                        break;
-                    case OP_LOG: {
-                        float input_val = entry->aux_data;
-                        if (input_val > 1e-8f) {
-                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out / input_val);
-                        }
-                        break;
-                    }
-                    case OP_TANH: {
-                        float tanh_val = entry->aux_data;
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * (1.0f - tanh_val * tanh_val));
-                        break;
-                    }
-                    case OP_SQRT:
-                        if (entry->aux_data > 1e-8f) {
-                            atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out / (2.0f * entry->aux_data));
-                        }
-                        break;
-                    case OP_SIN:
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], grad_out * cosf(entry->aux_data));
-                        break;
-                    case OP_COS:
-                        atomicAdd(&tape->grad_buffer[entry->input1_idx], -grad_out * sinf(entry->aux_data));
-                        break;
-                    default:
-                        break;
-                }
-            }
-            cg::this_grid().sync();
+    // Step 1: Thread 0 reconstructs target genome = decode(current_latent) + deltas
+    if (tid == 0) {
+        diresa_decode(latent, target_genome, weights);
+        int nd = archive->num_weight_deltas[elite_idx];
+        half* deltas = &archive->weight_deltas[elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE];
+        uint32_t* indices = &archive->weight_delta_indices[elite_idx * MAX_WEIGHT_DELTAS_PER_ELITE];
+        for (int i = 0; i < nd; i++) {
+            target_genome[indices[i]] += __half2float(deltas[i]);
         }
     }
+    cg::this_grid().sync();
 
-    grid.sync();
+    // Step 2: Reset tape (cooperative — clears grad_buffer, value_levels, counters)
+    reset_tape_device(tape, tid);
+    cg::this_grid().sync();
 
-    if (tid < GENOME_LATENT_DIM_MAX) {
-        float grad = tape->grad_buffer[tid];
-        float grad_norm = fabsf(grad);
-        if (grad_norm > gradient_clip_norm) {
-            grad = grad * (gradient_clip_norm / grad_norm);
+    // Step 3: Load latent values as tape leaves
+    int latent_dim = weights->output_dim;
+    for (int i = tid; i < latent_dim; i += num_threads) {
+        tape->value_buffer[i] = latent[i];
+    }
+    cg::this_grid().sync();
+
+    // Step 4: Cooperative tape-recorded DIRESA decode forward
+    int output_start = diresa_decode_taped_forward(tape, weights, tid, num_threads);
+
+    // Step 5: Seed MSE gradient at output: dL/d_recon[i] = 2*(recon[i] - target[i]) / N
+    int genome_size = weights->input_dim;
+    for (int i = tid; i < genome_size; i += num_threads) {
+        float recon = tape->value_buffer[output_start + i];
+        float target = target_genome[i];
+        tape->grad_buffer[output_start + i] = 2.0f * (recon - target) / genome_size;
+    }
+    cg::this_grid().sync();
+
+    // Step 6: Cooperative backward through tape (MATMUL + RELU levels)
+    int tape_size = tape->current_size;
+    int max_level = tape->max_level;
+
+    for (int level = max_level; level >= 1; level--) {
+        for (int i = tid; i < tape_size; i += num_threads) {
+            TapeEntry* entry = &tape->entries[i];
+            if (entry->level == level && entry->op != OP_MATMUL) {
+                backward_op(entry, tape->value_buffer, tape->grad_buffer);
+            }
         }
-        latent[tid] -= learning_rate * grad;
+        for (int i = 0; i < tape_size; i++) {
+            TapeEntry* entry = &tape->entries[i];
+            if (entry->level == level && entry->op == OP_MATMUL) {
+                backward_matmul_parallel(entry, tape->value_buffer, tape->grad_buffer, tid, num_threads);
+            }
+        }
+        cg::this_grid().sync();
+    }
+
+    // Step 7: Clipped gradient descent on latent genome
+    for (int i = tid; i < latent_dim; i += num_threads) {
+        float grad = tape->grad_buffer[i];
+        float grad_mag = fabsf(grad);
+        if (grad_mag > GRADIENT_CLIP_NORM) {
+            grad = grad * (GRADIENT_CLIP_NORM / grad_mag);
+        }
+        latent[i] -= ELITE_REFINE_LR * grad;
     }
 }
 

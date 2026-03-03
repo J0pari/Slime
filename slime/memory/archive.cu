@@ -343,9 +343,13 @@ __device__ void insert_elite_device(
     bool should_insert = (existing_idx < 0);
     int idx = -1;
 
+    printf("INSERT_ELITE hash=%llu existing=%d should_insert=%d archive_size=%d\n",
+        (unsigned long long)genome_hash_val, existing_idx, should_insert ? 1 : 0, *archive_size);
+
     if (should_insert) {
         idx = atomicAdd(archive_size, 1);
         if (idx >= MAX_ARCHIVE_SIZE) {
+            printf("INSERT_ELITE_FULL idx=%d max=%d\n", idx, MAX_ARCHIVE_SIZE);
             atomicSub(archive_size, 1);
             should_insert = false;
         }
@@ -359,8 +363,11 @@ __device__ void insert_elite_device(
             idx
         );
         if (!inserted) {
+            printf("INSERT_ELITE_HASH_FAIL hash=%llu idx=%d\n", (unsigned long long)genome_hash_val, idx);
             atomicSub(archive_size, 1);
             should_insert = false;
+        } else {
+            printf("INSERT_ELITE_OK idx=%d archive_size=%d\n", idx, *archive_size);
         }
     }
 
@@ -403,6 +410,7 @@ __device__ void insert_elite_device(
         for (int l = 0; l < GENOME_LATENT_DIM_MAX; l++) {
             archive->latent_genome[idx * GENOME_LATENT_DIM_MAX + l] = latent_genome_new[l];
         }
+        archive->num_weight_deltas[idx] = 0;
 
         float min_dist = 1e9f;
         int closest_cell = 0;
