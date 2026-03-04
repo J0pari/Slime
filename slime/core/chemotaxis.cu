@@ -7,6 +7,7 @@
 #include "pseudopod.cu"
 #include "../memory/pool.cu"
 #include "../compute/warp_ca.cu"
+#include "../data/dataset_loader.cu"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cuda_fp16.h>
@@ -45,53 +46,9 @@ __device__ void store_chemical_snapshot_device(Organism* organism) {
     }
 }
 
-__device__ void update_field_from_ca_device(Organism* organism) {
-    ComponentPool* pool = organism->pool;
-    ChemicalField* chem = organism->chemical_field;
-    float* chemical_concentration = chem->concentration;
-    int chem_channels = chem->channels;
-    int entry_idx = organism->current_entry_idx;
-
-    DEVICE_FATAL_IF(entry_idx >= pool->capacity, "update_field_from_ca_device: entry_idx out of bounds");
-
-    PoolEntry* entry = &pool->entries[entry_idx];
-    DEVICE_FATAL_IF(!pool->alive_flags[entry_idx], "update_field_from_ca_device: dead entry passed");
-
-    int grid_size = entry->grid_size;
-    int cells = grid_size * grid_size;
-    int ca_channels = entry->channels;
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x < grid_size && y < grid_size) {
-        int cell_idx = y * grid_size + x;
-        float* ca_concentration = entry->ca_state->ca_concentration;
-
-        // Map CA channels 0..chem_channels-1 to chemical field channels
-        for (int c = 0; c < chem_channels && c < ca_channels; c++) {
-            float val = ca_concentration[cell_idx * ca_channels + c];
-            if (isfinite(val)) {
-                atomicAdd(&chemical_concentration[c * cells + cell_idx], val);
-            }
-        }
-    }
-}
-
 __device__ void initialize_ca_from_field_device(Organism* organism) {
     ComponentPool* pool = organism->pool;
     ChemicalField* chem = organism->chemical_field;
-    const float* chem_concentration = chem->concentration;
-    const float* chem_gradient_x = chem->gradient_x;
-    const float* chem_gradient_y = chem->gradient_y;
-    const float* chem_laplacian = chem->laplacian;
-    const float* chem_sources = chem->sources;
-    const float* chem_decay_factors = chem->decay_factors;
-    int chem_channels = chem->channels;
-    const float* resource_density = organism->resource_density;
-    const float* fitness_landscape = organism->fitness_landscape;
-    const float* resource_gradient_x = organism->resource_gradient_x;
-    const float* resource_gradient_y = organism->resource_gradient_y;
-    const float* attractor_field = organism->attractor_field;
     int entry_idx = organism->current_entry_idx;
 
     DEVICE_FATAL_IF(entry_idx >= pool->capacity, "initialize_ca_from_field_device: entry_idx out of bounds");
@@ -103,85 +60,35 @@ __device__ void initialize_ca_from_field_device(Organism* organism) {
     int cells = grid_size * grid_size;
     int ca_channels = entry->channels;
 
-    // Use 1D indexing to support both 1D cooperative launches and 2D grid launches
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
 
     float* ca_conc = entry->ca_state->ca_concentration;
 
+    HybridTrainingMode* training_mode = organism->training_mode;
+    DEVICE_FATAL_IF(!training_mode || !training_mode->batch_samples,
+        "initialize_ca_from_field_device: training_mode or batch_samples null");
+
+    // Per-entry init: agent position offsets the field read
+    BehavioralState* agent = &organism->behavioral_agents[entry_idx];
+    int agent_gx = min(max((int)(agent->position[0] * grid_size), 0), grid_size - 1);
+    int agent_gy = min(max((int)(agent->position[1] * grid_size), 0), grid_size - 1);
+
     for (int cell_idx = global_tid; cell_idx < cells; cell_idx += total_threads) {
-        int x = cell_idx % grid_size;
-        int y = cell_idx / grid_size;
+        int cx = cell_idx % grid_size;
+        int cy = cell_idx / grid_size;
+        int field_x = (cx + agent_gx) % grid_size;
+        int field_y = (cy + agent_gy) % grid_size;
+        int field_cell = field_y * grid_size + field_x;
+
         int base_idx = cell_idx * ca_channels;
-
-        // Aggregate multi-channel chemical field into CA channels 0-5
-        // CA channel 0: average of concentration across chem channels
-        // CA channels 1-4: average of gradients/laplacian/sources across chem channels
-        float conc_sum = 0.0f, gx_sum = 0.0f, gy_sum = 0.0f, lap_sum = 0.0f, src_sum = 0.0f;
-        for (int c = 0; c < chem_channels; c++) {
-            int field_idx = c * cells + cell_idx;
-            conc_sum += chem_concentration[field_idx];
-            gx_sum += chem_gradient_x[field_idx];
-            gy_sum += chem_gradient_y[field_idx];
-            lap_sum += chem_laplacian[field_idx];
-            src_sum += chem_sources[field_idx];
-        }
-        float inv_channels = 1.0f / (float)chem_channels;
-        ca_conc[base_idx + 0] = conc_sum * inv_channels;
-        ca_conc[base_idx + 1] = gx_sum * inv_channels;
-        ca_conc[base_idx + 2] = gy_sum * inv_channels;
-        ca_conc[base_idx + 3] = lap_sum * inv_channels;
-        ca_conc[base_idx + 4] = src_sum * inv_channels;
-        DEVICE_FATAL_IF(chem_decay_factors == nullptr, "chem_decay_factors is null");
-        ca_conc[base_idx + 5] = chem_decay_factors[cell_idx];
-
-        ca_conc[base_idx + 6] = resource_density[cell_idx];
-        ca_conc[base_idx + 7] = fitness_landscape[cell_idx];
-        ca_conc[base_idx + 8] = resource_gradient_x[cell_idx];
-        ca_conc[base_idx + 9] = resource_gradient_y[cell_idx];
-
-        // Compute per-entry behavioral_field from pool
-        int behavioral_dim = organism->behavioral_dim_hw + organism->behavioral_dim_task + organism->behavioral_dim_gen;
-        int behavioral_buffer_size = grid_size * grid_size * behavioral_dim;
-        const float* entry_behavioral_field = organism->behavioral_field_pool + entry_idx * behavioral_buffer_size;
-        ca_conc[base_idx + 10] = entry_behavioral_field[cell_idx];
-
-        // Channels 11-13: sample data from batch_samples
-        if (ca_channels > 11) {
-            HybridTrainingMode* training_mode = organism->training_mode;
-            if (training_mode && training_mode->batch_samples) {
-                int batch_stride = grid_size * grid_size;
-                // Use batch 0's samples for per-entry CA state
-                int sample_base = 0 * batch_stride * 3;
-                ca_conc[base_idx + 11] = training_mode->batch_samples[sample_base + 0 * batch_stride + cell_idx];
-                if (ca_channels > 12) {
-                    ca_conc[base_idx + 12] = training_mode->batch_samples[sample_base + 1 * batch_stride + cell_idx];
-                }
-                if (ca_channels > 13) {
-                    ca_conc[base_idx + 13] = training_mode->batch_samples[sample_base + 2 * batch_stride + cell_idx];
-                }
-            } else {
-                DEVICE_FATAL("initialize_ca_from_field_device: training_mode or batch_samples null for channels 11-13");
-            }
-        }
-
-        if (ca_channels > 14) {
-            float* ca_output = entry->ca_state->ca_output;
-            DEVICE_FATAL_IF(ca_output == nullptr, "ca_output null but ca_state exists");
-            int num_heads = entry->num_heads;
-            int head_dim = entry->head_dim;
-            float recurrence = 0.0f;
-            for (int h = 0; h < num_heads; h++) {
-                int output_idx = h * grid_size * grid_size * head_dim + cell_idx * head_dim;
-                recurrence += ca_output[output_idx];
-            }
-            ca_conc[base_idx + 14] = recurrence / (float)max(1, num_heads);
-        }
-
-        if (ca_channels > 15) {
-            DEVICE_FATAL_IF(attractor_field == nullptr, "initialize_ca_from_field_device: attractor_field required for channel 15");
-            ca_conc[base_idx + 15] = attractor_field[cell_idx];
-        }
+        inject_ca_cell_device(
+            ca_conc, base_idx, ca_channels, 0,
+            chem->concentration, chem->channels, cells, cell_idx,
+            field_cell,
+            training_mode->batch_samples, 0,
+            nullptr, 0
+        );
     }
 }
 

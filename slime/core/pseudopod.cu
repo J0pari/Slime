@@ -51,7 +51,7 @@ __device__ float get_ca_xavier_scale(
 ) {
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
-    int value_size = num_heads * head_dim * channels;
+    int flow_projection_size = num_heads * 2 * head_dim;
 
     if (flat_idx < perception_size) {
         *out_matrix = 0;
@@ -71,11 +71,11 @@ __device__ float get_ca_xavier_scale(
     }
     flat_idx -= interaction_size;
 
-    if (flat_idx < value_size) {
+    if (flat_idx < flow_projection_size) {
         *out_matrix = 2;
         *out_local_idx = flat_idx;
         float fan_in = (float)head_dim;
-        float fan_out = (float)channels;
+        float fan_out = 2.0f;
         return sqrtf(2.0f / (fan_in + fan_out));
     }
 
@@ -87,7 +87,7 @@ __device__ float get_ca_xavier_scale(
 __device__ void init_ca_weights_xavier(
     half* perception_weights,
     half* interaction_weights,
-    half* value_weights,
+    half* flow_projection_weights,
     int weight_idx,
     int num_heads,
     int channels,
@@ -96,7 +96,7 @@ __device__ void init_ca_weights_xavier(
 ) {
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
-    int value_size = num_heads * head_dim * channels;
+    int flow_projection_size = num_heads * 2 * head_dim;
 
     int matrix, local_idx;
     float scale;
@@ -109,9 +109,9 @@ __device__ void init_ca_weights_xavier(
         scale = get_ca_xavier_scale(perception_size + weight_idx, num_heads, channels, head_dim, &matrix, &local_idx);
         interaction_weights[weight_idx] = __float2half(curand_normal(rand_state) * scale);
     }
-    if (weight_idx < value_size) {
-        scale = get_ca_xavier_scale(perception_size + interaction_size + weight_idx, num_heads, channels, head_dim, &matrix, &local_idx);
-        value_weights[weight_idx] = __float2half(curand_normal(rand_state) * scale);
+    if (weight_idx < flow_projection_size) {
+        float fp_scale = sqrtf(2.0f / ((float)head_dim + 2.0f));
+        flow_projection_weights[weight_idx] = __float2half(curand_normal(rand_state) * fp_scale);
     }
 }
 
@@ -121,8 +121,8 @@ __device__ void init_organism_ca_weights_device(Organism* organism) {
 
     int perception_size = arch.num_heads * arch.channels * arch.head_dim;
     int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
-    int value_size = arch.num_heads * arch.head_dim * arch.channels;
-    int max_weight_size = max(perception_size, max(interaction_size, value_size));
+    int flow_projection_size = arch.num_heads * 2 * arch.head_dim;
+    int max_weight_size = max(perception_size, max(interaction_size, flow_projection_size));
 
     int total_work = pool->alive_indices_count * max_weight_size;
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -145,30 +145,27 @@ __device__ void init_organism_ca_weights_device(Organism* organism) {
         init_ca_weights_xavier(
             ca_state->perception_weights,
             ca_state->interaction_weights,
-            ca_state->value_weights,
+            ca_state->flow_projection_weights,
             weight_idx, arch.num_heads, arch.channels, arch.head_dim,
             &rand_state
         );
     }
 }
 
-__device__ void init_ca_weights_device(Organism* organism) {
-    MultiHeadCAState* mh_state = organism->multihead_ca_state;
-    half* perception_weights = mh_state->perception_weights;
-    half* interaction_weights = mh_state->interaction_weights;
-    half* value_weights = mh_state->value_weights;
-    Architecture arch = Architecture::maxBounds();
-    int num_heads = arch.num_heads;
-    int channels = arch.channels;
-    int head_dim = arch.head_dim;
-    unsigned long seed = organism->init_seed;
 
+__global__ void init_ca_weights_kernel(
+    half* perception_weights,
+    half* interaction_weights,
+    half* flow_projection_weights,
+    int num_heads, int channels, int head_dim,
+    unsigned long seed
+) {
     int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
     curandState_t rand_state;
     curand_init(seed, weight_idx, 0, &rand_state);
 
     init_ca_weights_xavier(
-        perception_weights, interaction_weights, value_weights,
+        perception_weights, interaction_weights, flow_projection_weights,
         weight_idx, num_heads, channels, head_dim,
         &rand_state
     );

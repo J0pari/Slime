@@ -307,6 +307,8 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.prev_hw_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_HW, "prev_hw_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.prev_task_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_TASK, "prev_task_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.prev_gen_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_GEN, "prev_gen_coords_pool");
+    CUDA_ALLOC_CHECK(buffers_host.sample_field_coords, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * 2, "sample_field_coords");
+    CUDA_ALLOC_CHECK(buffers_host.prev_sample_field_coords, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * 2, "prev_sample_field_coords");
     CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (NUM_HEADS + 1) * HEAD_DIM, "fp32_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.fp16_ca_workspace, sizeof(half) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (CHANNELS + HEAD_DIM), "fp16_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.latent_genome_pool, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX, "latent_genome_pool");
@@ -359,8 +361,7 @@ int main() {
     constexpr size_t ADAM_CA_ENTRY_SIZE =
         (NUM_HEADS * CHANNELS * HEAD_DIM) +
         (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
-        (NUM_HEADS * HEAD_DIM * CHANNELS) +
-        (NUM_CLASSES_MAX * NUM_HEADS * CHANNELS);
+        (NUM_HEADS * 2 * HEAD_DIM);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_m_ca_pool");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_v_ca_pool");
     CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "adam_m_pooling");
@@ -371,13 +372,13 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "adam_v_fc_bias");
 
     // Wave-based buffers use per-entry accumulated offsets, must size for POOL_CAPACITY_MAX
-    CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_ca_states_pool");
-    CUDA_ALLOC_CHECK(buffers_host.batch_ca_input_grads, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_ca_input_grads");
+    CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "batch_ca_states_pool");
+    CUDA_ALLOC_CHECK(buffers_host.batch_ca_input_grads, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "batch_ca_input_grads");
     CUDA_ALLOC_CHECK(buffers_host.batched_ca_output, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "batched_ca_output");
     CUDA_ALLOC_CHECK(buffers_host.batch_affinity_reduced, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE, "batch_affinity_reduced");
     CUDA_ALLOC_CHECK(buffers_host.batch_flow_field, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * 2, "batch_flow_field");
     CUDA_ALLOC_CHECK(buffers_host.batch_reintegration_buffer, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_reintegration_buffer");
-    CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CA_FIELD_SIZE * CHANNELS, "batch_prev_concentration");
+    CUDA_ALLOC_CHECK(buffers_host.batch_prev_concentration, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "batch_prev_concentration");
     CUDA_ALLOC_CHECK(buffers_host.batch_labels_pool, sizeof(int) * BATCH_SIZE, "batch_labels_pool");
     CUDA_ALLOC_CHECK(buffers_host.batch_samples_pool, sizeof(float) * BATCH_SIZE * CA_FIELD_SIZE * 3, "batch_samples_pool");
     CUDA_ALLOC_CHECK(buffers_host.task_loss_pool, sizeof(float), "task_loss_pool");
@@ -507,9 +508,10 @@ int main() {
 
             if (gen != last_gen) {
                 last_gen = gen;
+                const char* mode = entry.is_train_batch ? "train" : "test";
 
-                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f correct=%d/%d seq=%llu (%.1fs)\n",
-                       gen, entry.batch_size, entry.accuracy, entry.loss,
+                printf("[AUDIT] gen=%d mode=%s batch=%d acc=%.4f loss=%.4f correct=%d/%d seq=%llu (%.1fs)\n",
+                       gen, mode, entry.batch_size, entry.accuracy, entry.loss,
                        entry.correct_count, entry.batch_size,
                        (unsigned long long)hdr.sequence_number, elapsed_sec);
 
@@ -537,7 +539,19 @@ int main() {
                     fprintf(stderr, "E_POOL gen=%d\n", gen);
                 }
 
-                append_to_manifest(manifest_path, predictions_path, ca_path, elapsed_sec);
+                if (write_chemical_field(session_dir, gen,
+                        entry.state_chemical_sample, STATE_EXPORT_CHEM_SIZE) != 0) {
+                    fprintf(stderr, "E_CHEM gen=%d\n", gen);
+                }
+
+                if (write_class_accuracy(session_dir, gen,
+                        entry.per_class_correct, entry.per_class_total,
+                        entry.num_classes) != 0) {
+                    fprintf(stderr, "E_CLASS_ACC gen=%d\n", gen);
+                }
+
+                append_to_manifest(manifest_path, predictions_path, elapsed_sec);
+                append_to_manifest(manifest_path, ca_path, elapsed_sec);
             }
         }
 

@@ -23,14 +23,14 @@ __device__ void init_unified_gradient_buffer_device(Organism* organism) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         grad_buf->perception_grads = perception_grads;
         grad_buf->interaction_grads = interaction_grads;
-        grad_buf->value_grads = value_grads;
+        grad_buf->flow_projection_grads = value_grads;
         grad_buf->pooling_weight_grads = pooling_weight_grads;
         grad_buf->fc_weight_grads = fc_weight_grads;
         grad_buf->fc_bias_grads = fc_bias_grads;
 
         grad_buf->perception_size = entry->num_heads * entry->channels * entry->head_dim;
         grad_buf->interaction_size = entry->num_heads * entry->head_dim * entry->head_dim;
-        grad_buf->value_size = entry->num_heads * entry->head_dim * entry->channels;
+        grad_buf->flow_projection_size = entry->num_heads * 2 * entry->head_dim;
         grad_buf->num_classes = num_classes;
         grad_buf->num_features = entry->num_heads * entry->channels;
 
@@ -42,14 +42,14 @@ __device__ void init_unified_gradient_buffer_device(Organism* organism) {
 __device__ void zero_unified_gradients_device(Organism* organism) {
     UnifiedGradientBuffer* grad_buf = organism->unified_grad_buffer;
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = grad_buf->perception_size + grad_buf->interaction_size + grad_buf->value_size;
+    int total = grad_buf->perception_size + grad_buf->interaction_size + grad_buf->flow_projection_size;
 
     if (idx < grad_buf->perception_size) {
         grad_buf->perception_grads[idx] = 0.0f;
     } else if (idx < grad_buf->perception_size + grad_buf->interaction_size) {
         grad_buf->interaction_grads[idx - grad_buf->perception_size] = 0.0f;
     } else if (idx < total) {
-        grad_buf->value_grads[idx - grad_buf->perception_size - grad_buf->interaction_size] = 0.0f;
+        grad_buf->flow_projection_grads[idx - grad_buf->perception_size - grad_buf->interaction_size] = 0.0f;
     }
 
     int class_total = grad_buf->num_features + grad_buf->num_classes * grad_buf->num_features + grad_buf->num_classes;
@@ -84,8 +84,8 @@ __device__ void init_ca_param_map_device(Organism* organism) {
     if (tid == 0) {
         param_map->perception_size = arch.num_heads * arch.channels * arch.head_dim;
         param_map->interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
-        param_map->value_size = arch.num_heads * arch.head_dim * arch.channels;
-        param_map->total_ca_params = param_map->perception_size + param_map->interaction_size + param_map->value_size;
+        param_map->flow_projection_size = arch.num_heads * 2 * arch.head_dim;
+        param_map->total_ca_params = param_map->perception_size + param_map->interaction_size + param_map->flow_projection_size;
         param_map->grid_size = arch.grid_size;
         param_map->channels = arch.channels;
         param_map->hidden_dim = arch.num_heads * arch.head_dim;
@@ -94,7 +94,8 @@ __device__ void init_ca_param_map_device(Organism* organism) {
 
     int total_threads = blockDim.x * gridDim.x;
     for (int h = tid; h < arch.num_heads; h += total_threads) {
-        int offset = h * (arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels);
+        int per_head = arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + 2 * arch.head_dim;
+        int offset = h * per_head;
 
         param_map->perception_start[h] = offset;
         offset += arch.channels * arch.head_dim;
@@ -102,10 +103,10 @@ __device__ void init_ca_param_map_device(Organism* organism) {
         param_map->interaction_start[h] = offset;
         offset += arch.head_dim * arch.head_dim;
 
-        param_map->value_start[h] = offset;
+        param_map->flow_projection_start[h] = offset;
 
         param_map->head_param_offsets[h] = param_map->perception_start[h];
-        param_map->head_param_counts[h] = arch.channels * arch.head_dim + arch.head_dim * arch.head_dim + arch.head_dim * arch.channels;
+        param_map->head_param_counts[h] = per_head;
     }
 }
 
@@ -143,7 +144,7 @@ __device__ void init_training_mode_device(Organism* organism) {
             case 4: mode->batch_size = batch_size_val; break;
             case 5: mode->learning_rate = learning_rate_val; break;
             case 6: mode->gradient_clip_norm = gradient_clip_norm_val; break;
-            case 7: mode->adam_timestep = 1; break;
+            case 7: break;  // adam_timestep incremented in hybrid_lifecycle (last wave)
         }
     }
 }

@@ -554,7 +554,7 @@ __device__ void store_elite_weight_deltas_device(
     int elite_idx,
     const half* perception_weights,
     const half* interaction_weights,
-    const half* value_weights,
+    const half* flow_projection_weights,
     int num_heads,
     int channels,
     int head_dim,
@@ -573,8 +573,8 @@ __device__ void store_elite_weight_deltas_device(
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
-    int value_size = num_heads * head_dim * channels;
-    int total_size = perception_size + interaction_size + value_size;
+    int flow_projection_size = num_heads * 2 * head_dim;
+    int total_size = perception_size + interaction_size + flow_projection_size;
 
     int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -604,7 +604,7 @@ __device__ void store_elite_weight_deltas_device(
         } else if (matrix == 1) {
             current = __half2float(interaction_weights[local_idx]);
         } else if (matrix == 2) {
-            current = __half2float(value_weights[local_idx]);
+            current = __half2float(flow_projection_weights[local_idx]);
         } else {
             DEVICE_FATAL("invalid matrix index from get_ca_xavier_scale");
         }
@@ -641,7 +641,7 @@ __device__ void restore_elite_weights_device(
     int elite_idx,
     half* perception_weights,
     half* interaction_weights,
-    half* value_weights
+    half* flow_projection_weights
 ) {
     const GPUElite* archive = organism->archive;
 
@@ -659,8 +659,8 @@ __device__ void restore_elite_weights_device(
 
     int perception_size = num_heads * channels * head_dim;
     int interaction_size = num_heads * head_dim * head_dim;
-    int value_size = num_heads * head_dim * channels;
-    int total_size = perception_size + interaction_size + value_size;
+    int flow_projection_size = num_heads * 2 * head_dim;
+    int total_size = perception_size + interaction_size + flow_projection_size;
 
     int flat_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -677,7 +677,7 @@ __device__ void restore_elite_weights_device(
         } else if (matrix == 1) {
             interaction_weights[local_idx] = __float2half(val);
         } else if (matrix == 2) {
-            value_weights[local_idx] = __float2half(val);
+            flow_projection_weights[local_idx] = __float2half(val);
         }
     }
 }
@@ -687,7 +687,7 @@ __device__ void apply_weight_deltas_device(
     int elite_idx,
     half* perception_weights,
     half* interaction_weights,
-    half* value_weights
+    half* flow_projection_weights
 ) {
     const GPUElite* archive = organism->archive;
 
@@ -720,8 +720,8 @@ __device__ void apply_weight_deltas_device(
             float current = __half2float(interaction_weights[local_idx]);
             interaction_weights[local_idx] = __float2half(current + __half2float(delta));
         } else if (matrix == 2) {
-            float current = __half2float(value_weights[local_idx]);
-            value_weights[local_idx] = __float2half(current + __half2float(delta));
+            float current = __half2float(flow_projection_weights[local_idx]);
+            flow_projection_weights[local_idx] = __float2half(current + __half2float(delta));
         }
     }
 }

@@ -55,8 +55,9 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
 
         int grid_size = entry->grid_size;
         int ca_channels = entry->channels;
+        int num_heads = entry->num_heads;
         int cells = grid_size * grid_size;
-        int entry_buffer_size = batch_size * cells * ca_channels;
+        int entry_buffer_size = batch_size * num_heads * cells * ca_channels;
 
         float* entry_prev_conc = prev_conc + current_offset;
 
@@ -64,11 +65,11 @@ __device__ void init_batch_prev_concentration_device(Organism* organism) {
         int behavioral_buffer_size = cells * behavioral_dim;
         const float* entry_behavioral_field = organism->behavioral_field_pool + entry_idx * behavioral_buffer_size;
 
-        // Initialize all batch samples with the same field values
+        // Initialize all (batch, head) slices — each head starts with identical seed
         for (int idx = global_tid; idx < entry_buffer_size; idx += total_threads) {
-            int batch_idx = idx / (cells * ca_channels);
-            int remainder = idx % (cells * ca_channels);
-            int cell_idx = remainder / ca_channels;
+            int batch_idx = idx / (num_heads * cells * ca_channels);
+            int remainder = idx % (num_heads * cells * ca_channels);
+            int cell_idx = (remainder / ca_channels) % cells;
             int c = remainder % ca_channels;
 
             float val;
@@ -362,8 +363,8 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 
         int perception_size = arch.num_heads * arch.channels * arch.head_dim;
         int interaction_size = arch.num_heads * arch.head_dim * arch.head_dim;
-        int value_size = arch.num_heads * arch.head_dim * arch.channels;
-        int total_weights_size = perception_size + interaction_size + value_size;
+        int flow_projection_size = arch.num_heads * 2 * arch.head_dim;
+        int total_weights_size = perception_size + interaction_size + flow_projection_size;
 
         dim3 weight_init_grid((total_weights_size + BLOCK_SIZE - 1) / BLOCK_SIZE, pool_capacity);
         dim3 weight_init_block(BLOCK_SIZE);
@@ -386,7 +387,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             half* entry_weights_base = buffers->all_ca_weights + entry_idx * CA_WEIGHTS_PER_ENTRY_STRIDE;
             entry_ca_state->perception_weights = entry_weights_base;
             entry_ca_state->interaction_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE;
-            entry_ca_state->value_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE;
+            entry_ca_state->flow_projection_weights = entry_weights_base + CA_PERCEPTION_WEIGHT_SIZE + CA_INTERACTION_WEIGHT_SIZE;
 
             // Accumulate workspace offset based on dimensions of all previous entries
             size_t fp32_ws_offset = 0;
@@ -761,6 +762,8 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->chem_grid_size = arch.grid_size;
 
         organism->diffusion_dt = CHEMICAL_DIFFUSION_DT_MAX;
+        if (global_tid == 0) organism->training_mode->adam_timestep = 0;
+        cg::this_grid().sync();
         init_training_mode_device(organism);
         cg::this_grid().sync();
 
@@ -923,10 +926,15 @@ __global__ void persistent_evolution_kernel(
         int my_entry = blockIdx.x % max(1, alive_count_local);
         Architecture arch_local = get_arch_from_pool(organism, my_entry);
 
-        // Block 0 writes shared arch state, others use local
+        // Block 0 writes shared arch state and selects train vs test dataset
         if (global_tid == 0) {
             organism->current_arch = arch_local;
             organism->snapshot_field_size = arch_local.grid_size * arch_local.grid_size;
+            int dataset_idx = organism->curriculum->current_dataset_idx;
+            bool is_test_gen = ((organism->generation % 2) != 0);
+            organism->current_dataset = is_test_gen
+                ? organism->test_dataset_array[dataset_idx]
+                : organism->dataset_array[dataset_idx];
         }
         cg::this_grid().sync();
 
@@ -1042,18 +1050,17 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
-        for (int compact = 0; compact < p2_alive_count; compact++) {
-            int entry_idx = organism->pool->alive_indices[compact];
-            if (global_tid == 0) {
-                organism->current_entry_idx = entry_idx;
-            }
-            cg::this_grid().sync();
-            update_field_from_ca_device(organism);
-            cg::this_grid().sync();
-        }
-
         if (organism->archive_size > 0) {
             behavioral_update_device(organism);
+        }
+        cg::this_grid().sync();
+
+        // Copy current sample_field_coords → prev for next generation's field reads
+        {
+            int coord_count = POOL_CAPACITY_MAX * BATCH_SIZE * 2;
+            for (int i = global_tid; i < coord_count; i += total_threads) {
+                organism->prev_sample_field_coords[i] = organism->sample_field_coords[i];
+            }
         }
         cg::this_grid().sync();
 

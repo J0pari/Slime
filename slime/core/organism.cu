@@ -282,6 +282,7 @@ struct StateExportEntry {
     float train_accuracy;
     float test_accuracy;
     float generalization_gap;
+    int is_train_batch;
 
     int pool_alive_count;
     int pool_capacity;
@@ -683,14 +684,14 @@ struct ClassificationHead {
 struct CAParameterMap {
     int perception_start[NUM_HEADS];
     int interaction_start[NUM_HEADS];
-    int value_start[NUM_HEADS];
+    int flow_projection_start[NUM_HEADS];
 
     int head_param_offsets[NUM_HEADS];
     int head_param_counts[NUM_HEADS];
 
     int perception_size;
     int interaction_size;
-    int value_size;
+    int flow_projection_size;
 
     int total_params;
     int total_ca_params;
@@ -716,7 +717,7 @@ struct HybridTrainingMode {
     float* adam_v;
     int perception_size;
     int interaction_size;
-    int value_size;
+    int flow_projection_size;
     int policy_size;
     int adam_timestep;
     bool is_train_batch;
@@ -754,7 +755,7 @@ struct AdaptiveCurriculum {
 struct UnifiedGradientBuffer {
     float* perception_grads;
     float* interaction_grads;
-    float* value_grads;
+    float* flow_projection_grads;
 
     float* pooling_weight_grads;
     float* fc_weight_grads;
@@ -765,7 +766,7 @@ struct UnifiedGradientBuffer {
 
     int perception_size;
     int interaction_size;
-    int value_size;
+    int flow_projection_size;
     int num_classes;
     int num_features;
 };
@@ -795,7 +796,7 @@ struct BackwardWorkspaceLayout {
 struct MultiHeadCAState {
     half* perception_weights;
     half* interaction_weights;
-    half* value_weights;
+    half* flow_projection_weights;
 
     float* ca_concentration;
     float* ca_output;
@@ -1047,6 +1048,10 @@ struct Organism {
     float* prev_task_coords_pool;
     float* prev_gen_coords_pool;
 
+    // Per-sample 2D field coords from DIRESA task coords → fractal fold
+    float* sample_field_coords;       // [capacity * batch_size * 2] current gen
+    float* prev_sample_field_coords;  // [capacity * batch_size * 2] prev gen for reads
+
     uint16_t* delta_indices_pool;
     float* delta_values_pool;
     uint16_t* delta_counts_pool;
@@ -1265,10 +1270,6 @@ struct Organism {
     int tensor_K;
     float* activation_data;
     int activation_size;
-    half* tensor_neighborhood_fp16;
-    MultiHeadCAState* multihead_ca_state;
-    float* tensor_perception_out;
-    int current_head_id;
     int max_grid_size;
 
     // Dataset loader fields

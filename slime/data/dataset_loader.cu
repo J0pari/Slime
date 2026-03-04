@@ -413,67 +413,176 @@ __device__ void sample_batch_device(Organism* organism) {
 }
 
 
-__device__ void inject_sample_to_ca_device(Organism* organism) {
-    float* ca_state = organism->ca_state;
-    int batch_size = organism->dataset_batch_size;
-    int channels = organism->ca_channels;
-    int grid_size = organism->dataset_grid_size;
-    ChemicalField* chem = organism->chemical_field;
-    float* chem_concentration = chem->concentration;
-    float* chem_gradient_x = chem->gradient_x;
-    float* chem_gradient_y = chem->gradient_y;
-    float* chem_laplacian = chem->laplacian;
-    float* chem_sources = chem->sources;
-    float* chem_decay_factors = chem->decay_factors;
-    float* rd_resource_density = organism->rd_resource_density;
-    float* rd_fitness_landscape = organism->rd_fitness_landscape;
-    float* rd_resource_gradient_x = organism->rd_resource_gradient_x;
-    float* rd_resource_gradient_y = organism->rd_resource_gradient_y;
-    float* behavioral_field = organism->behavioral_field;
-    float* batch_samples = organism->training_mode->batch_samples;
-    float* prev_concentration = organism->ca_prev_concentration;
-    float* attractor_field = organism->attractor_field;
-
-    int batch_idx = blockIdx.z;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (batch_idx >= batch_size || y >= grid_size || x >= grid_size) return;
-
-    if (ca_state == nullptr) {
-        if (threadIdx.x == 0 && threadIdx.y == 0 && batch_idx == 0) {
-            printf("FATAL [inject_sample_to_ca]: ca_state is NULL\n");
-        }
-        return;
+// 16D DIRESA task coords → 2D field position via fractal fold.
+// Recursive subdivision: each pair of dimensions contributes at decreasing spatial scales.
+// All 16 dimensions participate. Locality-preserving.
+__device__ __forceinline__ void fractal_fold_2d(
+    const float* coords, int task_dim, int grid_size,
+    float* out_x, float* out_y
+) {
+    float fx = 0.0f, fy = 0.0f;
+    for (int d = 0; d + 1 < task_dim; d += 2) {
+        int level = d / 2;
+        float w = 1.0f / (float)(1 << (level + 1));
+        fx += (1.0f / (1.0f + expf(-coords[d])))     * w;
+        fy += (1.0f / (1.0f + expf(-coords[d + 1]))) * w;
     }
+    *out_x = (float)min(max((int)(fx * grid_size), 0), grid_size - 1);
+    *out_y = (float)min(max((int)(fy * grid_size), 0), grid_size - 1);
+}
 
-    int spatial_idx = y * grid_size + x;
-    int base_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
+// Per-cell CA state initialization. Ch0=field concentration, ch1-3=sample, ch4+=learned state.
+// field_spatial_idx: pre-computed field position for this cell (accounts for agent pos + sample offset)
+// spatial_idx: CA grid cell index (used for image data indexing, unchanged by field offset)
+__device__ __forceinline__ void inject_ca_cell_device(
+    float* ca_out,
+    int base_idx,
+    int channels,
+    int generation,
+    const float* chem_concentration,
+    int chem_channels,
+    int cells,
+    int spatial_idx,
+    int field_spatial_idx,
+    const float* batch_samples,
+    int batch_idx,
+    const float* prev_concentration,
+    int prev_base_idx
+) {
+    float conc_sum = 0.0f;
+    for (int c = 0; c < chem_channels; c++) {
+        conc_sum += chem_concentration[c * cells + field_spatial_idx];
+    }
+    ca_out[base_idx + 0] = conc_sum / (float)chem_channels;
 
-    ca_state[base_idx + 0] = chem_concentration[spatial_idx];
-    ca_state[base_idx + 1] = chem_gradient_x[spatial_idx];
-    ca_state[base_idx + 2] = chem_gradient_y[spatial_idx];
-    ca_state[base_idx + 3] = chem_laplacian[spatial_idx];
-    ca_state[base_idx + 4] = chem_sources[spatial_idx];
-    ca_state[base_idx + 5] = chem_decay_factors[spatial_idx];
+    int img_base = batch_idx * cells * 3;
+    if (channels > 1) ca_out[base_idx + 1] = batch_samples[img_base + 0 * cells + spatial_idx];
+    if (channels > 2) ca_out[base_idx + 2] = batch_samples[img_base + 1 * cells + spatial_idx];
+    if (channels > 3) ca_out[base_idx + 3] = batch_samples[img_base + 2 * cells + spatial_idx];
 
-    ca_state[base_idx + 6] = rd_resource_density[spatial_idx];
-    ca_state[base_idx + 7] = rd_fitness_landscape[spatial_idx];
-    ca_state[base_idx + 8] = rd_resource_gradient_x[spatial_idx];
-    ca_state[base_idx + 9] = rd_resource_gradient_y[spatial_idx];
+    if (generation == 0 || prev_concentration == nullptr) {
+        for (int c = 4; c < channels; c++) {
+            ca_out[base_idx + c] = 0.0f;
+        }
+    } else {
+        for (int c = 4; c < channels; c++) {
+            ca_out[base_idx + c] = prev_concentration[prev_base_idx + c];
+        }
+    }
+}
 
-    ca_state[base_idx + 10] = behavioral_field[spatial_idx];
+// Load batch labels from dataset. Called by single thread.
+__device__ void load_batch_labels_device(
+    Dataset* dataset,
+    int* batch_labels_out,
+    int batch_size,
+    int generation
+) {
+    int dataset_size = dataset->num_samples;
+    int offset = (generation % ((dataset_size + batch_size - 1) / batch_size)) * batch_size;
+    for (int idx = 0; idx < batch_size; idx++) {
+        int src_idx = (offset + idx) % dataset_size;
+        batch_labels_out[idx] = dataset->labels[src_idx];
+    }
+}
 
+// Bilinear-interpolate raw dataset bytes into float batch_samples buffer.
+__device__ void load_batch_samples_device(
+    Dataset* dataset,
+    float* batch_samples_out,
+    int batch_size,
+    int grid_size,
+    int generation,
+    int tid,
+    int num_threads
+) {
+    int dataset_size = dataset->num_samples;
+    int sample_rows = dataset->descriptor->sample_rows;
+    int sample_cols = dataset->descriptor->sample_cols;
+    int sample_channels = dataset->descriptor->channels;
+    FeatureEncoding encoding = dataset->descriptor->encoding;
+    unsigned char* all_samples = dataset->samples;
+    int sample_size = sample_rows * sample_cols * sample_channels;
     int batch_stride = grid_size * grid_size;
-    int img_base = batch_idx * batch_stride * 3;
-    ca_state[base_idx + 11] = batch_samples[img_base + 0 * batch_stride + spatial_idx];
-    ca_state[base_idx + 12] = batch_samples[img_base + 1 * batch_stride + spatial_idx];
-    ca_state[base_idx + 13] = batch_samples[img_base + 2 * batch_stride + spatial_idx];
+    int offset = (generation % ((dataset_size + batch_size - 1) / batch_size)) * batch_size;
 
-    int prev_idx = batch_idx * grid_size * grid_size * channels + spatial_idx * channels;
-    ca_state[base_idx + 14] = prev_concentration[prev_idx + 0];
+    if (encoding == ENCODING_TEMPORAL_1D) {
+        int timesteps = sample_rows;
+        int features = sample_cols;
+        int total_cells = batch_size * batch_stride;
 
-    ca_state[base_idx + 15] = attractor_field[spatial_idx];
+        for (int work_idx = tid; work_idx < total_cells; work_idx += num_threads) {
+            int idx = work_idx / batch_stride;
+            int cell_idx = work_idx % batch_stride;
+            int src_idx = (offset + idx) % dataset_size;
+            int cell_y = cell_idx / grid_size;
+            int cell_x = cell_idx % grid_size;
+
+            float src_t = cell_y * (float)timesteps / grid_size;
+            float src_f = cell_x * (float)features / grid_size;
+            int t0 = (int)src_t;
+            int f0 = (int)src_f;
+            int t1 = min(t0 + 1, timesteps - 1);
+            int f1 = min(f0 + 1, features - 1);
+            float ft = src_t - t0;
+            float ff = src_f - f0;
+
+            int out_base = idx * batch_stride * 3;
+            int sample_base = src_idx * sample_size;
+
+            float v00 = all_samples[sample_base + t0 * features + f0] / 255.0f;
+            float v01 = all_samples[sample_base + t0 * features + f1] / 255.0f;
+            float v10 = all_samples[sample_base + t1 * features + f0] / 255.0f;
+            float v11 = all_samples[sample_base + t1 * features + f1] / 255.0f;
+            float val = Interpolation::bilinear(v00, v01, v10, v11, ff, ft);
+
+            batch_samples_out[out_base + 0 * batch_stride + cell_idx] = val;
+            batch_samples_out[out_base + 1 * batch_stride + cell_idx] = ft;
+            batch_samples_out[out_base + 2 * batch_stride + cell_idx] = ff;
+        }
+    } else {
+        // ENCODING_SPATIAL_2D or ENCODING_SPECTRAL_AUDIO
+        int total_pixels = batch_size * batch_stride;
+        for (int work_idx = tid; work_idx < total_pixels; work_idx += num_threads) {
+            int idx = work_idx / batch_stride;
+            int pixel_idx = work_idx % batch_stride;
+            int src_idx = (offset + idx) % dataset_size;
+            int out_y = pixel_idx / grid_size;
+            int out_x = pixel_idx % grid_size;
+
+            float src_y = out_y * (float)sample_rows / grid_size;
+            float src_x = out_x * (float)sample_cols / grid_size;
+            int y0 = (int)src_y;
+            int x0 = (int)src_x;
+            int y1 = min(y0 + 1, sample_rows - 1);
+            int x1 = min(x0 + 1, sample_cols - 1);
+            float fy = src_y - y0;
+            float fx = src_x - x0;
+            int out_idx_base = idx * batch_stride * 3;
+
+            if (sample_channels >= 3) {
+                for (int c = 0; c < 3; c++) {
+                    int channel_offset = c * sample_rows * sample_cols;
+                    int sample_base = src_idx * sample_size + channel_offset;
+                    float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                    float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                    float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                    float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                    batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
+                }
+            } else {
+                int sample_base = src_idx * sample_size;
+                float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
+                float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
+                float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
+                float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
+                float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
+                batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
+                batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
+                batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
+            }
+        }
+    }
 }
 
 __host__ bool read_binary_blob(const char* path, void* buffer, size_t size, size_t skip_bytes) {

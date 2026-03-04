@@ -939,7 +939,7 @@ __device__ void inherit_ca_weights_device(Organism* organism) {
 
         int perception_size = child->num_heads * child->channels * child->head_dim;
         int interaction_size = child->num_heads * child->head_dim * child->head_dim;
-        int value_size = child->num_heads * child->head_dim * child->channels;
+        int flow_projection_size = child->num_heads * 2 * child->head_dim;
 
         int weight_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -949,8 +949,8 @@ __device__ void inherit_ca_weights_device(Organism* organism) {
         if (weight_idx < interaction_size) {
             child_ca->interaction_weights[weight_idx] = parent_ca->interaction_weights[weight_idx];
         }
-        if (weight_idx < value_size) {
-            child_ca->value_weights[weight_idx] = parent_ca->value_weights[weight_idx];
+        if (weight_idx < flow_projection_size) {
+            child_ca->flow_projection_weights[weight_idx] = parent_ca->flow_projection_weights[weight_idx];
         }
     }
 }

@@ -58,7 +58,8 @@ int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit)
         fprintf(stderr, "FATAL: Cannot create predictions %s\n", path);
         return 1;
     }
-    fprintf(f, "sample,label,prediction,confidence,correct\n");
+    const char* mode = audit->is_train_batch ? "train" : "test";
+    fprintf(f, "sample,mode,label,prediction,confidence,correct\n");
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
         if (std::isnan(audit->sample_confidences[s])) {
             fprintf(stderr, "FATAL: NAN confidence for sample %d, gen %d\n", s, gen);
@@ -70,8 +71,8 @@ int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit)
             fclose(f);
             return 1;
         }
-        fprintf(f, "%d,%d,%d,%.6f,%d\n",
-                s, audit->sample_labels[s], audit->sample_predictions[s],
+        fprintf(f, "%d,%s,%d,%d,%.6f,%d\n",
+                s, mode, audit->sample_labels[s], audit->sample_predictions[s],
                 audit->sample_confidences[s],
                 (audit->sample_labels[s] == audit->sample_predictions[s]) ? 1 : 0);
     }
@@ -79,8 +80,7 @@ int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit)
     return 0;
 }
 
-void append_to_manifest(const char* manifest_path, const char* predictions_path,
-                        const char* ca_path, double elapsed_sec) {
+void append_to_manifest(const char* manifest_path, const char* file_path, double elapsed_sec) {
     FILE* mf = fopen(manifest_path, "r");
     bool need_header = (mf == NULL);
     if (mf) fclose(mf);
@@ -88,10 +88,9 @@ void append_to_manifest(const char* manifest_path, const char* predictions_path,
     mf = fopen(manifest_path, "a");
     if (mf) {
         if (need_header) {
-            fprintf(mf, "file,size,sha256,elapsed_sec\n");
+            fprintf(mf, "file,elapsed_sec\n");
         }
-        fprintf(mf, "%s,%.2f\n", predictions_path, elapsed_sec);
-        fprintf(mf, "%s,%.2f\n", ca_path, elapsed_sec);
+        fprintf(mf, "%s,%.2f\n", file_path, elapsed_sec);
         fclose(mf);
     }
 }
@@ -105,7 +104,7 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
 
     if (gen == 0) {
         fprintf(f,
-            "gen,accuracy,loss,train_acc,test_acc,gen_gap,"
+            "gen,mode,accuracy,loss,train_acc,test_acc,gen_gap,"
             "pool_alive,pool_capacity,"
             "occupied_cells,frontier_gained,frontier_lost,sparse_cells,niche_entropy,novelty_gradient,"
             "fitness_best,fitness_mean,fitness_delta,quality_floor,quality_mean,quality_range,"
@@ -119,8 +118,9 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
             "correct,batch_size\n");
     }
 
+    const char* mode = audit->is_train_batch ? "train" : "test";
     fprintf(f,
-        "%d,%.6f,%.6f,%.6f,%.6f,%.6f,"
+        "%d,%s,%.6f,%.6f,%.6f,%.6f,%.6f,"
         "%d,%d,"
         "%d,%d,%d,%d,%.6f,%.6f,"
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -132,7 +132,7 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
         "%d,%.6f,%.6f,"
         "%d,%d\n",
-        gen, audit->accuracy, audit->loss, audit->train_accuracy, audit->test_accuracy, audit->generalization_gap,
+        gen, mode, audit->accuracy, audit->loss, audit->train_accuracy, audit->test_accuracy, audit->generalization_gap,
         audit->pool_alive_count, audit->pool_capacity,
         audit->archive_occupied_cells, audit->frontier_cells_gained, audit->frontier_cells_lost, audit->sparse_cell_count, audit->niche_entropy, audit->novelty_gradient,
         audit->elite_fitness_best, audit->elite_fitness_mean, audit->elite_fitness_delta, audit->quality_floor, audit->quality_mean, audit->quality_range,
@@ -158,11 +158,11 @@ int write_pool_state(const char* session_dir, int gen, TelemetryAuditEntry* audi
     FILE* f = fopen(path, "w");
     if (!f) return 1;
 
-    fprintf(f, "entry,alive,fitness,hunger,age,num_deltas,genome_hash\n");
+    fprintf(f, "entry,fitness,hunger,age,num_deltas,genome_hash\n");
     for (int i = 0; i < audit->pool_capacity && i < POOL_CAPACITY_MAX; i++) {
-        fprintf(f, "%d,%d,%.6f,%.6f,%d,%d,%llu\n",
+        if (!audit->pool_entry_alive[i]) continue;
+        fprintf(f, "%d,%.6f,%.6f,%d,%d,%llu\n",
                 i,
-                audit->pool_entry_alive[i],
                 audit->pool_entry_fitness[i],
                 audit->pool_entry_hunger[i],
                 audit->pool_entry_age[i],

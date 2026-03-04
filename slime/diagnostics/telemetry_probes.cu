@@ -429,6 +429,7 @@ __device__ void populate_audit_buffer(
     int grid_size,
     float train_accuracy,
     float test_accuracy,
+    bool is_train_batch,
     TelemetryBuffer* telemetry,
     ComponentPool* pool,
     ChemicalField* chemical_field,
@@ -501,6 +502,7 @@ __device__ void populate_audit_buffer(
     audit->train_accuracy = train_accuracy;
     audit->test_accuracy = test_accuracy;
     audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
+    audit->is_train_batch = is_train_batch ? 1 : 0;
     printf("V:audit_cp3 correct=%d/%d acc=%.4f\n", correct, batch_size, audit->accuracy);
 
     if (batch_samples) {

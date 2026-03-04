@@ -152,7 +152,7 @@ __device__ void init_ca_parameter_map_device(Organism* organism) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         map->perception_size = arch.channels * arch.head_dim;
         map->interaction_size = arch.head_dim * arch.head_dim;
-        map->value_size = arch.head_dim * arch.channels;
+        map->flow_projection_size = 2 * arch.head_dim;
 
         int offset = 0;
         for (int h = 0; h < arch.num_heads; h++) {
@@ -164,10 +164,10 @@ __device__ void init_ca_parameter_map_device(Organism* organism) {
             map->interaction_start[h] = offset;
             offset += map->interaction_size;
 
-            map->value_start[h] = offset;
-            offset += map->value_size;
+            map->flow_projection_start[h] = offset;
+            offset += map->flow_projection_size;
 
-            map->head_param_counts[h] = map->perception_size + map->interaction_size + map->value_size;
+            map->head_param_counts[h] = map->perception_size + map->interaction_size + map->flow_projection_size;
         }
 
         map->total_params = offset;

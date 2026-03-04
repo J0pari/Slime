@@ -17,8 +17,7 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
     constexpr int ADAM_CA_ENTRY_STRIDE =
         (NUM_HEADS * CHANNELS * HEAD_DIM) +
         (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
-        (NUM_HEADS * HEAD_DIM * CHANNELS) +
-        (NUM_CLASSES_MAX * NUM_HEADS * CHANNELS);
+        (NUM_HEADS * 2 * HEAD_DIM);
 
     half* weights_fp16 = ca_state->perception_weights;
     float* gradients = ca_state->tape.grad_buffer;
@@ -26,7 +25,7 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
     float* v = training_mode->adam_v + entry_idx * ADAM_CA_ENTRY_STRIDE;
     int num_params = entry->num_heads * entry->channels * entry->head_dim;
     int per_head_perception = entry->channels * entry->head_dim;
-    int per_head_total = per_head_perception + entry->head_dim * entry->head_dim + entry->head_dim * entry->channels;
+    int per_head_total = per_head_perception + entry->head_dim * entry->head_dim + 2 * entry->head_dim;
     float lr = training_mode->learning_rate;
     float beta1 = ADAM_BETA1;
     float beta2 = ADAM_BETA2;
@@ -78,13 +77,12 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
     constexpr int ADAM_CA_ENTRY_STRIDE =
         (NUM_HEADS * CHANNELS * HEAD_DIM) +
         (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
-        (NUM_HEADS * HEAD_DIM * CHANNELS) +
-        (NUM_CLASSES_MAX * NUM_HEADS * CHANNELS);
+        (NUM_HEADS * 2 * HEAD_DIM);
 
     int perception_params = entry->num_heads * entry->channels * entry->head_dim;
     int per_head_perception = entry->channels * entry->head_dim;
     int per_head_interaction = entry->head_dim * entry->head_dim;
-    int per_head_total = per_head_perception + per_head_interaction + entry->head_dim * entry->channels;
+    int per_head_total = per_head_perception + per_head_interaction + 2 * entry->head_dim;
     half* weights_fp16 = ca_state->interaction_weights;
     float* gradients = ca_state->tape.grad_buffer;
     float* entry_adam_m = training_mode->adam_m + entry_idx * ADAM_CA_ENTRY_STRIDE;
@@ -133,7 +131,7 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
     }
 }
 
-__device__ void adam_update_value_device(Organism* organism, int entry_idx) {
+__device__ void adam_update_flow_projection_device(Organism* organism, int entry_idx) {
     int tid = threadIdx.x;
 
     MultiHeadCAState* ca_state = &organism->ca_state_pool[entry_idx];
@@ -143,22 +141,21 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
     constexpr int ADAM_CA_ENTRY_STRIDE =
         (NUM_HEADS * CHANNELS * HEAD_DIM) +
         (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
-        (NUM_HEADS * HEAD_DIM * CHANNELS) +
-        (NUM_CLASSES_MAX * NUM_HEADS * CHANNELS);
+        (NUM_HEADS * 2 * HEAD_DIM);
 
     int perception_params = entry->num_heads * entry->channels * entry->head_dim;
     int interaction_params = entry->num_heads * entry->head_dim * entry->head_dim;
     int per_head_perception = entry->channels * entry->head_dim;
     int per_head_interaction = entry->head_dim * entry->head_dim;
-    int per_head_value = entry->head_dim * entry->channels;
-    int per_head_total = per_head_perception + per_head_interaction + per_head_value;
-    half* weights_fp16 = ca_state->value_weights;
+    int per_head_flow_projection = 2 * entry->head_dim;
+    int per_head_total = per_head_perception + per_head_interaction + per_head_flow_projection;
+    half* weights_fp16 = ca_state->flow_projection_weights;
     float* gradients = ca_state->tape.grad_buffer;
     float* entry_adam_m = training_mode->adam_m + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* entry_adam_v = training_mode->adam_v + entry_idx * ADAM_CA_ENTRY_STRIDE;
     float* m = entry_adam_m + perception_params + interaction_params;
     float* v = entry_adam_v + perception_params + interaction_params;
-    int num_params = entry->num_heads * entry->head_dim * entry->channels;
+    int num_params = entry->num_heads * 2 * entry->head_dim;
     float lr = training_mode->learning_rate;
     float beta1 = ADAM_BETA1;
     float beta2 = ADAM_BETA2;
@@ -167,15 +164,15 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
     if (tid < num_params) {
-        int head = tid / per_head_value;
-        int local = tid % per_head_value;
+        int head = tid / per_head_flow_projection;
+        int local = tid % per_head_flow_projection;
         int grad_idx = head * per_head_total + per_head_perception + per_head_interaction + local;
 
         float weight = __half2float(weights_fp16[tid]);
         float g = gradients[grad_idx];
 
-        DEVICE_FATAL_IF(isnan(g), "adam_value: gradient is NaN");
-        DEVICE_FATAL_IF(isinf(g), "adam_value: gradient is Inf");
+        DEVICE_FATAL_IF(isnan(g), "adam_flow_projection: gradient is NaN");
+        DEVICE_FATAL_IF(isinf(g), "adam_flow_projection: gradient is Inf");
 
         if (fabsf(g) > gradient_clip_norm) {
             g = copysignf(gradient_clip_norm, g);
@@ -188,12 +185,12 @@ __device__ void adam_update_value_device(Organism* organism, int entry_idx) {
         float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
-        DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_value: denom is NaN/Inf");
+        DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_flow_projection: denom is NaN/Inf");
 
         weight -= lr * m_hat / denom;
 
-        DEVICE_FATAL_IF(isnan(weight), "adam_value: weight became NaN");
-        DEVICE_FATAL_IF(isinf(weight), "adam_value: weight became Inf");
+        DEVICE_FATAL_IF(isnan(weight), "adam_flow_projection: weight became NaN");
+        DEVICE_FATAL_IF(isinf(weight), "adam_flow_projection: weight became Inf");
 
         weights_fp16[tid] = __float2half(weight);
         gradients[grad_idx] = 0.0f;

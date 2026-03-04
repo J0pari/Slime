@@ -36,43 +36,6 @@ __device__ int g_blocks_ca_fwd = 0;
 __device__ int g_blocks_flow = 0;
 __device__ int g_blocks_bwd = 0;
 __device__ int g_blocks_complete = 0;
-__device__ int g_diag6_progress_count = 0;
-__device__ int g_diag7_tdr_warning_count = 0;
-__device__ int g_diag12_weight_ptr_count = 0;
-__device__ int g_diag13_neigh_read_count = 0;
-__device__ int g_diag15_input_bad_count = 0;
-__device__ int g_diag16_post_neigh_count = 0;
-__device__ int g_diag17_pre_perc_count = 0;
-__device__ int g_diag19_perc_w_bad_count = 0;
-__device__ int g_diag20_perc_acc_bad_count = 0;
-__device__ int g_diag21_perc_bad_count = 0;
-__device__ int g_diag22_post_perc_count = 0;
-__device__ int g_diag23_pre_inter_count = 0;
-__device__ int g_diag25_inter_prog_count = 0;
-__device__ int g_diag26_inter_sample_count = 0;
-__device__ int g_diag27_pregelu_bad_count = 0;
-__device__ int g_diag28_gelu_bad_count = 0;
-__device__ int g_diag29_post_inter_count = 0;
-__device__ int g_diag30_inter_slow_count = 0;
-__device__ int g_diag31_pre_out_count = 0;
-__device__ int g_diag32_out_bad_count = 0;
-__device__ int g_diag33_gate_bad_count = 0;
-__device__ int g_diag34_post_out_count = 0;
-__device__ int g_diag35_pre_save_count = 0;
-__device__ int g_diag37_perc_save_verify_count = 0;
-__device__ int g_diag40_post_save_count = 0;
-__device__ int g_diag42_pre_caout_count = 0;
-__device__ int g_diag43_caout_bad_count = 0;
-__device__ int g_diag44_post_caout_count = 0;
-__device__ int g_diag45_timing_count = 0;
-__device__ int g_diag46_iter_slow_count = 0;
-__device__ int g_diag47_stack_corrupt_count = 0;
-__device__ int g_diag48_nancheck_count = 0;
-__device__ int g_diag49_thread_prog_count = 0;
-__device__ int g_diag50_thread_exit_count = 0;
-__device__ int g_diag51_warp_count = 0;
-__device__ int g_diag52_block_done_count = 0;
-__device__ int g_diag53_sync_count = 0;
 // V: verbose progress counters for backward pass
 __device__ int g_v_flow_done_count = 0;
 __device__ int g_v_bwd_enter_count = 0;
@@ -131,12 +94,12 @@ __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(Po
 
     size_t fp16_a_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
     size_t fp16_b_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
-    // dW stores: value(head_dim*channels) + interaction(head_dim*head_dim) + perception(channels*head_dim)
-    size_t dW_elements = (size_t)num_heads * (head_dim * channels + head_dim * head_dim + channels * head_dim);
+    // dW stores: interaction(head_dim*head_dim) + perception(channels*head_dim)
+    size_t dW_elements = (size_t)num_heads * (head_dim * head_dim + channels * head_dim);
     size_t dI_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * head_dim;
-    // W_T stores: value(channels*head_dim) + interaction(head_dim*head_dim)
-    size_t W_T_elements = (size_t)num_heads * (channels * head_dim + head_dim * head_dim);
-    size_t im2col_elements = (size_t)channels * cells * CA_KERNEL_CELL_COUNT;
+    // W_T stores: interaction(head_dim*head_dim)
+    size_t W_T_elements = (size_t)num_heads * head_dim * head_dim;
+    size_t im2col_elements = (size_t)num_heads * BACKWARD_CHUNK_SAMPLES * channels;
     size_t dpregelu_elements = (size_t)BACKWARD_CHUNK_SAMPLES * num_heads * cells * head_dim;
 
     size_t offset = 0;
@@ -168,7 +131,7 @@ __device__ __forceinline__ BackwardWorkspaceLayout compute_backward_ws_layout(Po
 
 __device__ __forceinline__ int compute_entry_ca_states_size(PoolEntry* entry, int batch_size) {
     int cells = entry->grid_size * entry->grid_size;
-    return batch_size * cells * entry->channels;
+    return batch_size * entry->num_heads * cells * entry->channels;
 }
 
 __device__ __forceinline__ int compute_entry_ca_output_size(PoolEntry* entry, int batch_size) {
@@ -240,7 +203,7 @@ __device__ void zero_buffer_device(Organism* organism, float* buffer, int n) {
 }
 
 // Load initial batch samples during initialization (before first training iteration)
-// This must be called before init_batch_prev_concentration_device so channels 11-13 have real data
+// This must be called before init_batch_prev_concentration_device so channels 0-2 have real data
 __device__ void load_initial_batch_samples_device(Organism* organism) {
     int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
@@ -402,117 +365,21 @@ __device__ void load_batch_device(Organism* organism) {
 
     cg::this_grid().sync();  // SYNC 1: after wave offset computation
 
-    // Dataset - always valid, allocated before computation
     Dataset* dataset = organism->current_dataset;
-    int dataset_size = dataset->num_samples;
-    int sample_rows = dataset->descriptor->sample_rows;
-    int sample_cols = dataset->descriptor->sample_cols;
-    int sample_channels = dataset->descriptor->channels;
-    FeatureEncoding encoding = dataset->descriptor->encoding;
-    unsigned char* all_samples = dataset->samples;
-    unsigned char* all_labels = dataset->labels;
+    int batch_stride = has_work ? grid_size * grid_size : 0;
 
-    float* batch_samples_out = training_mode->batch_samples;
-    int* batch_labels_out = training_mode->batch_labels;
-    int batch_stride = grid_size * grid_size;
-    int sample_size = sample_rows * sample_cols * sample_channels;
-    int offset = has_work ? (generation % ((dataset_size + batch_size - 1) / batch_size)) * batch_size : 0;
-
-    // Phase 1: Load labels (only block 0, thread 0 does this for shared output)
     if (has_work && tid == 0 && blockIdx.x == 0) {
-        for (int idx = 0; idx < batch_size; idx++) {
-            int src_idx = (offset + idx) % dataset_size;
-            batch_labels_out[idx] = all_labels[src_idx];
-        }
+        load_batch_labels_device(dataset, training_mode->batch_labels, batch_size, generation);
     }
 
     cg::this_grid().sync();  // SYNC 2: after label loading
 
-    // Phase 2: Load samples - dispatch based on encoding
     if (has_work) {
-        if (encoding == ENCODING_TEMPORAL_1D) {
-            // Timeseries: resample 1D temporal data to 2D grid
-            int timesteps = sample_rows;
-            int features = sample_cols;
-            int total_cells = batch_size * batch_stride;
-
-            for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x) {
-                int idx = work_idx / batch_stride;
-                int cell_idx = work_idx % batch_stride;
-                int src_idx = (offset + idx) % dataset_size;
-                int cell_y = cell_idx / grid_size;
-                int cell_x = cell_idx % grid_size;
-
-                float src_t = cell_y * (float)timesteps / grid_size;
-                float src_f = cell_x * (float)features / grid_size;
-                int t0 = (int)src_t;
-                int f0 = (int)src_f;
-                int t1 = min(t0 + 1, timesteps - 1);
-                int f1 = min(f0 + 1, features - 1);
-                float ft = src_t - t0;
-                float ff = src_f - f0;
-
-                int out_base = idx * batch_stride * 3;
-                int sample_base = src_idx * sample_size;
-
-                float v00 = all_samples[sample_base + t0 * features + f0] / 255.0f;
-                float v01 = all_samples[sample_base + t0 * features + f1] / 255.0f;
-                float v10 = all_samples[sample_base + t1 * features + f0] / 255.0f;
-                float v11 = all_samples[sample_base + t1 * features + f1] / 255.0f;
-                float val = Interpolation::bilinear(v00, v01, v10, v11, ff, ft);
-
-                batch_samples_out[out_base + 0 * batch_stride + cell_idx] = val;
-                batch_samples_out[out_base + 1 * batch_stride + cell_idx] = ft;
-                batch_samples_out[out_base + 2 * batch_stride + cell_idx] = ff;
-            }
-        } else {
-            // ENCODING_SPATIAL_2D or ENCODING_SPECTRAL_AUDIO: 2D bilinear interpolation
-            int total_pixels = batch_size * batch_stride;
-            for (int work_idx = tid; work_idx < total_pixels; work_idx += blockDim.x) {
-                int idx = work_idx / batch_stride;
-                int pixel_idx = work_idx % batch_stride;
-                int src_idx = (offset + idx) % dataset_size;
-                int out_y = pixel_idx / grid_size;
-                int out_x = pixel_idx % grid_size;
-
-                float src_y = out_y * (float)sample_rows / grid_size;
-                float src_x = out_x * (float)sample_cols / grid_size;
-                int y0 = (int)src_y;
-                int x0 = (int)src_x;
-                int y1 = min(y0 + 1, sample_rows - 1);
-                int x1 = min(x0 + 1, sample_cols - 1);
-                float fy = src_y - y0;
-                float fx = src_x - x0;
-                int out_idx_base = idx * batch_stride * 3;
-
-                if (sample_channels >= 3) {
-                    for (int c = 0; c < 3; c++) {
-                        int channel_offset = c * sample_rows * sample_cols;
-                        int sample_base = src_idx * sample_size + channel_offset;
-                        float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
-                        float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
-                        float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
-                        float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
-                        batch_samples_out[out_idx_base + c * batch_stride + pixel_idx] = Interpolation::bilinear(tl, tr, bl, br, fx, fy);
-                    }
-                } else {
-                    int sample_base = src_idx * sample_size;
-                    float tl = all_samples[sample_base + y0 * sample_cols + x0] / 255.0f;
-                    float tr = all_samples[sample_base + y0 * sample_cols + x1] / 255.0f;
-                    float bl = all_samples[sample_base + y1 * sample_cols + x0] / 255.0f;
-                    float br = all_samples[sample_base + y1 * sample_cols + x1] / 255.0f;
-                    float3 vg = Interpolation::bilinear_with_grad(tl, tr, bl, br, fx, fy);
-                    batch_samples_out[out_idx_base + 0 * batch_stride + pixel_idx] = vg.x;
-                    batch_samples_out[out_idx_base + 1 * batch_stride + pixel_idx] = vg.y;
-                    batch_samples_out[out_idx_base + 2 * batch_stride + pixel_idx] = vg.z;
-                }
-            }
-        }
+        load_batch_samples_device(dataset, training_mode->batch_samples, batch_size, grid_size, generation, tid, blockDim.x);
     }
 
     cg::this_grid().sync();  // SYNC 3: after sample loading
 
-    // Phase 3: Initialize CA state from previous concentration + inject samples
     float* ca_out;
     float* prev_concentration;
     float* batch_samples = training_mode->batch_samples;
@@ -522,77 +389,50 @@ __device__ void load_batch_device(Organism* organism) {
         prev_concentration = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
     }
 
-    // Field pointers for generation 0 bootstrap
     ChemicalField* chem = organism->chemical_field;
-    const float* chem_concentration = chem->concentration;
-    const float* chem_gradient_x = chem->gradient_x;
-    const float* chem_gradient_y = chem->gradient_y;
-    const float* chem_laplacian = chem->laplacian;
-    const float* chem_sources = chem->sources;
-    const float* chem_decay_factors = chem->decay_factors;
-    int chem_channels = chem->channels;
-    const float* resource_density = organism->resource_density;
-    const float* fitness_landscape_field = organism->fitness_landscape;
-    const float* resource_gradient_x = organism->resource_gradient_x;
-    const float* resource_gradient_y = organism->resource_gradient_y;
-    const float* attractor_field = organism->attractor_field;
 
-    // Per-entry behavioral_field from pool
-    int behavioral_dim = organism->behavioral_dim_hw + organism->behavioral_dim_task + organism->behavioral_dim_gen;
-    int behavioral_buffer_size = has_work ? (grid_size * grid_size * behavioral_dim) : 0;
-    const float* entry_behavioral_field = has_work ?
-        (organism->behavioral_field_pool + entry_idx * behavioral_buffer_size) : nullptr;
+    // Field read positioning: gen >= 1 uses prev-gen DIRESA-derived coords, gen 0 uses agent_pos + stride
+    bool use_diresa_coords = (generation >= 1) && has_work;
+    float* prev_field_coords = nullptr;
+    int agent_gx = 0, agent_gy = 0;
+    int sample_stride_field = has_work ? (grid_size / batch_size) : 0;
+    if (has_work) {
+        if (use_diresa_coords) {
+            prev_field_coords = organism->prev_sample_field_coords + entry_idx * batch_size * 2;
+        } else {
+            BehavioralState* agent = &organism->behavioral_agents[entry_idx];
+            agent_gx = min(max((int)(agent->position[0] * grid_size), 0), grid_size - 1);
+            agent_gy = min(max((int)(agent->position[1] * grid_size), 0), grid_size - 1);
+        }
+    }
 
-    constexpr int SAMPLE_CHANNEL_START = 11;
-    constexpr int SAMPLE_CHANNEL_COUNT = 3;
-
-    // Loop with sync - all blocks iterate same count, work guarded inside
     for (int batch_idx = 0; batch_idx < batch_size; batch_idx++) {
         if (has_work) {
-            for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
-                int base_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
+            int center_x, center_y;
+            if (use_diresa_coords) {
+                center_x = (int)prev_field_coords[batch_idx * 2];
+                center_y = (int)prev_field_coords[batch_idx * 2 + 1];
+            } else {
+                center_x = agent_gx + batch_idx * sample_stride_field;
+                center_y = agent_gy + batch_idx * sample_stride_field;
+            }
+            int num_heads_local = entry->num_heads;
+            for (int head = 0; head < num_heads_local; head++) {
+                for (int spatial_idx = tid; spatial_idx < batch_stride; spatial_idx += blockDim.x) {
+                    int cx = spatial_idx % grid_size;
+                    int cy = spatial_idx / grid_size;
+                    int field_x = (cx + center_x) % grid_size;
+                    int field_y = (cy + center_y) % grid_size;
+                    int field_spatial_idx = field_y * grid_size + field_x;
 
-                if (generation == 0) {
-                    // Bootstrap: initialize from fields, not prev_concentration
-                    // Aggregate multi-channel chemical field into CA channels 0-4
-                    float conc_sum = 0.0f, gx_sum = 0.0f, gy_sum = 0.0f, lap_sum = 0.0f, src_sum = 0.0f;
-                    for (int cc = 0; cc < chem_channels; cc++) {
-                        int field_idx = cc * batch_stride + spatial_idx;
-                        conc_sum += chem_concentration[field_idx];
-                        gx_sum += chem_gradient_x[field_idx];
-                        gy_sum += chem_gradient_y[field_idx];
-                        lap_sum += chem_laplacian[field_idx];
-                        src_sum += chem_sources[field_idx];
-                    }
-                    float inv_chem_channels = 1.0f / chem_channels;
-                    ca_out[base_idx + 0] = conc_sum * inv_chem_channels;
-                    if (channels_out > 1) ca_out[base_idx + 1] = gx_sum * inv_chem_channels;
-                    if (channels_out > 2) ca_out[base_idx + 2] = gy_sum * inv_chem_channels;
-                    if (channels_out > 3) ca_out[base_idx + 3] = lap_sum * inv_chem_channels;
-                    if (channels_out > 4) ca_out[base_idx + 4] = src_sum * inv_chem_channels;
-                    if (channels_out > 5) ca_out[base_idx + 5] = chem_decay_factors[spatial_idx];
-                    if (channels_out > 6) ca_out[base_idx + 6] = resource_density[spatial_idx];
-                    if (channels_out > 7) ca_out[base_idx + 7] = fitness_landscape_field[spatial_idx];
-                    if (channels_out > 8) ca_out[base_idx + 8] = resource_gradient_x[spatial_idx];
-                    if (channels_out > 9) ca_out[base_idx + 9] = resource_gradient_y[spatial_idx];
-                    if (channels_out > 10) ca_out[base_idx + 10] = entry_behavioral_field[spatial_idx];
-                    // Channels 11-13 set below from batch_samples
-                    if (channels_out > 14) ca_out[base_idx + 14] = conc_sum * inv_chem_channels;  // Bootstrap recurrence
-                    if (channels_out > 15) ca_out[base_idx + 15] = attractor_field ? attractor_field[spatial_idx] : conc_sum * inv_chem_channels;
-                } else {
-                    // Normal: copy from prev_concentration
-                    int prev_idx = batch_idx * batch_stride * channels_out + spatial_idx * channels_out;
-                    for (int c = 0; c < channels_out; c++) {
-                        ca_out[base_idx + c] = prev_concentration[prev_idx + c];
-                    }
-                }
-
-                // Always inject samples into channels 11-13
-                if (channels_out > SAMPLE_CHANNEL_START + SAMPLE_CHANNEL_COUNT - 1) {
-                    int sample_base = batch_idx * batch_stride * 3;
-                    ca_out[base_idx + 11] = batch_samples[sample_base + 0 * batch_stride + spatial_idx];
-                    ca_out[base_idx + 12] = batch_samples[sample_base + 1 * batch_stride + spatial_idx];
-                    ca_out[base_idx + 13] = batch_samples[sample_base + 2 * batch_stride + spatial_idx];
+                    int base_idx = (batch_idx * num_heads_local + head) * batch_stride * channels_out + spatial_idx * channels_out;
+                    inject_ca_cell_device(
+                        ca_out, base_idx, channels_out, generation,
+                        chem->concentration, chem->channels, batch_stride, spatial_idx,
+                        field_spatial_idx,
+                        batch_samples, batch_idx,
+                        prev_concentration, base_idx
+                    );
                 }
             }
         }
@@ -667,13 +507,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         }
     }
     sdata[tid] = thread_sum;
-    cg::this_grid().sync();
+    __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
             sdata[tid] += sdata[tid + s];
         }
-        cg::this_grid().sync();
+        __syncthreads();
     }
 
     float local_ca_mean;
@@ -681,7 +521,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         local_ca_mean = sdata[0] / (float)local_cells;
         if (tid == 0) sdata[0] = local_ca_mean;
     }
-    cg::this_grid().sync();
+    __syncthreads();
     if (has_work) {
         local_ca_mean = sdata[0];
     }
@@ -788,6 +628,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     if (has_work && tid == 0 && blockIdx.x == 0) printf("V:BLK_ARCH grid=%d heads=%d hdim=%d ch=%d blocks=%d\n", arch.grid_size, arch.num_heads, arch.head_dim, arch.channels, gridDim.x);
 
     float* ca_output_grad = organism->buffers->ca_output_grad_buffer + s_wave_offsets.ca_output_offset;
+    float* wave_prev_conc = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
 
     if (s_use_gradients) {
         cg::this_grid().sync();
@@ -798,759 +639,32 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         }
         cg::this_grid().sync();
 
-        // Trace recording and CA setup - work guarded
-        ExecutionTrace* ca_trace_slot = nullptr;
-        unsigned long long ca_cycle_start = 0;
         if (has_work) {
-            TraceBuffer* trace_buffer = &ca_state->trace;
-            int trace_idx = -1;
-            if (tid == 0 && trace_buffer->traces != nullptr &&
-                trace_buffer->current_idx < trace_buffer->capacity) {
-                trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-            }
-            if (tid < WARP_SIZE) {
-                trace_idx = __shfl_sync(0xFFFFFFFF, trace_idx, 0);
-                if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
-                    ca_trace_slot = &trace_buffer->traces[trace_idx];
-                    record_warp_metrics(ca_trace_slot, blockIdx.x);
-                    record_memory_access(ca_trace_slot, (void*)&ca_state->perception_weights[tid], true);
-                    record_shared_memory_access(ca_trace_slot, false, false);
-                }
-            }
-            ca_cycle_start = clock64();
-            if (tid == 0) printf("TRACE_FWD b%d eid=%d slot=%p cidx=%d cap=%d traces=%p cidx_addr=%p ca_state=%p\n",
-                blockIdx.x, entry_idx, ca_trace_slot, trace_buffer->current_idx, trace_buffer->capacity, trace_buffer->traces,
-                &trace_buffer->current_idx, (void*)ca_state);
-
-            float* perception_saved = ca_state->perception_saved;
-            float* interaction_saved = ca_state->interaction_saved;
-            float* pre_gelu_saved = ca_state->pre_gelu_saved;
-
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int channels = arch.channels;
-            int num_heads = arch.num_heads;
-            int head_dim = arch.head_dim;
-            int cells_per_grid = grid_size * grid_size;
-
-            DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "CA_FWD: batch_ca_states_pool is null");
-            DEVICE_FATAL_IF(organism->buffers->batched_ca_output == nullptr, "CA_FWD: batched_ca_output is null");
-            DEVICE_FATAL_IF(s_wave_offsets.ca_states_offset < 0, "CA_FWD: ca_states_offset negative");
-            DEVICE_FATAL_IF(s_wave_offsets.ca_output_offset < 0, "CA_FWD: ca_output_offset negative");
             float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
             float* ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
 
-            int total_cells = batch_size * num_heads * cells_per_grid;
-            DEVICE_FATAL_IF(total_cells <= 0, "CA_LOOP: total_cells <= 0");
-            DEVICE_FATAL_IF(ca_input == nullptr, "CA_LOOP: ca_input is null");
-            DEVICE_FATAL_IF(ca_output == nullptr, "CA_LOOP: ca_output is null");
-            DEVICE_FATAL_IF(ca_state == nullptr, "CA_LOOP: ca_state is null");
-            DEVICE_FATAL_IF(ca_state->perception_weights == nullptr, "CA_LOOP: perception_weights is null");
-            DEVICE_FATAL_IF(ca_state->interaction_weights == nullptr, "CA_LOOP: interaction_weights is null");
-            DEVICE_FATAL_IF(ca_state->value_weights == nullptr, "CA_LOOP: value_weights is null");
-            DEVICE_FATAL_IF(perception_saved == nullptr, "CA_LOOP: perception_saved is null");
-            DEVICE_FATAL_IF(interaction_saved == nullptr, "CA_LOOP: interaction_saved is null");
-            DEVICE_FATAL_IF(pre_gelu_saved == nullptr, "CA_LOOP: pre_gelu_saved is null");
-            int my_act_size = batch_size * num_heads * cells_per_grid * head_dim;
-            int my_max_abs_idx = s_wave_offsets.activations_offset + my_act_size - 1;
-
-            if (total_cells <= 0 && tid == 0) printf("E_INIT b%d total_cells=%d\n", blockIdx.x, total_cells);
-            if (total_cells > 1000000 && tid == 0) printf("E_INIT b%d total_cells=%d huge\n", blockIdx.x, total_cells);
-            if (blockDim.x <= 0 && tid == 0) printf("E_INIT b%d blockDim.x=%d\n", blockIdx.x, (int)blockDim.x);
-            if (grid_size <= 0 && tid == 0) printf("E_INIT b%d grid_size=%d\n", blockIdx.x, grid_size);
-            if (channels <= 0 && tid == 0) printf("E_INIT b%d channels=%d\n", blockIdx.x, channels);
-            if (head_dim <= 0 && tid == 0) printf("E_INIT b%d head_dim=%d\n", blockIdx.x, head_dim);
-            if (num_heads <= 0 && tid == 0) printf("E_INIT b%d num_heads=%d\n", blockIdx.x, num_heads);
-
-            // Stack canary to detect overflow
-            volatile float stack_canary_start = 3.14159265f;
-
-            int expected_iters = (total_cells + blockDim.x - 1) / blockDim.x;
-            long long kernel_start_clock = clock64();
-
-            if (tid == 0) {
-                int count = atomicAdd(&g_blocks_ca_fwd, 1) + 1;
-                int blocks_with_work = min(pool->alive_indices_count - wave_start, (int)gridDim.x);
-                if (count == blocks_with_work) {
-                    printf("DIAG1_INIT blocks_work=%d hdim=%d heads=%d cells=%d batch=%d grid=%d chan=%d\n",
-                           blocks_with_work, head_dim, num_heads, cells_per_grid, batch_size, grid_size, channels);
-                }
-            }
-
-            PROVENANCE_FATAL_IF(ca_input == nullptr, "DIAG2: ca_input null");
-            PROVENANCE_FATAL_IF(ca_output == nullptr, "DIAG2: ca_output null");
-            PROVENANCE_FATAL_IF(ca_state->perception_weights == nullptr, "DIAG2: perception_weights null");
-            PROVENANCE_FATAL_IF(ca_state->interaction_weights == nullptr, "DIAG2: interaction_weights null");
-            PROVENANCE_FATAL_IF(ca_state->value_weights == nullptr, "DIAG2: value_weights null");
-            PROVENANCE_FATAL_IF(perception_saved == nullptr, "DIAG2: perception_saved null");
-            PROVENANCE_FATAL_IF(interaction_saved == nullptr, "DIAG2: interaction_saved null");
-            PROVENANCE_FATAL_IF(pre_gelu_saved == nullptr, "DIAG2: pre_gelu_saved null");
-
-            PROVENANCE_FATAL_IF(head_dim <= 0 || head_dim > 128, "DIAG3: head_dim insane");
-            PROVENANCE_FATAL_IF(num_heads <= 0 || num_heads > 64, "DIAG3: num_heads insane");
-            PROVENANCE_FATAL_IF(channels <= 0 || channels > 64, "DIAG3: channels insane");
-            PROVENANCE_FATAL_IF(grid_size <= 0 || grid_size > 256, "DIAG3: grid_size insane");
-            PROVENANCE_FATAL_IF(batch_size <= 0 || batch_size > 128, "DIAG3: batch_size insane");
-            PROVENANCE_FATAL_IF(cells_per_grid <= 0 || cells_per_grid > 65536, "DIAG3: cells_per_grid insane");
-            PROVENANCE_FATAL_IF(total_cells <= 0 || total_cells > 10000000, "DIAG3: total_cells insane");
-
-            // DIAG 4: Per-thread initial state - count threads entering
-            if (tid == 0) printf("DIAG_PRE_SYNC4 block=%d\n", blockIdx.x);
-            __shared__ int s_diag4_threads;
-            if (tid == 0) s_diag4_threads = 0;
-            __syncthreads();
-            if (tid == 0) printf("DIAG_POST_SYNC4a block=%d\n", blockIdx.x);
-            atomicAdd(&s_diag4_threads, 1);
-            __syncthreads();
-            if (tid == 0) printf("DIAG_POST_SYNC4b block=%d\n", blockIdx.x);
-            if (tid == 0) {
-                int total_threads = atomicAdd(&g_blocks_entered, s_diag4_threads);
-                if (blockIdx.x == gridDim.x - 1) {
-                    printf("DIAG4_THREADS total=%d blocks=%d\n", total_threads + s_diag4_threads, gridDim.x);
-                }
-            }
-
-            int loop_iter = 0;
-            int max_iter_safety = expected_iters + 100;
-            long long prev_iter_end = kernel_start_clock;
-            int last_completed_iter = -1;
-            int stuck_detection_counter = 0;
-
-            // Track per-warp completion for divergence detection
-            __shared__ int s_warp_last_iter[8]; // 256 threads = 8 warps
-            if (tid < 8) s_warp_last_iter[tid] = -1;
-            __syncthreads();
-
-            // CA forward work loop
-            if (tid == 0) printf("DIAG_CA_LOOP_START block=%d total_cells=%d\n", blockIdx.x, total_cells);
-            for (int work_idx = tid; work_idx < total_cells; work_idx += blockDim.x, loop_iter++) {
-
-            if (tid == 0 && loop_iter == 0) printf("DIAG_LOOP_ITER0 block=%d\n", blockIdx.x);
-
-            // DIAG 5: Infinite loop protection - count occurrences
-            if (loop_iter > max_iter_safety) {
-                atomicAdd(&g_blocks_flow, 1);  // reuse counter for infinite loop count
-                break;
-            }
-
-            long long iter_start = clock64();
-            long long iter_since_start_ms = (iter_start - kernel_start_clock) / 1000000;
-
-            // DIAG 6: Progress tracking - count all thread iterations at 5-iter checkpoints
-            if (loop_iter % 5 == 0) {
-                atomicAdd(&g_diag6_progress_count, 1);
-            }
-
-            // DIAG 7: TDR warning threshold - count all threads exceeding 2s from start
-            if (iter_since_start_ms > 2000) {
-                atomicAdd(&g_diag7_tdr_warning_count, 1);
-            }
-
-            // DIAG 8: Verify loop variables not corrupted
-            PROVENANCE_FATAL_IF(work_idx < 0, "DIAG8: work_idx negative");
-            PROVENANCE_FATAL_IF(work_idx >= total_cells + blockDim.x, "DIAG8: work_idx overflow");
-            PROVENANCE_FATAL_IF(loop_iter < 0, "DIAG8: loop_iter negative");
-
-            // DIAG 9: Verify thread index not corrupted
-            int check_tid = threadIdx.x;
-            int check_blk = blockIdx.x;
-            PROVENANCE_FATAL_IF(check_tid != tid, "DIAG9: tid corrupted");
-            PROVENANCE_FATAL_IF(check_blk < 0 || check_blk >= gridDim.x, "DIAG9: blockIdx corrupted");
-
-                // Index calculations
-                int heads_times_cells = num_heads * cells_per_grid;
-                int batch_id = work_idx / heads_times_cells;
-                int remainder = work_idx % heads_times_cells;
-                int head_id = remainder / cells_per_grid;
-                int cell_idx = remainder % cells_per_grid;
-                int cell_y = cell_idx / grid_size;
-                int cell_x = cell_idx % grid_size;
-
-                // DIAG 10: Validate all computed indices
-                PROVENANCE_FATAL_IF(batch_id < 0 || batch_id >= batch_size, "DIAG10: batch_id OOB");
-                PROVENANCE_FATAL_IF(head_id < 0 || head_id >= num_heads, "DIAG10: head_id OOB");
-                PROVENANCE_FATAL_IF(cell_idx < 0 || cell_idx >= cells_per_grid, "DIAG10: cell_idx OOB");
-                PROVENANCE_FATAL_IF(cell_x < 0 || cell_x >= grid_size, "DIAG10: cell_x OOB");
-                PROVENANCE_FATAL_IF(cell_y < 0 || cell_y >= grid_size, "DIAG10: cell_y OOB");
-
-                // Weight pointer calculations
-                int perc_w_offset = head_id * channels * head_dim;
-                int inter_w_offset = head_id * head_dim * head_dim;
-                int val_w_offset = head_id * head_dim * channels;
-
-                // DIAG 11: Validate weight offsets
-                int max_perc_w = num_heads * channels * head_dim;
-                int max_inter_w = num_heads * head_dim * head_dim;
-                int max_val_w = num_heads * head_dim * channels;
-                PROVENANCE_FATAL_IF(perc_w_offset < 0 || perc_w_offset >= max_perc_w, "DIAG11: perc_w_offset OOB");
-                PROVENANCE_FATAL_IF(inter_w_offset < 0 || inter_w_offset >= max_inter_w, "DIAG11: inter_w_offset OOB");
-                PROVENANCE_FATAL_IF(val_w_offset < 0 || val_w_offset >= max_val_w, "DIAG11: val_w_offset OOB");
-
-                half* perc_w = &ca_state->perception_weights[perc_w_offset];
-                half* inter_w = &ca_state->interaction_weights[inter_w_offset];
-                half* val_w = &ca_state->value_weights[val_w_offset];
-
-                // DIAG 12: Weight pointer calculations done - count all threads
-                atomicAdd(&g_diag12_weight_ptr_count, 1);
-
-                float neighborhood[3][3][CHANNELS];
-
-                // Stack canary check mid-allocation
-                volatile float stack_canary_mid1 = 2.71828f;
-
-                // ============ NEIGHBORHOOD READ ============
-                long long t_neigh_start = clock64();
-
-                // DIAG 13: Before neighborhood read - count all threads
-                atomicAdd(&g_diag13_neigh_read_count, 1);
-
-                for (int dy = -1; dy <= 1; dy++) {
-                    for (int dx = -1; dx <= 1; dx++) {
-                        int nx = min(max(cell_x + dx, 0), grid_size - 1);
-                        int ny = min(max(cell_y + dy, 0), grid_size - 1);
-                        int state_idx = batch_id * cells_per_grid * channels +
-                                       ny * grid_size * channels +
-                                       nx * channels;
-
-                        // DIAG 14: Validate neighborhood read index
-                        int max_ca_input_idx = batch_size * cells_per_grid * channels;
-                        PROVENANCE_FATAL_IF(state_idx < 0 || state_idx + channels > max_ca_input_idx,
-                                           "DIAG14: ca_input read OOB");
-
-                        for (int c = 0; c < channels; c++) {
-                            float val = ca_input[state_idx + c];
-                            neighborhood[dy + 1][dx + 1][c] = val;
-
-                            // DIAG 15: Check for NaN/Inf in input - count all occurrences
-                            if (isnan(val) || isinf(val)) {
-                                atomicAdd(&g_diag15_input_bad_count, 1);
-                            }
-                        }
-                    }
-                }
-
-                long long t_neigh_end = clock64();
-
-                // DIAG 16: After neighborhood read - count all threads
-                atomicAdd(&g_diag16_post_neigh_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_NEIGH block=%d\n", blockIdx.x);
-
-                // ============ PERCEPTION COMPUTATION ============
-                float perception[HEAD_DIM];
-
-                // Stack canary check
-                volatile float stack_canary_mid2 = 1.41421f;
-
-                long long t_perc_start = clock64();
-
-                // DIAG 17: Before perception loop - count all threads
-                atomicAdd(&g_diag17_pre_perc_count, 1);
-
-                for (int h = 0; h < head_dim; h++) {
-                    // DIAG 18: Check perception loop variable
-                    PROVENANCE_FATAL_IF(h < 0 || h >= HEAD_DIM, "DIAG18: perception h OOB");
-
-                    float acc = 0.0f;
-                    for (int dy = 0; dy < 3; dy++) {
-                        for (int dx = 0; dx < 3; dx++) {
-                            for (int c = 0; c < channels; c++) {
-                                int w_idx = c * head_dim + h;
-                                PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= channels * head_dim,
-                                                   "DIAG18: perc_w index OOB");
-
-                                float neigh_val = neighborhood[dy][dx][c];
-                                half w_half = perc_w[w_idx];
-                                float w_float = __half2float(w_half);
-
-                                // DIAG 19: Check half conversion - count all bad weights
-                                if (isnan(w_float) || isinf(w_float)) {
-                                    atomicAdd(&g_diag19_perc_w_bad_count, 1);
-                                }
-
-                                acc += neigh_val * w_float;
-                            }
-                        }
-                    }
-
-                    // DIAG 20: Check accumulator before activation - count all bad
-                    if (isnan(acc) || isinf(acc)) {
-                        atomicAdd(&g_diag20_perc_acc_bad_count, 1);
-                    }
-
-                    perception[h] = activation_relu(acc);
-
-                    // DIAG 21: Check perception value after activation - count all bad
-                    if (isnan(perception[h]) || isinf(perception[h])) {
-                        atomicAdd(&g_diag21_perc_bad_count, 1);
-                    }
-                }
-
-                long long t_perc_end = clock64();
-
-                // DIAG 22: After perception - count all threads
-                atomicAdd(&g_diag22_post_perc_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PERC block=%d\n", blockIdx.x);
-
-                // ============ INTERACTION COMPUTATION (THE BIG ONE - hdim^2 MACs) ============
-                float interaction[HEAD_DIM];
-                float pre_gelu_vals[HEAD_DIM];
-                float interaction_sum = 0.0f;
-
-                // Stack canary
-                volatile float stack_canary_mid3 = 1.73205f;
-
-                long long t_inter_start = clock64();
-
-                // DIAG 23: Before interaction - count all threads
-                atomicAdd(&g_diag23_pre_inter_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_INTER block=%d\n", blockIdx.x);
-
-                // DIAG 24: Detailed interaction loop tracking for hdim=64
-                int inter_checkpoint = head_dim / 4; // Report every 25%
-
-                for (int h = 0; h < head_dim; h++) {
-                    PROVENANCE_FATAL_IF(h < 0 || h >= HEAD_DIM, "DIAG24: interaction h OOB");
-
-                    // DIAG 25: Track progress through interaction for large hdim - count checkpoints
-                    if (head_dim >= 32 && inter_checkpoint > 0 && h % inter_checkpoint == 0) {
-                        atomicAdd(&g_diag25_inter_prog_count, 1);
-                    }
-
-                    float acc = 0.0f;
-                    for (int j = 0; j < head_dim; j++) {
-                        PROVENANCE_FATAL_IF(j < 0 || j >= HEAD_DIM, "DIAG24: interaction j OOB");
-
-                        int w_idx = j * head_dim + h;
-                        PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= head_dim * head_dim,
-                                           "DIAG24: inter_w index OOB");
-
-                        float p_val = perception[j];
-                        half w_half = inter_w[w_idx];
-                        float w_float = __half2float(w_half);
-
-                        // DIAG 26: Check values in inner loop - count first samples
-                        if (h == 0 && j == 0 && loop_iter == 0) {
-                            atomicAdd(&g_diag26_inter_sample_count, 1);
-                        }
-
-                        acc += p_val * w_float;
-                    }
-
-                    pre_gelu_vals[h] = acc;
-
-                    // DIAG 27: Check pre-gelu value - count all bad
-                    if (isnan(acc) || isinf(acc)) {
-                        atomicAdd(&g_diag27_pregelu_bad_count, 1);
-                    }
-
-                    float gelu = activation_gelu(acc);
-
-                    // DIAG 28: Check gelu result - count all bad
-                    if (isnan(gelu) || isinf(gelu)) {
-                        atomicAdd(&g_diag28_gelu_bad_count, 1);
-                    }
-
-                    interaction[h] = gelu;
-                    interaction_sum += fabsf(gelu);
-                }
-
-                long long t_inter_end = clock64();
-                long long inter_time_us = (t_inter_end - t_inter_start) / 1000;
-
-                // DIAG 29: After interaction - count all threads
-                atomicAdd(&g_diag29_post_inter_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_INTER block=%d\n", blockIdx.x);
-
-                // DIAG 30: Warn if interaction taking too long - count all slow threads
-                if (inter_time_us > 100000) { // > 100ms
-                    atomicAdd(&g_diag30_inter_slow_count, 1);
-                }
-
-                // ============ OUTPUT COMPUTATION ============
-                float output[CHANNELS];
-
-                long long t_out_start = clock64();
-
-                // DIAG 31: Before output - count all threads
-                atomicAdd(&g_diag31_pre_out_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_OUTPUT block=%d\n", blockIdx.x);
-
-                for (int c = 0; c < channels; c++) {
-                    PROVENANCE_FATAL_IF(c < 0 || c >= CHANNELS, "DIAG31: output c OOB");
-
-                    float acc = 0.0f;
-                    for (int h = 0; h < head_dim; h++) {
-                        int w_idx = h * channels + c;
-                        PROVENANCE_FATAL_IF(w_idx < 0 || w_idx >= head_dim * channels,
-                                           "DIAG31: val_w index OOB");
-
-                        float i_val = interaction[h];
-                        half w_half = val_w[w_idx];
-                        float w_float = __half2float(w_half);
-                        acc += i_val * w_float;
-                    }
-                    output[c] = acc;
-
-                    // DIAG 32: Check output value - count all bad
-                    if (isnan(output[c]) || isinf(output[c])) {
-                        atomicAdd(&g_diag32_out_bad_count, 1);
-                    }
-                }
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_GATE block=%d\n", blockIdx.x);
-
-                // DIAG 33: Gate computation
-                float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
-                float gate = activation_sigmoid(gate_input);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_GATE block=%d gate=%f\n", blockIdx.x, gate);
-
-                // DIAG 33: Check gate value - count all bad
-                if (isnan(gate) || isinf(gate)) {
-                    atomicAdd(&g_diag33_gate_bad_count, 1);
-                }
-
-                long long t_out_end = clock64();
-
-                // DIAG 34: After output - count all threads
-                atomicAdd(&g_diag34_post_out_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_SAVE block=%d\n", blockIdx.x);
-
-                // ============ SAVE ACTIVATIONS ============
-                long long t_save_start = clock64();
-
-                int saved_base = batch_id * num_heads * cells_per_grid * head_dim +
-                                head_id * cells_per_grid * head_dim +
-                                cell_idx * head_dim;
-                int max_saved_idx = saved_base + head_dim - 1;
-                int expected_saved_size = batch_size * num_heads * cells_per_grid * head_dim;
-
-                // DIAG 35: Validate save indices
-                PROVENANCE_FATAL_IF(saved_base < 0, "DIAG35: saved_base negative");
-                PROVENANCE_FATAL_IF(max_saved_idx >= expected_saved_size, "DIAG35: saved OOB");
-
-                // DIAG 35: Pre-save - count all threads
-                atomicAdd(&g_diag35_pre_save_count, 1);
-
-                // DIAG 36: Save perception
-                for (int h = 0; h < head_dim; h++) {
-                    int idx = saved_base + h;
-                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG36: perc_save idx OOB");
-                    perception_saved[idx] = perception[h];
-                }
-
-                // DIAG 37: Verify perception save - count all first-iteration saves
-                if (loop_iter == 0) {
-                    atomicAdd(&g_diag37_perc_save_verify_count, 1);
-                }
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PERC_SAVE block=%d\n", blockIdx.x);
-
-                // DIAG 38: Save interaction
-                for (int h = 0; h < head_dim; h++) {
-                    int idx = saved_base + h;
-                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG38: inter_save idx OOB");
-                    interaction_saved[idx] = interaction[h];
-                }
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_INTER_SAVE block=%d\n", blockIdx.x);
-
-                // DIAG 39: Save pre_gelu
-                for (int h = 0; h < head_dim; h++) {
-                    int idx = saved_base + h;
-                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_saved_size, "DIAG39: pregelu_save idx OOB");
-                    pre_gelu_saved[idx] = pre_gelu_vals[h];
-                }
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_PREGELU_SAVE block=%d\n", blockIdx.x);
-
-                long long t_save_end = clock64();
-
-                // DIAG 40: After saves - count all threads
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_ATOMIC40 block=%d\n", blockIdx.x);
-                atomicAdd(&g_diag40_post_save_count, 1);
-                if (tid == 0 && loop_iter == 0) printf("DIAG_POST_ATOMIC40 block=%d\n", blockIdx.x);
-
-                // ============ WRITE CA OUTPUT ============
-                if (tid == 0 && loop_iter == 0) printf("DIAG_PRE_CAOUT block=%d\n", blockIdx.x);
-                long long t_caout_start = clock64();
-
-                int out_idx = batch_id * num_heads * cells_per_grid * channels +
-                             head_id * cells_per_grid * channels +
-                             cell_y * grid_size * channels +
-                             cell_x * channels;
-                int max_out_idx = out_idx + channels - 1;
-                int expected_out_size = batch_size * num_heads * cells_per_grid * channels;
-
-                // DIAG 41: Validate output indices
-                PROVENANCE_FATAL_IF(out_idx < 0, "DIAG41: out_idx negative");
-                PROVENANCE_FATAL_IF(max_out_idx >= expected_out_size, "DIAG41: ca_out OOB");
-
-                // DIAG 42: Before ca_output write
-                atomicAdd(&g_diag42_pre_caout_count, 1);
-
-                for (int c = 0; c < channels; c++) {
-                    int idx = out_idx + c;
-                    PROVENANCE_FATAL_IF(idx < 0 || idx >= expected_out_size, "DIAG42: ca_out write OOB");
-
-                    float input_val = neighborhood[1][1][c];
-                    float out_val = input_val * (1.0f - gate) + output[c] * gate;
-
-                    // DIAG 43: Check output value
-                    if (isnan(out_val) || isinf(out_val)) {
-                        atomicAdd(&g_diag43_caout_bad_count, 1);
-                    }
-
-                    ca_output[idx] = out_val;
-                }
-
-                long long t_caout_end = clock64();
-
-                // ============ ITERATION COMPLETE ============
-                long long iter_end = clock64();
-                long long iter_total_us = (iter_end - iter_start) / 1000;
-                long long total_ms = (iter_end - kernel_start_clock) / 1000000;
-
-                // DIAG 45: Timing breakdown - count timing checkpoints
-                if (loop_iter % 10 == 0) {
-                    atomicAdd(&g_diag45_timing_count, 1);
-                }
-
-                // DIAG 46: Warn if iteration took too long - count all slow threads
-                if (iter_total_us > 500000) { // > 500ms
-                    atomicAdd(&g_diag46_iter_slow_count, 1);
-                }
-
-                // DIAG 47: Stack canary check - count all corruptions
-                if (stack_canary_start != 3.14159265f || stack_canary_mid1 != 2.71828f ||
-                    stack_canary_mid2 != 1.41421f || stack_canary_mid3 != 1.73205f) {
-                    atomicAdd(&g_diag47_stack_corrupt_count, 1);
-                }
-
-                // DIAG 48: Check for NaN/Inf summary - count all bad
-                int any_nan = isnan(perception[0]) || isnan(interaction[0]) || isnan(output[0]) || isnan(gate);
-                int any_inf = isinf(perception[0]) || isinf(interaction[0]) || isinf(output[0]) || isinf(gate);
-                if (any_nan || any_inf) {
-                    atomicAdd(&g_diag48_nancheck_count, 1);
-                }
-
-                // Update warp progress tracking (only lane 0 of each warp writes)
-                if ((tid % 32) == 0) {
-                    s_warp_last_iter[tid / 32] = loop_iter;
-                }
-
-                last_completed_iter = loop_iter;
-                prev_iter_end = iter_end;
-
-                // DIAG 49: Per-thread completion tracking - count progress checkpoints
-                if (loop_iter % 50 == 0) {
-                    atomicAdd(&g_diag49_thread_prog_count, 1);
-                }
-            }
-
-            // ============ LOOP EXIT ============
-            long long loop_end = clock64();
-            long long total_loop_ms = (loop_end - kernel_start_clock) / 1000000;
-
-            // DIAG 50: Loop exit for all threads
-            atomicAdd(&g_diag50_thread_exit_count, 1);
-
-            // DIAG 51: Warp-level completion - count all warps
-            if (tid % 32 == 0) {
-                atomicAdd(&g_diag51_warp_count, 1);
-            }
-
-            // DIAG 52: Block-level summary - count all blocks
-            if (tid == 0) {
-                atomicAdd(&g_diag52_block_done_count, 1);
-            }
-
-            // Final stack canary check
-            if (stack_canary_start != 3.14159265f && tid == 0) {
-                printf("E_STACK b%d canary=%.8f\n", blockIdx.x, stack_canary_start);
-            }
-
-            // Record elapsed cycles for this CA forward pass
-            if (ca_trace_slot != nullptr && tid == 0) {
-                unsigned long long ca_cycle_end = clock64();
-                unsigned long long elapsed = ca_cycle_end - ca_cycle_start;
-                ca_trace_slot->cycles_elapsed = elapsed;
-                ca_trace_slot->tensor_core_cycles = elapsed;
-                printf("TRACE_FWD_WRITE b%d elapsed=%llu\n", blockIdx.x, elapsed);
-            }
+            multi_head_ca_tensor_device(entry, training_mode->batch_size, ca_input, ca_output, s_task_accuracy);
         }
 
-        // DIAG 53: Sync after loop - count threads reaching sync (only blocks with work did actual work)
-        if (tid == 0) printf("DIAG_PRE_GRIDSYNC block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
-        if (has_work) atomicAdd(&g_diag53_sync_count, 1);
         cg::this_grid().sync();
-        if (tid == 0) printf("DIAG_POST_GRIDSYNC block=%d\n", blockIdx.x);
 
-        // V:CA_FWD_DONE - count blocks completing CA forward
         if (has_work && tid == 0) {
             atomicAdd(&g_blocks_ca_fwd, 1);
         }
 
-        if (tid == 0) printf("DIAG_PRE_GRIDSYNC2 block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
         cg::this_grid().sync();
-        if (tid == 0) printf("DIAG_POST_GRIDSYNC2 block=%d\n", blockIdx.x);
         if (has_work) {
             DEVICE_FATAL_IF(s_error_flag, "hybrid_lifecycle: error flag set after CA forward");
         }
-        if (tid == 0) printf("DIAG_POST_ERRCHECK block=%d\n", blockIdx.x);
 
-        // Flow computation - work guarded, syncs outside
+        // Persist per-head state: ca_output → prev_concentration for next generation
         if (has_work) {
-            int total_cells = arch.grid_size * arch.grid_size;
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int channels = arch.channels;
-            int num_heads = arch.num_heads;
-
+            int state_size = training_mode->batch_size * arch.num_heads *
+                             arch.grid_size * arch.grid_size * arch.channels;
             float* wave_ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
-            float* wave_affinity = organism->buffers->batch_affinity_reduced + s_wave_offsets.affinity_offset;
 
-            int total_affinity_work = batch_size * total_cells;
-            for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
-                int batch_idx = work_idx / total_cells;
-                int cell_idx = work_idx % total_cells;
-
-                float affinity = 0.0f;
-                int total_elements = num_heads * channels;
-                for (int i = 0; i < total_elements; i++) {
-                    int head = i / channels;
-                    int c = i % channels;
-                    int idx = batch_idx * num_heads * total_cells * channels +
-                              head * total_cells * channels +
-                              cell_idx * channels + c;
-                    affinity += wave_ca_output[idx];
-                }
-                wave_affinity[batch_idx * total_cells + cell_idx] = affinity;
-            }
-        }
-        if (tid == 0) printf("DIAG_PRE_GRIDSYNC3 block=%d has_work=%d\n", blockIdx.x, has_work ? 1 : 0);
-        cg::this_grid().sync();
-        if (tid == 0) printf("DIAG_POST_GRIDSYNC3 block=%d\n", blockIdx.x);
-
-        if (has_work) {
-            int total_cells = arch.grid_size * arch.grid_size;
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int channels = arch.channels;
-            float flow_beta_A = entry->flow_beta_A;
-            float flow_n = entry->flow_n;
-            float flow_alpha_min = entry->flow_alpha_min;
-            float flow_alpha_max = entry->flow_alpha_max;
-            float flow_sharpness = entry->flow_sharpness;
-
-            float* wave_affinity = organism->buffers->batch_affinity_reduced + s_wave_offsets.affinity_offset;
-            float* wave_flow = organism->buffers->batch_flow_field + s_wave_offsets.flow_offset;
-            float* wave_ca_pool = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
-
-            int total_affinity_work = batch_size * total_cells;
-            for (int work_idx = tid; work_idx < total_affinity_work; work_idx += blockDim.x) {
-                int batch_idx = work_idx / total_cells;
-                int cell_idx = work_idx % total_cells;
-                int x = cell_idx % grid_size;
-                int y = cell_idx / grid_size;
-
-                int batch_offset = batch_idx * total_cells;
-                float U_center = wave_affinity[batch_offset + cell_idx];
-                int x_E = min(x + 1, grid_size - 1);
-                int y_N = min(y + 1, grid_size - 1);
-                float U_E = wave_affinity[batch_offset + y * grid_size + x_E];
-                float U_N = wave_affinity[batch_offset + y_N * grid_size + x];
-
-                int conc_batch_offset = batch_idx * total_cells * channels;
-                float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
-                for (int c = 0; c < channels; c++) {
-                    A_sum_center += wave_ca_pool[conc_batch_offset + cell_idx * channels + c];
-                    A_sum_E += wave_ca_pool[conc_batch_offset + (y * grid_size + x_E) * channels + c];
-                    A_sum_N += wave_ca_pool[conc_batch_offset + (y_N * grid_size + x) * channels + c];
-                }
-
-                float2 F = FlowLeniaOps::compute_flow_differentiable(
-                    U_center, U_E, U_N, A_sum_center, A_sum_E, A_sum_N,
-                    flow_beta_A, flow_n, flow_alpha_min, flow_alpha_max, flow_sharpness
-                );
-
-                int flow_idx = batch_idx * total_cells * 2 + cell_idx * 2;
-                wave_flow[flow_idx + 0] = F.x;
-                wave_flow[flow_idx + 1] = F.y;
-            }
-
-            float* wave_reint = organism->buffers->batch_reintegration_buffer + s_wave_offsets.ca_states_offset;
-            int buffer_size = batch_size * total_cells * channels;
-            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                wave_reint[idx] = 0.0f;
-            }
-        }
-        cg::this_grid().sync();
-        if (tid == 0 && blockIdx.x == 0) printf("DIAG_FLOW1\n");
-
-        if (has_work) {
-            int total_cells = arch.grid_size * arch.grid_size;
-            int batch_size = training_mode->batch_size;
-            int grid_size = arch.grid_size;
-            int channels = arch.channels;
-            float flow_dt = entry->flow_resource_dt;
-
-            float* wave_flow = organism->buffers->batch_flow_field + s_wave_offsets.flow_offset;
-            float* wave_reint = organism->buffers->batch_reintegration_buffer + s_wave_offsets.ca_states_offset;
-            float* wave_ca_pool = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
-
-            int total_splat_work = batch_size * total_cells;
-            for (int work_idx = tid; work_idx < total_splat_work; work_idx += blockDim.x) {
-                int batch_idx = work_idx / total_cells;
-                int cell_idx = work_idx % total_cells;
-                int source_x = cell_idx % grid_size;
-                int source_y = cell_idx / grid_size;
-
-                int batch_offset = batch_idx * total_cells;
-                int flow_idx = batch_offset * 2 + cell_idx * 2;
-                float Fx = wave_flow[flow_idx + 0];
-                float Fy = wave_flow[flow_idx + 1];
-
-                int conc_batch_offset = batch_idx * total_cells * channels;
-                float* batch_buffer = wave_reint + conc_batch_offset;
-                const float* batch_conc = wave_ca_pool + conc_batch_offset;
-
-                for (int c = 0; c < channels; c++) {
-                    float source_mass = batch_conc[cell_idx * channels + c];
-                    FlowLeniaOps::bilinear_transport_forward(
-                        source_mass,
-                        (float)source_x, (float)source_y,
-                        Fx, Fy, flow_dt, grid_size,
-                        batch_buffer, c, channels
-                    );
-                }
-            }
-        }
-        cg::this_grid().sync();
-        if (tid == 0 && blockIdx.x == 0) printf("DIAG_FLOW2\n");
-
-        if (has_work) {
-            int total_cells = arch.grid_size * arch.grid_size;
-            int batch_size = training_mode->batch_size;
-            int channels = arch.channels;
-            int buffer_size = batch_size * total_cells * channels;
-
-            float* wave_reint = organism->buffers->batch_reintegration_buffer + s_wave_offsets.ca_states_offset;
-            float* wave_ca_pool = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
-
-            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                wave_ca_pool[idx] = wave_reint[idx];
-            }
-        }
-        cg::this_grid().sync();
-        if (tid == 0 && blockIdx.x == 0) printf("DIAG_FLOW3\n");
-
-        if (has_work) {
-            int total_cells = arch.grid_size * arch.grid_size;
-            int batch_size = training_mode->batch_size;
-            int channels = arch.channels;
-            int buffer_size = batch_size * total_cells * channels;
-
-            float* wave_ca_pool = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
-            float* wave_prev_conc = organism->buffers->batch_prev_concentration + s_wave_offsets.ca_states_offset;
-
-            for (int idx = tid; idx < buffer_size; idx += blockDim.x) {
-                wave_prev_conc[idx] = wave_ca_pool[idx];
+            for (int idx = tid; idx < state_size; idx += blockDim.x) {
+                wave_prev_conc[idx] = wave_ca_output[idx];
             }
         }
         cg::this_grid().sync();
@@ -1559,9 +673,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             atomicAdd(&g_v_flow_done_count, 1);
         }
 
-        if (tid == 0) printf("DIAG_PRE_POOL_BARRIER b%d\n", blockIdx.x);
         grid_barrier(gridDim.x);
-        if (tid == 0 && blockIdx.x == 0) printf("DIAG_POST_POOL_BARRIER\n");
 
         if (training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
             // Pooling - work guarded
@@ -1613,6 +725,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 DEVICE_FATAL_IF(entry->diresa_task_weights->input_dim != num_features,
                     "hybrid_lifecycle: diresa_task_weights->input_dim mismatch with num_features (entry %d)", entry_idx);
+
+                // Per-sample DIRESA encode → fractal fold → 2D field coords
+                int batch_size_local = training_mode->batch_size;
+                float* features_base = organism->gradient_features_pool + entry_idx * batch_size_local * num_features;
+                float* field_coords = organism->sample_field_coords + entry_idx * batch_size_local * 2;
+                float sample_latent[BEHAVIORAL_DIM_TASK];
+                for (int s = 0; s < batch_size_local; s++) {
+                    diresa_encode(features_base + s * num_features, sample_latent, entry->diresa_task_weights);
+                    fractal_fold_2d(sample_latent, task_dim, arch.grid_size, &field_coords[s * 2], &field_coords[s * 2 + 1]);
+                }
             }
         }
         cg::this_grid().sync();
@@ -1824,6 +946,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 grid_size,
                 train_acc,
                 test_acc,
+                training_mode->is_train_batch,
                 organism->telemetry,
                 organism->pool,
                 organism->chemical_field,
@@ -2009,8 +1132,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int I_batch_stride;
             int V_head_stride;
             int V_batch_stride;
-            int ws_dW_value_stride;
-            int ws_W_T_value_stride;
             int ws_dW_interaction_stride;
             int ws_W_T_interaction_stride;
             int chunk_ws_a_stride;
@@ -2080,12 +1201,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 DEVICE_FATAL_IF(ca_state->perception_saved == nullptr, "BWD: perception_saved is null");
                 DEVICE_FATAL_IF(ca_state->interaction_saved == nullptr, "BWD: interaction_saved is null");
                 DEVICE_FATAL_IF(ca_state->pre_gelu_saved == nullptr, "BWD: pre_gelu_saved is null");
-                DEVICE_FATAL_IF(ca_state->value_weights == nullptr, "BWD: value_weights is null");
+                DEVICE_FATAL_IF(ca_state->flow_projection_weights == nullptr, "BWD: flow_projection_weights is null");
                 DEVICE_FATAL_IF(ca_state->interaction_weights == nullptr, "BWD: interaction_weights is null");
                 DEVICE_FATAL_IF(ca_state->perception_weights == nullptr, "BWD: perception_weights is null");
                 DEVICE_FATAL_IF(ca_state->tape.grad_buffer == nullptr, "BWD: tape.grad_buffer is null");
                 DEVICE_FATAL_IF(param_map == nullptr, "BWD: param_map is null");
-                DEVICE_FATAL_IF(param_map->value_start == nullptr, "BWD: param_map->value_start is null");
                 DEVICE_FATAL_IF(param_map->interaction_start == nullptr, "BWD: param_map->interaction_start is null");
                 DEVICE_FATAL_IF(param_map->perception_start == nullptr, "BWD: param_map->perception_start is null");
                 DEVICE_FATAL_IF(organism->batch_ca_states_pool == nullptr, "BWD: batch_ca_states_pool is null");
@@ -2097,8 +1217,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 I_batch_stride = arch.num_heads * I_head_stride;
                 V_head_stride = num_cells * arch.channels;
                 V_batch_stride = arch.num_heads * V_head_stride;
-                ws_dW_value_stride = arch.head_dim * arch.channels;
-                ws_W_T_value_stride = arch.channels * arch.head_dim;
                 ws_dW_interaction_stride = arch.head_dim * arch.head_dim;
                 ws_W_T_interaction_stride = arch.head_dim * arch.head_dim;
 
@@ -2116,212 +1234,116 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             int lane_id = tid % WARP_SIZE;
             int num_warps = blockDim.x / WARP_SIZE;
 
+            // Zero d_ca_input before transport backward (d_source accumulates here)
+            float* d_ca_input = nullptr;
+            if (has_work) {
+                DEVICE_FATAL_IF(organism->batch_ca_input_grads == nullptr,
+                    "batch_ca_input_grads must be allocated for backward pass");
+                d_ca_input = organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset;
+                int d_ca_total = training_mode->batch_size * arch.num_heads * num_cells * arch.channels;
+                for (int idx = tid; idx < d_ca_total; idx += blockDim.x) {
+                    d_ca_input[idx] = 0.0f;
+                }
+            }
+            cg::this_grid().sync();
+
             {
-            // Zero dW - work guarded
+            // Transport backward: ca_output_grad → d_interaction, d_source, d_flow_projection_weights
             if (has_work) {
-                int total_dW = arch.num_heads * arch.head_dim * arch.channels;
-                DEVICE_FATAL_IF(total_dW <= 0, "BWD: total_dW overflow or zero");
-                for (int idx = tid; idx < total_dW; idx += blockDim.x) {
-                    ws_dW[idx] = 0.0f;
-                }
-            }
-            cg::this_grid().sync();
+                float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+                half* flow_proj_w = ca_state->flow_projection_weights;
+                int batch_size = training_mode->batch_size;
+                int channels = arch.channels;
+                int head_dim = arch.head_dim;
+                int num_heads_bwd = arch.num_heads;
+                int max_grad_buffer = ca_state->tape.value_capacity;
 
-            // All blocks iterate broadcast num_chunks, only blocks with work do actual work
-            for (int chunk_idx = 0; chunk_idx < bwd_num_chunks; chunk_idx++) {
-                // Per-block chunk computation - only valid for blocks with work
-                int chunk_start = chunk_idx * BACKWARD_CHUNK_SAMPLES;
-                int chunk_samples = has_work ? min(BACKWARD_CHUNK_SAMPLES, total_samples - chunk_start) : 0;
-                int chunk_samples_aligned = (chunk_samples / WMMA_TILE_DIM) * WMMA_TILE_DIM;
-                bool chunk_has_work = has_work && (chunk_samples_aligned > 0);
-
-                if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_chunk0_count, 1);
-
-                if (chunk_has_work) {
-                    int total_I = arch.num_heads * chunk_samples_aligned * arch.head_dim;
-                    int max_src_I = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
-                    int max_dst_I = arch.num_heads * chunk_ws_a_stride;
-                    for (int idx = tid; idx < total_I; idx += blockDim.x) {
-                        int head_id = idx / (chunk_samples_aligned * arch.head_dim);
-                        int remainder = idx % (chunk_samples_aligned * arch.head_dim);
-                        int sample_in_chunk = remainder / arch.head_dim;
-                        int dim_idx = remainder % arch.head_dim;
-                        int global_sample = chunk_start + sample_in_chunk;
-                        int batch_id = global_sample / num_cells;
-                        int cell_id = global_sample % num_cells;
-                        int src_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
-                        int dst_idx = head_id * chunk_ws_a_stride + sample_in_chunk * arch.head_dim + dim_idx;
-                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_I, "BWD interaction_saved OOB");
-                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_I, "BWD ws_fp16_a OOB");
-                        float src_val = interaction_saved[src_idx];
-                        PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD interaction_saved NaN/Inf");
-                        ws_fp16_a[dst_idx] = __float2half(src_val);
-                    }
-                }
-                cg::this_grid().sync();
-                if (tid == 0 && blockIdx.x == 0 && chunk_idx == 0) printf("V:bwd_I_load\n");
-                if (has_work && tid == 0 && blockIdx.x == 0 && chunk_idx == 0) {
-                    TraceBuffer* mid_tb0 = &organism->ca_state_pool[pool->alive_indices[wave_start]].trace;
-                    printf("TRACE_MID_0 cidx=%d cyc0=%llu\n", mid_tb0->current_idx, mid_tb0->traces[0].cycles_elapsed);
+                // Zero flow projection grads in tape
+                int fp_grad_total = num_heads_bwd * 2 * head_dim;
+                for (int idx = tid; idx < fp_grad_total; idx += blockDim.x) {
+                    int h = idx / (2 * head_dim);
+                    int local = idx % (2 * head_dim);
+                    ca_state->tape.grad_buffer[param_map->flow_projection_start[h] + local] = 0.0f;
                 }
 
-                if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_i_done_count, 1);
-
-                if (chunk_has_work) {
-                    int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
-                    int max_src_V = arch.num_heads * training_mode->batch_size * num_cells * arch.channels;
-                    int max_dst_V = arch.num_heads * chunk_ws_b_stride;
-                    for (int idx = tid; idx < total_V; idx += blockDim.x) {
-                        int head_id = idx / (chunk_samples_aligned * arch.channels);
-                        int remainder = idx % (chunk_samples_aligned * arch.channels);
-                        int sample_in_chunk = remainder / arch.channels;
-                        int ch_idx = remainder % arch.channels;
-                        int global_sample = chunk_start + sample_in_chunk;
-                        int batch_id = global_sample / num_cells;
-                        int cell_id = global_sample % num_cells;
-                        int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
-                        int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
-                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_V, "BWD ca_output_grad OOB");
-                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_V, "BWD ws_fp16_b OOB");
-                        float src_val = ca_output_grad[src_idx];
-                        PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD ca_output_grad NaN/Inf");
-                        ws_fp16_b[dst_idx] = __float2half(src_val);
-                    }
+                // Zero dL_dinteraction
+                int total_dI = num_heads_bwd * batch_size * num_cells * head_dim;
+                for (int idx = tid; idx < total_dI; idx += blockDim.x) {
+                    dL_dinteraction[idx] = 0.0f;
                 }
-                cg::this_grid().sync();
 
-                if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_v_done_count, 1);
+                for (int batch_id = 0; batch_id < batch_size; batch_id++) {
+                    for (int head = 0; head < num_heads_bwd; head++) {
+                        int saved_base = batch_id * I_batch_stride + head * I_head_stride;
+                        int flow_weight_offset = head * 2 * head_dim;
+                        int batch_cell_offset = (batch_id * num_heads_bwd + head) * num_cells * channels;
 
-                if (chunk_has_work) {
-                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.head_dim, "arch.head_dim");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.channels, "arch.channels");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.num_heads, "arch.num_heads");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_ws_a_stride, "chunk_ws_a_stride");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_ws_b_stride, "chunk_ws_b_stride");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(ws_dW_value_stride, "ws_dW_value_stride");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_samples_aligned, "chunk_samples_aligned");
-                    PROVENANCE_FATAL_IF(ws_fp16_a == nullptr, "ws_fp16_a null");
-                    PROVENANCE_FATAL_IF(ws_fp16_b == nullptr, "ws_fp16_b null");
-                    PROVENANCE_FATAL_IF(ws_dW == nullptr, "ws_dW null");
-
-                    int tiles_M = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                    int tiles_N = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                    int total_tiles = tiles_M * tiles_N * arch.num_heads;
-                    int max_ws_fp16_a = arch.num_heads * chunk_ws_a_stride;
-                    int max_ws_fp16_b = arch.num_heads * chunk_ws_b_stride;
-                    int max_ws_dW = arch.num_heads * ws_dW_value_stride;
-
-                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                        int head_id = tile_idx / (tiles_M * tiles_N);
-                        int tile_flat = tile_idx % (tiles_M * tiles_N);
-                        int warpM = tile_flat / tiles_N;
-                        int warpN = tile_flat % tiles_N;
-
-                        int tile_row = warpM * WMMA_TILE_DIM;
-                        int tile_col = warpN * WMMA_TILE_DIM;
-
-                        PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "head_id OOB");
-
-                        if (tile_row < arch.head_dim && tile_col < arch.channels) {
-                            int A_base_offset = head_id * chunk_ws_a_stride;
-                            int B_base_offset = head_id * chunk_ws_b_stride;
-                            int C_base_offset = head_id * ws_dW_value_stride;
-                            PROVENANCE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_a, "A_base OOB");
-                            PROVENANCE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_fp16_b, "B_base OOB");
-                            PROVENANCE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dW, "C_base OOB");
-
-                            const half* A_head = ws_fp16_a + A_base_offset;
-                            const half* B_head = ws_fp16_b + B_base_offset;
-                            float* C_head = ws_dW + C_base_offset;
-
-                            int C_tile_offset = tile_row * arch.channels + tile_col;
-                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.channels + (tile_col + WMMA_TILE_DIM - 1);
-                            PROVENANCE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= ws_dW_value_stride, "C_tile OOB");
-
-                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::col_major> a_frag;
-                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-
-                            nvcuda::wmma::load_matrix_sync(c_frag, C_head + C_tile_offset, arch.channels, nvcuda::wmma::mem_row_major);
-
-                            for (int k_tile = 0; k_tile < chunk_samples_aligned; k_tile += WMMA_TILE_DIM) {
-                                int A_tile_offset = k_tile * arch.head_dim + tile_row;
-                                int A_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_row + WMMA_TILE_DIM - 1);
-                                int B_tile_offset = k_tile * arch.channels + tile_col;
-                                int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.channels + (tile_col + WMMA_TILE_DIM - 1);
-                                PROVENANCE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_a_stride, "A_tile OOB");
-                                PROVENANCE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= chunk_ws_b_stride, "B_tile OOB");
-                                PROVENANCE_FATAL_IF(A_base_offset + A_tile_max >= max_ws_fp16_a, "A_abs OOB");
-                                PROVENANCE_FATAL_IF(B_base_offset + B_tile_max >= max_ws_fp16_b, "B_abs OOB");
-                                nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.head_dim);
-                                nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.channels);
-                                nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                        for (int cell_idx = tid; cell_idx < num_cells; cell_idx += blockDim.x) {
+                            float interaction_local[HEAD_DIM];
+                            float interaction_sum = 0.0f;
+                            for (int d = 0; d < head_dim; d++) {
+                                float val = interaction_saved[saved_base + cell_idx * head_dim + d];
+                                interaction_local[d] = val;
+                                interaction_sum += fabsf(val);
                             }
-                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.channels, nvcuda::wmma::mem_row_major);
+
+                            float2 flow = FlowLeniaOps::project_to_flow(
+                                interaction_local, head_dim, &flow_proj_w[flow_weight_offset]);
+                            float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
+                            float gate = activation_sigmoid(gate_input);
+
+                            float d_source[CHANNELS];
+                            float d_flow_x, d_flow_y, d_gate_val;
+                            FlowLeniaOps::bilinear_transport_backward(
+                                ca_input, cell_idx, flow, gate, entry->flow_resource_dt,
+                                arch.grid_size, ca_output_grad,
+                                d_source, &d_flow_x, &d_flow_y, &d_gate_val,
+                                channels, batch_cell_offset);
+
+                            // d_source → d_ca_input (written later after zeroing)
+                            // For now store in dL_dperception buffer temporarily
+                            // (will be accumulated after d_ca_input is zeroed)
+
+                            // Flow projection backward
+                            float d_interaction_local[HEAD_DIM];
+                            float d_weights_local[2 * HEAD_DIM];
+                            for (int d = 0; d < head_dim; d++) {
+                                d_interaction_local[d] = 0.0f;
+                            }
+                            for (int d = 0; d < 2 * head_dim; d++) {
+                                d_weights_local[d] = 0.0f;
+                            }
+                            FlowLeniaOps::project_to_flow_backward(
+                                d_flow_x, d_flow_y, interaction_local, head_dim,
+                                &flow_proj_w[flow_weight_offset],
+                                d_interaction_local, d_weights_local);
+
+                            // Gate backward: d_gate → sigmoid backward → d_interaction_sum
+                            float d_sigmoid = d_gate_val * gate * (1.0f - gate);
+                            float d_interaction_sum = d_sigmoid / (float)head_dim;
+                            for (int d = 0; d < head_dim; d++) {
+                                float sign_val = (interaction_local[d] > 0.0f) ? 1.0f :
+                                                 (interaction_local[d] < 0.0f) ? -1.0f : 0.0f;
+                                d_interaction_local[d] += d_interaction_sum * sign_val;
+                            }
+
+                            // Write d_interaction to dL_dinteraction
+                            int out_base = head * I_head_stride + batch_id * I_batch_stride + cell_idx * head_dim;
+                            for (int d = 0; d < head_dim; d++) {
+                                dL_dinteraction[out_base + d] = d_interaction_local[d];
+                            }
+
+                            // Accumulate flow projection weight grads
+                            int fp_grad_base = param_map->flow_projection_start[head];
+                            for (int d = 0; d < 2 * head_dim; d++) {
+                                atomicAdd(&ca_state->tape.grad_buffer[fp_grad_base + d], d_weights_local[d]);
+                            }
+
+                            // Accumulate d_source into d_ca_input (zeroed before this section)
+                            for (int c = 0; c < channels; c++) {
+                                atomicAdd(&d_ca_input[batch_cell_offset + cell_idx * channels + c], d_source[c]);
+                            }
                         }
-                    }
-                }
-                cg::this_grid().sync();
-            }
-
-            // V:BWD_VALUE_GRAD_COPY - count blocks
-            if (has_work && tid == 0) atomicAdd(&g_v_bwd_value_grad_count, 1);
-            if (has_work) {
-                int total_grads = arch.num_heads * arch.head_dim * arch.channels;
-                int max_ws_dW = arch.num_heads * ws_dW_value_stride;
-                int max_grad_buffer = ca_state->tape.capacity;
-                PROVENANCE_FATAL_IF(total_grads <= 0, "BWD value grad: total_grads overflow");
-                for (int idx = tid; idx < total_grads; idx += blockDim.x) {
-                    int head_id = idx / (arch.head_dim * arch.channels);
-                    int local_idx = idx % (arch.head_dim * arch.channels);
-                    int src_idx = head_id * ws_dW_value_stride + local_idx;
-                    int dst_idx = param_map->value_start[head_id] + local_idx;
-                    PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD value grad: head_id OOB");
-                    PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_ws_dW, "BWD value grad: src_idx OOB");
-                    PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_grad_buffer, "BWD value grad: dst_idx OOB");
-                    float src_val = ws_dW[src_idx];
-                    PROVENANCE_FATAL_IF(!isfinite(src_val), "BWD value grad: ws_dW NaN/Inf");
-                    ca_state->tape.grad_buffer[dst_idx] = src_val;
-                }
-            }
-            cg::this_grid().sync();
-
-            // V:BWD_VALUE_TRANSPOSE - work guarded, sync outside
-            if (has_work) {
-                int t_tiles_x = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int t_tiles_y = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                int total_tile_elements = t_tiles_x * t_tiles_y * arch.num_heads * WMMA_TILE_DIM * WMMA_TILE_DIM;
-                int max_W_per_head = arch.head_dim * arch.channels;
-                int max_W_T_per_head = ws_W_T_value_stride;
-
-                for (int work_idx = tid; work_idx < total_tile_elements; work_idx += blockDim.x) {
-                    int elements_per_tile = WMMA_TILE_DIM * WMMA_TILE_DIM;
-                    int tiles_per_head = t_tiles_x * t_tiles_y;
-                    int head_id = work_idx / (tiles_per_head * elements_per_tile);
-                    int remainder = work_idx % (tiles_per_head * elements_per_tile);
-                    int tile_idx = remainder / elements_per_tile;
-                    int elem_idx = remainder % elements_per_tile;
-                    int tile_x = tile_idx % t_tiles_x;
-                    int tile_y = tile_idx / t_tiles_x;
-                    int local_x = elem_idx % WMMA_TILE_DIM;
-                    int local_y = elem_idx / WMMA_TILE_DIM;
-
-                    int bx = tile_x * WMMA_TILE_DIM;
-                    int by = tile_y * WMMA_TILE_DIM;
-                    int h = bx + local_x;
-                    int c = by + local_y;
-
-                    if (c < arch.channels && h < arch.head_dim) {
-                        int W_src_idx = h * arch.channels + c;
-                        int W_T_dst_idx = c * arch.head_dim + h;
-                        PROVENANCE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "BWD val transpose: head_id OOB");
-                        PROVENANCE_FATAL_IF(W_src_idx < 0 || W_src_idx >= max_W_per_head, "BWD val transpose: src OOB");
-                        PROVENANCE_FATAL_IF(W_T_dst_idx < 0 || W_T_dst_idx >= max_W_T_per_head, "BWD val transpose: dst OOB");
-                        const half* W_head = ca_state->value_weights + head_id * arch.head_dim * arch.channels;
-                        half* W_T_head = ws_W_T + head_id * ws_W_T_value_stride;
-                        half w_val = W_head[W_src_idx];
-                        PROVENANCE_FATAL_IF(!isfinite(__half2float(w_val)), "BWD val transpose: W NaN/Inf");
-                        W_T_head[W_T_dst_idx] = w_val;
                     }
                 }
             }
@@ -2358,7 +1380,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         PROVENANCE_FATAL_IF(W_src_idx < 0 || W_src_idx >= max_W_per_head, "BWD inter transpose: src OOB");
                         PROVENANCE_FATAL_IF(W_T_dst_idx < 0 || W_T_dst_idx >= max_W_T_per_head, "BWD inter transpose: dst OOB");
                         const half* W_head = ca_state->interaction_weights + head_id * arch.head_dim * arch.head_dim;
-                        half* W_T_head = ws_W_T + arch.num_heads * ws_W_T_value_stride + head_id * ws_W_T_interaction_stride;
+                        half* W_T_head = ws_W_T + head_id * ws_W_T_interaction_stride;
                         half w_val = W_head[W_src_idx];
                         PROVENANCE_FATAL_IF(!isfinite(__half2float(w_val)), "BWD inter transpose: W NaN/Inf");
                         W_T_head[W_T_dst_idx] = w_val;
@@ -2374,7 +1396,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 int total_perception = arch.num_heads * arch.channels * arch.head_dim;
                 int total_zero = total_interaction + total_perception;
                 PROVENANCE_FATAL_IF(total_zero <= 0, "BWD zero dW: total_zero overflow");
-                float* ws_dW_inter = ws_dW + arch.num_heads * ws_dW_value_stride;
+                float* ws_dW_inter = ws_dW;
                 for (int idx = tid; idx < total_zero; idx += blockDim.x) {
                     ws_dW_inter[idx] = 0.0f;
                 }
@@ -2394,24 +1416,14 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             float* ws_dW_interaction;
             float* ws_dW_perception;
             half* ws_W_T_interaction;
-            float* d_ca_input;
 
             if (has_work) {
                 chunk_ws_dI_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
                 chunk_ws_dpregelu_stride = BACKWARD_CHUNK_SAMPLES * arch.head_dim;
                 chunk_ws_pooled_stride = BACKWARD_CHUNK_SAMPLES * arch.channels;
-                ws_dW_interaction = ws_dW + arch.num_heads * ws_dW_value_stride;
+                ws_dW_interaction = ws_dW;
                 ws_dW_perception = ws_dW_interaction + arch.num_heads * ws_dW_interaction_stride;
-                ws_W_T_interaction = ws_W_T + arch.num_heads * ws_W_T_value_stride;
-
-                DEVICE_FATAL_IF(organism->batch_ca_input_grads == nullptr,
-                    "batch_ca_input_grads must be allocated for backward pass");
-                d_ca_input = organism->batch_ca_input_grads + s_wave_offsets.ca_states_offset;
-                int max_d_ca = total_samples * arch.channels;
-                PROVENANCE_FATAL_IF(max_d_ca <= 0, "BWD d_ca_input: max_d_ca overflow");
-                for (int idx = tid; idx < max_d_ca; idx += blockDim.x) {
-                    d_ca_input[idx] = 0.0f;
-                }
+                ws_W_T_interaction = ws_W_T;
             }
             cg::this_grid().sync();
 
@@ -2426,93 +1438,10 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_chunk2_enter_count, 1);
 
-                if (chunk_has_work) {
-                    int total_V = arch.num_heads * chunk_samples_aligned * arch.channels;
-                    int max_src_V = arch.num_heads * training_mode->batch_size * num_cells * arch.channels;
-                    int max_dst_V = arch.num_heads * chunk_ws_b_stride;
-                    PROVENANCE_FATAL_IF(total_V <= 0, "BWD chunk2 V: total overflow");
-                    for (int idx = tid; idx < total_V; idx += blockDim.x) {
-                        int head_id = idx / (chunk_samples_aligned * arch.channels);
-                        int remainder = idx % (chunk_samples_aligned * arch.channels);
-                        int sample_in_chunk = remainder / arch.channels;
-                        int ch_idx = remainder % arch.channels;
-                        int global_sample = chunk_start + sample_in_chunk;
-                        int batch_id = global_sample / num_cells;
-                        int cell_id = global_sample % num_cells;
-                        int src_idx = head_id * V_head_stride + batch_id * V_batch_stride + cell_id * arch.channels + ch_idx;
-                        int dst_idx = head_id * chunk_ws_b_stride + sample_in_chunk * arch.channels + ch_idx;
-                        PROVENANCE_FATAL_IF(src_idx < 0 || src_idx >= max_src_V, "BWD chunk2: src_idx OOB");
-                        PROVENANCE_FATAL_IF(dst_idx < 0 || dst_idx >= max_dst_V, "BWD chunk2: dst_idx OOB");
-                        float val = ca_output_grad[src_idx];
-                        PROVENANCE_FATAL_IF(!isfinite(val), "BWD chunk2: ca_output_grad NaN/Inf");
-                        ws_fp16_b[dst_idx] = __float2half(val);
-                    }
-                }
-                cg::this_grid().sync();
-
-
-                if (chunk_has_work) {
-                    int tiles_M = (chunk_samples_aligned + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                    int tiles_N = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-                    int total_tiles = tiles_M * tiles_N * arch.num_heads;
-                    int max_ws_fp16_b_dI = arch.num_heads * chunk_ws_b_stride;
-                    int max_ws_W_T = arch.num_heads * ws_W_T_value_stride;
-                    int max_ws_dI_total = arch.num_heads * chunk_ws_dI_stride;
-
-                    for (int tile_idx = warp_id; tile_idx < total_tiles; tile_idx += num_warps) {
-                        int head_id = tile_idx / (tiles_M * tiles_N);
-                        int tile_flat = tile_idx % (tiles_M * tiles_N);
-                        int warpM = tile_flat / tiles_N;
-                        int warpN = tile_flat % tiles_N;
-                        int tile_row = warpM * WMMA_TILE_DIM;
-                        int tile_col = warpN * WMMA_TILE_DIM;
-
-                        DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA dI: head_id OOB");
-
-                        if (tile_row < chunk_samples_aligned && tile_col < arch.head_dim) {
-                            int A_base_offset = head_id * chunk_ws_b_stride;
-                            int B_base_offset = head_id * ws_W_T_value_stride;
-                            int C_base_offset = head_id * chunk_ws_dI_stride;
-                            DEVICE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_b_dI, "WMMA dI: A_base OOB");
-                            DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_W_T, "WMMA dI: B_base OOB");
-                            DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dI_total, "WMMA dI: C_base OOB");
-
-                            const half* A_head = ws_fp16_b + A_base_offset;
-                            const half* B_head = ws_W_T + B_base_offset;
-                            float* C_head = ws_dI + C_base_offset;
-
-                            int C_tile_offset = tile_row * arch.head_dim + tile_col;
-                            int C_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
-                            DEVICE_FATAL_IF(C_tile_offset < 0 || C_tile_max >= chunk_ws_dI_stride, "WMMA dI: C_tile OOB");
-
-                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> a_frag;
-                            nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, nvcuda::wmma::row_major> b_frag;
-                            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                            nvcuda::wmma::fill_fragment(c_frag, 0.0f);
-
-                            for (int k_tile = 0; k_tile < arch.channels; k_tile += WMMA_TILE_DIM) {
-                                if (k_tile + WMMA_TILE_DIM <= arch.channels) {
-                                    int A_tile_offset = tile_row * arch.channels + k_tile;
-                                    int A_tile_max = (tile_row + WMMA_TILE_DIM - 1) * arch.channels + (k_tile + WMMA_TILE_DIM - 1);
-                                    int B_tile_offset = k_tile * arch.head_dim + tile_col;
-                                    int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
-                                    DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= chunk_ws_b_stride, "WMMA dI: A_tile OOB");
-                                    DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= ws_W_T_value_stride, "WMMA dI: B_tile OOB");
-                                    nvcuda::wmma::load_matrix_sync(a_frag, A_head + A_tile_offset, arch.channels);
-                                    nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
-                                    nvcuda::wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-                                }
-                            }
-                            nvcuda::wmma::store_matrix_sync(C_head + C_tile_offset, c_frag, arch.head_dim, nvcuda::wmma::mem_row_major);
-                        }
-                    }
-                }
-                cg::this_grid().sync();
-
+                // GELU backward: dL_dinteraction (from transport bwd) → ws_dpregelu
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_di_write_count, 1);
                 if (chunk_has_work) {
                     int total_elem = arch.num_heads * chunk_samples_aligned * arch.head_dim;
-                    int max_ws_dI = arch.num_heads * chunk_ws_dI_stride;
                     int max_out = arch.num_heads * training_mode->batch_size * num_cells * arch.head_dim;
                     int max_saved = training_mode->batch_size * I_batch_stride + arch.num_heads * I_head_stride;
                     int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
@@ -2525,19 +1454,16 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         int batch_id = global_sample / num_cells;
                         int cell_id = global_sample % num_cells;
 
-                        int ws_idx = head_id * chunk_ws_dI_stride + sample_in_chunk * arch.head_dim + dim_idx;
                         int out_idx = head_id * I_head_stride + batch_id * I_batch_stride + cell_id * arch.head_dim + dim_idx;
                         int saved_idx = batch_id * I_batch_stride + head_id * I_head_stride + cell_id * arch.head_dim + dim_idx;
                         int dpregelu_idx = head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + dim_idx;
 
-                        PROVENANCE_FATAL_IF(ws_idx < 0 || ws_idx >= max_ws_dI, "BWD dI: ws_idx OOB");
                         PROVENANCE_FATAL_IF(out_idx < 0 || out_idx >= max_out, "BWD dI: out_idx OOB");
                         PROVENANCE_FATAL_IF(saved_idx < 0 || saved_idx >= max_saved, "BWD dI: saved_idx OOB");
                         PROVENANCE_FATAL_IF(dpregelu_idx < 0 || dpregelu_idx >= max_dpregelu, "BWD dI: dpregelu_idx OOB");
 
-                        float dL_dI_val = ws_dI[ws_idx];
-                        PROVENANCE_FATAL_IF(!isfinite(dL_dI_val), "BWD dI: ws_dI NaN/Inf");
-                        dL_dinteraction[out_idx] = dL_dI_val;
+                        float dL_dI_val = dL_dinteraction[out_idx];
+                        PROVENANCE_FATAL_IF(!isfinite(dL_dI_val), "BWD dI: dL_dinteraction NaN/Inf");
                         float pre_val = pre_gelu_saved[saved_idx];
                         PROVENANCE_FATAL_IF(!isfinite(pre_val), "BWD dI: pre_gelu_saved NaN/Inf");
                         float gelu_bwd = activation_gelu_backward(pre_val, dL_dI_val);
@@ -2739,20 +1665,22 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_im2col_count, 1);
                 if (chunk_has_work) {
-                    int max_input = training_mode->batch_size * arch.grid_size * arch.grid_size * arch.channels;
-                    int max_im2col = chunk_samples_aligned * arch.channels;
-                    for (int idx = tid; idx < chunk_samples_aligned; idx += blockDim.x) {
-                        int global_sample = chunk_start + idx;
+                    int im2col_sample_stride = chunk_samples_aligned * arch.channels;
+                    int total_im2col_work = arch.num_heads * chunk_samples_aligned;
+                    int max_input = training_mode->batch_size * arch.num_heads * num_cells * arch.channels;
+                    int max_im2col = arch.num_heads * im2col_sample_stride;
+                    const float* input_batch = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+
+                    for (int idx = tid; idx < total_im2col_work; idx += blockDim.x) {
+                        int head_id = idx / chunk_samples_aligned;
+                        int sample_in_chunk = idx % chunk_samples_aligned;
+                        int global_sample = chunk_start + sample_in_chunk;
                         int batch_id = global_sample / num_cells;
                         int cell_idx = global_sample % num_cells;
                         int cell_y = cell_idx / arch.grid_size;
                         int cell_x = cell_idx % arch.grid_size;
 
-                        PROVENANCE_FATAL_IF(batch_id < 0 || batch_id >= training_mode->batch_size, "BWD im2col: batch_id OOB");
-                        PROVENANCE_FATAL_IF(cell_y < 0 || cell_y >= arch.grid_size, "BWD im2col: cell_y OOB");
-                        PROVENANCE_FATAL_IF(cell_x < 0 || cell_x >= arch.grid_size, "BWD im2col: cell_x OOB");
-
-                        const float* input_batch = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
+                        int head_input_offset = (batch_id * arch.num_heads + head_id) * num_cells * arch.channels;
 
                         for (int c = 0; c < arch.channels; c++) {
                             float sum = 0.0f;
@@ -2760,17 +1688,13 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                                 for (int dx = -1; dx <= 1; dx++) {
                                     int ny = max(0, min(arch.grid_size - 1, cell_y + dy));
                                     int nx = max(0, min(arch.grid_size - 1, cell_x + dx));
-                                    int input_idx = batch_id * arch.grid_size * arch.grid_size * arch.channels +
-                                                   ny * arch.grid_size * arch.channels + nx * arch.channels + c;
+                                    int input_idx = head_input_offset + ny * arch.grid_size * arch.channels + nx * arch.channels + c;
                                     PROVENANCE_FATAL_IF(input_idx < 0 || input_idx >= max_input, "BWD im2col: input_idx OOB");
-                                    float in_val = input_batch[input_idx];
-                                    PROVENANCE_FATAL_IF(!isfinite(in_val), "BWD im2col: input NaN/Inf");
-                                    sum += in_val;
+                                    sum += input_batch[input_idx];
                                 }
                             }
-                            int im2col_idx = idx * arch.channels + c;
+                            int im2col_idx = head_id * im2col_sample_stride + sample_in_chunk * arch.channels + c;
                             PROVENANCE_FATAL_IF(im2col_idx < 0 || im2col_idx >= max_im2col, "BWD im2col: im2col_idx OOB");
-                            PROVENANCE_FATAL_IF(!isfinite(sum), "BWD im2col: sum NaN/Inf");
                             ws_im2col[im2col_idx] = sum;
                         }
                     }
@@ -2779,7 +1703,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 if (chunk_has_work && tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_conv_fp16_count, 1);
                 if (chunk_has_work) {
-                    int total_conv = chunk_samples_aligned * arch.channels;
+                    int total_conv = arch.num_heads * chunk_samples_aligned * arch.channels;
                     for (int idx = tid; idx < total_conv; idx += blockDim.x) {
                         float val = ws_im2col[idx];
                         PROVENANCE_FATAL_IF(!isfinite(val), "BWD conv fp16: ws_im2col NaN/Inf");
@@ -2809,7 +1733,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     int dW_tiles_c = (arch.channels + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int dW_tiles_h = (arch.head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
                     int total_tiles = dW_tiles_c * dW_tiles_h * arch.num_heads;
-                    int max_ws_fp16_a_perc = chunk_samples_aligned * arch.channels;
+                    int im2col_head_stride = chunk_samples_aligned * arch.channels;
+                    int max_ws_fp16_a_perc = arch.num_heads * im2col_head_stride;
                     int chunk_B_stride = chunk_samples_aligned * arch.head_dim;
                     int max_ws_fp16_b_perc = arch.num_heads * chunk_B_stride;
                     int max_ws_dW_perc = arch.num_heads * ws_dW_perception_stride;
@@ -2825,12 +1750,14 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         DEVICE_FATAL_IF(head_id < 0 || head_id >= arch.num_heads, "WMMA perc dW: head_id OOB");
 
                         if (tile_row < arch.channels && tile_col < arch.head_dim) {
+                            int A_base_offset = head_id * im2col_head_stride;
                             int B_base_offset = head_id * chunk_B_stride;
                             int C_base_offset = head_id * ws_dW_perception_stride;
+                            DEVICE_FATAL_IF(A_base_offset < 0 || A_base_offset >= max_ws_fp16_a_perc, "WMMA perc dW: A_base OOB");
                             DEVICE_FATAL_IF(B_base_offset < 0 || B_base_offset >= max_ws_fp16_b_perc, "WMMA perc dW: B_base OOB");
                             DEVICE_FATAL_IF(C_base_offset < 0 || C_base_offset >= max_ws_dW_perc, "WMMA perc dW: C_base OOB");
 
-                            const half* A_ptr = ws_fp16_a;
+                            const half* A_ptr = ws_fp16_a + A_base_offset;
                             const half* B_head = ws_fp16_b + B_base_offset;
                             float* C_head = ws_dW_perception + C_base_offset;
 
@@ -2848,7 +1775,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                                 int A_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.channels + (tile_row + WMMA_TILE_DIM - 1);
                                 int B_tile_offset = k_tile * arch.head_dim + tile_col;
                                 int B_tile_max = (k_tile + WMMA_TILE_DIM - 1) * arch.head_dim + (tile_col + WMMA_TILE_DIM - 1);
-                                DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= max_ws_fp16_a_perc, "WMMA perc dW: A_tile OOB");
+                                DEVICE_FATAL_IF(A_tile_offset < 0 || A_tile_max >= im2col_head_stride, "WMMA perc dW: A_tile OOB");
                                 DEVICE_FATAL_IF(B_tile_offset < 0 || B_tile_max >= chunk_B_stride, "WMMA perc dW: B_tile OOB");
                                 nvcuda::wmma::load_matrix_sync(a_frag, A_ptr + A_tile_offset, arch.channels);
                                 nvcuda::wmma::load_matrix_sync(b_frag, B_head + B_tile_offset, arch.head_dim);
@@ -2864,34 +1791,27 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 if (chunk_has_work) {
                     int weights_per_head = arch.channels * arch.head_dim;
                     int max_dpregelu = arch.num_heads * chunk_ws_dpregelu_stride;
-                    int max_im2col = chunk_samples_aligned * arch.channels;
-                    for (int idx = tid; idx < chunk_samples_aligned * arch.channels; idx += blockDim.x) {
-                        int sample_in_chunk = idx / arch.channels;
-                        int channel_idx = idx % arch.channels;
+                    int im2col_head_stride_ig = chunk_samples_aligned * arch.channels;
+                    int max_im2col = arch.num_heads * im2col_head_stride_ig;
+                    int total_input_grad = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    for (int idx = tid; idx < total_input_grad; idx += blockDim.x) {
+                        int head_id = idx / (chunk_samples_aligned * arch.channels);
+                        int remainder = idx % (chunk_samples_aligned * arch.channels);
+                        int sample_in_chunk = remainder / arch.channels;
+                        int channel_idx = remainder % arch.channels;
 
                         float d_input_accum = 0.0f;
-                        int max_perc_weights = arch.num_heads * weights_per_head;
-                        for (int h = 0; h < arch.num_heads; h++) {
-                            // perception_weights is stored as [num_heads][channels][head_dim]
-                            // Index for head h: h * channels * head_dim + channel * head_dim + dim
-                            int head_weight_start = h * weights_per_head;
-                            for (int hd = 0; hd < arch.head_dim; hd++) {
-                                int local_idx = channel_idx * arch.head_dim + hd;
-                                int W_idx = head_weight_start + local_idx;
-                                int dprerelu_idx = h * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd;
-                                PROVENANCE_FATAL_IF(local_idx < 0 || local_idx >= weights_per_head, "BWD input: local_idx OOB");
-                                PROVENANCE_FATAL_IF(W_idx < 0 || W_idx >= max_perc_weights, "BWD input: W_idx OOB");
-                                PROVENANCE_FATAL_IF(dprerelu_idx < 0 || dprerelu_idx >= max_dpregelu, "BWD input: dprerelu_idx OOB");
-                                float W_val = __half2float(ca_state->perception_weights[W_idx]);
-                                PROVENANCE_FATAL_IF(!isfinite(W_val), "BWD input: W_val NaN/Inf");
-                                float dprerelu_val = ws_dpregelu[dprerelu_idx];
-                                PROVENANCE_FATAL_IF(!isfinite(dprerelu_val), "BWD input: dprerelu_val NaN/Inf");
-                                d_input_accum += W_val * dprerelu_val;
-                            }
+                        int head_weight_start = head_id * weights_per_head;
+                        for (int hd = 0; hd < arch.head_dim; hd++) {
+                            int W_idx = head_weight_start + channel_idx * arch.head_dim + hd;
+                            int dprerelu_idx = head_id * chunk_ws_dpregelu_stride + sample_in_chunk * arch.head_dim + hd;
+                            PROVENANCE_FATAL_IF(W_idx < 0 || W_idx >= arch.num_heads * weights_per_head, "BWD input: W_idx OOB");
+                            PROVENANCE_FATAL_IF(dprerelu_idx < 0 || dprerelu_idx >= max_dpregelu, "BWD input: dprerelu_idx OOB");
+                            d_input_accum += __half2float(ca_state->perception_weights[W_idx]) * ws_dpregelu[dprerelu_idx];
                         }
-                        PROVENANCE_FATAL_IF(idx < 0 || idx >= max_im2col, "BWD input: im2col idx OOB");
-                        PROVENANCE_FATAL_IF(!isfinite(d_input_accum), "BWD input: d_input_accum NaN/Inf");
-                        ws_im2col[idx] = d_input_accum;
+                        int im2col_idx = head_id * im2col_head_stride_ig + sample_in_chunk * arch.channels + channel_idx;
+                        PROVENANCE_FATAL_IF(im2col_idx < 0 || im2col_idx >= max_im2col, "BWD input: im2col idx OOB");
+                        ws_im2col[im2col_idx] = d_input_accum;
                     }
                 }
                 cg::this_grid().sync();
@@ -2903,37 +1823,30 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
 
                 if (chunk_has_work) {
                     if (tid == 0 && chunk_idx == 0) atomicAdd(&g_v_bwd_scatter_count, 1);
-                    PROVENANCE_FATAL_IF(ws_im2col == nullptr, "ws_im2col null");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(training_mode->batch_size, "batch_size");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(num_cells, "num_cells");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.grid_size, "grid_size");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(chunk_samples_aligned, "chunk_samples_aligned");
-                    PROVENANCE_ASSERT_INITIALIZED_INT(arch.channels, "arch.channels");
-                    PROVENANCE_FATAL_IF(chunk_samples_aligned <= 0, "chunk_samples_aligned <= 0");
-                    PROVENANCE_FATAL_IF(arch.channels <= 0, "arch.channels <= 0");
-                    int scatter_loop_bound = chunk_samples_aligned * arch.channels;
-                    PROVENANCE_FATAL_IF(scatter_loop_bound <= 0, "scatter_loop_bound overflow");
-                    PROVENANCE_FATAL_IF(scatter_loop_bound > 1000000, "scatter_loop_bound huge");
-                    int max_d_ca = training_mode->batch_size * num_cells * arch.channels;
-                    PROVENANCE_FATAL_IF(max_d_ca <= 0, "max_d_ca <= 0");
+                    int im2col_head_stride_sc = chunk_samples_aligned * arch.channels;
+                    int scatter_loop_bound = arch.num_heads * chunk_samples_aligned * arch.channels;
+                    int max_d_ca = training_mode->batch_size * arch.num_heads * num_cells * arch.channels;
                     for (int idx = tid; idx < scatter_loop_bound; idx += blockDim.x) {
-                        int sample_in_chunk = idx / arch.channels;
-                        int channel_idx = idx % arch.channels;
+                        int head_id = idx / (chunk_samples_aligned * arch.channels);
+                        int remainder = idx % (chunk_samples_aligned * arch.channels);
+                        int sample_in_chunk = remainder / arch.channels;
+                        int channel_idx = remainder % arch.channels;
                         int global_sample = chunk_start + sample_in_chunk;
                         int batch_id = global_sample / num_cells;
                         int cell_idx = global_sample % num_cells;
                         int cell_y = cell_idx / arch.grid_size;
                         int cell_x = cell_idx % arch.grid_size;
-                        float d_pooled_val = ws_im2col[idx];
-                        PROVENANCE_FATAL_IF(!isfinite(d_pooled_val), "BWD scatter: d_pooled_val NaN/Inf");
+                        int im2col_idx = head_id * im2col_head_stride_sc + sample_in_chunk * arch.channels + channel_idx;
+                        float d_pooled_val = ws_im2col[im2col_idx];
 
+                        int head_d_ca_base = (batch_id * arch.num_heads + head_id) * num_cells * arch.channels;
                         for (int dy = -1; dy <= 1; dy++) {
                             for (int dx = -1; dx <= 1; dx++) {
                                 int ny = cell_y + dy;
                                 int nx = cell_x + dx;
                                 if (ny >= 0 && ny < arch.grid_size && nx >= 0 && nx < arch.grid_size) {
                                     int out_cell_idx = ny * arch.grid_size + nx;
-                                    int out_idx = batch_id * num_cells * arch.channels + out_cell_idx * arch.channels + channel_idx;
+                                    int out_idx = head_d_ca_base + out_cell_idx * arch.channels + channel_idx;
                                     PROVENANCE_FATAL_IF(out_idx < 0 || out_idx >= max_d_ca, "BWD scatter: out_idx OOB");
                                     atomicAdd(&d_ca_input[out_idx], d_pooled_val);
                                 }
@@ -3008,162 +1921,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             cg::this_grid().sync();
         }
 
-        // Flow Lenia backward - work guarded, syncs outside
-        {
-                // Shared memory for reductions - all blocks participate in syncs
-                __shared__ float s_d_beta_A;
-                __shared__ float s_d_n;
-                if (tid == 0) {
-                    s_d_beta_A = 0.0f;
-                    s_d_n = 0.0f;
-                }
-                cg::this_grid().sync();
-
-                // Per-block variables - uninitialized, only valid when has_work
-                int batch_size;
-                int grid_size;
-                int channels;
-                int num_heads;
-                int total_cells;
-                float flow_beta_A;
-                float flow_n;
-                float flow_alpha_min;
-                float flow_alpha_max;
-                float flow_sharpness;
-                float flow_dt;
-                float local_d_beta_A;
-                float local_d_n;
-
-                if (has_work) {
-                    batch_size = training_mode->batch_size;
-                    grid_size = arch.grid_size;
-                    channels = arch.channels;
-                    num_heads = arch.num_heads;
-                    total_cells = grid_size * grid_size;
-
-                    flow_beta_A = entry->flow_beta_A;
-                    flow_n = entry->flow_n;
-                    flow_alpha_min = entry->flow_alpha_min;
-                    flow_alpha_max = entry->flow_alpha_max;
-                    flow_sharpness = entry->flow_sharpness;
-                    flow_dt = entry->flow_resource_dt;
-
-                    local_d_beta_A = 0.0f;
-                    local_d_n = 0.0f;
-
-                    int total_work = batch_size * total_cells;
-                    for (int work_idx = tid; work_idx < total_work; work_idx += blockDim.x) {
-                    int batch_idx = work_idx / total_cells;
-                    int cell_idx = work_idx % total_cells;
-                    int source_x = cell_idx % grid_size;
-                    int source_y = cell_idx / grid_size;
-
-                    int batch_offset = batch_idx * total_cells;
-                    int flow_idx = batch_offset * 2 + cell_idx * 2;
-                    float Fx = organism->buffers->batch_flow_field[s_wave_offsets.flow_offset + flow_idx + 0];
-                    float Fy = organism->buffers->batch_flow_field[s_wave_offsets.flow_offset + flow_idx + 1];
-
-                    int conc_batch_offset = batch_idx * total_cells * channels;
-                    const float* batch_conc = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset + conc_batch_offset;
-
-                    float d_flow_x_accum = 0.0f;
-                    float d_flow_y_accum = 0.0f;
-
-                    for (int c = 0; c < channels; c++) {
-                        float source_mass = batch_conc[cell_idx * channels + c];
-                        float d_source_mass, d_flow_x_local, d_flow_y_local;
-
-                        float channel_grad = 0.0f;
-                        for (int h = 0; h < num_heads; h++) {
-                            int grad_idx = batch_idx * num_heads * total_cells * channels +
-                                          h * total_cells * channels +
-                                          cell_idx * channels + c;
-                            channel_grad += ca_output_grad[grad_idx];
-                        }
-
-                        FlowLeniaOps::bilinear_transport_backward(
-                            source_mass,
-                            (float)source_x, (float)source_y,
-                            Fx, Fy, flow_dt, grid_size,
-                            &channel_grad,
-                            &d_source_mass, &d_flow_x_local, &d_flow_y_local,
-                            c, channels
-                        );
-
-                        d_flow_x_accum += d_flow_x_local;
-                        d_flow_y_accum += d_flow_y_local;
-                    }
-
-                    int y = source_y;
-                    int x = source_x;
-                    int x_E = min(x + 1, grid_size - 1);
-                    int y_N = min(y + 1, grid_size - 1);
-
-                    float U_center = organism->buffers->batch_affinity_reduced[batch_offset + cell_idx];
-                    float U_E = organism->buffers->batch_affinity_reduced[batch_offset + y * grid_size + x_E];
-                    float U_N = organism->buffers->batch_affinity_reduced[batch_offset + y_N * grid_size + x];
-
-                    float A_sum_center = 0.0f, A_sum_E = 0.0f, A_sum_N = 0.0f;
-                    for (int c = 0; c < channels; c++) {
-                        A_sum_center += batch_conc[cell_idx * channels + c];
-                        A_sum_E += batch_conc[(y * grid_size + x_E) * channels + c];
-                        A_sum_N += batch_conc[(y_N * grid_size + x) * channels + c];
-                    }
-
-                    float d_beta_A_local, d_n_local;
-                    FlowLeniaOps::compute_flow_backward(
-                        d_flow_x_accum, d_flow_y_accum,
-                        U_center, U_E, U_N,
-                        A_sum_center, A_sum_E, A_sum_N,
-                        flow_beta_A, flow_n,
-                        flow_alpha_min, flow_alpha_max, flow_sharpness,
-                        &d_beta_A_local, &d_n_local
-                    );
-
-                        local_d_beta_A += d_beta_A_local;
-                        local_d_n += d_n_local;
-                    }
-
-                    atomicAdd(&s_d_beta_A, local_d_beta_A);
-                    atomicAdd(&s_d_n, local_d_n);
-                }
-                cg::this_grid().sync();
-                if (tid == 0 && blockIdx.x == 0) printf("V:flow_bwd_reduce\n");
-
-                if (has_work && tid == 0) {
-                    float d_beta_A = s_d_beta_A / (batch_size * total_cells);
-                    float d_n = s_d_n / (batch_size * total_cells);
-
-                    float ctx_metabolic = entry->fitness.value;
-                    float ctx_stress = entry->hunger.value;
-                    float ctx_morphogen = local_ca_mean;
-                    float ctx_complexity = organism->telemetry->genome_complexity.hash_entropy;
-                    float ctx_niche = organism->telemetry->archive_topology.novelty_gradient;
-                    float ctx_learning = organism->telemetry->diresa_evolution.behavioral_drift_rate;
-                    float ctx_performance = organism->telemetry->task_performance.accuracy;
-
-                    TrainingParams train_params;
-                    float flow_lr = train_params.get_flow_lenia_lr(primary_genome, entry->gradients,
-                        ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity,
-                        ctx_niche, ctx_learning, ctx_performance);
-                    float clip_norm = train_params.get_gradient_clip_norm(primary_genome, entry->gradients,
-                        ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity,
-                        ctx_niche, ctx_learning, ctx_performance);
-
-                    d_beta_A = fmaxf(-clip_norm, fminf(clip_norm, d_beta_A));
-                    d_n = fmaxf(-clip_norm, fminf(clip_norm, d_n));
-
-                    float new_beta_A = entry->flow_beta_A - flow_lr * d_beta_A;
-                    float new_n = entry->flow_n - flow_lr * d_n;
-
-                    entry->flow_beta_A = fmaxf(FLOW_LENIA_BETA_A_MIN, fminf(FLOW_LENIA_BETA_A_MAX, new_beta_A));
-                    entry->flow_n = fmaxf(FLOW_LENIA_N_MIN, fminf(FLOW_LENIA_N_MAX, new_n));
-
-                    organism->buffers->flow_beta_A_grad = d_beta_A;
-                    organism->buffers->flow_n_grad = d_n;
-                }
-                cg::this_grid().sync();
-            }
+        cg::this_grid().sync();
 
             // Record elapsed cycles for backward pass
             if (bwd_trace_slot != nullptr && tid == 0) {
@@ -3258,7 +2016,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         if (has_work && training_mode->batch_samples != nullptr && training_mode->classifier != nullptr) {
             adam_update_perception_device(organism, entry_idx);
             adam_update_interaction_device(organism, entry_idx);
-            adam_update_value_device(organism, entry_idx);
+            adam_update_flow_projection_device(organism, entry_idx);
             adam_update_pooling_device(organism, entry_idx);
             adam_update_fc_weights_device(organism, entry_idx);
             adam_update_fc_bias_device(organism, entry_idx);
@@ -3590,22 +2348,35 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    // CA state sync: iterates all pool entries, so last wave only
-    if (is_last_wave && has_work && blockIdx.x == 0 && organism->batch_ca_states_pool) {
-        int grid_size_sync = arch.grid_size;
-        int channels_sync = arch.channels;
-        int spatial = grid_size_sync * grid_size_sync;
-        int copy_size = spatial * channels_sync;
-        int pool_cap = organism->pool->capacity;
+    // All heads deposit ch0 into shared chemical field
+    if (has_work && organism->buffers->batch_prev_concentration && organism->chemical_field) {
+        ChemicalField* field = organism->chemical_field;
+        int grid_size_dep = arch.grid_size;
+        int cells_dep = grid_size_dep * grid_size_dep;
+        int channels_dep = arch.channels;
+        int num_heads_dep = arch.num_heads;
         int batch_sz = training_mode->batch_size;
+        int head_stride = cells_dep * channels_dep;
+        float acc = fminf(fmaxf(entry->task_accuracy.value, 0.0f), 1.0f);
+        float deposition_strength = 0.01f + 0.09f * acc;
+        float* field_coords = organism->sample_field_coords + entry_idx * batch_sz * 2;
 
-        for (int e = 0; e < pool_cap && e < batch_sz; e++) {
-            PoolEntry* ent = &organism->pool->entries[e];
-            if (organism->pool->alive_flags[e] && ent->ca_state && ent->ca_state->ca_concentration) {
-                int src_offset = e * copy_size;
-                for (int idx = tid; idx < copy_size; idx += blockDim.x) {
-                    ent->ca_state->ca_concentration[idx] = organism->batch_ca_states_pool[src_offset + idx];
+        for (int s = 0; s < batch_sz; s++) {
+            int center_x = (int)field_coords[s * 2];
+            int center_y = (int)field_coords[s * 2 + 1];
+            int batch_base = s * num_heads_dep * head_stride;
+            for (int cell = tid; cell < cells_dep; cell += blockDim.x) {
+                int cx = cell % grid_size_dep;
+                int cy = cell / grid_size_dep;
+                int field_x = (cx + center_x) % grid_size_dep;
+                int field_y = (cy + center_y) % grid_size_dep;
+                int field_cell = field_y * grid_size_dep + field_x;
+
+                float ch0_sum = 0.0f;
+                for (int h = 0; h < num_heads_dep; h++) {
+                    ch0_sum += wave_prev_conc[batch_base + h * head_stride + cell * channels_dep];
                 }
+                atomicAdd(&field->concentration[field_cell], ch0_sum * deposition_strength);
             }
         }
     }
@@ -3636,6 +2407,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
             grid_size,
             train_acc,
             test_acc,
+            training_mode->is_train_batch,
             organism->telemetry,
             organism->pool,
             organism->chemical_field,
@@ -3723,43 +2495,6 @@ __device__ void check_convergence_device(Organism* organism, bool* converged) {
     grid_barrier(gridDim.x);
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("DIAG_AGGREGATE blocks_ca_fwd=%d blocks_entered=%d\n", g_blocks_ca_fwd, g_blocks_entered);
-        printf("DIAG6_PROGRESS total=%d\n", g_diag6_progress_count);
-        printf("DIAG7_TDR_WARN total=%d\n", g_diag7_tdr_warning_count);
-        printf("DIAG12_WEIGHT_PTR total=%d\n", g_diag12_weight_ptr_count);
-        printf("DIAG13_NEIGH_READ total=%d\n", g_diag13_neigh_read_count);
-        printf("DIAG15_INPUT_BAD total=%d\n", g_diag15_input_bad_count);
-        printf("DIAG16_POST_NEIGH total=%d\n", g_diag16_post_neigh_count);
-        printf("DIAG17_PRE_PERC total=%d\n", g_diag17_pre_perc_count);
-        printf("DIAG19_PERC_W_BAD total=%d\n", g_diag19_perc_w_bad_count);
-        printf("DIAG20_PERC_ACC_BAD total=%d\n", g_diag20_perc_acc_bad_count);
-        printf("DIAG21_PERC_BAD total=%d\n", g_diag21_perc_bad_count);
-        printf("DIAG22_POST_PERC total=%d\n", g_diag22_post_perc_count);
-        printf("DIAG23_PRE_INTER total=%d\n", g_diag23_pre_inter_count);
-        printf("DIAG25_INTER_PROG total=%d\n", g_diag25_inter_prog_count);
-        printf("DIAG26_INTER_SAMPLE total=%d\n", g_diag26_inter_sample_count);
-        printf("DIAG27_PREGELU_BAD total=%d\n", g_diag27_pregelu_bad_count);
-        printf("DIAG28_GELU_BAD total=%d\n", g_diag28_gelu_bad_count);
-        printf("DIAG29_POST_INTER total=%d\n", g_diag29_post_inter_count);
-        printf("DIAG30_INTER_SLOW total=%d\n", g_diag30_inter_slow_count);
-        printf("DIAG31_PRE_OUT total=%d\n", g_diag31_pre_out_count);
-        printf("DIAG32_OUT_BAD total=%d\n", g_diag32_out_bad_count);
-        printf("DIAG33_GATE_BAD total=%d\n", g_diag33_gate_bad_count);
-        printf("DIAG34_POST_OUT total=%d\n", g_diag34_post_out_count);
-        printf("DIAG35_PRE_SAVE total=%d\n", g_diag35_pre_save_count);
-        printf("DIAG37_PERC_SAVE_VERIFY total=%d\n", g_diag37_perc_save_verify_count);
-        printf("DIAG40_POST_SAVE total=%d\n", g_diag40_post_save_count);
-        printf("DIAG42_PRE_CAOUT total=%d\n", g_diag42_pre_caout_count);
-        printf("DIAG43_CAOUT_BAD total=%d\n", g_diag43_caout_bad_count);
-        printf("DIAG44_POST_CAOUT total=%d\n", g_diag44_post_caout_count);
-        printf("DIAG45_TIMING total=%d\n", g_diag45_timing_count);
-        printf("DIAG46_ITER_SLOW total=%d\n", g_diag46_iter_slow_count);
-        printf("DIAG47_STACK_CORRUPT total=%d\n", g_diag47_stack_corrupt_count);
-        printf("DIAG48_NANCHECK total=%d\n", g_diag48_nancheck_count);
-        printf("DIAG49_THREAD_PROG total=%d\n", g_diag49_thread_prog_count);
-        printf("DIAG50_THREAD_EXIT total=%d\n", g_diag50_thread_exit_count);
-        printf("DIAG51_WARP total=%d\n", g_diag51_warp_count);
-        printf("DIAG52_BLOCK_DONE total=%d\n", g_diag52_block_done_count);
-        printf("DIAG53_SYNC total=%d\n", g_diag53_sync_count);
         // V:BWD aggregate counters
         printf("V:BWD_FLOW_DONE total=%d\n", g_v_flow_done_count);
         printf("V:BWD_ENTER total=%d\n", g_v_bwd_enter_count);
@@ -3793,43 +2528,6 @@ __device__ void check_convergence_device(Organism* organism, bool* converged) {
         // Reset all counters
         g_blocks_ca_fwd = 0;
         g_blocks_entered = 0;
-        g_diag6_progress_count = 0;
-        g_diag7_tdr_warning_count = 0;
-        g_diag12_weight_ptr_count = 0;
-        g_diag13_neigh_read_count = 0;
-        g_diag15_input_bad_count = 0;
-        g_diag16_post_neigh_count = 0;
-        g_diag17_pre_perc_count = 0;
-        g_diag19_perc_w_bad_count = 0;
-        g_diag20_perc_acc_bad_count = 0;
-        g_diag21_perc_bad_count = 0;
-        g_diag22_post_perc_count = 0;
-        g_diag23_pre_inter_count = 0;
-        g_diag25_inter_prog_count = 0;
-        g_diag26_inter_sample_count = 0;
-        g_diag27_pregelu_bad_count = 0;
-        g_diag28_gelu_bad_count = 0;
-        g_diag29_post_inter_count = 0;
-        g_diag30_inter_slow_count = 0;
-        g_diag31_pre_out_count = 0;
-        g_diag32_out_bad_count = 0;
-        g_diag33_gate_bad_count = 0;
-        g_diag34_post_out_count = 0;
-        g_diag35_pre_save_count = 0;
-        g_diag37_perc_save_verify_count = 0;
-        g_diag40_post_save_count = 0;
-        g_diag42_pre_caout_count = 0;
-        g_diag43_caout_bad_count = 0;
-        g_diag44_post_caout_count = 0;
-        g_diag45_timing_count = 0;
-        g_diag46_iter_slow_count = 0;
-        g_diag47_stack_corrupt_count = 0;
-        g_diag48_nancheck_count = 0;
-        g_diag49_thread_prog_count = 0;
-        g_diag50_thread_exit_count = 0;
-        g_diag51_warp_count = 0;
-        g_diag52_block_done_count = 0;
-        g_diag53_sync_count = 0;
         // Reset V:BWD counters
         g_v_flow_done_count = 0;
         g_v_bwd_enter_count = 0;
