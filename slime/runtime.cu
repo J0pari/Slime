@@ -395,7 +395,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
             for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
                 PoolEntry* prev = &organism->pool->entries[prev_idx];
                 int cells = prev->grid_size * prev->grid_size;
-                fp32_ws_offset += cells * (prev->num_heads + 1) * prev->head_dim;
+                fp32_ws_offset += cells * 2 * prev->num_heads * prev->head_dim;
                 fp16_ws_offset += cells * (prev->channels + prev->head_dim);
             }
             entry_ca_state->fp32_workspace = buffers->fp32_ca_workspace + fp32_ws_offset;

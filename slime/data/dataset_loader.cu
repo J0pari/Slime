@@ -431,16 +431,17 @@ __device__ __forceinline__ void fractal_fold_2d(
     *out_y = (float)min(max((int)(fy * grid_size), 0), grid_size - 1);
 }
 
-// Per-cell CA state initialization. Ch0=field concentration, ch1-3=sample, ch4+=learned state.
+// Per-cell CA state initialization.
+// Ch0-5: fresh chemical field (concentration, gradient_x/y, laplacian, sources, decay)
+// Ch6-10,14-15: prev CA output (seeded at gen 0 by init_batch_prev_concentration with resource/behavioral/attractor data)
+// Ch11-13: fresh batch sample RGB
 // field_spatial_idx: pre-computed field position for this cell (accounts for agent pos + sample offset)
 // spatial_idx: CA grid cell index (used for image data indexing, unchanged by field offset)
 __device__ __forceinline__ void inject_ca_cell_device(
     float* ca_out,
     int base_idx,
     int channels,
-    int generation,
-    const float* chem_concentration,
-    int chem_channels,
+    Organism* organism,
     int cells,
     int spatial_idx,
     int field_spatial_idx,
@@ -449,26 +450,40 @@ __device__ __forceinline__ void inject_ca_cell_device(
     const float* prev_concentration,
     int prev_base_idx
 ) {
-    float conc_sum = 0.0f;
-    for (int c = 0; c < chem_channels; c++) {
-        conc_sum += chem_concentration[c * cells + field_spatial_idx];
-    }
-    ca_out[base_idx + 0] = conc_sum / (float)chem_channels;
+    ChemicalField* chem = organism->chemical_field;
 
-    int img_base = batch_idx * cells * 3;
-    if (channels > 1) ca_out[base_idx + 1] = batch_samples[img_base + 0 * cells + spatial_idx];
-    if (channels > 2) ca_out[base_idx + 2] = batch_samples[img_base + 1 * cells + spatial_idx];
-    if (channels > 3) ca_out[base_idx + 3] = batch_samples[img_base + 2 * cells + spatial_idx];
+    // Ch0-5: fresh chemical field data
+    ca_out[base_idx + 0] = chem->concentration[field_spatial_idx];
+    if (channels > 1) ca_out[base_idx + 1] = chem->gradient_x[field_spatial_idx];
+    if (channels > 2) ca_out[base_idx + 2] = chem->gradient_y[field_spatial_idx];
+    if (channels > 3) ca_out[base_idx + 3] = chem->laplacian[field_spatial_idx];
+    if (channels > 4) ca_out[base_idx + 4] = chem->sources[field_spatial_idx];
+    if (channels > 5) ca_out[base_idx + 5] = chem->decay_factors[field_spatial_idx];
 
-    if (generation == 0 || prev_concentration == nullptr) {
-        for (int c = 4; c < channels; c++) {
-            ca_out[base_idx + c] = 0.0f;
-        }
+    // Ch6-10, 14-15: prev CA output (seeded at gen 0 by init_batch_prev_concentration)
+    if (prev_concentration != nullptr) {
+        if (channels > 6)  ca_out[base_idx + 6]  = prev_concentration[prev_base_idx + 6];
+        if (channels > 7)  ca_out[base_idx + 7]  = prev_concentration[prev_base_idx + 7];
+        if (channels > 8)  ca_out[base_idx + 8]  = prev_concentration[prev_base_idx + 8];
+        if (channels > 9)  ca_out[base_idx + 9]  = prev_concentration[prev_base_idx + 9];
+        if (channels > 10) ca_out[base_idx + 10] = prev_concentration[prev_base_idx + 10];
+        if (channels > 14) ca_out[base_idx + 14] = prev_concentration[prev_base_idx + 14];
+        if (channels > 15) ca_out[base_idx + 15] = prev_concentration[prev_base_idx + 15];
     } else {
-        for (int c = 4; c < channels; c++) {
-            ca_out[base_idx + c] = prev_concentration[prev_base_idx + c];
-        }
+        if (channels > 6)  ca_out[base_idx + 6]  = 0.0f;
+        if (channels > 7)  ca_out[base_idx + 7]  = 0.0f;
+        if (channels > 8)  ca_out[base_idx + 8]  = 0.0f;
+        if (channels > 9)  ca_out[base_idx + 9]  = 0.0f;
+        if (channels > 10) ca_out[base_idx + 10] = 0.0f;
+        if (channels > 14) ca_out[base_idx + 14] = 0.0f;
+        if (channels > 15) ca_out[base_idx + 15] = 0.0f;
     }
+
+    // Ch11-13: fresh batch sample RGB
+    int img_base = batch_idx * cells * 3;
+    if (channels > 11) ca_out[base_idx + 11] = batch_samples[img_base + 0 * cells + spatial_idx];
+    if (channels > 12) ca_out[base_idx + 12] = batch_samples[img_base + 1 * cells + spatial_idx];
+    if (channels > 13) ca_out[base_idx + 13] = batch_samples[img_base + 2 * cells + spatial_idx];
 }
 
 // Load batch labels from dataset. Called by single thread.

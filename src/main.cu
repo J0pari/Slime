@@ -309,7 +309,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.prev_gen_coords_pool, sizeof(float) * POOL_CAPACITY_MAX * BEHAVIORAL_DIM_GEN, "prev_gen_coords_pool");
     CUDA_ALLOC_CHECK(buffers_host.sample_field_coords, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * 2, "sample_field_coords");
     CUDA_ALLOC_CHECK(buffers_host.prev_sample_field_coords, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * 2, "prev_sample_field_coords");
-    CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (NUM_HEADS + 1) * HEAD_DIM, "fp32_ca_workspace");
+    CUDA_ALLOC_CHECK(buffers_host.fp32_ca_workspace, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * 2 * NUM_HEADS * HEAD_DIM, "fp32_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.fp16_ca_workspace, sizeof(half) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * (CHANNELS + HEAD_DIM), "fp16_ca_workspace");
     CUDA_ALLOC_CHECK(buffers_host.latent_genome_pool, sizeof(float) * MAX_ARCHIVE_SIZE * GENOME_LATENT_DIM_MAX, "latent_genome_pool");
     CUDA_ALLOC_CHECK(buffers_host.behavioral_field_pool, sizeof(float) * POOL_CAPACITY_MAX * CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL, "behavioral_field_pool");

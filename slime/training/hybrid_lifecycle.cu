@@ -427,8 +427,8 @@ __device__ void load_batch_device(Organism* organism) {
 
                     int base_idx = (batch_idx * num_heads_local + head) * batch_stride * channels_out + spatial_idx * channels_out;
                     inject_ca_cell_device(
-                        ca_out, base_idx, channels_out, generation,
-                        chem->concentration, chem->channels, batch_stride, spatial_idx,
+                        ca_out, base_idx, channels_out,
+                        organism, batch_stride, spatial_idx,
                         field_spatial_idx,
                         batch_samples, batch_idx,
                         prev_concentration, base_idx
@@ -642,11 +642,8 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         if (has_work) {
             float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
             float* ca_output = organism->buffers->batched_ca_output + s_wave_offsets.ca_output_offset;
-
             multi_head_ca_tensor_device(entry, training_mode->batch_size, ca_input, ca_output, s_task_accuracy);
         }
-
-        cg::this_grid().sync();
 
         if (has_work && tid == 0) {
             atomicAdd(&g_blocks_ca_fwd, 1);
@@ -1272,6 +1269,10 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                     dL_dinteraction[idx] = 0.0f;
                 }
 
+                // Use fp32_workspace as per-thread scratch for d_weights (avoids stack overflow)
+                // Layout: fp32_workspace[tid * 2 * HEAD_DIM .. tid * 2 * HEAD_DIM + 2*HEAD_DIM - 1]
+                float* fp32_ws = ca_state->fp32_workspace;
+
                 for (int batch_id = 0; batch_id < batch_size; batch_id++) {
                     for (int head = 0; head < num_heads_bwd; head++) {
                         int saved_base = batch_id * I_batch_stride + head * I_head_stride;
@@ -1279,16 +1280,15 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                         int batch_cell_offset = (batch_id * num_heads_bwd + head) * num_cells * channels;
 
                         for (int cell_idx = tid; cell_idx < num_cells; cell_idx += blockDim.x) {
-                            float interaction_local[HEAD_DIM];
+                            // Read interaction directly from saved buffer (no stack copy)
+                            const float* inter_ptr = &interaction_saved[saved_base + cell_idx * head_dim];
                             float interaction_sum = 0.0f;
                             for (int d = 0; d < head_dim; d++) {
-                                float val = interaction_saved[saved_base + cell_idx * head_dim + d];
-                                interaction_local[d] = val;
-                                interaction_sum += fabsf(val);
+                                interaction_sum += fabsf(inter_ptr[d]);
                             }
 
                             float2 flow = FlowLeniaOps::project_to_flow(
-                                interaction_local, head_dim, &flow_proj_w[flow_weight_offset]);
+                                inter_ptr, head_dim, &flow_proj_w[flow_weight_offset]);
                             float gate_input = interaction_sum / (float)head_dim - compute_ca_gate_center(s_task_accuracy);
                             float gate = activation_sigmoid(gate_input);
 
@@ -1300,43 +1300,30 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                                 d_source, &d_flow_x, &d_flow_y, &d_gate_val,
                                 channels, batch_cell_offset);
 
-                            // d_source → d_ca_input (written later after zeroing)
-                            // For now store in dL_dperception buffer temporarily
-                            // (will be accumulated after d_ca_input is zeroed)
-
-                            // Flow projection backward
-                            float d_interaction_local[HEAD_DIM];
-                            float d_weights_local[2 * HEAD_DIM];
-                            for (int d = 0; d < head_dim; d++) {
-                                d_interaction_local[d] = 0.0f;
-                            }
+                            // Flow projection backward: write d_interaction directly to pre-zeroed dL_dinteraction
+                            int out_base = head * I_head_stride + batch_id * I_batch_stride + cell_idx * head_dim;
+                            float* d_weights_scratch = &fp32_ws[tid * 2 * HEAD_DIM];
                             for (int d = 0; d < 2 * head_dim; d++) {
-                                d_weights_local[d] = 0.0f;
+                                d_weights_scratch[d] = 0.0f;
                             }
                             FlowLeniaOps::project_to_flow_backward(
-                                d_flow_x, d_flow_y, interaction_local, head_dim,
+                                d_flow_x, d_flow_y, inter_ptr, head_dim,
                                 &flow_proj_w[flow_weight_offset],
-                                d_interaction_local, d_weights_local);
+                                &dL_dinteraction[out_base], d_weights_scratch);
 
                             // Gate backward: d_gate → sigmoid backward → d_interaction_sum
                             float d_sigmoid = d_gate_val * gate * (1.0f - gate);
                             float d_interaction_sum = d_sigmoid / (float)head_dim;
                             for (int d = 0; d < head_dim; d++) {
-                                float sign_val = (interaction_local[d] > 0.0f) ? 1.0f :
-                                                 (interaction_local[d] < 0.0f) ? -1.0f : 0.0f;
-                                d_interaction_local[d] += d_interaction_sum * sign_val;
+                                float sign_val = (inter_ptr[d] > 0.0f) ? 1.0f :
+                                                 (inter_ptr[d] < 0.0f) ? -1.0f : 0.0f;
+                                dL_dinteraction[out_base + d] += d_interaction_sum * sign_val;
                             }
 
-                            // Write d_interaction to dL_dinteraction
-                            int out_base = head * I_head_stride + batch_id * I_batch_stride + cell_idx * head_dim;
-                            for (int d = 0; d < head_dim; d++) {
-                                dL_dinteraction[out_base + d] = d_interaction_local[d];
-                            }
-
-                            // Accumulate flow projection weight grads
+                            // Accumulate flow projection weight grads from scratch to grad_buffer
                             int fp_grad_base = param_map->flow_projection_start[head];
                             for (int d = 0; d < 2 * head_dim; d++) {
-                                atomicAdd(&ca_state->tape.grad_buffer[fp_grad_base + d], d_weights_local[d]);
+                                atomicAdd(&ca_state->tape.grad_buffer[fp_grad_base + d], d_weights_scratch[d]);
                             }
 
                             // Accumulate d_source into d_ca_input (zeroed before this section)
@@ -2348,7 +2335,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    // All heads deposit ch0 into shared chemical field
+    // All heads deposit ch0 into shared chemical field (with decay to prevent unbounded accumulation)
     if (has_work && organism->buffers->batch_prev_concentration && organism->chemical_field) {
         ChemicalField* field = organism->chemical_field;
         int grid_size_dep = arch.grid_size;
@@ -2360,6 +2347,11 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         float acc = fminf(fmaxf(entry->task_accuracy.value, 0.0f), 1.0f);
         float deposition_strength = 0.01f + 0.09f * acc;
         float* field_coords = organism->sample_field_coords + entry_idx * batch_sz * 2;
+
+        // Decay existing field before new deposition
+        for (int cell = tid; cell < cells_dep; cell += blockDim.x) {
+            field->concentration[cell] *= FIELD_DECAY_RATE;
+        }
 
         for (int s = 0; s < batch_sz; s++) {
             int center_x = (int)field_coords[s * 2];

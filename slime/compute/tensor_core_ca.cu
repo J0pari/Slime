@@ -123,190 +123,198 @@ __device__ void prepare_ca_fp16_device(Organism* organism) {
 __device__ void multi_head_ca_tensor_device(
     PoolEntry* entry,
     int batch_size,
-    float* ca_input,
-    float* ca_output,
+    float* __restrict__ ca_input,
+    float* __restrict__ ca_output,
     float task_accuracy
 ) {
-    // Block-local: 256 threads per block, __syncthreads between stages.
-    // Each block processes its own entry independently. 8 warps for WMMA.
-    int tid = threadIdx.x;
-    int block_threads = blockDim.x;
-
+    const int tid = threadIdx.x;
+    const int block_threads = blockDim.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int block_warps = block_threads / WARP_SIZE;
     MultiHeadCAState* ca_state = entry->ca_state;
-    int grid_size = entry->grid_size;
-    int channels = entry->channels;
-    int num_heads = entry->num_heads;
-    int head_dim = entry->head_dim;
-    int num_cells = grid_size * grid_size;
+    const int grid_size = entry->grid_size;
+    const int channels = entry->channels;
+    const int num_heads = entry->num_heads;
+    const int head_dim = entry->head_dim;
+    const int num_cells = grid_size * grid_size;
 
-    float* perception_saved = ca_state->perception_saved;
-    float* interaction_saved = ca_state->interaction_saved;
-    float* pre_gelu_saved = ca_state->pre_gelu_saved;
+    // Saved activations for backward pass
+    float* __restrict__ perception_saved = ca_state->perception_saved;
+    float* __restrict__ interaction_saved = ca_state->interaction_saved;
+    float* __restrict__ pre_gelu_saved = ca_state->pre_gelu_saved;
 
-    half* perception_weights = ca_state->perception_weights;
-    half* interaction_weights = ca_state->interaction_weights;
-    half* flow_projection_weights = ca_state->flow_projection_weights;
+    // Learned weight matrices (fp16 for WMMA)
+    const half* __restrict__ perception_weights = ca_state->perception_weights;
+    const half* __restrict__ interaction_weights = ca_state->interaction_weights;
+    const half* __restrict__ flow_projection_weights = ca_state->flow_projection_weights;
 
-    half* fp16_workspace = ca_state->fp16_workspace;
-    float* fp32_workspace = ca_state->fp32_workspace;
+    // Workspace: fp16 for WMMA inputs, fp32 for WMMA outputs
+    // fp16 layout: [0, num_cells*channels) = gathered neighborhood
+    //              [num_cells*channels, num_cells*channels + num_cells*head_dim) = interaction input
+    // fp32 layout: [head * num_cells*head_dim] = per-head perception/interaction output
+    half* __restrict__ fp16_workspace = ca_state->fp16_workspace;
+    float* __restrict__ fp32_workspace = ca_state->fp32_workspace;
 
-    // Trace recording
-    if (threadIdx.x == 0) {
-        TraceBuffer* trace_buffer = &ca_state->trace;
-        int trace_idx = -1;
-        if (trace_buffer->traces != nullptr &&
-            trace_buffer->current_idx < trace_buffer->capacity) {
-            trace_idx = atomicAdd(&trace_buffer->current_idx, 1);
-        }
-        if (trace_idx >= 0 && trace_idx < trace_buffer->capacity) {
-            ExecutionTrace* t = &trace_buffer->traces[trace_idx];
-            record_warp_metrics(t, blockIdx.x);
-            record_memory_access(t, (void*)perception_weights, true);
-        }
-    }
+    // Precompute per-head strides
+    const int cells_x_channels = num_cells * channels;
+    const int cells_x_hdim = num_cells * head_dim;
+    const int batch_head_stride = num_heads * num_cells * channels;
 
     // ============ STAGE 0: Zero ca_output (transport accumulates via atomicAdd) ============
-    int total_output = batch_size * num_heads * num_cells * channels;
+    const int total_output = batch_size * batch_head_stride;
     for (int i = tid; i < total_output; i += block_threads) {
         ca_output[i] = 0.0f;
     }
     __syncthreads();
-
-    int warp_id = tid / WARP_SIZE;
-    int block_warps = block_threads / WARP_SIZE;
-
     for (int batch_id = 0; batch_id < batch_size; batch_id++) {
         for (int head = 0; head < num_heads; head++) {
 
+            const int input_offset = (batch_id * num_heads + head) * cells_x_channels;
+
             // ============ STAGE 1: Gather 3x3 neighborhood for this head ============
-            int input_offset = (batch_id * num_heads + head) * num_cells * channels;
-            int total_gather = num_cells * channels;
-            for (int i = tid; i < total_gather; i += block_threads) {
-                int cell_idx = i / channels;
-                int c = i % channels;
-                int cell_y = cell_idx / grid_size;
-                int cell_x = cell_idx % grid_size;
+            // Reads from ca_input[input_offset + cell*channels + c]
+            // Writes to fp16_workspace[cell*channels + c] (neighborhood sum as fp16)
+            for (int i = tid; i < cells_x_channels; i += block_threads) {
+                const int cell_idx = i / channels;
+                const int c = i % channels;
+                const int cell_y = cell_idx / grid_size;
+                const int cell_x = cell_idx % grid_size;
 
                 float sum = 0.0f;
                 for (int dy = -1; dy <= 1; dy++) {
                     for (int dx = -1; dx <= 1; dx++) {
-                        int ny = min(max(cell_y + dy, 0), grid_size - 1);
-                        int nx = min(max(cell_x + dx, 0), grid_size - 1);
-                        sum += ca_input[input_offset + ny * grid_size * channels + nx * channels + c];
+                        const int ny = min(max(cell_y + dy, 0), grid_size - 1);
+                        const int nx = min(max(cell_x + dx, 0), grid_size - 1);
+                        sum += ca_input[input_offset + (ny * grid_size + nx) * channels + c];
                     }
                 }
                 fp16_workspace[i] = __float2half(sum);
             }
             __syncthreads();
 
-            int perc_weight_offset = head * channels * head_dim;
-            int inter_weight_offset = head * head_dim * head_dim;
-            int flow_weight_offset = head * 2 * head_dim;
-            int perception_size = num_cells * head_dim;
+            // Weight offsets into the learned parameter arrays
+            const int perc_weight_offset = head * channels * head_dim;
+            const int inter_weight_offset = head * head_dim * head_dim;
+            const int flow_weight_offset = head * 2 * head_dim;
 
-            int perc_out_offset = head * num_cells * head_dim;
-            int inter_out_offset = num_heads * num_cells * head_dim + head * num_cells * head_dim;
+            // fp32_workspace layout: [0, num_heads*cells_x_hdim) = perception output
+            //                        [num_heads*cells_x_hdim, 2*num_heads*cells_x_hdim) = interaction output
+            const int perc_out_offset = head * cells_x_hdim;
+            const int inter_out_offset = num_heads * cells_x_hdim + head * cells_x_hdim;
 
             // ============ STAGE 2: Perception matmul (WMMA) ============
-            // [num_cells × channels] × [channels × head_dim] → [num_cells × head_dim]
-            int perc_tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-            int perc_tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-            int perc_total_tiles = perc_tiles_M * perc_tiles_N;
+            // A=[num_cells × channels] @ B=[channels × head_dim] → C=[num_cells × head_dim]
+            {
+                int perc_tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                int perc_tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                int perc_total_tiles = perc_tiles_M * perc_tiles_N;
 
-            for (int tile_idx = warp_id; tile_idx < perc_total_tiles; tile_idx += block_warps) {
-                int warpM = tile_idx / perc_tiles_N;
-                int warpN = tile_idx % perc_tiles_N;
-                int tile_row = warpM * WMMA_TILE_DIM;
-                int tile_col = warpN * WMMA_TILE_DIM;
+                for (int tile_idx = warp_id; tile_idx < perc_total_tiles; tile_idx += block_warps) {
+                    int warpM = tile_idx / perc_tiles_N;
+                    int warpN = tile_idx % perc_tiles_N;
+                    int tile_row = warpM * WMMA_TILE_DIM;
+                    int tile_col = warpN * WMMA_TILE_DIM;
 
-                if (tile_row < num_cells && tile_col < head_dim) {
-                    wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
-                    wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
-                    wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                    wmma::fill_fragment(c_frag, 0.0f);
+                    if (tile_row < num_cells && tile_col < head_dim) {
+                        wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
+                        wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
+                        wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                        wmma::fill_fragment(c_frag, 0.0f);
 
-                    for (int k = 0; k < channels; k += WMMA_TILE_DIM) {
-                        if (k + WMMA_TILE_DIM <= channels) {
-                            wmma::load_matrix_sync(a_frag,
-                                fp16_workspace + tile_row * channels + k,
-                                channels);
-                            wmma::load_matrix_sync(b_frag,
-                                perception_weights + perc_weight_offset + k * head_dim + tile_col,
-                                head_dim);
-                            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                        for (int k = 0; k < channels; k += WMMA_TILE_DIM) {
+                            if (k + WMMA_TILE_DIM <= channels) {
+                                wmma::load_matrix_sync(a_frag,
+                                    fp16_workspace + tile_row * channels + k,
+                                    channels);
+                                wmma::load_matrix_sync(b_frag,
+                                    perception_weights + perc_weight_offset + k * head_dim + tile_col,
+                                    head_dim);
+                                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                            }
                         }
+                        wmma::store_matrix_sync(
+                            fp32_workspace + perc_out_offset + tile_row * head_dim + tile_col,
+                            c_frag, head_dim, wmma::mem_row_major);
                     }
-                    wmma::store_matrix_sync(
-                        fp32_workspace + perc_out_offset + tile_row * head_dim + tile_col,
-                        c_frag, head_dim, wmma::mem_row_major);
                 }
             }
             __syncthreads();
 
             // ============ STAGE 3: ReLU + save perception ============
-            int saved_base = batch_id * num_heads * num_cells * head_dim +
-                             head * num_cells * head_dim;
+            {
+                const int saved_base = (batch_id * num_heads + head) * cells_x_hdim;
 
-            for (int i = tid; i < perception_size; i += block_threads) {
-                float val = activation_relu(fp32_workspace[perc_out_offset + i]);
-                fp32_workspace[perc_out_offset + i] = val;
-                perception_saved[saved_base + i] = val;
+                for (int i = tid; i < cells_x_hdim; i += block_threads) {
+                    float val = activation_relu(fp32_workspace[perc_out_offset + i]);
+                    fp32_workspace[perc_out_offset + i] = val;
+                    perception_saved[saved_base + i] = val;
+                }
             }
             __syncthreads();
 
             // ============ STAGE 4: fp32 → fp16 for interaction input ============
-            half* interaction_input = fp16_workspace + num_cells * channels;
-            for (int i = tid; i < perception_size; i += block_threads) {
-                interaction_input[i] = __float2half(fp32_workspace[perc_out_offset + i]);
+            {
+                half* interaction_input = fp16_workspace + cells_x_channels;
+                for (int i = tid; i < cells_x_hdim; i += block_threads) {
+                    interaction_input[i] = __float2half(fp32_workspace[perc_out_offset + i]);
+                }
             }
             __syncthreads();
 
             // ============ STAGE 5: Interaction matmul (WMMA) ============
-            // [num_cells × head_dim] × [head_dim × head_dim] → [num_cells × head_dim]
-            int inter_tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-            int inter_tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
-            int inter_total_tiles = inter_tiles_M * inter_tiles_N;
+            // A=[num_cells × head_dim] @ B=[head_dim × head_dim] → C=[num_cells × head_dim]
+            {
+                half* interaction_input = fp16_workspace + cells_x_channels;
+                int inter_tiles_M = (num_cells + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                int inter_tiles_N = (head_dim + WMMA_TILE_DIM - 1) / WMMA_TILE_DIM;
+                int inter_total_tiles = inter_tiles_M * inter_tiles_N;
 
-            for (int tile_idx = warp_id; tile_idx < inter_total_tiles; tile_idx += block_warps) {
-                int warpM = tile_idx / inter_tiles_N;
-                int warpN = tile_idx % inter_tiles_N;
-                int tile_row = warpM * WMMA_TILE_DIM;
-                int tile_col = warpN * WMMA_TILE_DIM;
+                for (int tile_idx = warp_id; tile_idx < inter_total_tiles; tile_idx += block_warps) {
+                    int warpM = tile_idx / inter_tiles_N;
+                    int warpN = tile_idx % inter_tiles_N;
+                    int tile_row = warpM * WMMA_TILE_DIM;
+                    int tile_col = warpN * WMMA_TILE_DIM;
 
-                if (tile_row < num_cells && tile_col < head_dim) {
-                    wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
-                    wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
-                    wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
-                    wmma::fill_fragment(c_frag, 0.0f);
+                    if (tile_row < num_cells && tile_col < head_dim) {
+                        wmma::fragment<wmma::matrix_a, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> a_frag;
+                        wmma::fragment<wmma::matrix_b, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, half, wmma::row_major> b_frag;
+                        wmma::fragment<wmma::accumulator, WMMA_TILE_DIM, WMMA_TILE_DIM, WMMA_TILE_DIM, float> c_frag;
+                        wmma::fill_fragment(c_frag, 0.0f);
 
-                    for (int k = 0; k < head_dim; k += WMMA_TILE_DIM) {
-                        if (k + WMMA_TILE_DIM <= head_dim) {
-                            wmma::load_matrix_sync(a_frag,
-                                interaction_input + tile_row * head_dim + k,
-                                head_dim);
-                            wmma::load_matrix_sync(b_frag,
-                                interaction_weights + inter_weight_offset + k * head_dim + tile_col,
-                                head_dim);
-                            wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                        for (int k = 0; k < head_dim; k += WMMA_TILE_DIM) {
+                            if (k + WMMA_TILE_DIM <= head_dim) {
+                                wmma::load_matrix_sync(a_frag,
+                                    interaction_input + tile_row * head_dim + k,
+                                    head_dim);
+                                wmma::load_matrix_sync(b_frag,
+                                    interaction_weights + inter_weight_offset + k * head_dim + tile_col,
+                                    head_dim);
+                                wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+                            }
                         }
+                        wmma::store_matrix_sync(
+                            fp32_workspace + inter_out_offset + tile_row * head_dim + tile_col,
+                            c_frag, head_dim, wmma::mem_row_major);
                     }
-                    wmma::store_matrix_sync(
-                        fp32_workspace + inter_out_offset + tile_row * head_dim + tile_col,
-                        c_frag, head_dim, wmma::mem_row_major);
                 }
             }
             __syncthreads();
 
             // ============ STAGE 6: Save pre_gelu + GELU + save interaction ============
-            for (int i = tid; i < perception_size; i += block_threads) {
-                float pre_gelu = fp32_workspace[inter_out_offset + i];
-                pre_gelu_saved[saved_base + i] = pre_gelu;
-                float gelu = activation_gelu(pre_gelu);
-                fp32_workspace[inter_out_offset + i] = gelu;
-                interaction_saved[saved_base + i] = gelu;
+            {
+                const int saved_base = (batch_id * num_heads + head) * cells_x_hdim;
+
+                for (int i = tid; i < cells_x_hdim; i += block_threads) {
+                    float pre_gelu = fp32_workspace[inter_out_offset + i];
+                    pre_gelu_saved[saved_base + i] = pre_gelu;
+                    float gelu = activation_gelu(pre_gelu);
+                    fp32_workspace[inter_out_offset + i] = gelu;
+                    interaction_saved[saved_base + i] = gelu;
+                }
             }
             __syncthreads();
 
+            if (tid == 0 && batch_id == 0 && head == 0) printf("CA_S7 block=%d\n", blockIdx.x);
             // ============ STAGE 7: Flow projection + gated transport ============
             for (int cell_idx = tid; cell_idx < num_cells; cell_idx += block_threads) {
                 float interaction_local[HEAD_DIM];
@@ -334,6 +342,7 @@ __device__ void multi_head_ca_tensor_device(
             __syncthreads();
         }
     }
+    if (tid == 0) printf("CA_DONE block=%d\n", blockIdx.x);
 }
 
 #endif

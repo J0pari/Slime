@@ -83,8 +83,8 @@ __device__ void initialize_ca_from_field_device(Organism* organism) {
 
         int base_idx = cell_idx * ca_channels;
         inject_ca_cell_device(
-            ca_conc, base_idx, ca_channels, 0,
-            chem->concentration, chem->channels, cells, cell_idx,
+            ca_conc, base_idx, ca_channels,
+            organism, cells, cell_idx,
             field_cell,
             training_mode->batch_samples, 0,
             nullptr, 0
