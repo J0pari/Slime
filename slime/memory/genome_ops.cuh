@@ -40,8 +40,9 @@ namespace GenomeParamTable {
     constexpr int flow_alpha_max = FLOW_LENIA_BLOCK + 4;
     constexpr int flow_sharpness = FLOW_LENIA_BLOCK + 5;
     constexpr int flow_resource_dt = FLOW_LENIA_BLOCK + 6;
+    constexpr int field_diffusivity = FLOW_LENIA_BLOCK + 7;
 
-    
+
     constexpr int CHEMOTAXIS_BLOCK = 3 * BLOCK_SIZE;
     constexpr int chemotaxis_theta = CHEMOTAXIS_BLOCK + 0;
     constexpr int chemotaxis_sigma = CHEMOTAXIS_BLOCK + 1;
@@ -103,8 +104,9 @@ namespace GenomeParamTable {
     constexpr int embed_ctx_metabolic = CONTEXT_BLOCK + 4;
     constexpr int embed_ctx_stress = CONTEXT_BLOCK + 5;
     constexpr int embed_ctx_morphogen = CONTEXT_BLOCK + 6;
+    constexpr int field_decay_rate = CONTEXT_BLOCK + 7;
 
-    
+
     constexpr int BEHAVIORAL_BLOCK = 9 * BLOCK_SIZE;
     constexpr int behavioral_dim_hw = BEHAVIORAL_BLOCK + 0;
     constexpr int behavioral_dim_task = BEHAVIORAL_BLOCK + 1;

@@ -630,11 +630,6 @@ constexpr int MIN_DENSITY_INIT = MAX_ARCHIVE_SIZE * 100 - 1;
 
 
 // Environmental constants (field physics)
-constexpr float FIELD_DIFFUSIVITY = 0.1f;
-constexpr float FIELD_REACTION_ORDER = 2.0f;
-constexpr float FIELD_REACTION_RATE = 0.0f;
-constexpr float FIELD_ADVECTION = 0.05f;
-constexpr float FIELD_FLOW_DT = 0.01f;
 constexpr float FIELD_CHEMICAL_DECAY = 0.95f;
 constexpr float FIELD_ATTRACTOR_SIGMA = 0.1f;
 constexpr float FIELD_BEHAVIORAL_SIGMA = 0.15f;
@@ -786,7 +781,6 @@ constexpr float FLOW_LENIA_LR_MIN = 0.00001f;
 constexpr float FLOW_LENIA_LR_MAX = 0.001f;
 constexpr float BATCH_SIZE_NORM_MIN = 0.0f;
 constexpr float BATCH_SIZE_NORM_MAX = 1.0f;
-constexpr float FIELD_DECAY_RATE = 0.95f;
 constexpr float ADAM_BETA1_MIN = 0.85f;
 constexpr float ADAM_BETA1_MAX = 0.95f;
 constexpr float ADAM_BETA2_MIN = 0.99f;
@@ -839,6 +833,10 @@ constexpr float CHEMOTAXIS_DT_MIN = 0.01f;
 constexpr float CHEMOTAXIS_DT_MAX = 0.5f;
 constexpr float FLOW_LENIA_DT_MIN = 0.01f;
 constexpr float FLOW_LENIA_DT_MAX = 0.5f;
+constexpr float FIELD_DIFFUSIVITY_MIN = 0.01f;
+constexpr float FIELD_DIFFUSIVITY_MAX = 0.5f;
+constexpr float FIELD_DECAY_RATE_MIN = 0.8f;
+constexpr float FIELD_DECAY_RATE_MAX = 0.99f;
 constexpr float DEFAULT_DECAY_RATE_MIN = 0.9f;
 constexpr float DEFAULT_DECAY_RATE_MAX = 0.999f;
 constexpr float WARP_CA_GROWTH_RATE_MIN = 0.01f;

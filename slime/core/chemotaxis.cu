@@ -105,13 +105,23 @@ __device__ void diffusion_reaction_device(Organism* organism) {
     int channels = chem->channels;
     float dt = organism->dt;
 
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    ComponentPool* pool = organism->pool;
+    PoolEntry* entry = &pool->entries[pool->alive_indices[0]];
+    float field_diffusivity = entry->field_diffusivity;
+    float field_decay_rate = entry->field_decay_rate;
+    float flow_beta_A = entry->flow_beta_A;
+    float flow_n = entry->flow_n;
+    float flow_alpha_min = entry->flow_alpha_min;
+    float flow_alpha_max = entry->flow_alpha_max;
+    float flow_sharpness = entry->flow_sharpness;
 
-    if (x < grid_size && y < grid_size) {
-        int spatial_idx = y * grid_size + x;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
 
-        // Process each channel independently
+    for (int spatial_idx = global_tid; spatial_idx < cells; spatial_idx += total_threads) {
+        int x = spatial_idx % grid_size;
+        int y = spatial_idx / grid_size;
+
         for (int c = 0; c < channels; c++) {
             int field_idx = c * cells + spatial_idx;
             float* channel_concentration = concentration + c * cells;
@@ -121,13 +131,36 @@ __device__ void diffusion_reaction_device(Organism* organism) {
                                     channel_concentration, x, y, grid_size, 1);
 
             float source_contribution = sources[field_idx];
+            float diffusion = field_diffusivity * laplacian[field_idx];
+            float decay = -field_decay_rate * c_center;
 
-            float diffusion = FIELD_DIFFUSIVITY * laplacian[field_idx];
-            float reaction = FIELD_REACTION_RATE * powf(c_center, FIELD_REACTION_ORDER);
-            float decay = -FIELD_DECAY_RATE * c_center;
+            // Flow-driven transport: compute_flow_differentiable uses genome-derived params
+            int east_idx = y * grid_size + min(x + 1, grid_size - 1);
+            int north_idx = min(y + 1, grid_size - 1) * grid_size + x;
 
-            concentration[field_idx] = c_center + dt * (diffusion + reaction + decay + source_contribution);
-            concentration[field_idx] = clamp(concentration[field_idx], NORMALIZED_MIN, NORMALIZED_MAX);
+            float U_center = c_center;
+            float U_E = channel_concentration[east_idx];
+            float U_N = channel_concentration[north_idx];
+
+            // Affinity sums from all channels at this cell and neighbors
+            float A_center = 0.0f, A_E = 0.0f, A_N = 0.0f;
+            for (int cc = 0; cc < channels; cc++) {
+                A_center += concentration[cc * cells + spatial_idx];
+                A_E += concentration[cc * cells + east_idx];
+                A_N += concentration[cc * cells + north_idx];
+            }
+
+            float2 flow = FlowLeniaOps::compute_flow_differentiable(
+                U_center, U_E, U_N,
+                A_center, A_E, A_N,
+                flow_beta_A, flow_n,
+                flow_alpha_min, flow_alpha_max, flow_sharpness);
+
+            // Flow advection: upwind approximation
+            float advection = -(flow.x * gradient_x[field_idx] + flow.y * gradient_y[field_idx]);
+
+            concentration[field_idx] = c_center + dt * (diffusion + decay + advection + source_contribution);
+            concentration[field_idx] = fmaxf(concentration[field_idx], 0.0f);
         }
     }
 }
@@ -1061,6 +1094,26 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
         organism->telemetry->diresa_evolution.behavioral_drift_rate,
         organism->telemetry->task_performance.accuracy,
         RESOURCE_FLOW_DT_MIN, RESOURCE_FLOW_DT_MAX
+    );
+
+    entry->field_diffusivity = genome_to_param(
+        genome, epigenetic, GenomeParamTable::field_diffusivity,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FIELD_DIFFUSIVITY_MIN, FIELD_DIFFUSIVITY_MAX
+    );
+
+    entry->field_decay_rate = genome_to_param(
+        genome, epigenetic, GenomeParamTable::field_decay_rate,
+        context_metabolic, context_stress, context_morphogen,
+        organism->telemetry->genome_complexity.hash_entropy,
+        organism->telemetry->archive_topology.novelty_gradient,
+        organism->telemetry->diresa_evolution.behavioral_drift_rate,
+        organism->telemetry->task_performance.accuracy,
+        FIELD_DECAY_RATE_MIN, FIELD_DECAY_RATE_MAX
     );
     }
 }

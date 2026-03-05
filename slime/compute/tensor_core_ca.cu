@@ -314,7 +314,6 @@ __device__ void multi_head_ca_tensor_device(
             }
             __syncthreads();
 
-            if (tid == 0 && batch_id == 0 && head == 0) printf("CA_S7 block=%d\n", blockIdx.x);
             // ============ STAGE 7: Flow projection + gated transport ============
             for (int cell_idx = tid; cell_idx < num_cells; cell_idx += block_threads) {
                 float interaction_local[HEAD_DIM];
@@ -342,7 +341,6 @@ __device__ void multi_head_ca_tensor_device(
             __syncthreads();
         }
     }
-    if (tid == 0) printf("CA_DONE block=%d\n", blockIdx.x);
 }
 
 #endif

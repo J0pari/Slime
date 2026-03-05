@@ -956,6 +956,8 @@ struct PoolEntry {
     float flow_alpha_max;
     float flow_sharpness;
     float flow_resource_dt;
+    float field_diffusivity;
+    float field_decay_rate;
 
     MultiHeadCAState* ca_state;
 

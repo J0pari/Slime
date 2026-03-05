@@ -2191,26 +2191,6 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     cg::this_grid().sync();
     if (tid == 0 && blockIdx.x == 0) printf("V:HYB_baldwin_done\n");
 
-    if (training_mode->use_gradients) {
-        {
-            int grid_size = arch.grid_size;
-            int ca_channels = arch.channels;
-            int total_cells = grid_size * grid_size;
-            int chem_channels = organism->chemical_field->channels;
-            float* ca_concentration = entry->ca_state->ca_concentration;
-            float* chemical_concentration = organism->chemical_field->concentration;
-
-            for (int cell_idx = tid; cell_idx < total_cells; cell_idx += blockDim.x) {
-                // Map CA channels 0..chem_channels-1 to chemical field channels
-                for (int c = 0; c < chem_channels && c < ca_channels; c++) {
-                    float val = ca_concentration[cell_idx * ca_channels + c];
-                    if (isfinite(val)) {
-                        atomicAdd(&chemical_concentration[c * total_cells + cell_idx], val);
-                    }
-                }
-            }
-        }
-    }
     cg::this_grid().sync();
 
     if (training_mode->use_gradients) {
@@ -2335,7 +2315,7 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
     }
     cg::this_grid().sync();
 
-    // All heads deposit ch0 into shared chemical field (with decay to prevent unbounded accumulation)
+    // Delta deposition: deposit only (ca_output_ch0 - ca_input_ch0) to conserve mass
     if (has_work && organism->buffers->batch_prev_concentration && organism->chemical_field) {
         ChemicalField* field = organism->chemical_field;
         int grid_size_dep = arch.grid_size;
@@ -2344,13 +2324,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
         int num_heads_dep = arch.num_heads;
         int batch_sz = training_mode->batch_size;
         int head_stride = cells_dep * channels_dep;
-        float acc = fminf(fmaxf(entry->task_accuracy.value, 0.0f), 1.0f);
-        float deposition_strength = 0.01f + 0.09f * acc;
         float* field_coords = organism->sample_field_coords + entry_idx * batch_sz * 2;
+        float* ca_input = organism->batch_ca_states_pool + s_wave_offsets.ca_states_offset;
 
-        // Decay existing field before new deposition
-        for (int cell = tid; cell < cells_dep; cell += blockDim.x) {
-            field->concentration[cell] *= FIELD_DECAY_RATE;
+        int field_elements = channels_dep * cells_dep;
+        for (int i = tid; i < field_elements; i += blockDim.x) {
+            field->concentration[i] *= entry->field_decay_rate;
         }
 
         for (int s = 0; s < batch_sz; s++) {
@@ -2364,11 +2343,12 @@ __device__ void hybrid_organism_lifecycle_device(Organism* organism) {
                 int field_y = (cy + center_y) % grid_size_dep;
                 int field_cell = field_y * grid_size_dep + field_x;
 
-                float ch0_sum = 0.0f;
+                float delta_ch0 = 0.0f;
                 for (int h = 0; h < num_heads_dep; h++) {
-                    ch0_sum += wave_prev_conc[batch_base + h * head_stride + cell * channels_dep];
+                    int idx = batch_base + h * head_stride + cell * channels_dep;
+                    delta_ch0 += wave_prev_conc[idx] - ca_input[idx];
                 }
-                atomicAdd(&field->concentration[field_cell], ch0_sum * deposition_strength);
+                atomicAdd(&field->concentration[field_cell], delta_ch0);
             }
         }
     }
