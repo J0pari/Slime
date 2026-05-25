@@ -552,75 +552,75 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         if (global_tid == 0) printf("V:p2_post_diresa_genome pool_cap=%d\n", pool_capacity);
 
         // Per-entry DIRESA - each block handles entries[blockIdx.x]
+        // Wire pointers for ALL entries (memory pre-allocated for POOL_CAPACITY_MAX)
         int my_entry = blockIdx.x;
-        if (my_entry < pool_capacity && organism->pool->alive_flags[my_entry]) {
+        if (my_entry < pool_capacity) {
             PoolEntry* e = &organism->pool->entries[my_entry];
 
-            int entry_task_input_dim = e->num_heads * e->channels;
-            e->diresa_task_input_dim = entry_task_input_dim;
-
-            // Set up weight pointers for this entry
             e->diresa_task_weights = &organism->per_entry_diresa_task_weights[my_entry];
             e->diresa_hw_weights = &organism->per_entry_diresa_hw_weights[my_entry];
             e->diresa_gen_weights = &organism->per_entry_diresa_gen_weights[my_entry];
 
-            float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
-            float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + my_entry * DIRESA_HW_STRIDE;
-            float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + my_entry * DIRESA_GEN_STRIDE;
-            float* entry_task_grad = organism->per_entry_diresa_task_grad_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
-            float* entry_hw_grad = organism->per_entry_diresa_hw_grad_pool + my_entry * DIRESA_HW_STRIDE;
-            float* entry_gen_grad = organism->per_entry_diresa_gen_grad_pool + my_entry * DIRESA_GEN_STRIDE;
+            // Xavier init only for alive entries (dead entries get init via needs_weight_init at spawn/replace)
+            if (organism->pool->alive_flags[my_entry]) {
+                int entry_task_input_dim = e->num_heads * POOLING_NUM_TILES * e->channels;
+                e->diresa_task_input_dim = entry_task_input_dim;
 
-            // Task DIRESA
-            init_diresa_entry_device(
-                e->diresa_task_weights,
-                entry_task_pool,
-                entry_task_grad,
-                0,
-                entry_task_input_dim,
-                BEHAVIORAL_DIM_TASK,
-                e->diresa_hidden1,
-                e->diresa_hidden2,
-                e->distance_exponent,
-                e->quality_weight,
-                primary_genome,
-                e->gradients,
-                seed + 888888 + my_entry
-            );
+                float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+                float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + my_entry * DIRESA_HW_STRIDE;
+                float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + my_entry * DIRESA_GEN_STRIDE;
+                float* entry_task_grad = organism->per_entry_diresa_task_grad_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+                float* entry_hw_grad = organism->per_entry_diresa_hw_grad_pool + my_entry * DIRESA_HW_STRIDE;
+                float* entry_gen_grad = organism->per_entry_diresa_gen_grad_pool + my_entry * DIRESA_GEN_STRIDE;
 
-            // HW DIRESA
-            init_diresa_entry_device(
-                e->diresa_hw_weights,
-                entry_hw_pool,
-                entry_hw_grad,
-                0,
-                HARDWARE_FEATURES_DIM,
-                BEHAVIORAL_DIM_HW,
-                e->diresa_hidden1,
-                e->diresa_hidden2,
-                e->distance_exponent,
-                e->quality_weight,
-                primary_genome,
-                e->gradients,
-                seed + 999999 + my_entry
-            );
+                init_diresa_entry_device(
+                    e->diresa_task_weights,
+                    entry_task_pool,
+                    entry_task_grad,
+                    0,
+                    entry_task_input_dim,
+                    BEHAVIORAL_DIM_TASK,
+                    e->diresa_hidden1,
+                    e->diresa_hidden2,
+                    e->distance_exponent,
+                    e->quality_weight,
+                    primary_genome,
+                    e->gradients,
+                    seed + 888888 + my_entry
+                );
 
-            // Gen DIRESA
-            init_diresa_entry_device(
-                e->diresa_gen_weights,
-                entry_gen_pool,
-                entry_gen_grad,
-                0,
-                1,
-                BEHAVIORAL_DIM_GEN,
-                e->diresa_hidden1,
-                e->diresa_hidden2,
-                e->distance_exponent,
-                e->quality_weight,
-                primary_genome,
-                e->gradients,
-                seed + 777777 + my_entry
-            );
+                init_diresa_entry_device(
+                    e->diresa_hw_weights,
+                    entry_hw_pool,
+                    entry_hw_grad,
+                    0,
+                    HARDWARE_FEATURES_DIM,
+                    BEHAVIORAL_DIM_HW,
+                    e->diresa_hidden1,
+                    e->diresa_hidden2,
+                    e->distance_exponent,
+                    e->quality_weight,
+                    primary_genome,
+                    e->gradients,
+                    seed + 999999 + my_entry
+                );
+
+                init_diresa_entry_device(
+                    e->diresa_gen_weights,
+                    entry_gen_pool,
+                    entry_gen_grad,
+                    0,
+                    1,
+                    BEHAVIORAL_DIM_GEN,
+                    e->diresa_hidden1,
+                    e->diresa_hidden2,
+                    e->distance_exponent,
+                    e->quality_weight,
+                    primary_genome,
+                    e->gradients,
+                    seed + 777777 + my_entry
+                );
+            }
         }
         cg::this_grid().sync();
 
@@ -643,6 +643,15 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         cg::this_grid().sync();
 
         organism->prediction_error_history = buffers->prediction_error_history;
+        organism->loss_history = buffers->prediction_error_history;
+        organism->loss_history_length = 0;
+        organism->coherence_output = buffers->coherence_output_buffer;
+        organism->attractor_positions = buffers->attractor_positions_buffer;
+        organism->attractor_strengths = buffers->attractor_strengths_buffer;
+        organism->num_attractors = 0;
+        organism->behavioral_field = buffers->behavioral_field_buffer;
+        organism->behavioral_gradients = buffers->behavioral_gradients_buffer;
+        organism->features_buffer = organism->gradient_features_pool;
         organism->hardware_geom = buffers->hardware_geom;
         organism->delta_indices_pool = buffers->delta_indices_pool;
         organism->delta_values_pool = buffers->delta_values_pool;
@@ -762,7 +771,18 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         organism->chem_grid_size = arch.grid_size;
 
         organism->diffusion_dt = CHEMICAL_DIFFUSION_DT_MAX;
-        if (global_tid == 0) organism->training_mode->adam_timestep = 0;
+        organism->dt = CHEMICAL_DIFFUSION_DT_MAX;
+        organism->global_time = 0.0f;
+        if (global_tid == 0) {
+            organism->training_mode->adam_timestep = 0;
+            organism->ctx_metabolic = 0.0f;
+            organism->ctx_stress = 0.0f;
+            organism->ctx_morphogen = 0.0f;
+            organism->ctx_complexity = 0.0f;
+            organism->ctx_niche = 0.0f;
+            organism->ctx_learning = 0.0f;
+            organism->ctx_performance = 0.0f;
+        }
         cg::this_grid().sync();
         init_training_mode_device(organism);
         cg::this_grid().sync();
@@ -797,7 +817,32 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         cg::this_grid().sync();
         mark_checkpoint(15);  // post_chemsources - grid sync completed
 
+        if (global_tid == 0) {
+            ComponentPool* ap = organism->pool;
+            int alive = ap->alive_indices_count;
+            int n_attr = min(alive, MAX_ATTRACTORS);
+            for (int i = 0; i < n_attr; i++) {
+                int eidx = ap->alive_indices[i];
+                BehavioralState* agent = &organism->behavioral_agents[eidx];
+                organism->attractor_positions[i * 2] = agent->position[0];
+                organism->attractor_positions[i * 2 + 1] = agent->position[1];
+                organism->attractor_strengths[i] = fmaxf(ap->entries[eidx].fitness.value, 0.0f);
+            }
+            organism->num_attractors = n_attr;
+        }
+        cg::this_grid().sync();
+
+        create_attractors_device(organism);
+        cg::this_grid().sync();
+
         diffusion_reaction_device(organism);
+        cg::this_grid().sync();
+
+        compute_behavioral_field_device(organism);
+        cg::this_grid().sync();
+        behavioral_gradient_device(organism);
+        cg::this_grid().sync();
+        chemotactic_navigation_device(organism);
         cg::this_grid().sync();
 
         organism->snapshot_field_size = field_size;
@@ -807,7 +852,7 @@ __device__ void init_organism_phase2_device(Organism* organism) {
         // Bootstrap attractor_field from first history entry
         if (global_tid == 0) {
             int hist_count = organism->chemical_field->history->count;
-            DEVICE_FATAL_IF(hist_count <= 0, "init_organism_phase2: chemical history empty after first snapshot");
+            DEVICE_FATAL_IF(hist_count <= 0, "init_organism_phase2: chemical history count <= 0");
             int history_idx = (organism->chemical_field->history->head + hist_count - 1)
                   % organism->chemical_field->history->capacity;
             organism->attractor_field = organism->chemical_field->history->entries[history_idx].data;
@@ -833,6 +878,170 @@ __device__ void init_organism_phase2_device(Organism* organism) {
 }
 
 
+__device__ void init_new_entries_device(Organism* organism) {
+    int my_entry = blockIdx.x;
+    ComponentPool* pool = organism->pool;
+    if (my_entry >= pool->capacity) return;
+    if (!pool->alive_flags[my_entry]) return;
+    if (!pool->entries[my_entry].needs_weight_init) return;
+
+    PoolEntry* e = &pool->entries[my_entry];
+    int tid = threadIdx.x;
+
+    // Reconstruct genome for DIRESA hyperparameter derivation
+    float* workspace = organism->workspace_genomes + my_entry * (2 * GENOME_SIZE + POOL_CAPACITY_MAX);
+    float* reconstructed_genome = workspace;
+    float* parent_workspace = workspace + GENOME_SIZE;
+    if (tid == 0) {
+        reconstruct_genome_from_archive(
+            e->parent_hash,
+            organism->archive,
+            organism->archive_size,
+            e->delta_indices,
+            e->delta_values,
+            e->num_deltas,
+            e->max_deltas,
+            reconstructed_genome,
+            GENOME_SIZE,
+            parent_workspace,
+            organism->diresa_genome_weights
+        );
+    }
+    __syncthreads();
+
+    // DIRESA weight init (3 autoencoders, block-parallel Xavier)
+    int entry_task_input_dim = e->num_heads * POOLING_NUM_TILES * e->channels;
+    if (tid == 0) {
+        e->diresa_task_input_dim = entry_task_input_dim;
+    }
+
+    float* entry_task_pool = organism->per_entry_diresa_task_weight_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+    float* entry_hw_pool = organism->per_entry_diresa_hw_weight_pool + my_entry * DIRESA_HW_STRIDE;
+    float* entry_gen_pool = organism->per_entry_diresa_gen_weight_pool + my_entry * DIRESA_GEN_STRIDE;
+    float* entry_task_grad = organism->per_entry_diresa_task_grad_pool + my_entry * DIRESA_TASK_STRIDE_PER_ENTRY;
+    float* entry_hw_grad = organism->per_entry_diresa_hw_grad_pool + my_entry * DIRESA_HW_STRIDE;
+    float* entry_gen_grad = organism->per_entry_diresa_gen_grad_pool + my_entry * DIRESA_GEN_STRIDE;
+
+    unsigned int init_seed = (unsigned int)(e->genome_hash ^ (e->id * 0x9E3779B97F4A7C15ULL));
+
+    init_diresa_entry_device(
+        e->diresa_task_weights, entry_task_pool, entry_task_grad, 0,
+        entry_task_input_dim, BEHAVIORAL_DIM_TASK,
+        e->diresa_hidden1, e->diresa_hidden2,
+        e->distance_exponent, e->quality_weight,
+        reconstructed_genome, e->gradients,
+        init_seed + 888888
+    );
+
+    init_diresa_entry_device(
+        e->diresa_hw_weights, entry_hw_pool, entry_hw_grad, 0,
+        HARDWARE_FEATURES_DIM, BEHAVIORAL_DIM_HW,
+        e->diresa_hidden1, e->diresa_hidden2,
+        e->distance_exponent, e->quality_weight,
+        reconstructed_genome, e->gradients,
+        init_seed + 999999
+    );
+
+    init_diresa_entry_device(
+        e->diresa_gen_weights, entry_gen_pool, entry_gen_grad, 0,
+        1, BEHAVIORAL_DIM_GEN,
+        e->diresa_hidden1, e->diresa_hidden2,
+        e->distance_exponent, e->quality_weight,
+        reconstructed_genome, e->gradients,
+        init_seed + 777777
+    );
+
+    // CA weight init (Xavier)
+    MultiHeadCAState* ca_state = e->ca_state;
+    curandState_t ca_rand_state;
+    curand_init(init_seed + tid, 0, 0, &ca_rand_state);
+
+    int perception_size = e->num_heads * e->channels * e->head_dim;
+    int interaction_size = e->num_heads * e->head_dim * e->head_dim;
+    int flow_projection_size = e->num_heads * 2 * e->head_dim;
+    int max_ca_weight = max(perception_size, max(interaction_size, flow_projection_size));
+
+    for (int wi = tid; wi < max_ca_weight; wi += blockDim.x) {
+        init_ca_weights_xavier(
+            ca_state->perception_weights,
+            ca_state->interaction_weights,
+            ca_state->flow_projection_weights,
+            wi, e->num_heads, e->channels, e->head_dim,
+            &ca_rand_state
+        );
+    }
+
+    // Classifier weight init
+    ClassificationHead* classifier = &organism->classifier[my_entry];
+    int input_dim = entry_task_input_dim;
+    int num_classes = organism->classifier_num_classes;
+    curandState cls_rand_state;
+    curand_init(organism->classifier_seed + my_entry + tid, 0, 0, &cls_rand_state);
+
+    for (int pi = tid; pi < input_dim; pi += blockDim.x) {
+        classifier->pooling_weights[pi] = curand_normal(&cls_rand_state) * CLASSIFIER_POOLING_INIT_SCALE;
+    }
+
+    float fc_scale = sqrtf(2.0f / (input_dim + num_classes));
+    for (int pi = tid; pi < input_dim * num_classes; pi += blockDim.x) {
+        classifier->fc_weights[pi] = curand_normal(&cls_rand_state) * fc_scale;
+    }
+
+    for (int pi = tid; pi < num_classes; pi += blockDim.x) {
+        classifier->fc_bias[pi] = 0.0f;
+    }
+
+    // Zero Adam state for CA weights
+    constexpr int ADAM_CA_ENTRY_STRIDE =
+        (NUM_HEADS * CHANNELS * HEAD_DIM) +
+        (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
+        (NUM_HEADS * 2 * HEAD_DIM);
+
+    float* adam_m_ca = organism->adam_m_ca_pool + my_entry * ADAM_CA_ENTRY_STRIDE;
+    float* adam_v_ca = organism->adam_v_ca_pool + my_entry * ADAM_CA_ENTRY_STRIDE;
+    for (int pi = tid; pi < ADAM_CA_ENTRY_STRIDE; pi += blockDim.x) {
+        adam_m_ca[pi] = 0.0f;
+        adam_v_ca[pi] = 0.0f;
+    }
+
+    // Zero Adam state for pooling weights
+    constexpr int POOLING_ENTRY_STRIDE = CLASSIFIER_FEATURE_DIM;
+    float* adam_m_pool = organism->adam_m_pooling + my_entry * POOLING_ENTRY_STRIDE;
+    float* adam_v_pool = organism->adam_v_pooling + my_entry * POOLING_ENTRY_STRIDE;
+    for (int pi = tid; pi < POOLING_ENTRY_STRIDE; pi += blockDim.x) {
+        adam_m_pool[pi] = 0.0f;
+        adam_v_pool[pi] = 0.0f;
+    }
+
+    // Zero Adam state for FC weights
+    constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM;
+    float* adam_m_fc = organism->adam_m_fc_weights + my_entry * FC_WEIGHTS_ENTRY_STRIDE;
+    float* adam_v_fc = organism->adam_v_fc_weights + my_entry * FC_WEIGHTS_ENTRY_STRIDE;
+    for (int pi = tid; pi < FC_WEIGHTS_ENTRY_STRIDE; pi += blockDim.x) {
+        adam_m_fc[pi] = 0.0f;
+        adam_v_fc[pi] = 0.0f;
+    }
+
+    // Zero Adam state for FC bias
+    constexpr int FC_BIAS_ENTRY_STRIDE = NUM_CLASSES_MAX;
+    float* adam_m_fb = organism->adam_m_fc_bias + my_entry * FC_BIAS_ENTRY_STRIDE;
+    float* adam_v_fb = organism->adam_v_fc_bias + my_entry * FC_BIAS_ENTRY_STRIDE;
+    for (int pi = tid; pi < FC_BIAS_ENTRY_STRIDE; pi += blockDim.x) {
+        adam_m_fb[pi] = 0.0f;
+        adam_v_fb[pi] = 0.0f;
+    }
+
+    // Zero CA gradient buffer
+    float* grad_buf = ca_state->tape.grad_buffer;
+    for (int pi = tid; pi < ADAM_CA_ENTRY_STRIDE; pi += blockDim.x) {
+        grad_buf[pi] = 0.0f;
+    }
+
+    if (tid == 0) {
+        e->needs_weight_init = false;
+    }
+}
+
 __global__ void persistent_evolution_kernel(
     unsigned int seed,
     Dataset** dataset_array,
@@ -855,7 +1064,7 @@ __global__ void persistent_evolution_kernel(
     cg::this_grid().sync();
 
     // Parallel scalar init - distribute field writes across threads
-    int num_init_fields = 8;
+    int num_init_fields = 9;
     for (int field = global_tid; field < num_init_fields; field += total_threads) {
         switch (field) {
             case 0: {
@@ -870,7 +1079,15 @@ __global__ void persistent_evolution_kernel(
             case 4: organism->buffers = organism; break;
             case 5: organism->init_seed = seed; break;
             case 6: organism->audit_buffer = audit; break;
-            case 7: break; // Reserved
+            case 7: break;
+            case 8: {
+                int max_nc = 0;
+                for (int i = 0; i < NUM_ACTIVE_DATASETS; i++) {
+                    int nc = dataset_array[i]->descriptor->num_classes;
+                    if (nc > max_nc) max_nc = nc;
+                }
+                organism->classifier_num_classes = max_nc;
+            } break;
         }
     }
     cg::this_grid().sync();
@@ -918,6 +1135,49 @@ __global__ void persistent_evolution_kernel(
         }
     }
 
+    // Seed behavioral coordinates for initial entries from genome hash
+    // Without this, all coords start at zero → zero behavioral features →
+    // zero variance in archive topology → correlation undefined
+    {
+        ComponentPool* pool = organism->pool;
+        int hw_dim = organism->behavioral_dim_hw;
+        int task_dim = organism->behavioral_dim_task;
+        int gen_dim = organism->behavioral_dim_gen;
+        int init_alive = pool->alive_indices_count;
+
+        if (global_tid < init_alive) {
+            int entry_idx = pool->alive_indices[global_tid];
+            PoolEntry* entry = &pool->entries[entry_idx];
+            BehavioralState* agent = &organism->behavioral_agents[entry_idx];
+            uint64_t hash = entry->genome_hash;
+
+            for (int d = 0; d < hw_dim; d++) {
+                hash ^= hash >> 13;
+                hash ^= hash << 7;
+                hash ^= hash >> 17;
+                agent->hw_coords[d] = (float)(hash & 0xFFFF) / (float)0xFFFF;
+            }
+            for (int d = 0; d < task_dim; d++) {
+                hash ^= hash >> 13;
+                hash ^= hash << 7;
+                hash ^= hash >> 17;
+                agent->task_coords[d] = (float)(hash & 0xFFFF) / (float)0xFFFF;
+            }
+            for (int d = 0; d < gen_dim; d++) {
+                hash ^= hash >> 13;
+                hash ^= hash << 7;
+                hash ^= hash >> 17;
+                agent->gen_coords[d] = (float)(hash & 0xFFFF) / (float)0xFFFF;
+            }
+
+            agent->position[0] = (float)(entry_idx + 1) / (float)(init_alive + 1);
+            agent->position[1] = (float)(entry_idx + 1) / (float)(init_alive + 1);
+            agent->exploration_noise = BEHAVIORAL_EXPLORATION_NOISE_INIT;
+            agent->sensitivity = BEHAVIORAL_SENSITIVITY_INIT;
+        }
+    }
+    cg::this_grid().sync();
+
     unsigned long long tick = 0;
 
     while (true) {
@@ -931,10 +1191,35 @@ __global__ void persistent_evolution_kernel(
             organism->current_arch = arch_local;
             organism->snapshot_field_size = arch_local.grid_size * arch_local.grid_size;
             int dataset_idx = organism->curriculum->current_dataset_idx;
-            bool is_test_gen = ((organism->generation % 2) != 0);
-            organism->current_dataset = is_test_gen
-                ? organism->test_dataset_array[dataset_idx]
-                : organism->dataset_array[dataset_idx];
+            organism->current_dataset = organism->dataset_array[dataset_idx];
+            organism->training_mode->is_train_batch = true;
+
+            g_v_flow_done_count = 0;
+            g_v_bwd_enter_count = 0;
+            g_v_bwd_fatal_checks_count = 0;
+            g_v_bwd_chunk_count = 0;
+            g_v_bwd_value_grad_count = 0;
+            g_v_bwd_inter_grad_count = 0;
+            g_v_bwd_perc_grad_count = 0;
+            g_v_bwd_done_count = 0;
+            g_v_bwd_zero_dw_count = 0;
+            g_v_bwd_setup_done_count = 0;
+            g_v_bwd_chunks_done_count = 0;
+            g_v_bwd_inter_grad_copy_count = 0;
+            g_v_bwd_perc_grad_copy_count = 0;
+            g_v_bwd_grad_conc_count = 0;
+            g_v_bwd_chunk0_count = 0;
+            g_v_bwd_i_done_count = 0;
+            g_v_bwd_v_done_count = 0;
+            g_v_bwd_chunk2_enter_count = 0;
+            g_v_bwd_di_write_count = 0;
+            g_v_bwd_perc_load_count = 0;
+            g_v_bwd_dp_write_count = 0;
+            g_v_bwd_im2col_count = 0;
+            g_v_bwd_conv_fp16_count = 0;
+            g_v_bwd_input_grad_count = 0;
+            g_v_bwd_scatter_count = 0;
+            g_v_post_bwd_barrier_count = 0;
         }
         cg::this_grid().sync();
 
@@ -964,12 +1249,106 @@ __global__ void persistent_evolution_kernel(
             }
             cg::this_grid().sync();
 
+            // Train forward
             load_batch_device(organism);
             cg::this_grid().sync();
+            lifecycle_forward_device(organism);
+            cg::this_grid().sync();
 
-            hybrid_organism_lifecycle_device(organism);
+            // Capture train predictions (logits still valid, before backward/test overwrite)
+            lifecycle_audit_device(organism);
+            cg::this_grid().sync();
+
+            // Backward + Adam (uses train activations still in buffers)
+            lifecycle_backward_device(organism);
+            cg::this_grid().sync();
+
+            // Test forward
+            if (global_tid == 0) {
+                int dataset_idx_test = organism->curriculum->current_dataset_idx;
+                organism->current_dataset = organism->test_dataset_array[dataset_idx_test];
+                organism->training_mode->is_train_batch = false;
+            }
+            cg::this_grid().sync();
+            load_batch_device(organism);
+            cg::this_grid().sync();
+            lifecycle_forward_device(organism);
+            cg::this_grid().sync();
+
+            // Metrics + telemetry probes (both train_accuracy and test_accuracy now COMPUTED)
+            lifecycle_metrics_device(organism);
+            cg::this_grid().sync();
+
+            // Coherence from prediction error trend
+            if (global_tid == 0) {
+                int gen = organism->generation;
+                organism->loss_history_length = (gen + 1 < PREDICTION_ERROR_HISTORY_LENGTH) ? gen + 1 : PREDICTION_ERROR_HISTORY_LENGTH;
+            }
+            cg::this_grid().sync();
+            if (blockIdx.x == 0) {
+                compute_coherence_device(organism);
+            }
+            cg::this_grid().sync();
+
+            // Propagate organism-level coherence to all alive entries
+            if (global_tid == 0) {
+                float coh = *organism->coherence_output;
+                ComponentPool* coh_pool = organism->pool;
+                int coh_alive = coh_pool->alive_indices_count;
+                for (int i = 0; i < coh_alive; i++) {
+                    int eidx = coh_pool->alive_indices[i];
+                    PoolEntry* e = &coh_pool->entries[eidx];
+                    measured_value_set_computed(&e->coherence, coh, organism->generation, e->genome_hash);
+                }
+            }
+            cg::this_grid().sync();
+
+            // Capture test predictions (with fresh telemetry), reset error log
+            lifecycle_audit_device(organism);
+            if (global_tid == 0) {
+                g_device_error_count = 0;
+            }
+            cg::this_grid().sync();
+
+            // Restore train dataset for next wave/generation
+            if (global_tid == 0) {
+                int dataset_idx_restore = organism->curriculum->current_dataset_idx;
+                organism->current_dataset = organism->dataset_array[dataset_idx_restore];
+                organism->training_mode->is_train_batch = true;
+            }
             cg::this_grid().sync();
         }
+
+        if (global_tid == 0) {
+            ComponentPool* ctx_pool = organism->pool;
+            int ctx_alive = ctx_pool->alive_indices_count;
+            float fitness_sum = 0.0f;
+            float hunger_sum = 0.0f;
+            for (int i = 0; i < ctx_alive; i++) {
+                int eidx = ctx_pool->alive_indices[i];
+                float f = ctx_pool->entries[eidx].fitness.value;
+                float h = ctx_pool->entries[eidx].hunger.value;
+                fitness_sum += isnan(f) ? 0.0f : f;
+                hunger_sum += isnan(h) ? 0.0f : h;
+            }
+            float mean_fitness = (ctx_alive > 0) ? fitness_sum / ctx_alive : 0.0f;
+            float mean_hunger = (ctx_alive > 0) ? hunger_sum / ctx_alive : 1.0f;
+            organism->ctx_metabolic = mean_fitness;
+            organism->ctx_stress = mean_fitness / fmaxf(mean_hunger, 1e-6f);
+
+            ChemicalField* cf = organism->chemical_field;
+            float morph_sum = 0.0f;
+            for (int c = 0; c < cf->channels; c++) {
+                morph_sum += cf->cached_mean[c];
+            }
+            organism->ctx_morphogen = morph_sum / cf->channels;
+
+            organism->ctx_complexity = isnan(organism->telemetry->genome_complexity.hash_entropy) ? 0.0f : organism->telemetry->genome_complexity.hash_entropy;
+            organism->ctx_niche = isnan(organism->telemetry->archive_topology.novelty_gradient) ? 0.0f : organism->telemetry->archive_topology.novelty_gradient;
+            organism->ctx_learning = *organism->coherence_output;
+            organism->ctx_performance = isnan(organism->telemetry->task_performance.accuracy) ? 0.0f : organism->telemetry->task_performance.accuracy;
+        }
+        cg::this_grid().sync();
 
         aggregate_hardware_geometry_device(organism);
         cg::this_grid().sync();
@@ -982,14 +1361,23 @@ __global__ void persistent_evolution_kernel(
         selection_device(organism);
         cg::this_grid().sync();
 
+
         // Voronoi sync moved to start of loop (before training) so telemetry probes have valid cells
         // Selection updates archive here; voronoi will sync from it at start of next iteration
 
-        component_evolution_device(organism);
-        cg::this_grid().sync();
+
 
         compute_fitness_from_diresa_device(organism);
         cg::this_grid().sync();
+
+
+        populate_organism_flow_params_device(organism);
+        cg::this_grid().sync();
+
+
+        lifecycle_transition_device(organism);
+        cg::this_grid().sync();
+
 
         // Refine one elite's latent genome per generation via tape-recorded decode + backward
         if (organism->archive_size > 0) {
@@ -997,6 +1385,7 @@ __global__ void persistent_evolution_kernel(
             refine_elite_coop_device(organism, refine_idx);
         }
         cg::this_grid().sync();
+
 
         // Spawn probability - all threads compute same value, one writes
         int active = Atomics::load_int(organism->pool->active_count);
@@ -1011,9 +1400,20 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
+
         if (organism->archive_size > 0 && organism->num_voronoi_cells > 0) {
             archive_driven_lifecycle_device(organism, organism->hunger_threshold);
         }
+        cg::this_grid().sync();
+
+
+        {
+            cg::grid_group grid = cg::this_grid();
+            compact_pool_alive_indices_device(organism, grid);
+        }
+        cg::this_grid().sync();
+
+        init_new_entries_device(organism);
         cg::this_grid().sync();
 
         if (organism->generation >= 1) {
@@ -1021,7 +1421,32 @@ __global__ void persistent_evolution_kernel(
             cg::this_grid().sync();
         }
 
+        if (global_tid == 0) {
+            ComponentPool* ap = organism->pool;
+            int alive = ap->alive_indices_count;
+            int n_attr = min(alive, MAX_ATTRACTORS);
+            for (int i = 0; i < n_attr; i++) {
+                int eidx = ap->alive_indices[i];
+                BehavioralState* agent = &organism->behavioral_agents[eidx];
+                organism->attractor_positions[i * 2] = agent->position[0];
+                organism->attractor_positions[i * 2 + 1] = agent->position[1];
+                organism->attractor_strengths[i] = fmaxf(ap->entries[eidx].fitness.value, 0.0f);
+            }
+            organism->num_attractors = n_attr;
+        }
+        cg::this_grid().sync();
+
+        create_attractors_device(organism);
+        cg::this_grid().sync();
+
         diffusion_reaction_device(organism);
+        cg::this_grid().sync();
+
+        compute_behavioral_field_device(organism);
+        cg::this_grid().sync();
+        behavioral_gradient_device(organism);
+        cg::this_grid().sync();
+        chemotactic_navigation_device(organism);
         cg::this_grid().sync();
 
         store_chemical_snapshot_device(organism);
@@ -1064,6 +1489,9 @@ __global__ void persistent_evolution_kernel(
         }
         cg::this_grid().sync();
 
+        age_components_device(organism);
+        cg::this_grid().sync();
+
         // Generation boundary validation - verify critical subsystems actually ran
         if (global_tid == 0) {
             int gen = organism->generation;
@@ -1092,6 +1520,8 @@ __global__ void persistent_evolution_kernel(
                     "generation boundary: fitness is NaN/Inf");
             }
 
+            organism->global_time += organism->dt;
+            organism->dt = organism->diffusion_dt;
             atomicAdd(&organism->generation, 1);
         }
         cg::this_grid().sync();

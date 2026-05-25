@@ -209,6 +209,7 @@ struct TaskPerformanceMetrics {
     float accuracy;
     float train_accuracy;
     float test_accuracy;
+    float generalization_gap;
     float loss;
     float classification_stability;
     float avg_confidence;
@@ -251,6 +252,8 @@ struct TelemetryBuffer {
     int generation;
     bool valid;
 
+    float prev_mass_total;
+
     ArchiveTopologyMetrics last_checkpoint;
     int last_occupancy[MAX_CELLS];
     int last_total_spawned;
@@ -282,6 +285,8 @@ struct StateExportEntry {
     float train_accuracy;
     float test_accuracy;
     float generalization_gap;
+    float avg_confidence;
+    float classification_stability;
     int is_train_batch;
 
     int pool_alive_count;
@@ -406,6 +411,15 @@ struct StateExportEntry {
 
     int pool_total_spawned;
     int pool_total_culled;
+
+    int num_heads;
+    int head_dim;
+    int channels;
+    int num_blocks;
+    int kernel_phase_counts[KERNEL_PHASE_COUNTER_COUNT];
+
+    int error_count;
+    DeviceErrorEntry error_log[DEVICE_ERROR_LOG_CAPACITY];
 };
 
 struct Architecture {
@@ -965,6 +979,7 @@ struct PoolEntry {
     DIRESAWeights* diresa_hw_weights;
     DIRESAWeights* diresa_gen_weights;
     int diresa_task_input_dim;
+    bool needs_weight_init;
 };
 
 // From pool_types.cuh
@@ -1213,18 +1228,6 @@ struct Organism {
     float learning_rate;
     float gradient_clip_norm;
     float* correlation_matrix;
-
-    // Loss function fields
-    float* loss_predictions;
-    float* loss_targets;
-    float* loss_out;
-    int loss_batch_size;
-    int loss_dim;
-    float* loss_logits;
-    int* loss_labels;
-    float* loss_gradients;
-    int loss_num_classes;
-    float loss_smoothing;
 
     // Archive/behavioral dimension fields
     float* reconstruction_error;
@@ -1638,6 +1641,17 @@ struct Organism {
     // Flow gradient accumulators
     float flow_beta_A_grad;
     float flow_n_grad;
+
+    // Coherence computation output
+    float* coherence_output_buffer;
+
+    // Attractor buffers
+    float* attractor_positions_buffer;  // [MAX_ATTRACTORS * 2] — (x,y) per attractor
+    float* attractor_strengths_buffer;  // [MAX_ATTRACTORS]
+
+    // Organism-level behavioral field and gradients
+    float* behavioral_field_buffer;      // [CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL]
+    float* behavioral_gradients_buffer;  // [CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL * 2]
 };
 
 // Alias for backward compatibility with main.cu allocation code

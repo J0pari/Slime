@@ -27,6 +27,33 @@ __device__ __forceinline__ Architecture get_arch_from_pool(Organism* organism, i
 
 #include "../learning/diresa.cu"
 
+__device__ void init_entry_measured_values(PoolEntry* entry) {
+    measured_value_set_uncomputed(&entry->task_accuracy);
+    measured_value_set_uncomputed(&entry->train_accuracy);
+    measured_value_set_uncomputed(&entry->test_accuracy);
+    measured_value_set_uncomputed(&entry->task_loss);
+    measured_value_set_uncomputed(&entry->avg_confidence);
+    measured_value_set_uncomputed(&entry->classification_stability);
+    measured_value_set_uncomputed(&entry->coherence);
+    measured_value_set_uncomputed(&entry->generalization_gap);
+    measured_value_set_uncomputed(&entry->effective_rank);
+    measured_value_set_uncomputed(&entry->hardware_efficiency);
+    measured_value_set_uncomputed(&entry->fitness);
+    measured_value_set_uncomputed(&entry->gradient_magnitude);
+    measured_value_set_uncomputed(&entry->recon_loss_hw);
+    measured_value_set_uncomputed(&entry->recon_loss_task);
+    measured_value_set_uncomputed(&entry->recon_loss_gen);
+    measured_value_set_uncomputed(&entry->recon_loss_total);
+    measured_value_set_uncomputed(&entry->behavioral_drift_rate);
+    measured_value_set_uncomputed(&entry->latent_utilization);
+    measured_value_set_uncomputed(&entry->compression_ratio);
+    measured_value_set_uncomputed(&entry->hardware_feature_correlation);
+    measured_value_set_uncomputed(&entry->hunger);
+    measured_value_set_uncomputed(&entry->stress);
+    measured_value_set_uncomputed(&entry->dormancy);
+    measured_value_set_uncomputed(&entry->reactivation);
+}
+
 __device__ void init_rng_states_device(Organism* organism) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int count = organism->pool->capacity;
@@ -131,6 +158,24 @@ __device__ __forceinline__ void derive_fitness_exponents(const float* genome, Po
     entry->renyi_q = RANK_RENYI_ORDER_MIN + renyi_q_norm * (RANK_RENYI_ORDER_MAX - RANK_RENYI_ORDER_MIN);
 }
 
+__device__ __forceinline__ void derive_flow_params(const float* genome, PoolEntry* entry) {
+    float s_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_lenia_s, FLOW_LENIA_S_MIN, FLOW_LENIA_S_MAX);
+    float beta_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_lenia_beta_A, FLOW_LENIA_BETA_A_MIN, FLOW_LENIA_BETA_A_MAX);
+    float n_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_lenia_n, FLOW_LENIA_N_MIN, FLOW_LENIA_N_MAX);
+    float alpha_min_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_alpha_min, FLOW_LENIA_ALPHA_MIN_MIN, FLOW_LENIA_ALPHA_MIN_MAX);
+    float alpha_max_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_alpha_max, FLOW_LENIA_ALPHA_MAX_MIN, FLOW_LENIA_ALPHA_MAX_MAX);
+    float sharpness_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_sharpness, FLOW_LENIA_SHARPNESS_MIN, FLOW_LENIA_SHARPNESS_MAX);
+    float dt_norm = genome_to_bootstrap_param(genome, entry->gradients, GenomeParamTable::flow_resource_dt, RESOURCE_FLOW_DT_MIN, RESOURCE_FLOW_DT_MAX);
+
+    entry->flow_s = s_norm;
+    entry->flow_beta_A = beta_norm;
+    entry->flow_n = n_norm;
+    entry->flow_alpha_min = alpha_min_norm;
+    entry->flow_alpha_max = alpha_max_norm;
+    entry->flow_sharpness = sharpness_norm;
+    entry->flow_resource_dt = dt_norm;
+}
+
 __device__ float prng_next(PRNGState* state) {
     uint64_t x = state->s0;
     uint64_t y = state->s1;
@@ -152,14 +197,14 @@ __device__ float prng_levy_stable(PRNGState* state, float alpha, float scale) {
 
     float levy_num = sinf(alpha_phi);
     float cos_phi = cosf(phi);
-    DEVICE_FATAL_IF(cos_phi <= 0.0f, "levy_stable: cos_phi <= 0 indicates PRNG corruption");
+    DEVICE_FATAL_IF(cos_phi <= 0.0f, "levy_stable: cos_phi <= 0");
     float levy_denom = powf(cos_phi, (1.0f / alpha));
 
-    DEVICE_FATAL_IF(W <= 0.0f || W >= 1.0f, "levy_stable: W out of (0,1) indicates PRNG corruption");
+    DEVICE_FATAL_IF(W <= 0.0f || W >= 1.0f, "levy_stable: W out of (0,1)");
     float log_w = -logf(W);
-    DEVICE_FATAL_IF(log_w <= 0.0f, "levy_stable: log_w <= 0 indicates PRNG corruption");
+    DEVICE_FATAL_IF(log_w <= 0.0f, "levy_stable: log_w <= 0");
     float cos_one_minus_alpha_phi = cosf(one_minus_alpha_phi);
-    DEVICE_FATAL_IF(cos_one_minus_alpha_phi <= 0.0f, "levy_stable: cos_one_minus_alpha_phi <= 0 indicates PRNG corruption");
+    DEVICE_FATAL_IF(cos_one_minus_alpha_phi <= 0.0f, "levy_stable: cos_one_minus_alpha_phi <= 0");
     float levy_factor = powf(cos_one_minus_alpha_phi / log_w, ((1.0f - alpha) / alpha));
 
     return (levy_num / levy_denom * levy_factor) * scale;
@@ -314,19 +359,16 @@ __device__ void spawn_component_device(
             pool->entries[i].genome_hash
         );
 
+        init_entry_measured_values(&pool->entries[i]);
+
         PoolInitParams init_params;
         init_params.derive_from_genome(child_genome, pool->entries[i].gradients);
         measured_value_set_computed(&pool->entries[i].hunger, init_params.initial_hunger, generation, pool->entries[i].genome_hash);
         derive_architecture(child_genome, &pool->entries[i]);
         derive_diresa(child_genome, &pool->entries[i]);
         derive_fitness_exponents(child_genome, &pool->entries[i]);
-        measured_value_set_uncomputed(&pool->entries[i].fitness);
+        derive_flow_params(child_genome, &pool->entries[i]);
         pool->fitness_values[i] = NAN;
-        measured_value_set_uncomputed(&pool->entries[i].coherence);
-        measured_value_set_uncomputed(&pool->entries[i].task_accuracy);
-        measured_value_set_uncomputed(&pool->entries[i].generalization_gap);
-        measured_value_set_uncomputed(&pool->entries[i].hardware_efficiency);
-        measured_value_set_uncomputed(&pool->entries[i].effective_rank);
         pool->entries[i].active_warps = 0;
         pool->entries[i].divergent_branches = 0;
         pool->entries[i].total_branches = 0;
@@ -338,6 +380,7 @@ __device__ void spawn_component_device(
         pool->entries[i].inst_issued = 0;
         pool->entries[i].cycles_elapsed = 0;
         pool->entries[i].tensor_core_cycles = 0;
+        pool->entries[i].needs_weight_init = true;
     }
 }
 
@@ -587,6 +630,8 @@ __device__ void init_pool_device(Organism* organism) {
 
             pool->entries[idx].genome_hash = gpu_sha256(temp_genome, GENOME_SIZE);
 
+            init_entry_measured_values(&pool->entries[idx]);
+
             PoolInitParams init_params;
             init_params.derive_from_genome(temp_genome, pool->entries[idx].gradients);
             measured_value_set_computed(&pool->entries[idx].hunger, init_params.initial_hunger, generation, pool->entries[idx].genome_hash);
@@ -594,13 +639,9 @@ __device__ void init_pool_device(Organism* organism) {
             derive_architecture(temp_genome, &pool->entries[idx]);
             derive_diresa(temp_genome, &pool->entries[idx]);
             derive_fitness_exponents(temp_genome, &pool->entries[idx]);
-            measured_value_set_uncomputed(&pool->entries[idx].fitness);
+            derive_flow_params(temp_genome, &pool->entries[idx]);
             pool->fitness_values[idx] = NAN;
-            measured_value_set_uncomputed(&pool->entries[idx].coherence);
-            measured_value_set_uncomputed(&pool->entries[idx].task_accuracy);
-            measured_value_set_uncomputed(&pool->entries[idx].generalization_gap);
-            measured_value_set_uncomputed(&pool->entries[idx].hardware_efficiency);
-            measured_value_set_uncomputed(&pool->entries[idx].effective_rank);
+            pool->entries[idx].needs_weight_init = false;
         } else {
             pool->entries[idx].id = INT_MAX;
             pool->entries[idx].phase = LifecyclePhase::DEAD;
@@ -621,6 +662,7 @@ __device__ void init_pool_device(Organism* organism) {
             for (int i = 0; i < GENOME_SIZE; i++) {
                 pool->entries[idx].gradients[i] = NAN;
             }
+            pool->entries[idx].needs_weight_init = false;
         }
     }
 
@@ -916,8 +958,8 @@ __device__ void inherit_ca_weights_device(Organism* organism) {
         PoolEntry* child = &pool->entries[child_idx];
         PoolEntry* parent = &pool->entries[parent_idx];
 
-        DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights_device: child became dead between find and inherit");
-        DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights_device: parent became dead between find and inherit");
+        DEVICE_FATAL_IF(!pool->alive_flags[child_idx], "inherit_ca_weights_device: child is dead");
+        DEVICE_FATAL_IF(!pool->alive_flags[parent_idx], "inherit_ca_weights_device: parent is dead");
         DEVICE_FATAL_IF(!child->ca_state, "inherit_ca_weights_device: child ca_state is null");
         DEVICE_FATAL_IF(!parent->ca_state, "inherit_ca_weights_device: parent ca_state is null");
 

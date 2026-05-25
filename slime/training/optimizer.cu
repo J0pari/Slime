@@ -33,12 +33,12 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        int head = tid / per_head_perception;
-        int local = tid % per_head_perception;
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        int head = pi / per_head_perception;
+        int local = pi % per_head_perception;
         int grad_idx = head * per_head_total + local;
 
-        float weight = __half2float(weights_fp16[tid]);
+        float weight = __half2float(weights_fp16[pi]);
         float g = gradients[grad_idx];
 
         DEVICE_FATAL_IF(isnan(g), "adam_perception: gradient is NaN");
@@ -48,11 +48,11 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_perception: denom is NaN/Inf");
@@ -62,7 +62,7 @@ __device__ void adam_update_perception_device(Organism* organism, int entry_idx)
         DEVICE_FATAL_IF(isnan(weight), "adam_perception: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_perception: weight became Inf");
 
-        weights_fp16[tid] = __float2half(weight);
+        weights_fp16[pi] = __float2half(weight);
         gradients[grad_idx] = 0.0f;
     }
 }
@@ -97,12 +97,12 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        int head = tid / per_head_interaction;
-        int local = tid % per_head_interaction;
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        int head = pi / per_head_interaction;
+        int local = pi % per_head_interaction;
         int grad_idx = head * per_head_total + per_head_perception + local;
 
-        float weight = __half2float(weights_fp16[tid]);
+        float weight = __half2float(weights_fp16[pi]);
         float g = gradients[grad_idx];
 
         DEVICE_FATAL_IF(isnan(g), "adam_interaction: gradient is NaN");
@@ -112,11 +112,11 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_interaction: denom is NaN/Inf");
@@ -126,7 +126,7 @@ __device__ void adam_update_interaction_device(Organism* organism, int entry_idx
         DEVICE_FATAL_IF(isnan(weight), "adam_interaction: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_interaction: weight became Inf");
 
-        weights_fp16[tid] = __float2half(weight);
+        weights_fp16[pi] = __float2half(weight);
         gradients[grad_idx] = 0.0f;
     }
 }
@@ -163,12 +163,12 @@ __device__ void adam_update_flow_projection_device(Organism* organism, int entry
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        int head = tid / per_head_flow_projection;
-        int local = tid % per_head_flow_projection;
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        int head = pi / per_head_flow_projection;
+        int local = pi % per_head_flow_projection;
         int grad_idx = head * per_head_total + per_head_perception + per_head_interaction + local;
 
-        float weight = __half2float(weights_fp16[tid]);
+        float weight = __half2float(weights_fp16[pi]);
         float g = gradients[grad_idx];
 
         DEVICE_FATAL_IF(isnan(g), "adam_flow_projection: gradient is NaN");
@@ -178,11 +178,11 @@ __device__ void adam_update_flow_projection_device(Organism* organism, int entry
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_flow_projection: denom is NaN/Inf");
@@ -192,7 +192,7 @@ __device__ void adam_update_flow_projection_device(Organism* organism, int entry
         DEVICE_FATAL_IF(isnan(weight), "adam_flow_projection: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_flow_projection: weight became Inf");
 
-        weights_fp16[tid] = __float2half(weight);
+        weights_fp16[pi] = __float2half(weight);
         gradients[grad_idx] = 0.0f;
     }
 }
@@ -204,13 +204,13 @@ __device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
     PoolEntry* entry = &organism->pool->entries[entry_idx];
     HybridTrainingMode* training_mode = organism->training_mode;
 
-    constexpr int POOLING_ENTRY_STRIDE = NUM_HEADS * CHANNELS;
+    constexpr int POOLING_ENTRY_STRIDE = CLASSIFIER_FEATURE_DIM;
 
     float* weights = classifier->pooling_weights;
     float* gradients = organism->pooling_weights_grad + entry_idx * POOLING_ENTRY_STRIDE;
     float* m = organism->adam_m_pooling + entry_idx * POOLING_ENTRY_STRIDE;
     float* v = organism->adam_v_pooling + entry_idx * POOLING_ENTRY_STRIDE;
-    int num_params = entry->num_heads * entry->channels;
+    int num_params = entry->num_heads * POOLING_NUM_TILES * entry->channels;
     float lr = training_mode->learning_rate;
     float beta1 = ADAM_BETA1;
     float beta2 = ADAM_BETA2;
@@ -218,8 +218,8 @@ __device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        float g = gradients[tid];
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        float g = gradients[pi];
 
         DEVICE_FATAL_IF(isnan(g), "adam_pooling: gradient is NaN");
         DEVICE_FATAL_IF(isinf(g), "adam_pooling: gradient is Inf");
@@ -228,23 +228,23 @@ __device__ void adam_update_pooling_device(Organism* organism, int entry_idx) {
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_pooling: denom is NaN/Inf");
 
-        float weight = weights[tid];
+        float weight = weights[pi];
         weight -= lr * m_hat / denom;
 
         DEVICE_FATAL_IF(isnan(weight), "adam_pooling: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_pooling: weight became Inf");
 
-        weights[tid] = weight;
-        gradients[tid] = 0.0f;
+        weights[pi] = weight;
+        gradients[pi] = 0.0f;
     }
 }
 
@@ -255,9 +255,9 @@ __device__ void adam_update_fc_weights_device(Organism* organism, int entry_idx)
     HybridTrainingMode* training_mode = organism->training_mode;
     int num_classes = organism->current_dataset->descriptor->num_classes;
     PoolEntry* entry = &organism->pool->entries[entry_idx];
-    int num_features = entry->num_heads * entry->channels;
+    int num_features = entry->num_heads * POOLING_NUM_TILES * entry->channels;
 
-    constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * NUM_HEADS * CHANNELS;
+    constexpr int FC_WEIGHTS_ENTRY_STRIDE = NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM;
 
     float* weights = classifier->fc_weights;
     float* gradients = organism->fc_weights_grad + entry_idx * FC_WEIGHTS_ENTRY_STRIDE;
@@ -271,8 +271,8 @@ __device__ void adam_update_fc_weights_device(Organism* organism, int entry_idx)
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        float g = gradients[tid];
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        float g = gradients[pi];
 
         DEVICE_FATAL_IF(isnan(g), "adam_fc_weights: gradient is NaN");
         DEVICE_FATAL_IF(isinf(g), "adam_fc_weights: gradient is Inf");
@@ -281,23 +281,23 @@ __device__ void adam_update_fc_weights_device(Organism* organism, int entry_idx)
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_fc_weights: denom is NaN/Inf");
 
-        float weight = weights[tid];
+        float weight = weights[pi];
         weight -= lr * m_hat / denom;
 
         DEVICE_FATAL_IF(isnan(weight), "adam_fc_weights: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_fc_weights: weight became Inf");
 
-        weights[tid] = weight;
-        gradients[tid] = 0.0f;
+        weights[pi] = weight;
+        gradients[pi] = 0.0f;
     }
 }
 
@@ -322,8 +322,8 @@ __device__ void adam_update_fc_bias_device(Organism* organism, int entry_idx) {
     int timestep = training_mode->adam_timestep + 1;
     float gradient_clip_norm = GRADIENT_CLIP_NORM;
 
-    if (tid < num_params) {
-        float g = gradients[tid];
+    for (int pi = tid; pi < num_params; pi += blockDim.x) {
+        float g = gradients[pi];
 
         DEVICE_FATAL_IF(isnan(g), "adam_fc_bias: gradient is NaN");
         DEVICE_FATAL_IF(isinf(g), "adam_fc_bias: gradient is Inf");
@@ -332,30 +332,24 @@ __device__ void adam_update_fc_bias_device(Organism* organism, int entry_idx) {
             g = copysignf(gradient_clip_norm, g);
         }
 
-        m[tid] = beta1 * m[tid] + (1.0f - beta1) * g;
-        v[tid] = beta2 * v[tid] + (1.0f - beta2) * g * g;
+        m[pi] = beta1 * m[pi] + (1.0f - beta1) * g;
+        v[pi] = beta2 * v[pi] + (1.0f - beta2) * g * g;
 
-        float m_hat = m[tid] / (1.0f - powf(beta1, (float)timestep));
-        float v_hat = v[tid] / (1.0f - powf(beta2, (float)timestep));
+        float m_hat = m[pi] / (1.0f - powf(beta1, (float)timestep));
+        float v_hat = v[pi] / (1.0f - powf(beta2, (float)timestep));
 
         float denom = sqrtf(v_hat) + epsilon;
         DEVICE_FATAL_IF(isnan(denom) || isinf(denom), "adam_fc_bias: denom is NaN/Inf");
 
-        float weight = weights[tid];
+        float weight = weights[pi];
         weight -= lr * m_hat / denom;
 
         DEVICE_FATAL_IF(isnan(weight), "adam_fc_bias: weight became NaN");
         DEVICE_FATAL_IF(isinf(weight), "adam_fc_bias: weight became Inf");
 
-        weights[tid] = weight;
-        gradients[tid] = 0.0f;
+        weights[pi] = weight;
+        gradients[pi] = 0.0f;
     }
 }
-
-// adam_apply_unified_ca_grads_device REMOVED: NaN/Inf checks merged into per-entry Adam.
-// Gradients flow: backward → ca_state->tape.grad_buffer → per-entry Adam (one path).
-
-// adam_apply_unified_classifier_grads_device REMOVED: NaN/Inf checks merged into per-entry Adam.
-// Classifier gradients flow: backward → fc_weights_grad/fc_bias_grad/pooling_weights_grad → per-entry Adam.
 
 #endif

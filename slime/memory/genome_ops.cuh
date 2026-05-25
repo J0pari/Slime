@@ -224,11 +224,6 @@ namespace GenomeParamTable {
     constexpr int curriculum_min_generations = CURRICULUM_BLOCK + 2;
 
     
-    constexpr int CONVERGENCE_BLOCK = 28 * BLOCK_SIZE;
-    constexpr int convergence_fitness_threshold = CONVERGENCE_BLOCK + 0;
-    constexpr int convergence_coherence_threshold = CONVERGENCE_BLOCK + 1;
-
-    
     constexpr int DELTA_BLOCK = 30 * BLOCK_SIZE;
     constexpr int delta_threshold = DELTA_BLOCK + 0;
 
@@ -296,10 +291,6 @@ namespace GenomeParamTable {
     constexpr int BOUNDS_BLOCK_6 = 41 * BLOCK_SIZE;
     constexpr int weight_delta_threshold_min = BOUNDS_BLOCK_6 + 0;
     constexpr int weight_delta_threshold_max = BOUNDS_BLOCK_6 + 1;
-    constexpr int convergence_fitness_min = BOUNDS_BLOCK_6 + 2;
-    constexpr int convergence_fitness_max = BOUNDS_BLOCK_6 + 3;
-    constexpr int convergence_coherence_min = BOUNDS_BLOCK_6 + 4;
-    constexpr int convergence_coherence_max = BOUNDS_BLOCK_6 + 5;
     constexpr int genome_slot = BOUNDS_BLOCK_6 + 6;
 
     constexpr int EPIGENETIC_SENSITIVITY_BLOCK = 64 * BLOCK_SIZE;

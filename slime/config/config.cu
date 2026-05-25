@@ -36,17 +36,44 @@
 #define SLIME_DEBUG_PRINT(...) ((void)0)
 #endif
 
+struct DeviceErrorEntry {
+    int generation;
+    int block_id;
+    int thread_id;
+    int source_line;
+    char message[120];
+};
+
+constexpr int DEVICE_ERROR_LOG_CAPACITY = 64;
+constexpr int KERNEL_PHASE_COUNTER_COUNT = 28;
+
+__device__ DeviceErrorEntry g_device_error_log[DEVICE_ERROR_LOG_CAPACITY];
+__device__ int g_device_error_count = 0;
+__device__ int g_device_error_generation = 0;
+
+__device__ inline void device_log_error(const char* msg, int line, int blk, int thr) {
+    int idx = atomicAdd(&g_device_error_count, 1);
+    if (idx < DEVICE_ERROR_LOG_CAPACITY) {
+        DeviceErrorEntry* e = &g_device_error_log[idx];
+        e->generation = g_device_error_generation;
+        e->block_id = blk;
+        e->thread_id = thr;
+        e->source_line = line;
+        int i = 0;
+        while (msg[i] && i < 119) { e->message[i] = msg[i]; i++; }
+        e->message[i] = '\0';
+    }
+}
+
 #define DEVICE_FATAL(msg) \
     do { \
-        printf("!FATAL [%s:%d] b%d t%d %s\n", __FILE__, __LINE__, blockIdx.x, threadIdx.x, msg); \
+        device_log_error(msg, __LINE__, blockIdx.x, threadIdx.x); \
     } while(0)
 
-#define DEVICE_FATAL_IF(cond, ...) \
+#define DEVICE_FATAL_IF(cond, fmt, ...) \
     do { \
         if (cond) { \
-            printf("!FATAL [%s:%d] b%d t%d ", __FILE__, __LINE__, blockIdx.x, threadIdx.x); \
-            printf(__VA_ARGS__); \
-            printf("\n"); \
+            device_log_error(fmt, __LINE__, blockIdx.x, threadIdx.x); \
         } \
     } while(0)
 
@@ -97,6 +124,8 @@ enum RDFieldSlot {
 
 constexpr int WMMA_TILE_DIM = 16;
 constexpr int WARP_SIZE = 32;
+constexpr int GATHER_NEIGHBORHOOD_SIZE = 9;
+constexpr float GATHER_NORMALIZATION = 1.0f / (float)GATHER_NEIGHBORHOOD_SIZE;
 constexpr int BANK_PAD = 1;
 
 constexpr int CDP_SYNC_DEPTH = 4;
@@ -299,10 +328,7 @@ constexpr int SHA256_HASH_SIZE = 32;
 constexpr int PATH_BUFFER_SIZE = 512;
 constexpr int BYTES_PER_KB = 1024;
 constexpr int BYTES_PER_MB = BYTES_PER_KB * BYTES_PER_KB;
-constexpr int TELEMETRY_EVERY_GEN = 1;
-constexpr int TELEMETRY_DETAILED = 10;
-constexpr int TELEMETRY_COMPREHENSIVE = 1;
-constexpr int CHECKPOINT_INTERVAL = TELEMETRY_DETAILED;
+constexpr int PREDICTION_ERROR_HISTORY_LENGTH = 10;
 
 
 
@@ -474,6 +500,7 @@ constexpr float BALDWIN_SENSITIVITY_MAX = 1.0f;
 
 constexpr int ATTRACTOR_DIM_MIN = 4;
 constexpr int ATTRACTOR_DIM_MAX = 16;
+constexpr int MAX_ATTRACTORS = POOL_CAPACITY_MAX;
 constexpr int CA_STATE_DIM_MIN = 4;
 constexpr int CA_STATE_DIM_MAX = 16;
 constexpr int GENOME_LATENT_DIM_MIN = 32;
@@ -672,7 +699,10 @@ constexpr float EXPLORATION_BASE_MIN = 0.0f;
 constexpr float EXPLORATION_BASE_MAX = 0.5f;         
 
 
-constexpr float SENSITIVITY_THRESHOLD_BASE_MIN = 0.001f;  
+constexpr float BEHAVIORAL_EXPLORATION_NOISE_INIT = 0.1f;
+constexpr float BEHAVIORAL_SENSITIVITY_INIT = 0.05f;
+
+constexpr float SENSITIVITY_THRESHOLD_BASE_MIN = 0.001f;
 constexpr float SENSITIVITY_THRESHOLD_BASE_MAX = 0.05f;   
 constexpr float EXPLORATION_GROWTH_BASE_MIN = 1.01f;      
 constexpr float EXPLORATION_GROWTH_BASE_MAX = 1.20f;      
@@ -719,11 +749,19 @@ constexpr int NUM_HEADS = 2;       // DEBUG: e2e (prod: 8)
 constexpr int HEAD_DIM = 32;       // DEBUG: e2e (prod: 64)
 constexpr int CHANNELS = 16;       // DEBUG: e2e (prod: 16)
 constexpr int GRID_SIZE = 32;      // DEBUG: e2e (prod: 64)
+constexpr float PERCEPTION_OUTPUT_SCALE = 0.25f;  // 1/sqrt(CHANNELS) — stabilize fp16 conversion
+constexpr float INTERACTION_OUTPUT_SCALE = 0.176777f;  // 1/sqrt(HEAD_DIM) — stabilize flow projection
 constexpr int HIDDEN_DIM = NUM_HEADS * HEAD_DIM;
 constexpr int CA_INPUT_CHANNELS = 3;
 
+constexpr int POOLING_TILES_K = 4;
+constexpr int POOLING_NUM_TILES = POOLING_TILES_K * POOLING_TILES_K;
+static_assert(GRID_SIZE % POOLING_TILES_K == 0, "GRID_SIZE must be divisible by POOLING_TILES_K");
+constexpr int POOLING_TILE_CELLS = (GRID_SIZE / POOLING_TILES_K) * (GRID_SIZE / POOLING_TILES_K);
+constexpr int CLASSIFIER_FEATURE_DIM = NUM_HEADS * POOLING_NUM_TILES * CHANNELS;
+constexpr float CLASSIFIER_POOLING_INIT_SCALE = 0.1f;
 
-constexpr int DIRESA_TASK_INPUT_DIM = NUM_HEADS * CHANNELS;
+constexpr int DIRESA_TASK_INPUT_DIM = CLASSIFIER_FEATURE_DIM;
 constexpr size_t DIRESA_TASK_STRIDE_PER_ENTRY =
     DIRESA_TASK_INPUT_DIM * DIRESA_HIDDEN1_MAX + DIRESA_HIDDEN1_MAX +
     DIRESA_HIDDEN1_MAX * DIRESA_HIDDEN2_MAX + DIRESA_HIDDEN2_MAX +
@@ -781,6 +819,7 @@ constexpr float FLOW_LENIA_LR_MIN = 0.00001f;
 constexpr float FLOW_LENIA_LR_MAX = 0.001f;
 constexpr float BATCH_SIZE_NORM_MIN = 0.0f;
 constexpr float BATCH_SIZE_NORM_MAX = 1.0f;
+constexpr float LABEL_SMOOTHING = 0.1f;
 constexpr float ADAM_BETA1_MIN = 0.85f;
 constexpr float ADAM_BETA1_MAX = 0.95f;
 constexpr float ADAM_BETA2_MIN = 0.99f;
@@ -897,7 +936,7 @@ constexpr uint32_t AUDIT_MASK_CA_SNAPSHOT = (1 << 11);
 constexpr uint32_t AUDIT_MASK_STATE_EXPORT = (1 << 12);
 
 __device__ __forceinline__ float compute_ca_gate_center(float coherence) {
-    return 2.0f - 1.5f * coherence;
+    return 1.0f - 1.5f * coherence;
 }
 
 #endif

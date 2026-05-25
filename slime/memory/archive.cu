@@ -565,8 +565,8 @@ __device__ void store_elite_weight_deltas_device(
 ) {
     GPUElite* archive = organism->archive;
 
-    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
-    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS, "store_weight_deltas: num_heads invalid");
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "store_elite_weight_deltas_device: weight_deltas is null");
+    DEVICE_FATAL_IF(num_heads <= 0 || num_heads > NUM_HEADS, "store_elite_weight_deltas_device: num_heads invalid");
     DEVICE_FATAL_IF(channels <= 0 || channels > CHANNELS, "store_weight_deltas: channels invalid");
     DEVICE_FATAL_IF(head_dim <= 0 || head_dim > HEAD_DIM, "store_weight_deltas: head_dim invalid");
     DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "store_weight_deltas: elite_idx invalid");
@@ -645,8 +645,8 @@ __device__ void restore_elite_weights_device(
 ) {
     const GPUElite* archive = organism->archive;
 
-    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
-    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "restore_weights: elite_idx invalid");
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "restore_elite_weights_device: weight_deltas is null");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "restore_elite_weights_device: elite_idx invalid");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];
@@ -691,8 +691,8 @@ __device__ void apply_weight_deltas_device(
 ) {
     const GPUElite* archive = organism->archive;
 
-    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "archive->weight_deltas is null");
-    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "apply_deltas: elite_idx invalid");
+    DEVICE_FATAL_IF(archive->weight_deltas == nullptr, "apply_weight_deltas_device: weight_deltas is null");
+    DEVICE_FATAL_IF(elite_idx < 0 || elite_idx >= MAX_ARCHIVE_SIZE, "apply_weight_deltas_device: elite_idx invalid");
 
     int num_heads = archive->archived_num_heads[elite_idx];
     int channels = archive->archived_channels[elite_idx];

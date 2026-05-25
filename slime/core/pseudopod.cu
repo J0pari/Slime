@@ -19,25 +19,38 @@ namespace cg = cooperative_groups;
 namespace wmma = nvcuda::wmma;
 
 __device__ void compute_coherence_device(Organism* organism) {
-    float* loss_history = organism->loss_history;
+    float* history = organism->loss_history;
     float* coherence = organism->coherence_output;
-    int history_length = organism->loss_history_length;
+    int valid_count = organism->loss_history_length;
+    int capacity = PREDICTION_ERROR_HISTORY_LENGTH;
+    int generation = organism->generation;
 
     int tid = threadIdx.x;
 
+    if (valid_count < 2) {
+        if (tid == 0) *coherence = 0.0f;
+        return;
+    }
+
+    int write_head = generation % capacity;
+    int oldest_slot = (valid_count < capacity) ? 0 : (write_head + 1) % capacity;
+
     float local_improvement = 0.0f;
 
-    if (tid < history_length - 1) {
-        float current_loss = loss_history[tid];
-        float next_loss = loss_history[tid + 1];
-        DEVICE_FATAL_IF(current_loss <= 0.0f, "compute_coherence_device: loss history contains non-positive value");
-        local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
+    if (tid < valid_count - 1) {
+        int idx_current = (oldest_slot + tid) % capacity;
+        int idx_next = (oldest_slot + tid + 1) % capacity;
+        float current_loss = history[idx_current];
+        float next_loss = history[idx_next];
+        if (current_loss > 0.0f) {
+            local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
+        }
     }
 
     float total = BlockReduce<BLOCK_SIZE>::sum(local_improvement);
 
     if (tid == 0) {
-        *coherence = total / (history_length - 1);
+        *coherence = total / (valid_count - 1);
     }
 }
 

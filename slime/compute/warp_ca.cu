@@ -136,41 +136,6 @@ __device__ void gpu_svd_device(
     }
 }
 
-__device__ void coherence_device(
-    Organism* organism,
-    float* __restrict__ prediction_errors,
-    float* __restrict__ coherence_out,
-    int history_length
-) {
-    DEVICE_FATAL_IF(prediction_errors == nullptr, "coherence_kernel: prediction_errors is null");
-    DEVICE_FATAL_IF(coherence_out == nullptr, "coherence_kernel: coherence_out is null");
-    DEVICE_FATAL_IF(history_length < 2, "coherence_kernel: history_length must be >= 2");
-
-    __shared__ float learning_progress;
-
-    if (threadIdx.x == 0) learning_progress = 0.0f;
-    cg::this_grid().sync();
-
-    float local_progress = 0.0f;
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (tid < history_length - 1) {
-        float curr_error = prediction_errors[tid];
-        float next_error = prediction_errors[tid + 1];
-        if (curr_error > 0.0f) {
-            local_progress = fmaxf(0.0f, (curr_error - next_error) / curr_error);
-        }
-    }
-
-    cg::this_grid().sync();
-    local_progress = BlockReduce<BLOCK_SIZE>::sum(local_progress);
-
-    if (threadIdx.x == 0) {
-        learning_progress = local_progress / (history_length - 1);
-        *coherence_out = learning_progress;
-    }
-}
-
 __device__ void hunger_device(
     Organism* organism,
     float* __restrict__ coherence_values,

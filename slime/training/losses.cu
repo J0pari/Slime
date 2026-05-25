@@ -5,137 +5,57 @@
 #include "../config/config.cu"
 #include "../core/organism.cu"
 #include <cuda_runtime.h>
-#include <stdio.h>
 
-__device__ void mse_loss_device(Organism* organism) {
-    float* predictions = organism->loss_predictions;
-    float* targets = organism->loss_targets;
-    float* loss_out = organism->loss_out;
-    int batch_size = organism->loss_batch_size;
-    int dim = organism->loss_dim;
-    DEVICE_FATAL_IF(predictions == nullptr, "mse_loss: predictions is null");
-    DEVICE_FATAL_IF(targets == nullptr, "mse_loss: targets is null");
-    DEVICE_FATAL_IF(loss_out == nullptr, "mse_loss: loss_out is null");
-    DEVICE_FATAL_IF(batch_size <= 0, "mse_loss: batch_size must be positive");
-    DEVICE_FATAL_IF(dim <= 0, "mse_loss: dim must be positive");
+__device__ void cross_entropy_label_smoothing_device(
+    const float* __restrict__ logits,
+    const int* __restrict__ labels,
+    float* __restrict__ logit_grads,
+    float* loss_out,
+    int batch_size, int num_classes,
+    float smoothing,
+    int tid, int block_threads
+) {
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
+    int num_warps = block_threads / WARP_SIZE;
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < batch_size * dim) {
-        float pred = predictions[idx];
-        float target = targets[idx];
+    float true_weight = 1.0f - smoothing;
+    float smooth_weight = smoothing / (float)num_classes;
 
-        DEVICE_FATAL_IF(isnan(pred), "mse_loss: prediction is NaN");
-        DEVICE_FATAL_IF(isnan(target), "mse_loss: target is NaN");
+    for (int sample_base = 0; sample_base < batch_size; sample_base += num_warps) {
+        int batch_idx = sample_base + warp_id;
+        if (batch_idx < batch_size) {
+            int label = labels[batch_idx];
+            DEVICE_FATAL_IF(label < 0 || label >= num_classes, "cross_entropy_smooth: label out of range");
 
-        float diff = pred - target;
-        float squared_error = diff * diff;
+            const float* batch_logits = &logits[batch_idx * num_classes];
+            float* batch_grads = &logit_grads[batch_idx * num_classes];
 
-        atomicAdd(loss_out, squared_error / (float)(batch_size * dim));
-    }
-}
+            float local_val = (lane_id < num_classes) ? batch_logits[lane_id] : -INFINITY;
+            float max_logit = warp_reduce_max(local_val);
+            max_logit = __shfl_sync(0xffffffff, max_logit, 0);
 
-__device__ void cross_entropy_loss_device(Organism* organism) {
-    float* logits = organism->loss_logits;
-    int* labels = organism->loss_labels;
-    float* loss_out = organism->loss_out;
-    float* gradients = organism->loss_gradients;
-    int batch_size = organism->loss_batch_size;
-    int num_classes = organism->loss_num_classes;
-    DEVICE_FATAL_IF(logits == nullptr, "cross_entropy: logits is null");
-    DEVICE_FATAL_IF(labels == nullptr, "cross_entropy: labels is null");
-    DEVICE_FATAL_IF(loss_out == nullptr, "cross_entropy: loss_out is null");
-    DEVICE_FATAL_IF(batch_size <= 0, "cross_entropy: batch_size must be positive");
-    DEVICE_FATAL_IF(num_classes <= 0, "cross_entropy: num_classes must be positive");
+            float local_exp = (lane_id < num_classes) ? expf(local_val - max_logit) : 0.0f;
+            float sum_exp = warp_reduce_sum(local_exp);
+            sum_exp = __shfl_sync(0xffffffff, sum_exp, 0);
 
-    int sample = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sample < batch_size) {
-        int label = labels[sample];
-        DEVICE_FATAL_IF(label < 0 || label >= num_classes, "cross_entropy: label out of range");
+            if (lane_id < num_classes) {
+                float prob = local_exp / sum_exp;
+                float target = smooth_weight + ((lane_id == label) ? true_weight : 0.0f);
+                batch_grads[lane_id] = (prob - target) / batch_size;
+            }
 
-        float* sample_logits = &logits[sample * num_classes];
-
-        float max_logit = sample_logits[0];
-        for (int c = 1; c < num_classes; c++) {
-            float val = sample_logits[c];
-            DEVICE_FATAL_IF(isnan(val), "cross_entropy: logit is NaN");
-            if (val > max_logit) max_logit = val;
-        }
-
-        float sum_exp = 0.0f;
-        for (int c = 0; c < num_classes; c++) {
-            sum_exp += expf(sample_logits[c] - max_logit);
-        }
-
-        DEVICE_FATAL_IF(sum_exp <= 0.0f, "cross_entropy: sum_exp is non-positive");
-
-        float log_sum_exp = max_logit + logf(sum_exp);
-        float sample_loss = log_sum_exp - sample_logits[label];
-
-        DEVICE_FATAL_IF(isnan(sample_loss), "cross_entropy: loss became NaN");
-        DEVICE_FATAL_IF(isinf(sample_loss), "cross_entropy: loss became Inf");
-
-        atomicAdd(loss_out, sample_loss / (float)batch_size);
-
-        DEVICE_FATAL_IF(gradients == nullptr, "cross_entropy_kernel: gradients buffer required");
-        float* sample_grads = &gradients[sample * num_classes];
-        for (int c = 0; c < num_classes; c++) {
-            float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
-            float grad = (softmax_c - (c == label ? 1.0f : 0.0f)) / (float)batch_size;
-            sample_grads[c] = grad;
-        }
-    }
-}
-
-__device__ void cross_entropy_label_smoothing_device(Organism* organism) {
-    float* logits = organism->loss_logits;
-    int* labels = organism->loss_labels;
-    float* loss_out = organism->loss_out;
-    float* gradients = organism->loss_gradients;
-    int batch_size = organism->loss_batch_size;
-    int num_classes = organism->loss_num_classes;
-    float smoothing = organism->loss_smoothing;
-    DEVICE_FATAL_IF(logits == nullptr, "cross_entropy_smooth: logits is null");
-    DEVICE_FATAL_IF(labels == nullptr, "cross_entropy_smooth: labels is null");
-    DEVICE_FATAL_IF(loss_out == nullptr, "cross_entropy_smooth: loss_out is null");
-    DEVICE_FATAL_IF(smoothing < 0.0f || smoothing > 1.0f, "cross_entropy_smooth: smoothing must be in [0,1]");
-
-    int sample = blockIdx.x * blockDim.x + threadIdx.x;
-    if (sample < batch_size) {
-        int label = labels[sample];
-        DEVICE_FATAL_IF(label < 0 || label >= num_classes, "cross_entropy_smooth: label out of range");
-
-        float* sample_logits = &logits[sample * num_classes];
-
-        float max_logit = sample_logits[0];
-        for (int c = 1; c < num_classes; c++) {
-            if (sample_logits[c] > max_logit) max_logit = sample_logits[c];
-        }
-
-        float sum_exp = 0.0f;
-        for (int c = 0; c < num_classes; c++) {
-            sum_exp += expf(sample_logits[c] - max_logit);
-        }
-
-        float log_sum_exp = max_logit + logf(sum_exp);
-
-        float true_weight = 1.0f - smoothing;
-        float smooth_weight = smoothing / (float)num_classes;
-
-        float sample_loss = 0.0f;
-        for (int c = 0; c < num_classes; c++) {
-            float target = smooth_weight + (c == label ? true_weight : 0.0f);
-            float log_prob = sample_logits[c] - log_sum_exp;
-            sample_loss -= target * log_prob;
-        }
-
-        atomicAdd(loss_out, sample_loss / (float)batch_size);
-
-        DEVICE_FATAL_IF(gradients == nullptr, "cross_entropy_label_smoothing_kernel: gradients buffer required");
-        float* sample_grads = &gradients[sample * num_classes];
-        for (int c = 0; c < num_classes; c++) {
-            float softmax_c = expf(sample_logits[c] - max_logit) / sum_exp;
-            float target = smooth_weight + (c == label ? true_weight : 0.0f);
-            sample_grads[c] = (softmax_c - target) / (float)batch_size;
+            if (lane_id == 0) {
+                float log_sum_exp = logf(sum_exp) + max_logit;
+                float sample_loss = 0.0f;
+                for (int c = 0; c < num_classes; c++) {
+                    float target_c = smooth_weight + ((c == label) ? true_weight : 0.0f);
+                    float log_prob = batch_logits[c] - log_sum_exp;
+                    sample_loss -= target_c * log_prob;
+                }
+                DEVICE_FATAL_IF(!isfinite(sample_loss), "cross_entropy_smooth: loss is NaN/Inf");
+                atomicAdd(loss_out, sample_loss / batch_size);
+            }
         }
     }
 }

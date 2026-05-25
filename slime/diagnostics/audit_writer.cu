@@ -53,13 +53,15 @@ int write_ca_snapshot(const char* path, int gen, TelemetryAuditEntry* audit) {
 }
 
 int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit) {
-    FILE* f = fopen(path, "w");
+    FILE* f = fopen(path, gen == 0 ? "w" : "a");
     if (!f) {
         fprintf(stderr, "FATAL: Cannot create predictions %s\n", path);
         return 1;
     }
     const char* mode = audit->is_train_batch ? "train" : "test";
-    fprintf(f, "sample,mode,label,prediction,confidence,correct\n");
+    if (gen == 0) {
+        fprintf(f, "gen,sample,mode,label,prediction,confidence,correct\n");
+    }
     for (int s = 0; s < AUDIT_SAMPLE_COUNT && s < audit->batch_size; s++) {
         if (std::isnan(audit->sample_confidences[s])) {
             fprintf(stderr, "FATAL: NAN confidence for sample %d, gen %d\n", s, gen);
@@ -71,8 +73,8 @@ int write_predictions_csv(const char* path, int gen, TelemetryAuditEntry* audit)
             fclose(f);
             return 1;
         }
-        fprintf(f, "%d,%s,%d,%d,%.6f,%d\n",
-                s, mode, audit->sample_labels[s], audit->sample_predictions[s],
+        fprintf(f, "%d,%d,%s,%d,%d,%.6f,%d\n",
+                gen, s, mode, audit->sample_labels[s], audit->sample_predictions[s],
                 audit->sample_confidences[s],
                 (audit->sample_labels[s] == audit->sample_predictions[s]) ? 1 : 0);
     }
@@ -105,6 +107,7 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
     if (gen == 0) {
         fprintf(f,
             "gen,mode,accuracy,loss,train_acc,test_acc,gen_gap,"
+            "avg_confidence,stability,"
             "pool_alive,pool_capacity,"
             "occupied_cells,frontier_gained,frontier_lost,sparse_cells,niche_entropy,novelty_gradient,"
             "fitness_best,fitness_mean,fitness_delta,quality_floor,quality_mean,quality_range,"
@@ -115,12 +118,13 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
             "total_pop,births,deaths,"
             "diresa_loss_hw,diresa_loss_task,diresa_loss_gen,diresa_loss_total,diresa_drift,diresa_utilization,"
             "unique_hashes,hash_entropy,avg_deltas,"
-            "correct,batch_size\n");
+            "correct,batch_size,error_count\n");
     }
 
     const char* mode = audit->is_train_batch ? "train" : "test";
     fprintf(f,
         "%d,%s,%.6f,%.6f,%.6f,%.6f,%.6f,"
+        "%.6f,%.6f,"
         "%d,%d,"
         "%d,%d,%d,%d,%.6f,%.6f,"
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -131,8 +135,9 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
         "%d,%d,%d,"
         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
         "%d,%.6f,%.6f,"
-        "%d,%d\n",
+        "%d,%d,%d\n",
         gen, mode, audit->accuracy, audit->loss, audit->train_accuracy, audit->test_accuracy, audit->generalization_gap,
+        audit->avg_confidence, audit->classification_stability,
         audit->pool_alive_count, audit->pool_capacity,
         audit->archive_occupied_cells, audit->frontier_cells_gained, audit->frontier_cells_lost, audit->sparse_cell_count, audit->niche_entropy, audit->novelty_gradient,
         audit->elite_fitness_best, audit->elite_fitness_mean, audit->elite_fitness_delta, audit->quality_floor, audit->quality_mean, audit->quality_range,
@@ -143,7 +148,7 @@ int write_generation_summary(const char* session_dir, int gen, TelemetryAuditEnt
         audit->total_population, audit->births_this_gen, audit->deaths_this_gen,
         audit->diresa_recon_loss_hw, audit->diresa_recon_loss_task, audit->diresa_recon_loss_gen, audit->diresa_recon_loss_total, audit->diresa_behavioral_drift, audit->diresa_latent_utilization,
         audit->genome_unique_hashes, audit->genome_hash_entropy, audit->genome_avg_deltas,
-        audit->correct_count, audit->batch_size);
+        audit->correct_count, audit->batch_size, audit->error_count);
 
     fclose(f);
     return 0;
@@ -153,16 +158,18 @@ int write_pool_state(const char* session_dir, int gen, TelemetryAuditEntry* audi
     if (!audit) return 1;
 
     char path[256];
-    snprintf(path, sizeof(path), "%s/pool_states/gen%04d.csv", session_dir, gen);
+    snprintf(path, sizeof(path), "%s/pool_states.csv", session_dir);
 
-    FILE* f = fopen(path, "w");
+    FILE* f = fopen(path, gen == 0 ? "w" : "a");
     if (!f) return 1;
 
-    fprintf(f, "entry,fitness,hunger,age,num_deltas,genome_hash\n");
+    if (gen == 0) {
+        fprintf(f, "gen,entry,fitness,hunger,age,num_deltas,genome_hash\n");
+    }
     for (int i = 0; i < audit->pool_capacity && i < POOL_CAPACITY_MAX; i++) {
         if (!audit->pool_entry_alive[i]) continue;
-        fprintf(f, "%d,%.6f,%.6f,%d,%d,%llu\n",
-                i,
+        fprintf(f, "%d,%d,%.6f,%.6f,%d,%d,%llu\n",
+                gen, i,
                 audit->pool_entry_fitness[i],
                 audit->pool_entry_hunger[i],
                 audit->pool_entry_age[i],
@@ -206,17 +213,78 @@ int write_chemical_field(const char* session_dir, int gen, float* concentration,
     if (!concentration) return 1;
 
     char path[256];
-    snprintf(path, sizeof(path), "%s/chemical_fields/gen%04d.csv", session_dir, gen);
+    snprintf(path, sizeof(path), "%s/chemical_fields.csv", session_dir);
 
-    FILE* f = fopen(path, "w");
+    FILE* f = fopen(path, gen == 0 ? "w" : "a");
     if (!f) return 1;
 
+    if (gen == 0) {
+        fprintf(f, "gen,y,x,concentration\n");
+    }
     for (int y = 0; y < grid_size; y++) {
         for (int x = 0; x < grid_size; x++) {
-            fprintf(f, "%.6f%s", concentration[y * grid_size + x],
-                    x < grid_size - 1 ? "," : "\n");
+            fprintf(f, "%d,%d,%d,%.6f\n", gen, y, x, concentration[y * grid_size + x]);
         }
     }
+
+    fclose(f);
+    return 0;
+}
+
+int write_error_log(const char* session_dir, int gen, TelemetryAuditEntry* audit) {
+    if (audit->error_count == 0) return 0;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/errors.csv", session_dir);
+
+    FILE* f = fopen(path, gen == 0 ? "w" : "a");
+    if (!f) return 1;
+
+    if (gen == 0) {
+        fprintf(f, "gen,error_gen,block,thread,line,message\n");
+    }
+    for (int i = 0; i < audit->error_count && i < DEVICE_ERROR_LOG_CAPACITY; i++) {
+        DeviceErrorEntry* e = &audit->error_log[i];
+        fprintf(f, "%d,%d,%d,%d,%d,%s\n",
+                gen, e->generation, e->block_id, e->thread_id, e->source_line, e->message);
+    }
+    fclose(f);
+    return 0;
+}
+
+static const char* KERNEL_PHASE_NAMES[KERNEL_PHASE_COUNTER_COUNT] = {
+    "blocks_ca_fwd", "blocks_entered",
+    "flow_done", "bwd_enter", "bwd_fatal_checks", "bwd_chunk",
+    "bwd_value_grad", "bwd_inter_grad", "bwd_perc_grad", "bwd_done",
+    "bwd_zero_dw", "bwd_setup_done", "bwd_chunks_done",
+    "bwd_inter_grad_copy", "bwd_perc_grad_copy", "bwd_grad_conc",
+    "bwd_chunk0", "bwd_i_done", "bwd_v_done",
+    "bwd_chunk2_enter", "bwd_di_write", "bwd_perc_load", "bwd_dp_write",
+    "bwd_im2col", "bwd_conv_fp16", "bwd_input_grad", "bwd_scatter",
+    "post_bwd_barrier"
+};
+
+int write_kernel_diagnostics(const char* session_dir, int gen, TelemetryAuditEntry* audit) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/kernel_diagnostics.csv", session_dir);
+
+    FILE* f = fopen(path, gen == 0 ? "w" : "a");
+    if (!f) return 1;
+
+    if (gen == 0) {
+        fprintf(f, "gen,num_heads,head_dim,channels,num_blocks");
+        for (int i = 0; i < KERNEL_PHASE_COUNTER_COUNT; i++) {
+            fprintf(f, ",%s", KERNEL_PHASE_NAMES[i]);
+        }
+        fprintf(f, "\n");
+    }
+
+    fprintf(f, "%d,%d,%d,%d,%d",
+            gen, audit->num_heads, audit->head_dim, audit->channels, audit->num_blocks);
+    for (int i = 0; i < KERNEL_PHASE_COUNTER_COUNT; i++) {
+        fprintf(f, ",%d", audit->kernel_phase_counts[i]);
+    }
+    fprintf(f, "\n");
 
     fclose(f);
     return 0;

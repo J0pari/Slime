@@ -662,7 +662,7 @@ __device__ void memory_update_params_device(Organism* organism) {
 
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         DEVICE_FATAL_IF(tubes == nullptr, "memory_update_params_device: tubes is null");
-        DEVICE_FATAL_IF(generation < 1, "memory_update_params_device: generation < 1 - no previous data exists for fitness_trend");
+        DEVICE_FATAL_IF(generation < 1, "memory_update_params_device: generation < 1");
         DEVICE_FATAL_IF(fitness_history == nullptr, "memory_update_params_device: fitness_history is null");
 
         int decay_threshold_slot = GenomeParamTable::memory_decay_threshold;

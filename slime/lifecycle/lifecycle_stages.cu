@@ -215,6 +215,8 @@ __device__ void lifecycle_transition_device(Organism* organism) {
             local_state.organism_indices[local_idx] = idx;
             local_state.local_fitness[local_idx] = pool->fitness_values[idx];
             local_state.local_coherence[local_idx] = entry->coherence.value;
+            local_state.phases[local_idx] = entry->phase;
+            local_state.stress_accum[local_idx] = (entry->stress.state == ComputeState::COMPUTED) ? entry->stress.value : 0.0f;
         }
     }
 
@@ -314,6 +316,12 @@ __device__ void lifecycle_transition_device(Organism* organism) {
             measured_value_set_computed(&entry->fitness, new_fitness, generation, mod_hash);
             pool->fitness_values[idx] = new_fitness;
         }
+
+        LifecyclePhase final_phase = local_state.phases[local_idx];
+        entry->phase = final_phase;
+        measured_value_set_computed(&entry->stress, local_state.stress_accum[local_idx], generation, entry->genome_hash);
+        measured_value_set_computed(&entry->dormancy, (final_phase == LifecyclePhase::DORMANT) ? 1.0f : 0.0f, generation, entry->genome_hash);
+        measured_value_set_computed(&entry->reactivation, (final_phase == LifecyclePhase::REACTIVATING) ? 1.0f : 0.0f, generation, entry->genome_hash);
     }
 }
 
@@ -340,7 +348,7 @@ __device__ void hierarchical_lifecycle_device(Organism* organism) {
     
     
     int threads_in_block = min((int)blockDim.x, alive_count - block_id * blockDim.x);
-    DEVICE_FATAL_IF(threads_in_block <= 0, "hierarchical_lifecycle_kernel: block launched with no valid threads");
+    DEVICE_FATAL_IF(threads_in_block <= 0, "hierarchical_lifecycle_kernel: threads_in_block <= 0");
 
     bool has_organism = tid < threads_in_block;
     DEVICE_FATAL_IF(!has_organism && compact_idx < alive_count,
@@ -363,6 +371,8 @@ __device__ void hierarchical_lifecycle_device(Organism* organism) {
         local_state.organism_indices[tid] = actual_idx;
         local_state.local_fitness[tid] = entry->fitness.value;
         local_state.local_coherence[tid] = entry->coherence.value;
+        local_state.phases[tid] = entry->phase;
+        local_state.stress_accum[tid] = (entry->stress.state == ComputeState::COMPUTED) ? entry->stress.value : 0.0f;
         for (int i = 7; i > 0; i--) {
             local_state.gradient_history[tid][i] = local_state.gradient_history[tid][i-1];
         }
@@ -394,7 +404,11 @@ __device__ void hierarchical_lifecycle_device(Organism* organism) {
         const float* entry_gradients = entry->gradients;
 
         LifecyclePhase new_phase = local_organism_state_decide_transition(&local_state, tid, true, entry_hash, entry_genome, entry_gradients, ctx_metabolic, ctx_stress, ctx_morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance);
-        (void)new_phase;
+        local_state.phases[tid] = new_phase;
+        entry->phase = new_phase;
+        measured_value_set_computed(&entry->stress, local_state.stress_accum[tid], generation, entry_hash);
+        measured_value_set_computed(&entry->dormancy, (new_phase == LifecyclePhase::DORMANT) ? 1.0f : 0.0f, generation, entry_hash);
+        measured_value_set_computed(&entry->reactivation, (new_phase == LifecyclePhase::REACTIVATING) ? 1.0f : 0.0f, generation, entry_hash);
     }
 
     __shared__ float shared_fitness[BLOCK_SIZE];
@@ -537,60 +551,6 @@ __device__ void hierarchical_lifecycle_device(Organism* organism) {
     }
 }
 
-__device__ void component_evolution_device(Organism* organism) {
-    ComponentPool* pool = organism->pool;
-    GPUElite* archive = organism->archive;
-    int archive_size = organism->archive_size;
-    float* workspace_genomes = organism->workspace_genomes;
-
-    int tid = GridStride::thread_id();
-    if (tid < pool->capacity && pool->alive_flags[tid]) {
-        float* primary_genome = &workspace_genomes[tid * 2 * GENOME_SIZE];
-    float* primary_parent_temp = &workspace_genomes[tid * 2 * GENOME_SIZE + GENOME_SIZE];
-
-    PoolEntry* entry = &pool->entries[tid];
-    reconstruct_genome_from_archive(entry->parent_hash, archive, archive_size,
-        entry->delta_indices, entry->delta_values, entry->num_deltas,
-        entry->max_deltas, primary_genome, GENOME_SIZE, primary_parent_temp, organism->diresa_genome_weights);
-
-    if (tid == 0) {
-    }
-
-    cudaError_t err;
-
-    float current_task_accuracy = organism->telemetry->task_performance.accuracy;
-    DEVICE_FATAL_IF(isnan(current_task_accuracy), "component_evolution: task_accuracy is NaN");
-    measured_value_set_computed(&pool->entries[tid].task_accuracy, current_task_accuracy, organism->generation, pool->entries[tid].genome_hash);
-    float gen_gap = fabsf(organism->telemetry->task_performance.train_accuracy - organism->telemetry->task_performance.test_accuracy);
-    measured_value_set_computed(&pool->entries[tid].generalization_gap, gen_gap, organism->generation, pool->entries[tid].genome_hash);
-
-    if (tid == 0) {
-    }
-
-    organism->fitness_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].task_accuracy.value;
-    organism->coherence_history[(organism->generation % 2) * POOL_CAPACITY_MAX + tid] = pool->entries[tid].coherence.value;
-
-    if (tid == 0) {
-    }
-
-
-    if (organism->generation > 0 && tid < pool->capacity && pool->alive_flags[tid]) {
-        float prev_task_accuracy = organism->fitness_history[((organism->generation - 1) % 2) * POOL_CAPACITY_MAX + tid];
-        float learning_success = current_task_accuracy - prev_task_accuracy;
-
-        if (is_meaningful(learning_success, 1.0f)) {
-            float baldwin_sensitivity = pool->entries[tid].baldwin_sensitivity;
-            float scale = learning_success * baldwin_sensitivity;
-            float* grads = pool->entries[tid].gradients;
-            for (int g = threadIdx.x; g < GENOME_SIZE; g += blockDim.x) {
-                float val = grads[g] + scale * primary_genome[g];
-                grads[g] = fmaxf(GENOME_VALUE_MIN, fminf(GENOME_VALUE_MAX, val));
-            }
-        }
-    }
-    }  // close if (tid < pool->capacity && pool->alive_flags[tid])
-}
-
 __device__ void archive_driven_lifecycle_device(Organism* organism, float hunger_threshold) {
     ComponentPool* pool = organism->pool;
     GPUElite* archive = organism->archive;
@@ -612,12 +572,10 @@ __device__ void archive_driven_lifecycle_device(Organism* organism, float hunger
             }
         }
 
-        if (should_cull || !pool->alive_flags[idx]) {
+        if (should_cull) {
             DEVICE_FATAL_IF(archive_size <= 0, "archive_driven_lifecycle: archive empty when replacement needed");
-            if (should_cull) {
-                Atomics::increment_int(pool->total_culled);
-                Atomics::decrement_int(pool->active_count);
-            }
+            Atomics::increment_int(pool->total_culled);
+            Atomics::decrement_int(pool->active_count);
 
             float* thread_workspace = &workspace_genomes[idx * (2 * GENOME_SIZE + POOL_CAPACITY_MAX)];
             replace_from_archive_device(
@@ -635,7 +593,8 @@ __device__ void archive_driven_lifecycle_device(Organism* organism, float hunger
                 organism->telemetry->diresa_evolution.behavioral_drift_rate,
                 organism->telemetry->task_performance.accuracy,
                 thread_workspace,
-                diresa_genome_weights
+                diresa_genome_weights,
+                organism->classifier_num_classes
             );
 
             Atomics::increment_int(pool->active_count);

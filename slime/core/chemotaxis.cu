@@ -170,16 +170,22 @@ __device__ void behavioral_gradient_device(Organism* organism) {
     float* behavioral_gradients = organism->behavioral_gradients;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
+    int cells = grid_size * grid_size;
     int hw_dim = organism->hw_dim;
     int task_dim = organism->task_dim;
     int gen_dim = organism->gen_dim;
     int behavioral_dim = hw_dim + task_dim + gen_dim;
+    int total_work = cells * behavioral_dim;
 
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int dim = blockIdx.z;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
 
-    if (x < grid_size && y < grid_size && dim < behavioral_dim) {
+    for (int work_idx = global_tid; work_idx < total_work; work_idx += total_threads) {
+        int spatial_idx = work_idx / behavioral_dim;
+        int dim = work_idx % behavioral_dim;
+        int x = spatial_idx % grid_size;
+        int y = spatial_idx / grid_size;
+
         float grad_x, grad_y;
         Stencils::gradients_at(grad_x, grad_y, &behavioral_field[dim], x, y, grid_size, behavioral_dim);
 
@@ -188,7 +194,7 @@ __device__ void behavioral_gradient_device(Organism* organism) {
         grad_x /= magnitude;
         grad_y /= magnitude;
 
-        int grad_idx = ((y * grid_size + x) * behavioral_dim + dim) * 2;
+        int grad_idx = (spatial_idx * behavioral_dim + dim) * 2;
         behavioral_gradients[grad_idx] = grad_x;
         behavioral_gradients[grad_idx + 1] = grad_y;
     }
@@ -202,7 +208,7 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
     float* chem_gradient_y_field = chem->gradient_y;
     int chem_channels = chem->channels;
     float* behavioral_gradients = organism->behavioral_gradients;
-    int num_agents = organism->pool->capacity;
+    int num_alive = organism->pool->alive_indices_count;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
     int cells = grid_size * grid_size;
@@ -215,8 +221,9 @@ __device__ void chemotactic_navigation_device(Organism* organism) {
     int task_dim = organism->task_dim;
     int gen_dim = organism->gen_dim;
     int behavioral_dim = hw_dim + task_dim + gen_dim;
-    int agent_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (agent_id < num_agents) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < num_alive) {
+        int agent_id = organism->pool->alive_indices[tid];
         const float* genome = &organism->workspace_genomes[agent_id * GENOME_SIZE * 2];
     const float* gradients = organism->pool->entries[agent_id].gradients;
 
@@ -421,13 +428,15 @@ __device__ void create_attractors_device(Organism* organism) {
     float* attractor_strengths = organism->attractor_strengths;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
+    int cells = grid_size * grid_size;
     int num_attractors = organism->num_attractors;
 
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
 
-    if (x < grid_size && y < grid_size) {
-        int idx = y * grid_size + x;
+    for (int spatial_idx = global_tid; spatial_idx < cells; spatial_idx += total_threads) {
+        int x = spatial_idx % grid_size;
+        int y = spatial_idx / grid_size;
         float source_value = 0.0f;
 
         float px = (float)x / grid_size;
@@ -445,7 +454,7 @@ __device__ void create_attractors_device(Organism* organism) {
             source_value += strength * expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * FIELD_ATTRACTOR_SIGMA * FIELD_ATTRACTOR_SIGMA));
         }
 
-        sources[idx] = source_value;
+        sources[spatial_idx] = source_value;
     }
 }
 
@@ -587,7 +596,7 @@ __device__ void init_chemical_field_device(Organism* organism) {
 
     // Seed concentration from batch_samples (use batch 0)
     float* batch_samples = training_mode->batch_samples;
-    DEVICE_FATAL_IF(batch_samples == nullptr, "init_chemical_field: batch_samples null - must load samples first");
+    DEVICE_FATAL_IF(batch_samples == nullptr, "init_chemical_field: batch_samples is null");
 
     for (int idx = global_tid; idx < cells; idx += total_threads) {
         for (int c = 0; c < channels; c++) {
@@ -752,102 +761,97 @@ __device__ void set_chemical_sources_from_agents_device(Organism* organism) {
 __device__ void compute_behavioral_field_device(Organism* organism) {
     float* behavioral_field = organism->behavioral_field;
     BehavioralState* agents = organism->behavioral_agents;
-    int num_agents = organism->pool->capacity;
+    int num_agents = organism->pool->alive_indices_count;
     Architecture arch = Architecture::maxBounds();
     int grid_size = arch.grid_size;
+    int cells = grid_size * grid_size;
     int hw_dim = organism->hw_dim;
     int task_dim = organism->task_dim;
     int gen_dim = organism->gen_dim;
-
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x < grid_size && y < grid_size) {
-        float behavioral_field_sigma = FIELD_BEHAVIORAL_SIGMA;
-
-    float px = (float)x / grid_size;
-    float py = (float)y / grid_size;
-
     int behavioral_dim = hw_dim + task_dim + gen_dim;
-    int d_offset = 0;
 
-    for (int d = 0; d < hw_dim; d++) {
-        float field_value = 0.0f;
-        float weight_sum = 0.0f;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
 
-        for (int agent_id = 0; agent_id < num_agents; agent_id++) {
-            BehavioralState* agent = &agents[agent_id];
+    for (int spatial_idx = global_tid; spatial_idx < cells; spatial_idx += total_threads) {
+        int x = spatial_idx % grid_size;
+        int y = spatial_idx / grid_size;
+        float px = (float)x / grid_size;
+        float py = (float)y / grid_size;
 
-            float dx = fabsf(px - agent->position[0]);
-            float dy = fabsf(py - agent->position[1]);
-            dx = fminf(dx, NORMALIZED_MAX - dx);
-            dy = fminf(dy, NORMALIZED_MAX - dy);
-            float dist_sq = dx * dx + dy * dy;
+        int d_offset = 0;
 
-            float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
+        for (int d = 0; d < hw_dim; d++) {
+            float field_value = 0.0f;
+            float weight_sum = 0.0f;
 
-            field_value += weight * agent->hw_coords[d];
-            weight_sum += weight;
+            for (int i = 0; i < num_agents; i++) {
+                int eidx = organism->pool->alive_indices[i];
+                BehavioralState* agent = &agents[eidx];
+                float adx = fabsf(px - agent->position[0]);
+                float ady = fabsf(py - agent->position[1]);
+                adx = fminf(adx, NORMALIZED_MAX - adx);
+                ady = fminf(ady, NORMALIZED_MAX - ady);
+                float dist_sq = adx * adx + ady * ady;
+                float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * FIELD_BEHAVIORAL_SIGMA * FIELD_BEHAVIORAL_SIGMA));
+                field_value += weight * agent->hw_coords[d];
+                weight_sum += weight;
+            }
+
+            int field_idx = spatial_idx * behavioral_dim + d_offset;
+            if (is_meaningful(weight_sum, 1.0f)) {
+                behavioral_field[field_idx] = field_value / weight_sum;
+            }
+            d_offset++;
         }
 
-        int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        if (is_meaningful(weight_sum, 1.0f)) {
-            behavioral_field[field_idx] = field_value / weight_sum;
-        }
-        d_offset++;
-    }
+        for (int d = 0; d < task_dim; d++) {
+            float field_value = 0.0f;
+            float weight_sum = 0.0f;
 
-    for (int d = 0; d < task_dim; d++) {
-        float field_value = 0.0f;
-        float weight_sum = 0.0f;
+            for (int i = 0; i < num_agents; i++) {
+                int eidx = organism->pool->alive_indices[i];
+                BehavioralState* agent = &agents[eidx];
+                float adx = fabsf(px - agent->position[0]);
+                float ady = fabsf(py - agent->position[1]);
+                adx = fminf(adx, NORMALIZED_MAX - adx);
+                ady = fminf(ady, NORMALIZED_MAX - ady);
+                float dist_sq = adx * adx + ady * ady;
+                float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * FIELD_BEHAVIORAL_SIGMA * FIELD_BEHAVIORAL_SIGMA));
+                field_value += weight * agent->task_coords[d];
+                weight_sum += weight;
+            }
 
-        for (int agent_id = 0; agent_id < num_agents; agent_id++) {
-            BehavioralState* agent = &agents[agent_id];
-
-            float dx = fabsf(px - agent->position[0]);
-            float dy = fabsf(py - agent->position[1]);
-            dx = fminf(dx, NORMALIZED_MAX - dx);
-            dy = fminf(dy, NORMALIZED_MAX - dy);
-            float dist_sq = dx * dx + dy * dy;
-
-            float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
-
-            field_value += weight * agent->task_coords[d];
-            weight_sum += weight;
+            int field_idx = spatial_idx * behavioral_dim + d_offset;
+            if (is_meaningful(weight_sum, 1.0f)) {
+                behavioral_field[field_idx] = field_value / weight_sum;
+            }
+            d_offset++;
         }
 
-        int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        if (is_meaningful(weight_sum, 1.0f)) {
-            behavioral_field[field_idx] = field_value / weight_sum;
+        for (int d = 0; d < gen_dim; d++) {
+            float field_value = 0.0f;
+            float weight_sum = 0.0f;
+
+            for (int i = 0; i < num_agents; i++) {
+                int eidx = organism->pool->alive_indices[i];
+                BehavioralState* agent = &agents[eidx];
+                float adx = fabsf(px - agent->position[0]);
+                float ady = fabsf(py - agent->position[1]);
+                adx = fminf(adx, NORMALIZED_MAX - adx);
+                ady = fminf(ady, NORMALIZED_MAX - ady);
+                float dist_sq = adx * adx + ady * ady;
+                float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * FIELD_BEHAVIORAL_SIGMA * FIELD_BEHAVIORAL_SIGMA));
+                field_value += weight * agent->gen_coords[d];
+                weight_sum += weight;
+            }
+
+            int field_idx = spatial_idx * behavioral_dim + d_offset;
+            if (is_meaningful(weight_sum, 1.0f)) {
+                behavioral_field[field_idx] = field_value / weight_sum;
+            }
+            d_offset++;
         }
-        d_offset++;
-    }
-
-    for (int d = 0; d < gen_dim; d++) {
-        float field_value = 0.0f;
-        float weight_sum = 0.0f;
-
-        for (int agent_id = 0; agent_id < num_agents; agent_id++) {
-            BehavioralState* agent = &agents[agent_id];
-
-            float dx = fabsf(px - agent->position[0]);
-            float dy = fabsf(py - agent->position[1]);
-            dx = fminf(dx, NORMALIZED_MAX - dx);
-            dy = fminf(dy, NORMALIZED_MAX - dy);
-            float dist_sq = dx * dx + dy * dy;
-
-            float weight = expf(-dist_sq / (GAUSSIAN_VARIANCE_DENOMINATOR * behavioral_field_sigma * behavioral_field_sigma));
-
-            field_value += weight * agent->gen_coords[d];
-            weight_sum += weight;
-        }
-
-        int field_idx = (y * grid_size + x) * behavioral_dim + d_offset;
-        if (is_meaningful(weight_sum, 1.0f)) {
-            behavioral_field[field_idx] = field_value / weight_sum;
-        }
-        d_offset++;
-    }
     }
 }
 
@@ -997,17 +1001,22 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     float* epigenetic = entry->gradients;
     uint64_t genome_hash = entry->genome_hash;
 
-    float context_metabolic = entry->fitness.value;
+    float raw_fitness = entry->fitness.value;
+    float context_metabolic = isnan(raw_fitness) ? 0.0f : raw_fitness;
+    float safe_hash_entropy = isnan(organism->telemetry->genome_complexity.hash_entropy) ? 0.0f : organism->telemetry->genome_complexity.hash_entropy;
+    float safe_novelty_gradient = isnan(organism->telemetry->archive_topology.novelty_gradient) ? 0.0f : organism->telemetry->archive_topology.novelty_gradient;
+    float safe_drift_rate = isnan(organism->telemetry->diresa_evolution.behavioral_drift_rate) ? 0.0f : organism->telemetry->diresa_evolution.behavioral_drift_rate;
+    float safe_accuracy = isnan(organism->telemetry->task_performance.accuracy) ? 0.0f : organism->telemetry->task_performance.accuracy;
     int stress_numerator_slot = GenomeParamTable::context_stress_numerator;
     float stress_numerator = genome_to_param(
         genome, epigenetic, stress_numerator_slot,
-        entry->fitness.value,
+        context_metabolic,
         entry->hunger.value,
         safe_epsilon(1.0f),
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         NORMALIZED_MIN, NORMALIZED_MAX
     );
     DEVICE_FATAL_IF(entry->hunger.value <= 0.0f, "archive_driven_lifecycle: hunger <= 0 before stress division");
@@ -1023,10 +1032,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_s = genome_to_param(
         genome, epigenetic, s_param_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_S_MIN, FLOW_LENIA_S_MAX
     );
 
@@ -1034,10 +1043,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_beta_A = genome_to_param(
         genome, epigenetic, beta_A_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_BETA_A_MIN, FLOW_LENIA_BETA_A_MAX
     );
 
@@ -1045,10 +1054,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_n = genome_to_param(
         genome, epigenetic, n_param_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_N_MIN, FLOW_LENIA_N_MAX
     );
 
@@ -1056,10 +1065,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_alpha_min = genome_to_param(
         genome, epigenetic, alpha_min_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_ALPHA_MIN_MIN, FLOW_LENIA_ALPHA_MIN_MAX
     );
 
@@ -1067,10 +1076,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_alpha_max = genome_to_param(
         genome, epigenetic, alpha_max_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_ALPHA_MAX_MIN, FLOW_LENIA_ALPHA_MAX_MAX
     );
 
@@ -1078,10 +1087,10 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_sharpness = genome_to_param(
         genome, epigenetic, sharpness_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FLOW_LENIA_SHARPNESS_MIN, FLOW_LENIA_SHARPNESS_MAX
     );
 
@@ -1089,30 +1098,30 @@ __device__ void populate_organism_flow_params_device(Organism* organism) {
     entry->flow_resource_dt = genome_to_param(
         genome, epigenetic, resource_flow_dt_slot,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         RESOURCE_FLOW_DT_MIN, RESOURCE_FLOW_DT_MAX
     );
 
     entry->field_diffusivity = genome_to_param(
         genome, epigenetic, GenomeParamTable::field_diffusivity,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FIELD_DIFFUSIVITY_MIN, FIELD_DIFFUSIVITY_MAX
     );
 
     entry->field_decay_rate = genome_to_param(
         genome, epigenetic, GenomeParamTable::field_decay_rate,
         context_metabolic, context_stress, context_morphogen,
-        organism->telemetry->genome_complexity.hash_entropy,
-        organism->telemetry->archive_topology.novelty_gradient,
-        organism->telemetry->diresa_evolution.behavioral_drift_rate,
-        organism->telemetry->task_performance.accuracy,
+        safe_hash_entropy,
+        safe_novelty_gradient,
+        safe_drift_rate,
+        safe_accuracy,
         FIELD_DECAY_RATE_MIN, FIELD_DECAY_RATE_MAX
     );
     }

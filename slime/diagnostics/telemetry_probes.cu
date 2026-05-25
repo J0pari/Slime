@@ -248,7 +248,7 @@ __device__ void archive_topology_probe(
             corr_n++;
         }
     }
-    DEVICE_FATAL_IF(corr_n <= 1, "archive_topology_probe: corr_n <= 1, insufficient data for correlation");
+    DEVICE_FATAL_IF(corr_n <= 1, "archive_topology_probe: corr_n <= 1");
     float hw_mean = hw_sum / corr_n;
     float task_mean = task_sum / corr_n;
     float gen_mean = gen_sum / corr_n;
@@ -378,6 +378,7 @@ __device__ void task_performance_probe(
     metrics->accuracy = sum_accuracy / alive_count;
     metrics->train_accuracy = sum_train_accuracy / alive_count;
     metrics->test_accuracy = sum_test_accuracy / alive_count;
+    metrics->generalization_gap = fabsf(metrics->train_accuracy - metrics->test_accuracy);
     metrics->loss = sum_loss / alive_count;
     metrics->classification_stability = sum_stability / alive_count;
     metrics->avg_confidence = sum_confidence / alive_count;
@@ -427,8 +428,10 @@ __device__ void populate_audit_buffer(
     int num_classes,
     float* ca_concentration,
     int grid_size,
-    float train_accuracy,
-    float test_accuracy,
+    int num_heads,
+    int head_dim,
+    int channels,
+    int num_blocks,
     bool is_train_batch,
     TelemetryBuffer* telemetry,
     ComponentPool* pool,
@@ -439,15 +442,14 @@ __device__ void populate_audit_buffer(
 ) {
     TelemetryAuditEntry* audit = ring->acquire_write_slot(PROVENANCE_SOURCE_TELEMETRY);
 
-    printf("V:audit_entry gen=%d logits=%p labels=%p imgs=%p batch=%d n_cls=%d ca=%p grid=%d\n",
-           generation, (void*)logits, (void*)labels, (void*)batch_samples,
-           batch_size, num_classes, (void*)ca_concentration, grid_size);
-
     audit->generation = generation;
     audit->batch_size = batch_size;
     audit->num_classes = num_classes;
     audit->grid_size = grid_size;
-    printf("V:audit_cp1 batch=%d classes=%d grid=%d\n", batch_size, num_classes, grid_size);
+    audit->num_heads = num_heads;
+    audit->head_dim = head_dim;
+    audit->channels = channels;
+    audit->num_blocks = num_blocks;
 
     int samples_to_copy = (batch_size < AUDIT_SAMPLE_COUNT) ? batch_size : AUDIT_SAMPLE_COUNT;
 
@@ -474,36 +476,15 @@ __device__ void populate_audit_buffer(
             audit->sample_logits[s * NUM_CLASSES_MAX + c] = logits[s * num_classes + c];
         }
     }
-    printf("V:audit_cp2 samples_copied=%d\n", samples_to_copy);
-
-    int correct = 0;
-    float total_loss = 0.0f;
-    for (int b = 0; b < batch_size; b++) {
-        int pred = 0;
-        float max_logit = logits[b * num_classes];
-        for (int c = 1; c < num_classes; c++) {
-            if (logits[b * num_classes + c] > max_logit) {
-                max_logit = logits[b * num_classes + c];
-                pred = c;
-            }
-        }
-        if (pred == labels[b]) correct++;
-
-        float sum_exp = 0.0f;
-        for (int c = 0; c < num_classes; c++) {
-            sum_exp += expf(logits[b * num_classes + c] - max_logit);
-        }
-        total_loss -= (logits[b * num_classes + labels[b]] - max_logit - logf(sum_exp));
-    }
-
-    audit->correct_count = correct;
-    audit->accuracy = (float)correct / batch_size;
-    audit->loss = total_loss / batch_size;
-    audit->train_accuracy = train_accuracy;
-    audit->test_accuracy = test_accuracy;
-    audit->generalization_gap = fabsf(train_accuracy - test_accuracy);
+    audit->correct_count = telemetry->task_performance.correct_predictions;
+    audit->accuracy = telemetry->task_performance.accuracy;
+    audit->loss = telemetry->task_performance.loss;
+    audit->train_accuracy = telemetry->task_performance.train_accuracy;
+    audit->test_accuracy = telemetry->task_performance.test_accuracy;
+    audit->generalization_gap = telemetry->task_performance.generalization_gap;
+    audit->avg_confidence = telemetry->task_performance.avg_confidence;
+    audit->classification_stability = telemetry->task_performance.classification_stability;
     audit->is_train_batch = is_train_batch ? 1 : 0;
-    printf("V:audit_cp3 correct=%d/%d acc=%.4f\n", correct, batch_size, audit->accuracy);
 
     if (batch_samples) {
         int img_size = grid_size * grid_size;
@@ -515,20 +496,16 @@ __device__ void populate_audit_buffer(
             }
         }
     }
-    printf("V:audit_cp4 images_done\n");
-
     if (ca_concentration && pool) {
-        int channels = CHANNELS;
+        int channels_local = CHANNELS;
         for (int y = 0; y < grid_size; y++) {
             for (int x = 0; x < grid_size; x++) {
                 int cell_idx = y * grid_size + x;
                 int dst_idx = y * grid_size + x;  // Contiguous layout matching audit_writer
-                audit->ca_snapshot[dst_idx] = ca_concentration[cell_idx * channels + 0];
+                audit->ca_snapshot[dst_idx] = ca_concentration[cell_idx * channels_local + 0];
             }
         }
     }
-    printf("V:audit_cp5 ca_done\n");
-
     DEVICE_FATAL_IF(!pool, "populate_audit_buffer: pool is null");
     audit->pool_alive_count = pool->active_count.load(cuda::memory_order_relaxed);
     audit->pool_capacity = pool->capacity;
@@ -550,8 +527,6 @@ __device__ void populate_audit_buffer(
         audit->pool_entry_num_deltas[i] = 0;
         audit->pool_entry_genome_hash[i] = 0;
     }
-    printf("V:audit_cp6 pool_done\n");
-
     DEVICE_FATAL_IF(telemetry == nullptr, "populate_audit_buffer: telemetry is null");
     DEVICE_FATAL_IF(!telemetry->valid, "populate_audit_buffer: telemetry not valid");
 
@@ -678,11 +653,11 @@ __device__ void populate_audit_buffer(
     DEVICE_FATAL_IF(ca_state->ca_concentration == nullptr, "populate_audit_buffer: ca_concentration is null");
     DEVICE_FATAL_IF(ca_state->affinity_reduced == nullptr, "populate_audit_buffer: affinity_reduced is null");
     DEVICE_FATAL_IF(ca_state->flow_field == nullptr, "populate_audit_buffer: flow_field is null");
-    int channels = CHANNELS;
+    int ca_channels = CHANNELS;
     float mass_total = 0.0f;
     float affinity_sum = 0.0f;
     float flow_mag_sum = 0.0f;
-    for (int i = 0; i < total_cells * channels; i++) {
+    for (int i = 0; i < total_cells * ca_channels; i++) {
         mass_total += ca_state->ca_concentration[i];
     }
     for (int i = 0; i < total_cells; i++) {
@@ -693,11 +668,13 @@ __device__ void populate_audit_buffer(
         float fy = ca_state->flow_field[i * 2 + 1];
         flow_mag_sum += sqrtf(fx * fx + fy * fy);
     }
-    if (generation > 0) {
-        float prev_mass = audit->flow_lenia_mass_total;
-        DEVICE_FATAL_IF(prev_mass <= 0.0f, "populate_audit_buffer: prev mass invalid");
+    float prev_mass = telemetry->prev_mass_total;
+    if (prev_mass > 0.0f) {
         audit->flow_lenia_mass_conservation_error = fabsf(mass_total - prev_mass) / prev_mass;
+    } else {
+        audit->flow_lenia_mass_conservation_error = 0.0f;
     }
+    telemetry->prev_mass_total = mass_total;
     audit->flow_lenia_mass_total = mass_total;
     audit->flow_lenia_affinity_mean = affinity_sum / total_cells;
     audit->flow_lenia_flow_magnitude_mean = flow_mag_sum / total_cells;
@@ -722,49 +699,82 @@ __device__ void populate_audit_buffer(
         }
     }
 
+    audit->kernel_phase_counts[0] = g_blocks_ca_fwd;
+    audit->kernel_phase_counts[1] = g_blocks_entered;
+    audit->kernel_phase_counts[2] = g_v_flow_done_count;
+    audit->kernel_phase_counts[3] = g_v_bwd_enter_count;
+    audit->kernel_phase_counts[4] = g_v_bwd_fatal_checks_count;
+    audit->kernel_phase_counts[5] = g_v_bwd_chunk_count;
+    audit->kernel_phase_counts[6] = g_v_bwd_value_grad_count;
+    audit->kernel_phase_counts[7] = g_v_bwd_inter_grad_count;
+    audit->kernel_phase_counts[8] = g_v_bwd_perc_grad_count;
+    audit->kernel_phase_counts[9] = g_v_bwd_done_count;
+    audit->kernel_phase_counts[10] = g_v_bwd_zero_dw_count;
+    audit->kernel_phase_counts[11] = g_v_bwd_setup_done_count;
+    audit->kernel_phase_counts[12] = g_v_bwd_chunks_done_count;
+    audit->kernel_phase_counts[13] = g_v_bwd_inter_grad_copy_count;
+    audit->kernel_phase_counts[14] = g_v_bwd_perc_grad_copy_count;
+    audit->kernel_phase_counts[15] = g_v_bwd_grad_conc_count;
+    audit->kernel_phase_counts[16] = g_v_bwd_chunk0_count;
+    audit->kernel_phase_counts[17] = g_v_bwd_i_done_count;
+    audit->kernel_phase_counts[18] = g_v_bwd_v_done_count;
+    audit->kernel_phase_counts[19] = g_v_bwd_chunk2_enter_count;
+    audit->kernel_phase_counts[20] = g_v_bwd_di_write_count;
+    audit->kernel_phase_counts[21] = g_v_bwd_perc_load_count;
+    audit->kernel_phase_counts[22] = g_v_bwd_dp_write_count;
+    audit->kernel_phase_counts[23] = g_v_bwd_im2col_count;
+    audit->kernel_phase_counts[24] = g_v_bwd_conv_fp16_count;
+    audit->kernel_phase_counts[25] = g_v_bwd_input_grad_count;
+    audit->kernel_phase_counts[26] = g_v_bwd_scatter_count;
+    audit->kernel_phase_counts[27] = g_v_post_bwd_barrier_count;
+
+    int error_count = g_device_error_count;
+    audit->error_count = (error_count > DEVICE_ERROR_LOG_CAPACITY) ? DEVICE_ERROR_LOG_CAPACITY : error_count;
+    for (int i = 0; i < audit->error_count; i++) {
+        audit->error_log[i] = g_device_error_log[i];
+    }
+
     audit->provenance_source = PROVENANCE_SOURCE_TELEMETRY;
     audit->fields_written_mask = AUDIT_MASK_GENERATION | AUDIT_MASK_BATCH | AUDIT_MASK_ACCURACY |
                                  AUDIT_MASK_LOSS | AUDIT_MASK_POOL | AUDIT_MASK_ARCHIVE |
                                  AUDIT_MASK_CHEMICAL | AUDIT_MASK_FLOW | AUDIT_MASK_HARDWARE;
 
     ring->commit_write(audit);
-
-    printf("V:audit_done gen=%d m=0x%x\n", generation, audit->fields_written_mask);
 }
 
 __device__ void run_telemetry_probes(Organism* organism, int generation) {
     GPUElite* arch = (GPUElite*)organism->archive;
 
-    if (organism->generation % TELEMETRY_DETAILED == 0) {
-        genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
-        if (organism->generation > 0) {
-            compute_correlation_matrix_device(organism);
-        }
-        task_performance_probe(organism->pool, &organism->telemetry->task_performance);
+    task_performance_probe(organism->pool, &organism->telemetry->task_performance);
+
+    int history_idx = organism->generation % PREDICTION_ERROR_HISTORY_LENGTH;
+    organism->prediction_error_history[history_idx] = organism->telemetry->task_performance.loss;
+
+    genome_complexity_probe(organism->pool, &organism->telemetry->genome_complexity);
+    if (organism->generation > 0) {
+        compute_correlation_matrix_device(organism);
     }
 
-    if (organism->generation % TELEMETRY_COMPREHENSIVE == 0) {
-        if (organism->archive_size > 0) {
-            archive_topology_probe(
-                arch, organism->archive_size,
-                organism->voronoi_cells, organism->num_voronoi_cells,
-                &organism->telemetry->archive_topology,
-                &organism->telemetry->last_checkpoint,
-                organism->telemetry->last_occupancy,
-                arch->hw_dim, arch->task_dim, arch->gen_dim
-            );
-        }
-        int current_spawned = Atomics::load_int(organism->pool->total_spawned);
-        int current_culled = Atomics::load_int(organism->pool->total_culled);
-        organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
-        organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
-        organism->telemetry->last_total_spawned = current_spawned;
-        organism->telemetry->last_total_culled = current_culled;
-        organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
-        diresa_evolution_probe(organism->pool, &organism->telemetry->diresa_evolution);
-
-        organism->telemetry->valid = true;
+    if (organism->archive_size > 0) {
+        archive_topology_probe(
+            arch, organism->archive_size,
+            organism->voronoi_cells, organism->num_voronoi_cells,
+            &organism->telemetry->archive_topology,
+            &organism->telemetry->last_checkpoint,
+            organism->telemetry->last_occupancy,
+            arch->hw_dim, arch->task_dim, arch->gen_dim
+        );
     }
+    int current_spawned = Atomics::load_int(organism->pool->total_spawned);
+    int current_culled = Atomics::load_int(organism->pool->total_culled);
+    organism->telemetry->archive_topology.births_since_checkpoint = current_spawned - organism->telemetry->last_total_spawned;
+    organism->telemetry->archive_topology.deaths_since_checkpoint = current_culled - organism->telemetry->last_total_culled;
+    organism->telemetry->last_total_spawned = current_spawned;
+    organism->telemetry->last_total_culled = current_culled;
+    organism->telemetry->last_checkpoint = organism->telemetry->archive_topology;
+    diresa_evolution_probe(organism->pool, &organism->telemetry->diresa_evolution);
+
+    organism->telemetry->valid = true;
 }
 
 #endif

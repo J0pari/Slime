@@ -74,7 +74,7 @@ __device__ void compute_effective_rank_from_gradients_device(Organism* organism)
 
     float total_sq = s_total_sq;
 
-    DEVICE_FATAL_IF(total_sq < 1e-12f, "compute_effective_rank: zero gradient magnitude - no learning signal");
+    DEVICE_FATAL_IF(total_sq < 1e-12f, "compute_effective_rank: total_sq < 1e-12");
 
     __shared__ float s_entropy_sum;
     float local_entropy = 0.0f;
@@ -83,13 +83,13 @@ __device__ void compute_effective_rank_from_gradients_device(Organism* organism)
 
     for (int h = tid; h < num_heads; h += blockDim.x) {
         float g = gradient_magnitudes[h];
-        float p = (g * g) / total_sq;  
+        float p = (g * g) / total_sq;
 
-        if (p > 1e-12f) {  
+        if (p > 1e-12f) {
             if (use_shannon) {
-                local_entropy -= p * logf(p);  
+                local_entropy -= p * logf(p);
             } else {
-                local_entropy += powf(p, renyi_order_q);  
+                local_entropy += powf(p, renyi_order_q);
             }
         }
     }
@@ -104,7 +104,7 @@ __device__ void compute_effective_rank_from_gradients_device(Organism* organism)
     if (tid == 0) {
         float entropy;
         if (use_shannon) {
-            entropy = s_entropy_sum;  
+            entropy = s_entropy_sum;
         } else {
             entropy = logf(s_entropy_sum) / (1.0f - renyi_order_q);
         }
@@ -298,13 +298,10 @@ __device__ void compute_fitness_from_diresa_device(Organism* organism) {
     if (entry_idx < pool->capacity && pool->alive_flags[entry_idx]) {
         PoolEntry* entry = &pool->entries[entry_idx];
 
-        // Skip entries whose metrics haven't been computed yet (e.g. freshly spawned)
-        if (entry->task_accuracy.state != ComputeState::COMPUTED ||
-            entry->hardware_efficiency.state != ComputeState::COMPUTED ||
-            entry->effective_rank.state != ComputeState::COMPUTED ||
-            entry->generalization_gap.state != ComputeState::COMPUTED) {
-            return;
-        }
+        DEVICE_FATAL_IF(entry->task_accuracy.state != ComputeState::COMPUTED, "compute_fitness: task_accuracy not COMPUTED for alive entry");
+        DEVICE_FATAL_IF(entry->hardware_efficiency.state != ComputeState::COMPUTED, "compute_fitness: hardware_efficiency not COMPUTED for alive entry");
+        DEVICE_FATAL_IF(entry->effective_rank.state != ComputeState::COMPUTED, "compute_fitness: effective_rank not COMPUTED for alive entry");
+        DEVICE_FATAL_IF(entry->generalization_gap.state != ComputeState::COMPUTED, "compute_fitness: generalization_gap not COMPUTED for alive entry");
 
         compute_fitness(entry, generation);
         pool->fitness_values[entry_idx] = entry->fitness.value;

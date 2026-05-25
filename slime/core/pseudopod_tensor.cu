@@ -134,29 +134,5 @@ __device__ void tensor_core_conv3x3_device(Organism* organism) {
     }
 }
 
-__device__ void compute_coherence_tensor_device(Organism* organism) {
-    float* loss_history = organism->loss_history;
-    float* coherence = organism->coherence_output;
-    int history_length = organism->loss_history_length;
-
-    int tid = threadIdx.x;
-
-    float local_improvement = 0.0f;
-
-    if (tid < history_length - 1) {
-        float current_loss = loss_history[tid];
-        float next_loss = loss_history[tid + 1];
-
-        DEVICE_FATAL_IF(current_loss <= 0.0f, "compute_coherence_tensor: current_loss[%d]=%f", tid, current_loss);
-        local_improvement = fmaxf(0.0f, (current_loss - next_loss) / current_loss);
-    }
-
-    float total = BlockReduce<BLOCK_SIZE>::sum(local_improvement);
-
-    if (tid == 0) {
-        *coherence = total / (history_length - 1);
-    }
-}
-
 
 #endif

@@ -32,7 +32,7 @@ __device__ void init_unified_gradient_buffer_device(Organism* organism) {
         grad_buf->interaction_size = entry->num_heads * entry->head_dim * entry->head_dim;
         grad_buf->flow_projection_size = entry->num_heads * 2 * entry->head_dim;
         grad_buf->num_classes = num_classes;
-        grad_buf->num_features = entry->num_heads * entry->channels;
+        grad_buf->num_features = entry->num_heads * POOLING_NUM_TILES * entry->channels;
 
         grad_buf->has_autodiff_grads = 0;
         grad_buf->has_backprop_grads = 0;
@@ -157,13 +157,13 @@ __device__ void init_classifier_device(Organism* organism) {
     size_t workspace_offset = 0;
     for (int prev_idx = 0; prev_idx < entry_idx; prev_idx++) {
         PoolEntry* prev = &organism->pool->entries[prev_idx];
-        int prev_input_dim = prev->num_heads * prev->channels;
+        int prev_input_dim = prev->num_heads * POOLING_NUM_TILES * prev->channels;
         int prev_num_classes = organism->classifier_num_classes;
         workspace_offset += prev_input_dim + (prev_input_dim * prev_num_classes) + prev_num_classes;
     }
     float* workspace = organism->classifier_workspace + workspace_offset;
 
-    int input_dim = entry->num_heads * entry->channels;
+    int input_dim = entry->num_heads * POOLING_NUM_TILES * entry->channels;
     int num_classes = organism->classifier_num_classes;
     unsigned int seed = organism->classifier_seed + entry_idx;
 
@@ -179,17 +179,17 @@ __device__ void init_classifier_device(Organism* organism) {
     curandState state;
     curand_init(seed + tid, 0, 0, &state);
 
-    if (tid < input_dim) {
-        classifier->pooling_weights[tid] = curand_normal(&state) * 0.1f;
+    for (int pi = tid; pi < input_dim; pi += blockDim.x) {
+        classifier->pooling_weights[pi] = curand_normal(&state) * 0.1f;
     }
 
-    if (tid < input_dim * num_classes) {
-        float scale = sqrtf(2.0f / (input_dim + num_classes));
-        classifier->fc_weights[tid] = curand_normal(&state) * scale;
+    float scale = sqrtf(2.0f / (input_dim + num_classes));
+    for (int pi = tid; pi < input_dim * num_classes; pi += blockDim.x) {
+        classifier->fc_weights[pi] = curand_normal(&state) * scale;
     }
 
-    if (tid < num_classes) {
-        classifier->fc_bias[tid] = 0.0f;
+    for (int pi = tid; pi < num_classes; pi += blockDim.x) {
+        classifier->fc_bias[pi] = 0.0f;
     }
 
     cg::this_grid().sync();

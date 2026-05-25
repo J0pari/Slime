@@ -209,15 +209,11 @@ int main() {
     MKDIR("diagnostics");
     MKDIR(session_dir);
 
-    char samples_dir[256], ca_dir[256], pool_dir[256], chem_dir[256];
+    char samples_dir[256], ca_dir[256];
     snprintf(samples_dir, sizeof(samples_dir), "%s/samples", session_dir);
     snprintf(ca_dir, sizeof(ca_dir), "%s/ca_states", session_dir);
-    snprintf(pool_dir, sizeof(pool_dir), "%s/pool_states", session_dir);
-    snprintf(chem_dir, sizeof(chem_dir), "%s/chemical_fields", session_dir);
     MKDIR(samples_dir);
     MKDIR(ca_dir);
-    MKDIR(pool_dir);
-    MKDIR(chem_dir);
 
     char manifest_path[256];
     snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.csv", session_dir);
@@ -319,7 +315,12 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.memory_tubes_entries, sizeof(MemoryEntry) * MAX_HISTORY_LENGTH, "memory_tubes_entries");
     CUDA_ALLOC_CHECK(buffers_host.memory_tubes_data, sizeof(float) * MAX_HISTORY_LENGTH * (BEHAVIORAL_DIM_TOTAL + AGENT_SPATIAL_DIMS), "memory_tubes_data");
     CUDA_ALLOC_CHECK(buffers_host.memory_update_params, sizeof(MemoryUpdateParams), "memory_update_params");
-    CUDA_ALLOC_CHECK(buffers_host.prediction_error_history, sizeof(float) * TELEMETRY_DETAILED, "prediction_error_history");
+    CUDA_ALLOC_CHECK(buffers_host.prediction_error_history, sizeof(float) * PREDICTION_ERROR_HISTORY_LENGTH, "prediction_error_history");
+    CUDA_ALLOC_CHECK(buffers_host.coherence_output_buffer, sizeof(float), "coherence_output_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.attractor_positions_buffer, sizeof(float) * MAX_ATTRACTORS * 2, "attractor_positions_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.attractor_strengths_buffer, sizeof(float) * MAX_ATTRACTORS, "attractor_strengths_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.behavioral_field_buffer, sizeof(float) * CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL, "behavioral_field_buffer");
+    CUDA_ALLOC_CHECK(buffers_host.behavioral_gradients_buffer, sizeof(float) * CA_FIELD_SIZE * BEHAVIORAL_DIM_TOTAL * 2, "behavioral_gradients_buffer");
     CUDA_ALLOC_CHECK(buffers_host.trace_array, sizeof(ExecutionTrace) * TRACE_CAPACITY * POOL_CAPACITY_MAX, "trace_array");
     CUDA_ALLOC_CHECK(buffers_host.hardware_geom, sizeof(HardwareGeometry), "hardware_geom");
     CUDA_ALLOC_CHECK(buffers_host.delta_indices_pool, sizeof(uint16_t) * POOL_CAPACITY_MAX * MAX_DELTAS_PER_ENTRY, "delta_indices_pool");
@@ -349,25 +350,25 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.interaction_activations_saved, saved_act_size, "interaction_activations_saved");
     CUDA_ALLOC_CHECK(buffers_host.pre_gelu_values_saved, saved_act_size, "pre_gelu_values_saved");
     CUDA_ALLOC_CHECK(buffers_host.lifecycle_phase_counts, sizeof(int) * 8, "lifecycle_phase_counts");
-    CUDA_ALLOC_CHECK(buffers_host.gradient_features_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CHANNELS, "gradient_features_pool");
+    CUDA_ALLOC_CHECK(buffers_host.gradient_features_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CLASSIFIER_FEATURE_DIM, "gradient_features_pool");
     CUDA_ALLOC_CHECK(buffers_host.gradient_logits_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_CLASSES_MAX, "gradient_logits_pool");
     CUDA_ALLOC_CHECK(buffers_host.gradient_loss_pool, sizeof(float) * POOL_CAPACITY_MAX, "gradient_loss_pool");
     CUDA_ALLOC_CHECK(buffers_host.gradient_logit_grads_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_CLASSES_MAX, "gradient_logit_grads_pool");
     CUDA_ALLOC_CHECK(buffers_host.gradient_magnitudes_pool, sizeof(float) * POOL_CAPACITY_MAX * NUM_HEADS, "gradient_magnitudes_pool");
-    CUDA_ALLOC_CHECK(buffers_host.pooling_weights_grad, sizeof(float) * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "pooling_weights_grad");
-    CUDA_ALLOC_CHECK(buffers_host.fc_weights_grad, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "fc_weights_grad");
+    CUDA_ALLOC_CHECK(buffers_host.pooling_weights_grad, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "pooling_weights_grad");
+    CUDA_ALLOC_CHECK(buffers_host.fc_weights_grad, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "fc_weights_grad");
     CUDA_ALLOC_CHECK(buffers_host.fc_bias_grad, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "fc_bias_grad");
-    CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CHANNELS, "features_grad");
+    CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CLASSIFIER_FEATURE_DIM, "features_grad");
     constexpr size_t ADAM_CA_ENTRY_SIZE =
         (NUM_HEADS * CHANNELS * HEAD_DIM) +
         (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
         (NUM_HEADS * 2 * HEAD_DIM);
     CUDA_ALLOC_CHECK(buffers_host.adam_m_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_m_ca_pool");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_v_ca_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "adam_m_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "adam_v_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "adam_m_fc_weights");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * NUM_HEADS * CHANNELS * POOL_CAPACITY_MAX, "adam_v_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_m_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_v_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_m_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_v_fc_weights");
     CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_bias, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "adam_m_fc_bias");
     CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "adam_v_fc_bias");
 
@@ -390,8 +391,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.training_mode, sizeof(HybridTrainingMode), "training_mode");
     CUDA_ALLOC_CHECK(buffers_host.classifier, sizeof(ClassificationHead) * POOL_CAPACITY_MAX, "classifier");
     cudaMemset(buffers_host.classifier, 0, sizeof(ClassificationHead) * POOL_CAPACITY_MAX);
-    constexpr int CLASSIFIER_INPUT_DIM_MAX = NUM_HEADS * CHANNELS;
-    CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (CLASSIFIER_INPUT_DIM_MAX + (CLASSIFIER_INPUT_DIM_MAX * NUM_CLASSES_MAX) + NUM_CLASSES_MAX) * POOL_CAPACITY_MAX, "classifier_workspace");
+    CUDA_ALLOC_CHECK(buffers_host.classifier_workspace, sizeof(float) * (CLASSIFIER_FEATURE_DIM + (CLASSIFIER_FEATURE_DIM * NUM_CLASSES_MAX) + NUM_CLASSES_MAX) * POOL_CAPACITY_MAX, "classifier_workspace");
     CUDA_ALLOC_CHECK(buffers_host.curriculum, sizeof(AdaptiveCurriculum), "curriculum");
     CUDA_ALLOC_CHECK(buffers_host.voronoi_occupancy_histogram, sizeof(float) * MAX_CELLS, "voronoi_occupancy_histogram");
     CUDA_ALLOC_CHECK(buffers_host.pool_task_accuracies, sizeof(float) * POOL_CAPACITY_MAX, "pool_task_accuracies");
@@ -506,12 +506,21 @@ int main() {
                 fprintf(stderr, "E_JSON gen=%d\n", gen);
             }
 
-            if (gen != last_gen) {
-                last_gen = gen;
-                const char* mode = entry.is_train_batch ? "train" : "test";
+            const char* mode = entry.is_train_batch ? "train" : "test";
 
-                printf("[AUDIT] gen=%d mode=%s batch=%d acc=%.4f loss=%.4f correct=%d/%d seq=%llu (%.1fs)\n",
-                       gen, mode, entry.batch_size, entry.accuracy, entry.loss,
+            char predictions_path[256];
+            snprintf(predictions_path, sizeof(predictions_path), "%s/predictions.csv", session_dir);
+            if (write_predictions_csv(predictions_path, gen, &entry) != 0) {
+                fprintf(stderr, "E_PRED gen=%d mode=%s\n", gen, mode);
+            }
+
+            bool is_test = !entry.is_train_batch;
+            if (is_test && gen != last_gen) {
+                last_gen = gen;
+
+                printf("[AUDIT] gen=%d batch=%d acc=%.4f loss=%.4f train_acc=%.4f test_acc=%.4f correct=%d/%d seq=%llu (%.1fs)\n",
+                       gen, entry.batch_size, entry.accuracy, entry.loss,
+                       entry.train_accuracy, entry.test_accuracy,
                        entry.correct_count, entry.batch_size,
                        (unsigned long long)hdr.sequence_number, elapsed_sec);
 
@@ -523,12 +532,6 @@ int main() {
                 snprintf(ca_path, sizeof(ca_path), "%s/ca_states/gen%04d.pgm", session_dir, gen);
                 if (write_ca_snapshot(ca_path, gen, &entry) != 0) {
                     fprintf(stderr, "E_CA gen=%d\n", gen);
-                }
-
-                char predictions_path[256];
-                snprintf(predictions_path, sizeof(predictions_path), "%s/predictions_gen%04d.csv", session_dir, gen);
-                if (write_predictions_csv(predictions_path, gen, &entry) != 0) {
-                    fprintf(stderr, "E_PRED gen=%d\n", gen);
                 }
 
                 if (write_generation_summary(session_dir, gen, &entry) != 0) {
@@ -548,6 +551,14 @@ int main() {
                         entry.per_class_correct, entry.per_class_total,
                         entry.num_classes) != 0) {
                     fprintf(stderr, "E_CLASS_ACC gen=%d\n", gen);
+                }
+
+                if (write_error_log(session_dir, gen, &entry) != 0) {
+                    fprintf(stderr, "E_ERRORS gen=%d\n", gen);
+                }
+
+                if (write_kernel_diagnostics(session_dir, gen, &entry) != 0) {
+                    fprintf(stderr, "E_KERNEL_DIAG gen=%d\n", gen);
                 }
 
                 append_to_manifest(manifest_path, predictions_path, elapsed_sec);

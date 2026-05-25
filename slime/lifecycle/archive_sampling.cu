@@ -45,7 +45,7 @@ __device__ int sample_from_archive_novel(GPUElite* archive, int archive_size, Vo
     return result;
 }
 
-__device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, int generation, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights) {
+__device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archive, int archive_size, VoronoiCell* voronoi_cells, int num_cells, BehavioralState* behavioral_agents, int pool_idx, unsigned int seed, int generation, float ctx_complexity, float ctx_niche, float ctx_learning, float ctx_performance, float* workspace_genome, DIRESAWeights* diresa_genome_weights, int num_classes) {
     DEVICE_FATAL_IF(archive_size <= 0, "replace_from_archive_device: empty archive");
     DEVICE_FATAL_IF(num_cells <= 0, "replace_from_archive_device: no voronoi cells");
 
@@ -78,14 +78,13 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     float fitness_inherit_steepness = genome_to_param(elite_genome, entry->gradients, fitness_inherit_steepness_slot, ctx.metabolic, ctx.stress, ctx.morphogen, ctx_complexity, ctx_niche, ctx_learning, ctx_performance, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MIN, LIFECYCLE_FITNESS_INHERIT_STEEPNESS_MAX);
     float fitness_modulation = NORMALIZED_MAX / (NORMALIZED_MAX + expf(-fitness_inherit_steepness * (archive->fitness[elite_idx] - fitness_inherit_center)));
 
+    init_entry_measured_values(entry);
+
     float modulated_fitness = archive->fitness[elite_idx] * fitness_modulation;
     uint64_t mod_hash = archive->fitness_input_hash[elite_idx];
     mod_hash ^= __float_as_uint(fitness_modulation) + 0x9e3779b9 + (mod_hash << 6) + (mod_hash >> 2);
     measured_value_set_computed(&entry->fitness, modulated_fitness, generation, mod_hash);
     measured_value_set_computed(&entry->coherence, archive->coherence[elite_idx], generation, entry->genome_hash);
-    measured_value_set_uncomputed(&entry->task_accuracy);
-    measured_value_set_uncomputed(&entry->generalization_gap);
-    measured_value_set_uncomputed(&entry->hardware_efficiency);
     float hunger_val = NORMALIZED_MAX - archive->coherence[elite_idx];
     measured_value_set_computed(&entry->hunger, hunger_val, generation, entry->genome_hash);
     entry->generation = generation;
@@ -97,6 +96,7 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
     derive_architecture(elite_genome, entry);
     derive_diresa(elite_genome, entry);
     derive_fitness_exponents(elite_genome, entry);
+    derive_flow_params(elite_genome, entry);
 
     int hw_dim = archive->hw_dim;
     int task_dim = archive->task_dim;
@@ -115,8 +115,7 @@ __device__ void replace_from_archive_device(ComponentPool* pool, GPUElite* archi
         }
     }
 
-    entry->ca_state->tape.needs_weight_restore = 1;
-    entry->ca_state->tape.restore_elite_idx = elite_idx;
+    entry->needs_weight_init = true;
 }
 
 __device__ void selection_device(Organism* organism) {
@@ -181,10 +180,10 @@ __device__ void selection_device(Organism* organism) {
         measured_value_set_computed(&entry->recon_loss_gen, gen_mse, organism->generation, entry->genome_hash);
 
         // === Task DIRESA: batch-averaged pooled classifier features, train step ===
-        int num_features = entry->num_heads * entry->channels;
+        int num_features = entry->num_heads * POOLING_NUM_TILES * entry->channels;
         int batch_size = organism->training_mode->batch_size;
         float* batch_features = organism->gradient_features_pool + entry_idx * batch_size * num_features;
-        float task_features[NUM_HEADS * CHANNELS];
+        float task_features[CLASSIFIER_FEATURE_DIM];
         for (int i = 0; i < num_features; i++) {
             float sum = 0.0f;
             for (int b = 0; b < batch_size; b++) {
@@ -292,12 +291,12 @@ __device__ void selection_device(Organism* organism) {
             parent_id_0 = 0;
         } else {
             int parent_idx = find_parent_by_hash(archive, *archive_size, entry->parent_hash);
-            DEVICE_FATAL_IF(parent_idx < 0, "organism: parent not found in archive");
+            DEVICE_FATAL_IF(parent_idx < 0, "selection_device: parent not found in archive");
             parent_id_0 = parent_idx;
         }
 
-        DEVICE_FATAL_IF(isnan(entry->coherence.value), "organism: entry coherence is NaN");
-        DEVICE_FATAL_IF(isinf(entry->coherence.value), "organism: entry coherence is Inf");
+        DEVICE_FATAL_IF(isnan(entry->coherence.value), "selection_device: entry coherence is NaN");
+        DEVICE_FATAL_IF(isinf(entry->coherence.value), "selection_device: entry coherence is Inf");
 
         insert_elite_device(
             archive,

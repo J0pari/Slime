@@ -173,7 +173,7 @@ __device__ void multi_head_ca_tensor_device(
 
             // ============ STAGE 1: Gather 3x3 neighborhood for this head ============
             // Reads from ca_input[input_offset + cell*channels + c]
-            // Writes to fp16_workspace[cell*channels + c] (neighborhood sum as fp16)
+            // Writes to fp16_workspace[cell*channels + c] (neighborhood average as fp16)
             for (int i = tid; i < cells_x_channels; i += block_threads) {
                 const int cell_idx = i / channels;
                 const int c = i % channels;
@@ -188,7 +188,7 @@ __device__ void multi_head_ca_tensor_device(
                         sum += ca_input[input_offset + (ny * grid_size + nx) * channels + c];
                     }
                 }
-                fp16_workspace[i] = __float2half(sum);
+                fp16_workspace[i] = __float2half(sum * GATHER_NORMALIZATION);
             }
             __syncthreads();
 
@@ -240,12 +240,12 @@ __device__ void multi_head_ca_tensor_device(
             }
             __syncthreads();
 
-            // ============ STAGE 3: ReLU + save perception ============
+            // ============ STAGE 3: ReLU + scale + save perception ============
             {
                 const int saved_base = (batch_id * num_heads + head) * cells_x_hdim;
 
                 for (int i = tid; i < cells_x_hdim; i += block_threads) {
-                    float val = activation_relu(fp32_workspace[perc_out_offset + i]);
+                    float val = activation_relu(fp32_workspace[perc_out_offset + i]) * PERCEPTION_OUTPUT_SCALE;
                     fp32_workspace[perc_out_offset + i] = val;
                     perception_saved[saved_base + i] = val;
                 }
@@ -300,14 +300,14 @@ __device__ void multi_head_ca_tensor_device(
             }
             __syncthreads();
 
-            // ============ STAGE 6: Save pre_gelu + GELU + save interaction ============
+            // ============ STAGE 6: Save pre_gelu + GELU + scale + save interaction ============
             {
                 const int saved_base = (batch_id * num_heads + head) * cells_x_hdim;
 
                 for (int i = tid; i < cells_x_hdim; i += block_threads) {
                     float pre_gelu = fp32_workspace[inter_out_offset + i];
                     pre_gelu_saved[saved_base + i] = pre_gelu;
-                    float gelu = activation_gelu(pre_gelu);
+                    float gelu = activation_gelu(pre_gelu) * INTERACTION_OUTPUT_SCALE;
                     fp32_workspace[inter_out_offset + i] = gelu;
                     interaction_saved[saved_base + i] = gelu;
                 }
