@@ -42,15 +42,58 @@ struct WarpTape {
 
 // Loss routers. Both write into the gradient buffers feeding W_bmap, W_flow,
 // W_inter, W_perc through the standard backward sweep.
-__device__ void classifier_loss(const float* logits,
-                                int target_class,
-                                float* dlogits,
-                                float* loss_out);
+//
+// Classifier loss: numerically-stable softmax cross-entropy.
+//   p_i        = exp(z_i - max_z) / sum_j exp(z_j - max_z)
+//   loss       = -log p_target
+//   dloss/dz_i = p_i - 1_{i == target}
+//
+// n_classes is set by the dataset wrapper (A-701); a small upper bound is
+// enforced so the temporary p[] buffer stays on the stack/register.
+constexpr int MAX_CLASSES = 64;
 
-__device__ void predictor_mse_loss(const float* bmap_pred,
-                                   const float* bmap_target,
-                                   float* dbmap_pred,
-                                   float* loss_out);
+__host__ __device__ inline void classifier_loss(const float* logits,
+                                                int target_class,
+                                                int n_classes,
+                                                float* dlogits,
+                                                float* loss_out) {
+    if (n_classes <= 0 || n_classes > MAX_CLASSES) {
+        if (loss_out) *loss_out = 0.f;
+        return;
+    }
+    float max_z = logits[0];
+    for (int i = 1; i < n_classes; ++i) {
+        if (logits[i] > max_z) max_z = logits[i];
+    }
+    float p[MAX_CLASSES];
+    float Z = 0.f;
+    for (int i = 0; i < n_classes; ++i) {
+        p[i] = expf(logits[i] - max_z);
+        Z += p[i];
+    }
+    float invZ = (Z > 1e-30f) ? (1.0f / Z) : 0.f;
+    for (int i = 0; i < n_classes; ++i) p[i] *= invZ;
+    float logp_t = logf(p[target_class] + 1e-30f);
+    if (loss_out) *loss_out = -logp_t;
+    for (int i = 0; i < n_classes; ++i) {
+        dlogits[i] = p[i] - ((i == target_class) ? 1.0f : 0.0f);
+    }
+}
+
+// Predictor MSE loss against the target bmap_64. dloss/d_pred = 2*(p - t)/N.
+__host__ __device__ inline void predictor_mse_loss(const float* bmap_pred,
+                                                   const float* bmap_target,
+                                                   float* dbmap_pred,
+                                                   float* loss_out) {
+    float acc = 0.f;
+    const float scale = 2.0f / static_cast<float>(BMAP_DIM);
+    for (int i = 0; i < BMAP_DIM; ++i) {
+        float diff = bmap_pred[i] - bmap_target[i];
+        acc += diff * diff;
+        dbmap_pred[i] = scale * diff;
+    }
+    if (loss_out) *loss_out = acc / static_cast<float>(BMAP_DIM);
+}
 
 // Checkpoint-aware backward sweep. Identical control flow for both roles;
 // only the seed gradient (dlogits vs dbmap_pred) and the upstream loss

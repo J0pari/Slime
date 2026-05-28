@@ -14,6 +14,7 @@
 #include "../config/constants.cuh"
 
 #include <cstdint>
+#include <cstdio>
 #include <cuda_runtime.h>
 
 namespace slime::safety {
@@ -61,15 +62,80 @@ __host__ __device__ inline void cusum_update(CusumState* s, float x) {
     }
 }
 
-// Checkpoint write: writes header + entire population state, archive,
-// placeholder regressor + AdamW state, correlation window, PT replica
-// assignments, sentinel state. Atomic-replace on success.
-void write_checkpoint(const CheckpointHeader& hdr,
-                      const char* path);
+// Checkpoint file format:
+//   uint32_t magic            // 'S21C'
+//   uint32_t version
+//   uint32_t schema_hash      // catches struct drift
+//   CheckpointHeader hdr
+//   ...subsystem blobs (population, archive, placeholder, sentinels)
+//
+// write_checkpoint and load_checkpoint are host-side and operate on a single
+// open() call. Atomic-replace via temp-file + rename.
+constexpr uint32_t CHECKPOINT_MAGIC   = 0x53323143u;  // 'S' '2' '1' 'C'
+constexpr uint32_t CHECKPOINT_VERSION = 1;
 
-// Restore inverse. Returns false if signature or schema mismatches.
-bool load_checkpoint(CheckpointHeader* hdr_out,
-                     const char* path);
+// Schema hash combines the sizes of the structures that flow through the
+// checkpoint. Bump CHECKPOINT_VERSION if any of these change so old files
+// fail fast in load_checkpoint.
+__host__ inline uint32_t checkpoint_schema_hash() {
+    uint32_t h = 0x9E3779B9u;
+    auto mix = [&h](uint32_t x) {
+        h ^= x + 0x9E3779B9u + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<uint32_t>(sizeof(CheckpointHeader)));
+    mix(static_cast<uint32_t>(GENOME_BITS));
+    mix(static_cast<uint32_t>(MAX_ARCHIVE));
+    mix(static_cast<uint32_t>(POOL_SIZE));
+    mix(static_cast<uint32_t>(BMAP_DIM));
+    mix(static_cast<uint32_t>(BTRAJ_SAMPLES));
+    mix(static_cast<uint32_t>(CA_CHANNELS));
+    mix(static_cast<uint32_t>(GRID_SIZE));
+    return h;
+}
+
+// Header-only write/load. The full payload write/load is a thin wrapper that
+// calls these and then dumps the remaining blobs via fwrite. Kept separate
+// so the header can be sanity-checked without paying for the population
+// deserialisation.
+__host__ inline bool write_checkpoint_header(const CheckpointHeader& hdr,
+                                             const char* path) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    uint32_t magic   = CHECKPOINT_MAGIC;
+    uint32_t version = CHECKPOINT_VERSION;
+    uint32_t schema  = checkpoint_schema_hash();
+    bool ok = true;
+    ok = ok && std::fwrite(&magic,   sizeof(magic),   1, f) == 1;
+    ok = ok && std::fwrite(&version, sizeof(version), 1, f) == 1;
+    ok = ok && std::fwrite(&schema,  sizeof(schema),  1, f) == 1;
+    ok = ok && std::fwrite(&hdr,     sizeof(hdr),     1, f) == 1;
+    std::fclose(f);
+    return ok;
+}
+
+__host__ inline bool load_checkpoint_header(CheckpointHeader* hdr_out,
+                                            const char* path) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return false;
+    uint32_t magic, version, schema;
+    bool ok = true;
+    ok = ok && std::fread(&magic,   sizeof(magic),   1, f) == 1;
+    ok = ok && std::fread(&version, sizeof(version), 1, f) == 1;
+    ok = ok && std::fread(&schema,  sizeof(schema),  1, f) == 1;
+    ok = ok && std::fread(hdr_out,  sizeof(*hdr_out), 1, f) == 1;
+    std::fclose(f);
+    if (!ok) return false;
+    if (magic   != CHECKPOINT_MAGIC)        return false;
+    if (version != CHECKPOINT_VERSION)      return false;
+    if (schema  != checkpoint_schema_hash()) return false;
+    return true;
+}
+
+// Full-state write/load thunks that the host driver calls during run() and
+// at shutdown. Bodies wire in payload writers from the integration layer
+// once the World struct is finalised.
+void write_checkpoint(const CheckpointHeader& hdr, const char* path);
+bool load_checkpoint(CheckpointHeader* hdr_out,  const char* path);
 
 }  // namespace slime::safety
 

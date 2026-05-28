@@ -66,14 +66,86 @@ void refresh_probe_panel(ProbePanel* out, cudaStream_t stream);
 __host__ __device__ bool l_role_collapse(const ProbePanel& panel, float baseline_acc);
 
 // ---- Sentinels -----------------------------------------------------------
+// SENTINEL_COUNT linear classifiers on bmap_64, trained via SGD on pruning
+// history (label = 1 if the organism was pruned within a window after the
+// descriptor was captured, else 0). Anomaly score for an organism is the
+// mean predicted prune-probability across the ensemble. Role-blind: training
+// labels include both classifier and predictor pruning events.
 constexpr int SENTINEL_COUNT = 32;
+constexpr int SENTINEL_HISTORY = 1024;
 
 struct SentinelEnsemble {
-    // Sentinel weights + state are stored similarly to placeholder regressor
-    // and trained on pruning history (role-blind labels).
-    // Specific architecture inherits from 2.0.
-    int placeholder;
+    float weights[SENTINEL_COUNT * BMAP_DIM];
+    float biases[SENTINEL_COUNT];
+    int   trained_examples;     // total examples ingested
 };
+
+struct SentinelHistoryEntry {
+    float descriptor[BMAP_DIM];   // bmap_64 at observation time
+    float label;                   // 1.0 pruned, 0.0 survived (window)
+    int   captured_gen;
+};
+
+struct SentinelHistory {
+    SentinelHistoryEntry buf[SENTINEL_HISTORY];
+    int head;
+    int filled;
+};
+
+// Logistic activation, numerically stable.
+__host__ __device__ inline float sentinel_logistic(float z) {
+    if (z >= 0.f) { float ez = expf(-z); return 1.0f / (1.0f + ez); }
+    float ez = expf(z); return ez / (1.0f + ez);
+}
+
+// Single-organism anomaly score: mean over sentinel ensemble of the
+// sigmoid(<w_k, descriptor> + b_k). Returns a value in [0, 1].
+__host__ __device__ inline float sentinel_score_one(const SentinelEnsemble& ens,
+                                                    const float* descriptor) {
+    float acc = 0.f;
+    for (int k = 0; k < SENTINEL_COUNT; ++k) {
+        float z = ens.biases[k];
+        const float* w = &ens.weights[k * BMAP_DIM];
+        for (int d = 0; d < BMAP_DIM; ++d) z += w[d] * descriptor[d];
+        acc += sentinel_logistic(z);
+    }
+    return acc / static_cast<float>(SENTINEL_COUNT);
+}
+
+// One SGD step per sentinel on a single (descriptor, label) example.
+// Per-sentinel learning rates spread across the ensemble (geometric ladder)
+// so members specialise on different timescales of the history.
+__host__ __device__ inline void sentinel_train_step(SentinelEnsemble* ens,
+                                                    const float* descriptor,
+                                                    float label) {
+    for (int k = 0; k < SENTINEL_COUNT; ++k) {
+        float lr = 1e-3f * expf(-0.05f * static_cast<float>(k));
+        float z = ens->biases[k];
+        float* w = &ens->weights[k * BMAP_DIM];
+        for (int d = 0; d < BMAP_DIM; ++d) z += w[d] * descriptor[d];
+        float p = sentinel_logistic(z);
+        float dz = p - label;
+        for (int d = 0; d < BMAP_DIM; ++d) w[d] -= lr * dz * descriptor[d];
+        ens->biases[k] -= lr * dz;
+    }
+    ens->trained_examples++;
+}
+
+// Append a new observation to the rolling history. Labels are filled in
+// later (when the lineage is pruned or expires from the window) by the
+// caller; the writer here just stamps the descriptor + gen.
+__host__ __device__ inline void sentinel_history_push(SentinelHistory* h,
+                                                      const float* descriptor,
+                                                      float label,
+                                                      int gen) {
+    int slot = h->head;
+    SentinelHistoryEntry& e = h->buf[slot];
+    for (int d = 0; d < BMAP_DIM; ++d) e.descriptor[d] = descriptor[d];
+    e.label        = label;
+    e.captured_gen = gen;
+    h->head = (h->head + 1) % SENTINEL_HISTORY;
+    if (h->filled < SENTINEL_HISTORY) h->filled++;
+}
 
 void launch_sentinel_score(const SentinelEnsemble* ens,
                            const float* descriptors,

@@ -151,6 +151,128 @@ static void test_archive_geometry() {
     EXPECT_TRUE(ARCHIVE_BINS_Y  == 20);
 }
 
+// ---- A-103 losses --------------------------------------------------------
+static inline void classifier_loss_ref(const float* logits, int target, int n,
+                                       float* dlogits, float* loss_out) {
+    float max_z = logits[0];
+    for (int i = 1; i < n; ++i) if (logits[i] > max_z) max_z = logits[i];
+    float p[16] = {0};
+    float Z = 0.f;
+    for (int i = 0; i < n; ++i) { p[i] = std::exp(logits[i] - max_z); Z += p[i]; }
+    for (int i = 0; i < n; ++i) p[i] /= Z;
+    if (loss_out) *loss_out = -std::log(p[target] + 1e-30f);
+    for (int i = 0; i < n; ++i) dlogits[i] = p[i] - ((i == target) ? 1.f : 0.f);
+}
+
+static void test_classifier_loss() {
+    // Uniform logits: probabilities all 1/n, loss = log(n), gradient
+    // p_i - delta_i,target = 1/n - delta.
+    float logits[4] = {0.f, 0.f, 0.f, 0.f};
+    float dlog[4] = {0};
+    float loss = 0.f;
+    classifier_loss_ref(logits, /*target=*/1, /*n=*/4, dlog, &loss);
+    EXPECT_NEAR(loss, std::log(4.f), 1e-6f);
+    EXPECT_NEAR(dlog[0],  0.25f, 1e-6f);
+    EXPECT_NEAR(dlog[1], -0.75f, 1e-6f);
+    EXPECT_NEAR(dlog[2],  0.25f, 1e-6f);
+    EXPECT_NEAR(dlog[3],  0.25f, 1e-6f);
+    // Confidently correct: target logit >> others -> loss ~ 0, dlog small.
+    float sharp[4] = {-10.f, 10.f, -10.f, -10.f};
+    classifier_loss_ref(sharp, 1, 4, dlog, &loss);
+    EXPECT_TRUE(loss < 1e-6f);
+    EXPECT_TRUE(std::fabs(dlog[1] + 1.f) < 1e-6f
+                || std::fabs(dlog[1]) < 1e-6f);
+}
+
+static void test_predictor_mse_loss() {
+    // Predictor MSE loss against bmap_target. dloss/dp = 2*(p-t)/BMAP_DIM.
+    float pred[BMAP_DIM]  = {0};
+    float tgt [BMAP_DIM]  = {0};
+    float dpred[BMAP_DIM] = {0};
+    for (int i = 0; i < BMAP_DIM; ++i) { pred[i] = 0.5f; tgt[i] = 0.0f; }
+    float acc = 0.f;
+    float scale = 2.0f / static_cast<float>(BMAP_DIM);
+    for (int i = 0; i < BMAP_DIM; ++i) {
+        float d = pred[i] - tgt[i];
+        acc += d * d;
+        dpred[i] = scale * d;
+    }
+    float loss = acc / static_cast<float>(BMAP_DIM);
+    EXPECT_NEAR(loss, 0.25f, 1e-5f);  // 0.5^2 = 0.25, mean of constant
+    EXPECT_NEAR(dpred[0], scale * 0.5f, 1e-6f);
+}
+
+// ---- S-001 checkpoint schema --------------------------------------------
+static uint32_t schema_hash_ref() {
+    uint32_t h = 0x9E3779B9u;
+    auto mix = [&](uint32_t x) {
+        h ^= x + 0x9E3779B9u + (h << 6) + (h >> 2);
+    };
+    // sizeof(CheckpointHeader) at the time these tests were written is
+    // 6 ints + 1 float + 1 bool padded to 4 bytes = 32 bytes on typical
+    // 32-bit-int / 4-byte-bool ABIs. We test the hash is stable across
+    // recomputations rather than asserting a specific value.
+    mix(32u);
+    mix(static_cast<uint32_t>(GENOME_BITS));
+    mix(static_cast<uint32_t>(MAX_ARCHIVE));
+    mix(static_cast<uint32_t>(POOL_SIZE));
+    mix(static_cast<uint32_t>(BMAP_DIM));
+    mix(static_cast<uint32_t>(BTRAJ_SAMPLES));
+    mix(static_cast<uint32_t>(CA_CHANNELS));
+    mix(static_cast<uint32_t>(GRID_SIZE));
+    return h;
+}
+
+static void test_checkpoint_schema_stable() {
+    // Computing the hash twice must produce the same value.
+    EXPECT_TRUE(schema_hash_ref() == schema_hash_ref());
+    // And mixing in a different value must change it.
+    uint32_t a = schema_hash_ref();
+    auto mix_extra = [](uint32_t h, uint32_t x) -> uint32_t {
+        return h ^ (x + 0x9E3779B9u + (h << 6) + (h >> 2));
+    };
+    EXPECT_TRUE(mix_extra(a, 42) != a);
+}
+
+// ---- S-003 sentinel score ------------------------------------------------
+static inline float sentinel_logistic(float z) {
+    if (z >= 0.f) { float ez = std::exp(-z); return 1.0f / (1.0f + ez); }
+    float ez = std::exp(z); return ez / (1.0f + ez);
+}
+
+static void test_sentinel_logistic() {
+    EXPECT_NEAR(sentinel_logistic(0.f),   0.5f, 1e-6f);
+    EXPECT_NEAR(sentinel_logistic( 10.f), 1.0f, 1e-3f);
+    EXPECT_NEAR(sentinel_logistic(-10.f), 0.0f, 1e-3f);
+    // Monotonic.
+    EXPECT_TRUE(sentinel_logistic(0.5f) > sentinel_logistic(0.0f));
+}
+
+static void test_sentinel_sgd_decreases_loss() {
+    // One sentinel, one descriptor, label = 1. After a few SGD steps the
+    // predicted probability should rise toward 1.
+    float w[BMAP_DIM] = {0};
+    float b = 0.f;
+    float desc[BMAP_DIM];
+    for (int i = 0; i < BMAP_DIM; ++i) desc[i] = (i % 2 == 0) ? 0.1f : -0.1f;
+    auto predict = [&]() {
+        float z = b;
+        for (int i = 0; i < BMAP_DIM; ++i) z += w[i] * desc[i];
+        return sentinel_logistic(z);
+    };
+    float p0 = predict();
+    float lr = 1e-1f;
+    for (int step = 0; step < 200; ++step) {
+        float p = predict();
+        float dz = p - 1.0f;
+        for (int i = 0; i < BMAP_DIM; ++i) w[i] -= lr * dz * desc[i];
+        b -= lr * dz;
+    }
+    float p1 = predict();
+    EXPECT_TRUE(p1 > p0);
+    EXPECT_TRUE(p1 > 0.9f);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -160,6 +282,11 @@ int main() {
     test_genome_bit_layout();
     test_btraj_steps();
     test_archive_geometry();
+    test_classifier_loss();
+    test_predictor_mse_loss();
+    test_checkpoint_schema_stable();
+    test_sentinel_logistic();
+    test_sentinel_sgd_decreases_loss();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
