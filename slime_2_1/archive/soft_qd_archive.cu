@@ -77,11 +77,64 @@ __host__ __device__ inline bool bootstrap_trigger(const Archive& a) {
     return archive_size(a) >= ARCHIVE_HALF;
 }
 
+// Weighted Euclidean distance using the per-dim inverse-variance EMA.
+__host__ __device__ inline float weighted_dist2(const float* a,
+                                                const float* b,
+                                                const float* inv_var) {
+    float acc = 0.f;
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        float diff = a[d] - b[d];
+        acc += diff * diff * inv_var[d];
+    }
+    return acc;
+}
+
 // Soft-QD insertion. Returns the index of the slot that received the
-// candidate, or -1 if rejected. Insertion is bin-local and uses role-internal
-// nearest neighbours for novelty (A-401 role-internal novelty).
-__device__ int insert(Archive* a,
-                      const ArchiveEntry& candidate);
+// candidate, or -1 if rejected. Bin-local replacement; role-internal
+// nearest-neighbour replacement quality check (a candidate must beat the
+// weakest same-role occupant of its bin).
+__host__ __device__ inline int insert(Archive* a, const ArchiveEntry& cand) {
+    int b = cand.bin_x * ARCHIVE_BINS_Y + cand.bin_y;
+    BinCaps& caps = a->bins[b];
+    uint16_t cap   = (cand.role == Role::Classifier) ? caps.cap_classifier
+                                                     : caps.cap_predictor;
+    uint16_t& cnt  = (cand.role == Role::Classifier) ? caps.count_classifier
+                                                     : caps.count_predictor;
+
+    // If the bin/role has capacity, find an empty slot.
+    if (cnt < cap) {
+        for (int i = 0; i < MAX_ARCHIVE; ++i) {
+            if (!a->entries[i].alive) {
+                a->entries[i] = cand;
+                a->entries[i].alive = true;
+                cnt++;
+                if (cand.role == Role::Classifier) a->count_classifier++;
+                else                                a->count_predictor++;
+                return i;
+            }
+        }
+    }
+    // Otherwise replace the weakest same-role same-bin occupant if the
+    // candidate's fitness exceeds it.
+    int worst_idx  = -1;
+    float worst_f  = cand.fitness;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        const ArchiveEntry& e = a->entries[i];
+        if (!e.alive) continue;
+        if (e.role != cand.role) continue;
+        if (e.bin_x != cand.bin_x || e.bin_y != cand.bin_y) continue;
+        if (e.fitness < worst_f) {
+            worst_f = e.fitness;
+            worst_idx = i;
+        }
+    }
+    if (worst_idx >= 0) {
+        a->entries[worst_idx] = cand;
+        a->entries[worst_idx].alive = true;
+        return worst_idx;
+    }
+    return -1;
+}
 
 // Compose fitness with role multiplier, audit multiplier, and variance
 // multiplier. See blueprint A-401 fitness composition:

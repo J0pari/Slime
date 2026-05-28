@@ -9,10 +9,15 @@ NVCCFLAGS ?= -arch=$(ARCH) -rdc=true --extended-lambda --expt-relaxed-constexpr
 
 BUILD_DIR ?= build
 BIN       := $(BUILD_DIR)/slime_2_1
+HOST_TESTS := $(BUILD_DIR)/host_tests
 
 SRC := integration/host_main.cu
+HOST_SRC := tests/host_unit_tests.cpp
 
-.PHONY: all clean syntax-check
+CXX      ?= g++
+HOST_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Itests/stubs -I.
+
+.PHONY: all clean host-tests check
 
 all: $(BIN)
 
@@ -22,11 +27,18 @@ $(BUILD_DIR):
 $(BIN): $(SRC) | $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) $(SRC) -o $@ -lcudadevrt
 
-# Host-only syntax check. Requires clang++ and stubs <cuda_runtime.h> et al.
-# Used in environments where CUDA isn't installed (CI smoke, web sandboxes).
-syntax-check:
-	@echo "Host-only syntax check is not wired yet; install CUDA toolkit and"
-	@echo "use 'make all' for full validation."
+# Host-only unit tests for the math inlines (hybrid blending, role
+# multipliers, SOT gate, PT swap probabilities, genome bit layout, etc.).
+# Builds and runs without CUDA installed - useful for CI smoke and for
+# web-sandbox sessions.
+$(HOST_TESTS): $(HOST_SRC) config/constants.cuh tests/stubs/cuda_runtime.h tests/stubs/cuda_fp16.h | $(BUILD_DIR)
+	$(CXX) $(HOST_CXXFLAGS) $(HOST_SRC) -o $@
+
+host-tests: $(HOST_TESTS)
+	./$(HOST_TESTS)
+
+# Default 'check' target uses host tests so it passes without CUDA.
+check: host-tests
 
 clean:
 	rm -rf $(BUILD_DIR)

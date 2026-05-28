@@ -106,19 +106,147 @@ __device__ inline void seed_predictor_grid(__half* grid,
     (void)HI;
 }
 
-// Single CA step. role-blind: same W_perc / W_inter / W_flow / W_bmap path
-// as 2.0. Mass conservation via reintegration (see reaction_diffusion.cu).
-__device__ void ca_step(__half* state_curr,
-                        __half* state_next,
-                        const float* W_perc,
-                        const float* W_inter,
-                        const float* W_flow);
+// ---- Weight shapes (role-blind, A-201) -----------------------------------
+//
+// Perception: identity + Sobel_x + Sobel_y over the 16-channel state, giving
+// a 48-d perception vector per cell. W_inter mixes the perception vector
+// into a 32-d hidden representation (GELU). W_flow projects the hidden to a
+// 16-d delta. The new state is state + delta (clamped to FP16 range). RD
+// machinery for the chemical channels runs in parallel via rd_step.
+constexpr int PERC_DIM    = CA_CHANNELS * 3;   // 48
+constexpr int HIDDEN_DIM  = 32;
 
-// 64-step forward, sampling bmap at BTRAJ_STEPS into bmap_traj.
+// 3x3 stencils used by perception (identity, Sobel_x, Sobel_y).
+__device__ inline void sample_neighborhood(const __half* state,
+                                           int y, int x,
+                                           float* perc_out) {  // [PERC_DIM]
+    // Toroidal wrap on the grid edge.
+    auto at = [&](int dy, int dx, int c) -> float {
+        int yy = (y + dy + GRID_SIZE) % GRID_SIZE;
+        int xx = (x + dx + GRID_SIZE) % GRID_SIZE;
+        return __half2float(state[grid_idx(yy, xx, c)]);
+    };
+    for (int c = 0; c < CA_CHANNELS; ++c) {
+        // Identity.
+        perc_out[c] = at(0, 0, c);
+        // Sobel_x.
+        float sx = -at(-1, -1, c) - 2.f * at(0, -1, c) - at(1, -1, c)
+                 + at(-1,  1, c) + 2.f * at(0,  1, c) + at(1,  1, c);
+        perc_out[CA_CHANNELS + c] = sx * 0.125f;
+        // Sobel_y.
+        float sy = -at(-1, -1, c) - 2.f * at(-1, 0, c) - at(-1, 1, c)
+                 + at( 1, -1, c) + 2.f * at( 1, 0, c) + at( 1, 1, c);
+        perc_out[2 * CA_CHANNELS + c] = sy * 0.125f;
+    }
+}
+
+__device__ inline float gelu_approx(float x) {
+    // Hendrycks-Gimpel approximation.
+    const float k = 0.7978845608f;          // sqrt(2/pi)
+    return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
+}
+
+// Single CA step. role-blind: same W_perc / W_inter / W_flow / W_bmap path
+// as 2.0. Mass conservation hooks live in rd_step (A-202).
+//   W_perc  : [PERC_DIM x CA_CHANNELS]  (currently unused - perception via
+//             fixed Sobel stencils; kept in the API to mirror 2.0 weights
+//             and to leave room for learned perception kernels)
+//   W_inter : [PERC_DIM x HIDDEN_DIM]
+//   W_flow  : [HIDDEN_DIM x CA_CHANNELS]
+//
+// One thread = one cell. Block layout is (16, 16); each block covers a 16x16
+// tile of the 64x64 grid via four iterations.
+__device__ inline void ca_step(const __half* state_curr,
+                               __half* state_next,
+                               const float* /*W_perc*/,
+                               const float* W_inter,
+                               const float* W_flow) {
+    for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
+        for (int bx = 0; bx < GRID_SIZE; bx += blockDim.x) {
+            int y = by + threadIdx.y;
+            int x = bx + threadIdx.x;
+            if (y >= GRID_SIZE || x >= GRID_SIZE) continue;
+
+            float perc[PERC_DIM];
+            sample_neighborhood(state_curr, y, x, perc);
+
+            float hidden[HIDDEN_DIM];
+            #pragma unroll
+            for (int h = 0; h < HIDDEN_DIM; ++h) {
+                float acc = 0.f;
+                #pragma unroll
+                for (int p = 0; p < PERC_DIM; ++p) {
+                    acc += W_inter[p * HIDDEN_DIM + h] * perc[p];
+                }
+                hidden[h] = gelu_approx(acc);
+            }
+
+            #pragma unroll
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                float acc = 0.f;
+                #pragma unroll
+                for (int h = 0; h < HIDDEN_DIM; ++h) {
+                    acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
+                }
+                float prev = __half2float(state_curr[grid_idx(y, x, c)]);
+                float next = prev + acc;
+                // FP16 clamp; mirrors 2.0 numerical hygiene.
+                if (next > 65504.f)  next = 65504.f;
+                if (next < -65504.f) next = -65504.f;
+                state_next[grid_idx(y, x, c)] = __float2half(next);
+            }
+        }
+    }
+    __syncthreads();
+}
+
+// 64-step forward, sampling bmap at BTRAJ_STEPS into bmap_traj. One block per
+// organism. The kernel itself iterates the substrate; outer host code maps
+// blocks to organisms.
 __global__ void forward_kernel(OrganismState* organisms,
                                const ForwardInputs* inputs,
-                               const float* W_bmap,
-                               int n_organisms);
+                               const float* W_inter,    // [PERC_DIM x HIDDEN_DIM]
+                               const float* W_flow,     // [HIDDEN_DIM x CA_CHANNELS]
+                               const float* W_bmap,     // [CA_CHANNELS x BMAP_DIM]
+                               int n_organisms) {
+    int org = blockIdx.x;
+    if (org >= n_organisms) return;
+    OrganismState* o     = &organisms[org];
+    const ForwardInputs& in = inputs[org];
+
+    // Role-switched seeding (A-201).
+    if (in.role == Role::Classifier) {
+        seed_classifier_grid(o->grid, in.image_rgb, in.task_embedding);
+    } else {
+        seed_predictor_grid(o->grid, in.target_bmap_32, in.task_embedding);
+    }
+    __syncthreads();
+
+    __half* curr = o->grid;
+    __half* next = o->scratch;
+    int sample_idx = 0;
+
+    for (int step = 1; step <= CA_STEPS; ++step) {
+        ca_step(curr, next, /*W_perc*/ nullptr, W_inter, W_flow);
+        __half* tmp = curr; curr = next; next = tmp;
+
+        if (sample_idx < BTRAJ_SAMPLES && step == BTRAJ_STEPS[sample_idx]) {
+            project_bmap(curr,
+                         W_bmap,
+                         &o->bmap_traj[sample_idx * BMAP_DIM]);
+            sample_idx++;
+        }
+    }
+    // Leave the final state in o->grid so downstream phases (descriptor
+    // extraction, audit) can read directly without tracking the double buffer.
+    if (curr != o->grid) {
+        for (int idx = threadIdx.y * blockDim.x + threadIdx.x;
+             idx < GRID_SIZE * GRID_SIZE * CA_CHANNELS;
+             idx += blockDim.x * blockDim.y) {
+            o->grid[idx] = curr[idx];
+        }
+    }
+}
 
 // Global average pool + W_bmap projection. Produces bmap_t at the requested
 // step. Called inside forward_kernel after each BTRAJ step.

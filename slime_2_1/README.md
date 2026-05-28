@@ -34,8 +34,8 @@ blending weight.
 | S-003  | Structural Pressures: Audit, Sentinels, Lineage        | `safety/structural.cu`                         |
 | S-004  | Parallel Tempering Ladders                             | `safety/parallel_tempering.cu`                 |
 | I-001  | Assembly & Integration                                 | `integration/main_loop.cu`                     |
-| C-001  | Construction Sequence                                  | `build/construction_plan.md`                   |
-| M-001  | Bill of Materials                                      | `build/bom.md`                                 |
+| C-001  | Construction Sequence                                  | `docs/construction_plan.md`                    |
+| M-001  | Bill of Materials                                      | `docs/bom.md`                                  |
 | Q-001  | Quality Assurance                                      | `tests/qa_red_team.cu`                         |
 
 The full blueprint is reproduced at `docs/blueprint_2_1.md`. Every source file
@@ -54,3 +54,15 @@ following C-001.
 The legacy `slime/` tree at the repository root still compiles standalone; the
 2.1 scaffold lives beside it under `slime_2_1/` to keep the working baseline
 unbroken during construction.
+
+```
+make            # full nvcc build (requires CUDA toolkit, sm_86+)
+make check      # host-only unit tests (no CUDA required)
+make clean
+```
+
+`make check` exercises the math inlines that don't need a GPU: SOT gate,
+role-balance multipliers, hybrid surprise blending, PT swap probabilities,
+genome bit layout, BTRAJ step indices, archive geometry. The stub headers
+under `tests/stubs/` keep `<cuda_runtime.h>` and `<cuda_fp16.h>` references
+satisfied during a host-only compile.

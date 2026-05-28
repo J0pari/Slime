@@ -109,10 +109,35 @@ __host__ __device__ inline float ensemble_surprise(const float* predictions,  //
 }
 
 // ---- Bootstrap founder spawn --------------------------------------------
-// One-shot. Selects 16 high-novelty classifier parents and emits role-flipped
-// copies (delta weights preserved, only role bit changed). Subsequent
-// predictor reproduction follows normal spawn rules.
-void spawn_predictor_founders(cudaStream_t stream);
+// One-shot. Selects PREDICTOR_FOUNDERS (= 16) high-novelty classifier parents
+// from the archive and emits role-flipped copies into the active pool: the
+// genome's role bits go to Predictor (= 01), delta weights and the rest of
+// the genome are preserved. Subsequent predictor reproduction follows normal
+// spawn rules.
+//
+// Input arrays are length n_active. parent_novelty[i] is the role-internal
+// novelty score for classifier i (predictors and dead slots get -inf).
+// out_founders is filled with PREDICTOR_FOUNDERS indices into parent_idx.
+__host__ inline void select_predictor_founders(const float* parent_novelty,
+                                               int n_active,
+                                               int* out_founder_indices) {
+    // Simple top-K selection. K is small (16) so an O(N*K) scan is fine.
+    for (int k = 0; k < PREDICTOR_FOUNDERS; ++k) {
+        int best = -1;
+        float best_v = -1.0f;
+        for (int i = 0; i < n_active; ++i) {
+            // Skip already-chosen indices.
+            bool taken = false;
+            for (int j = 0; j < k; ++j) if (out_founder_indices[j] == i) { taken = true; break; }
+            if (taken) continue;
+            if (parent_novelty[i] > best_v) {
+                best_v = parent_novelty[i];
+                best   = i;
+            }
+        }
+        out_founder_indices[k] = best;
+    }
+}
 
 // ---- Hybrid blending ----------------------------------------------------
 struct CorrelationWindow {
