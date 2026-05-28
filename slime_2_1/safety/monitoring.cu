@@ -52,7 +52,14 @@ struct GenerationTelemetry {
 };
 
 // CUSUM update used for blended-surprise drift detection and for r itself.
-__host__ __device__ void cusum_update(CusumState* s, float x);
+__host__ __device__ inline void cusum_update(CusumState* s, float x) {
+    float dev = x - s->reference;
+    s->upper = fmaxf(0.f, s->upper + dev - s->allowance);
+    s->lower = fmaxf(0.f, s->lower - dev - s->allowance);
+    if (s->upper > s->threshold || s->lower > s->threshold) {
+        s->alert_count++;
+    }
+}
 
 // Checkpoint write: writes header + entire population state, archive,
 // placeholder regressor + AdamW state, correlation window, PT replica

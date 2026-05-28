@@ -75,6 +75,7 @@ struct World {
     float rho;                  // s_avg / s_target
 
     int   generation;
+    int   bootstrap_gen;
     bool  bootstrap_fired;
 };
 

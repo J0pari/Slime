@@ -86,10 +86,19 @@ __device__ int insert(Archive* a,
 // Compose fitness with role multiplier, audit multiplier, and variance
 // multiplier. See blueprint A-401 fitness composition:
 //   f = f_raw * role_mult * audit_mult * variance_mult
-__host__ __device__ float compose_fitness(float f_raw,
-                                          float role_mult,
-                                          float audit_mult,
-                                          float variance_mult);
+__host__ __device__ inline float compose_fitness(float f_raw,
+                                                 float role_mult,
+                                                 float audit_mult,
+                                                 float variance_mult) {
+    return f_raw * role_mult * audit_mult * variance_mult;
+}
+
+// Surprise ratio rho = s_avg / s_target. Guards against an uncalibrated
+// s_target (returns 1, which makes both role multipliers idle at 1.0).
+__host__ __device__ inline float surprise_ratio(float s_avg, float s_target) {
+    if (s_target <= 1e-12f) return 1.0f;
+    return s_avg / s_target;
+}
 
 // Surprise-mediated role multipliers. rho = s_avg / s_target. Coefficient is
 // ROLE_BALANCE_COEFF (= 0.1, matches lambda_audit).

@@ -88,8 +88,25 @@ struct PredictorSelectionCache {
 
 // Ensemble surprise per probe target. Each predictor's bmap_64 prediction
 // for the probe lives in the Intent Registry from the forward phase.
-__device__ float ensemble_surprise(const float* predictions,  // [K * BMAP_DIM]
-                                   int k);
+// Surprise = mean (over BMAP_DIM) variance across the K predictions.
+__host__ __device__ inline float ensemble_surprise(const float* predictions,  // [K * BMAP_DIM]
+                                                   int k) {
+    float total = 0.f;
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        float mean = 0.f;
+        for (int i = 0; i < k; ++i) {
+            mean += predictions[i * BMAP_DIM + d];
+        }
+        mean /= static_cast<float>(k);
+        float var = 0.f;
+        for (int i = 0; i < k; ++i) {
+            float diff = predictions[i * BMAP_DIM + d] - mean;
+            var += diff * diff;
+        }
+        total += var / static_cast<float>(k);
+    }
+    return total / static_cast<float>(BMAP_DIM);
+}
 
 // ---- Bootstrap founder spawn --------------------------------------------
 // One-shot. Selects 16 high-novelty classifier parents and emits role-flipped
@@ -107,7 +124,40 @@ struct CorrelationWindow {
 
 // Pearson r clipped to [0, 1]. Before bootstrap, the window is empty and r
 // is treated as zero; the placeholder dominates.
-__host__ __device__ float pearson_r_clipped(const CorrelationWindow& w);
+__host__ __device__ inline float pearson_r_clipped(const CorrelationWindow& w) {
+    int n = w.filled;
+    if (n < 2) return 0.f;
+    float sum_x = 0.f, sum_y = 0.f;
+    for (int i = 0; i < n; ++i) {
+        sum_x += w.s_placeholder[i];
+        sum_y += w.s_predictor[i];
+    }
+    float mean_x = sum_x / static_cast<float>(n);
+    float mean_y = sum_y / static_cast<float>(n);
+    float num = 0.f, den_x = 0.f, den_y = 0.f;
+    for (int i = 0; i < n; ++i) {
+        float dx = w.s_placeholder[i] - mean_x;
+        float dy = w.s_predictor[i]   - mean_y;
+        num   += dx * dy;
+        den_x += dx * dx;
+        den_y += dy * dy;
+    }
+    float den = sqrtf(den_x * den_y);
+    if (den <= 1e-12f) return 0.f;
+    float r = num / den;
+    if (r < 0.f) return 0.f;
+    if (r > 1.f) return 1.f;
+    return r;
+}
+
+// Push a new (s_placeholder, s_predictor) sample into the rolling window.
+__host__ __device__ inline void push_correlation(CorrelationWindow* w,
+                                                 float s_ph, float s_pr) {
+    w->s_placeholder[w->head] = s_ph;
+    w->s_predictor[w->head]   = s_pr;
+    w->head = (w->head + 1) % HYBRID_R_WINDOW;
+    if (w->filled < HYBRID_R_WINDOW) w->filled++;
+}
 
 __host__ __device__ inline float blend_surprise(float s_placeholder,
                                                 float s_predictor,
@@ -119,8 +169,18 @@ __host__ __device__ inline float blend_surprise(float s_placeholder,
 
 // CUSUM on r itself (companion to surprise CUSUM in S-001). Sudden drops in
 // r flag predictor population collapse or a discovery the placeholder misses;
-// both warrant operator review.
-__host__ __device__ void update_r_cusum(float r, float* cusum_state);
+// both warrant operator review. cusum_state layout: [upper, lower, ref, k].
+__host__ __device__ inline void update_r_cusum(float r, float* cusum_state) {
+    float upper = cusum_state[0];
+    float lower = cusum_state[1];
+    float ref   = cusum_state[2];
+    float k     = cusum_state[3];
+    float dev   = r - ref;
+    upper = fmaxf(0.f, upper + dev - k);
+    lower = fmaxf(0.f, lower - dev - k);
+    cusum_state[0] = upper;
+    cusum_state[1] = lower;
+}
 
 }  // namespace slime::predictor
 

@@ -53,6 +53,46 @@ __host__ __device__ inline float mutation_rate_for(const MutationLadder& l, int 
     return PT_MUTATION_RATES[l.replica_of[idx]];
 }
 
+// Fitness improvement RATE per replica over the prior PT_SWAP_INTERVAL
+// generations: delta between most-recent best and oldest best, normalised by
+// the window length. Used for the swap criterion (S-004).
+__host__ __device__ inline float improvement_rate(const MutationLadder& l,
+                                                  int replica) {
+    int head = l.history_head;
+    int oldest = (head + 1) % PT_SWAP_INTERVAL;
+    int latest = (head - 1 + PT_SWAP_INTERVAL) % PT_SWAP_INTERVAL;
+    float dfit = l.best_fitness_history[replica][latest]
+               - l.best_fitness_history[replica][oldest];
+    return dfit / static_cast<float>(PT_SWAP_INTERVAL);
+}
+
+// Metropolis acceptance for a swap between adjacent replicas low (cooler)
+// and high (hotter). Spec: p = min(1, exp(beta * (delta_high - delta_low))).
+__host__ __device__ inline float swap_accept_probability(float beta,
+                                                         float delta_low,
+                                                         float delta_high) {
+    float arg = beta * (delta_high - delta_low);
+    if (arg >= 0.f) return 1.0f;
+    return expf(arg);
+}
+
+// Adaptive beta EMA: nudge beta so the accept rate tracks PT_TARGET_ACCEPT.
+// Higher accept rate -> too easy -> increase beta. Spec says this removes the
+// "magic number" by adapting it.
+__host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 0.05f) {
+    int attempted = l->swaps_attempted;
+    if (attempted <= 0) return;
+    float accept_rate = static_cast<float>(l->swaps_accepted)
+                      / static_cast<float>(attempted);
+    l->accept_ema = (1.0f - ema_rate) * l->accept_ema + ema_rate * accept_rate;
+    float err = l->accept_ema - PT_TARGET_ACCEPT;
+    // accept_ema > target  => beta too small (everything accepted) -> increase
+    // accept_ema < target  => beta too large (rejects too much)    -> decrease
+    l->beta *= expf(0.5f * err);
+    if (l->beta < 1e-3f) l->beta = 1e-3f;
+    if (l->beta > 1e3f)  l->beta = 1e3f;
+}
+
 // Update the rolling best-fitness slot for each replica each generation.
 void record_best_fitness(MutationLadder* l,
                          const float* organism_fitness,

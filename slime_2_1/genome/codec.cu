@@ -43,19 +43,70 @@ __host__ __device__ inline uint32_t read_seed(const Genome& g) {
     return lo | hi;
 }
 
+// xorshift32 PRNG. Cheap, register-resident, suitable for per-thread state.
+__host__ __device__ inline uint32_t xorshift32(uint32_t* s) {
+    uint32_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *s = x;
+    return x;
+}
+
+__host__ __device__ inline float rand_uniform(uint32_t* s) {
+    return static_cast<float>(xorshift32(s)) * (1.0f / 4294967296.0f);
+}
+
 // Mutation. Each spawn uses the replica-assigned mutation rate from S-004 for
 // non-role bits, and the fixed 1e-4 for role bits. Cross-role lineage drift
-// is permitted as exploration.
-__device__ void mutate(Genome* g,
-                       float non_role_rate,
-                       float role_rate,
-                       uint32_t* rng_state);
+// is permitted as exploration. Bit-level Bernoulli flips per the two rates;
+// role bits (0, 1) use role_rate, all others use non_role_rate.
+__host__ __device__ inline void mutate(Genome* g,
+                                       float non_role_rate,
+                                       float role_rate,
+                                       uint32_t* rng_state) {
+    // Role bits live in word 0, positions 0 and 1.
+    for (int b = 0; b < 2; ++b) {
+        if (rand_uniform(rng_state) < role_rate) {
+            g->bits[0] ^= (1u << b);
+        }
+    }
+    // Remaining 1022 bits: word 0 bits 2..31, then words 1..31.
+    for (int b = 2; b < 32; ++b) {
+        if (rand_uniform(rng_state) < non_role_rate) {
+            g->bits[0] ^= (1u << b);
+        }
+    }
+    for (int w = 1; w < GENOME_WORDS; ++w) {
+        for (int b = 0; b < 32; ++b) {
+            if (rand_uniform(rng_state) < non_role_rate) {
+                g->bits[w] ^= (1u << b);
+            }
+        }
+    }
+}
 
-// Single-point crossover, role-blind.
-__device__ void crossover(const Genome& a,
-                          const Genome& b,
-                          Genome* out,
-                          uint32_t* rng_state);
+// Single-point crossover, role-blind. Cut point chosen uniformly in
+// [1, GENOME_BITS - 1] so each parent contributes a nonempty span.
+__host__ __device__ inline void crossover(const Genome& a,
+                                          const Genome& b,
+                                          Genome* out,
+                                          uint32_t* rng_state) {
+    uint32_t cut = 1u + (xorshift32(rng_state) % (GENOME_BITS - 1));
+    uint32_t cut_word = cut >> 5;
+    uint32_t cut_bit  = cut & 31u;
+
+    for (int w = 0; w < GENOME_WORDS; ++w) {
+        if (w < static_cast<int>(cut_word)) {
+            out->bits[w] = a.bits[w];
+        } else if (w > static_cast<int>(cut_word)) {
+            out->bits[w] = b.bits[w];
+        } else {
+            uint32_t mask_a = (cut_bit == 0) ? 0u : ((1u << cut_bit) - 1u);
+            out->bits[w] = (a.bits[w] & mask_a) | (b.bits[w] & ~mask_a);
+        }
+    }
+}
 
 // Delta-weight codec (sparse weight updates layered on the base init).
 // Layout unchanged from 2.0. Each organism holds up to MAX_DELTA_FLOATS
