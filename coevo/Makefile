@@ -8,7 +8,7 @@ CXXFLAGS  ?= -std=c++17 -O2
 NVCCFLAGS ?= -arch=$(ARCH) -rdc=true --extended-lambda --expt-relaxed-constexpr
 
 BUILD_DIR ?= build
-BIN       := $(BUILD_DIR)/slime_2_1
+BIN       := $(BUILD_DIR)/coevo
 HOST_TESTS := $(BUILD_DIR)/host_tests
 
 SRC := integration/host_main.cu

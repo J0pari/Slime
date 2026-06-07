@@ -39,7 +39,7 @@ void initialize_world(World* world) {
         world->stress_ladder.subpop[i] =
             static_cast<uint8_t>(i / STRESS_SUBPOP_SIZE);
     }
-    std::printf("slime_2_1: world initialised. pool=%d stress=%d archive_cap=%d\n",
+    std::printf("coevo: world initialised. pool=%d stress=%d archive_cap=%d\n",
                 POOL_SIZE, STRESS_POOL_SIZE, MAX_ARCHIVE);
 }
 
@@ -52,7 +52,7 @@ void step_generation(World* world) {
     if (!world->bootstrap_fired && archive::bootstrap_trigger(world->archive)) {
         world->bootstrap_fired = true;
         world->bootstrap_gen = gen;
-        std::printf("slime_2_1: bootstrap trigger at gen=%d (archive=%d)\n",
+        std::printf("coevo: bootstrap trigger at gen=%d (archive=%d)\n",
                     gen, archive::archive_size(world->archive));
         // predictor::spawn_predictor_founders(...);
     }
@@ -93,7 +93,7 @@ int run(const char* /*checkpoint_path*/) {
     // Smoke-test loop: 10 stepped iterations. Real runs replace with the
     // off-switch / termination poll from S-002.
     for (int i = 0; i < 10; ++i) step_generation(world);
-    std::printf("slime_2_1: completed %d smoke generations\n", world->generation);
+    std::printf("coevo: completed %d smoke generations\n", world->generation);
     std::free(world);
     return 0;
 }
