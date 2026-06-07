@@ -1,12 +1,16 @@
 // Sheet A-501: Optimizer — CAME
 //
-// Unchanged from 2.0. Confidence-Adjusted Momentum Estimation operates
-// uniformly across roles; only the loss feeding the backward pass differs
-// between classifiers (cross-entropy on logits) and predictors (MSE on
-// bmap_64; see A-103, A-601).
+// Confidence-Adjusted Momentum Estimation. Operates uniformly across roles;
+// only the loss feeding the backward pass differs between classifiers
+// (cross-entropy on logits) and predictors (MSE on bmap_64; see A-103, A-601).
+//
+// This is a flat-buffer approximation of CAME, not a faithful port of the
+// matrix-factored optimizer the blueprint names (the factorization is a
+// memory trick on 2-D weight tensors; on a flat weight buffer it degenerates).
+// See came_update for exactly what is computed. Unverified: not compiled.
 
-#ifndef SLIME_2_1_OPTIMIZER_CAME_CU
-#define SLIME_2_1_OPTIMIZER_CAME_CU
+#ifndef COEVO_OPTIMIZER_CAME_CU
+#define COEVO_OPTIMIZER_CAME_CU
 
 #include "../config/constants.cuh"
 
@@ -14,7 +18,8 @@
 
 namespace slime::optimizer {
 
-// CAME hyperparameters carried from 2.0.
+// CAME hyperparameters. Concrete values are set by the caller at construction;
+// none are pinned here.
 struct CameHyperparams {
     float lr;          // base learning rate
     float beta1;       // first-moment EMA
@@ -48,8 +53,8 @@ struct CameState {
 //   step = u_t / (sqrt(c_t) + eps)
 // where a noisy lineage (large step-to-step change in u) inflates c_t and so
 // damps the effective step. This captures the spec's confidence intent
-// without the matrix factorization the full 2.0 optimizer uses on 2-D
-// weights; the flat-buffer form is the scaffold's simplification.
+// without the matrix factorization that the named optimizer applies to 2-D
+// weight tensors; the flat-buffer form here is the simplification.
 __device__ inline void came_update(float* weights,
                                    const float* grads,
                                    CameState* state,
@@ -83,7 +88,12 @@ __global__ void came_step_kernel(float* weights,
     if (i == 0) state->step++;
 }
 
-// Host-side launcher used by phase graphs.
+// DECLARED ONLY — blueprint-in-place.
+// launch_came_step: thin host wrapper that launches came_step_kernel (above,
+// implemented) with ceil(n / 256) blocks of 256 threads on `stream`. The
+// per-element update math is done and host-tested; this is only the grid-config
+// + launch. One call per trainable weight buffer (W_inter, W_flow, W_bmap) per
+// organism, or one fused call over a concatenated buffer.
 void launch_came_step(float* weights,
                       const float* grads,
                       CameState* state,
@@ -93,4 +103,4 @@ void launch_came_step(float* weights,
 
 }  // namespace slime::optimizer
 
-#endif  // SLIME_2_1_OPTIMIZER_CAME_CU
+#endif  // COEVO_OPTIMIZER_CAME_CU

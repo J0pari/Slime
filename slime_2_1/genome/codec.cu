@@ -8,11 +8,11 @@
 //   bits 282..1023 low-rank delta init prior
 //
 // Role mutation rate is 1e-4 per role-bit per spawn (vs 1e-2 baseline).
-// Delta encoding, MAX_DELTA_FLOATS, and per-organism memory layout carry
-// forward from 2.0.
+// Delta encoding stores sparse (index, value) weight perturbations layered on
+// the base initialization, up to MAX_DELTA_FLOATS pairs per organism.
 
-#ifndef SLIME_2_1_GENOME_CODEC_CU
-#define SLIME_2_1_GENOME_CODEC_CU
+#ifndef COEVO_GENOME_CODEC_CU
+#define COEVO_GENOME_CODEC_CU
 
 #include "../config/constants.cuh"
 
@@ -113,10 +113,9 @@ __host__ __device__ inline void crossover(const Genome& a,
 }
 
 // Delta-weight codec (sparse weight updates layered on the base init).
-// Layout unchanged from 2.0. Each organism holds up to MAX_DELTA_FLOATS
-// (index, value) pairs encoding a low-rank perturbation initialised from
-// bits 282..1023 of the genome.
-constexpr int MAX_DELTA_FLOATS = 4096;  // from 2.0
+// Each organism holds up to MAX_DELTA_FLOATS (index, value) pairs encoding a
+// low-rank perturbation initialised from bits 282..1023 of the genome.
+constexpr int MAX_DELTA_FLOATS = 4096;
 
 struct DeltaWeights {
     uint32_t indices[MAX_DELTA_FLOATS];
@@ -124,17 +123,29 @@ struct DeltaWeights {
     int      count;
 };
 
+// DECLARED ONLY — blueprint-in-place.
+// apply_delta: scatter the sparse perturbation onto the learned weight buffers.
+// The three learned matrices (W_inter, W_flow, W_bmap) are addressed as one
+// concatenated index space; each delta.indices[k] selects a global weight slot
+// and delta.values[k] is added to the base-initialized weight there. Perception
+// is a fixed stencil and has no weights, so there is no W_perc target. O(count)
+// scatter, run at decode time before the forward pass.
 __device__ void apply_delta(const DeltaWeights& delta,
-                            float* W_perc,
                             float* W_inter,
                             float* W_flow,
                             float* W_bmap);
 
-// Initialise delta indices/values from the genome prior bits (282..1023).
+// DECLARED ONLY — blueprint-in-place.
+// init_delta_from_prior: seed a fresh organism's delta from genome bits
+// 282..1023. Interpret the prior bits as a low-rank generator: draw `count`
+// (index, value) pairs where indices are spread across the concatenated weight
+// space and values are small Gaussian-ish perturbations whose scale/rank are
+// set by the prior. Determinism comes from rng_state seeded with the genome
+// seed (read_seed), so the same genome always yields the same initial delta.
 __device__ void init_delta_from_prior(const Genome& g,
                                       DeltaWeights* delta,
                                       uint32_t* rng_state);
 
 }  // namespace slime::genome
 
-#endif  // SLIME_2_1_GENOME_CODEC_CU
+#endif  // COEVO_GENOME_CODEC_CU

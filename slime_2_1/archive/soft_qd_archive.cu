@@ -3,7 +3,7 @@
 // Descriptor: final bmap_64. Weighted Euclidean distance with per-dimension
 // inverse-variance EMA. RFF KDE projection W_rff shared across roles; the
 // archive's mean RFF vector mu_archive is maintained per role. 20x20 PCA bins
-// computed once on the union archive (per 2.0 cadence). Each bin has per-role
+// computed periodically on the union archive. Each bin has per-role
 // capacity caps.
 //
 // Surprise-mediated fitness scaling drives role balance: rho = s_avg / s_target
@@ -14,8 +14,8 @@
 //   predictor_mult  = 1 + 0.1 * max(0, rho - 1)
 // Coefficient 0.1 matches lambda_audit.
 
-#ifndef SLIME_2_1_ARCHIVE_SOFT_QD_ARCHIVE_CU
-#define SLIME_2_1_ARCHIVE_SOFT_QD_ARCHIVE_CU
+#ifndef COEVO_ARCHIVE_SOFT_QD_ARCHIVE_CU
+#define COEVO_ARCHIVE_SOFT_QD_ARCHIVE_CU
 
 #include "../config/constants.cuh"
 
@@ -96,7 +96,7 @@ __host__ __device__ inline float weighted_dist2(const float* a,
 // of the weakest same-role occupant of the candidate's PCA bin. This is the
 // quality half of the soft-QD rule.
 //
-// TODO(2.1, A-401): the diversity half. The full rule weights the replacement
+// NOT YET IMPLEMENTED (A-401): the diversity half. The full rule weights the replacement
 // decision by role-internal novelty (RFF KDE against mu_classifier /
 // mu_predictor), so a less-fit but more-novel candidate can still displace a
 // crowded incumbent. weighted_dist2() and the per-role mu_rff vectors are
@@ -176,7 +176,7 @@ __host__ __device__ inline float predictor_mult(float rho) {
     return 1.0f + ROLE_BALANCE_COEFF * gap;
 }
 
-// SOT gate (carried from 2.0): sigmoid(20 * (x - 0.7)).
+// SOT gate: sigmoid(20 * (x - 0.7)).
 __host__ __device__ inline float sot_gate(float x) {
     float z = SOT_GATE_SLOPE * (x - SOT_GATE_MIDPOINT);
     // numerically stable sigmoid
@@ -189,15 +189,34 @@ __host__ __device__ inline float sot_gate(float x) {
     }
 }
 
-// PCA bin recompute on the union archive. Per 2.0 cadence.
+// DECLARED ONLY — blueprint-in-place.
+// recompute_bins: refit the 20x20 PCA binning over the union archive.
+//   1. Gather all alive descriptors (bmap_64) into a [N x BMAP_DIM] matrix.
+//   2. Mean-center; compute the top-2 principal components (power iteration on
+//      the 32x32 covariance is enough for 2 PCs and avoids a full eig).
+//   3. Project every descriptor onto (PC0, PC1); take min/max per axis to fix
+//      the bin grid extents; assign each entry bin_x, bin_y in [0,20).
+//   4. Recount BinCaps.count_classifier / count_predictor from the new
+//      assignments. Caps themselves are policy and set elsewhere.
+//   Cadence: periodic (every few hundred generations); cost is O(N*BMAP_DIM)
+//   per power-iteration step. Run on the host or a single block; it is not on
+//   the per-generation hot path.
 void recompute_bins(Archive* a, cudaStream_t stream);
 
-// Lineage-aware replacement brake. Tightens replacement bars for whichever
-// role's lineage is runaway. Per-role and independent.
+// DECLARED ONLY — blueprint-in-place.
+// apply_lineage_brake: when lineage `runaway_lineage_id` of `role` exceeds its
+// per-role archive-share threshold (S-003), raise that role's replacement bar
+// inside every bin the lineage occupies, so its members are displaced sooner
+// and new members insert harder. Concretely: scale the effective fitness used
+// in insert()'s weakest-occupant comparison by a brake factor < 1 for entries
+// whose lineage_id matches, proportional to how far over threshold the lineage
+// sits. Per-role and independent: a classifier brake never touches predictor
+// replacement decisions. Must be idempotent across repeated calls in a
+// generation (recompute the factor from current share, do not accumulate).
 __device__ void apply_lineage_brake(Archive* a,
                                     Role role,
                                     uint32_t runaway_lineage_id);
 
 }  // namespace slime::archive
 
-#endif  // SLIME_2_1_ARCHIVE_SOFT_QD_ARCHIVE_CU
+#endif  // COEVO_ARCHIVE_SOFT_QD_ARCHIVE_CU

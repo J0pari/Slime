@@ -1,16 +1,19 @@
 // Sheet A-103: Autodiff — Checkpointed Warp Tape (Trajectory-Aware)
 //
-// Unchanged from 2.0 in essentials. The only modification: a predictor
+// A checkpointed reverse-mode tape over the CA forward pass. A predictor
 // organism's loss is MSE between bmap_64 of its forward pass and a target
-// bmap_64 (ground truth label drawn from the Intent Registry). The Warp tape
-// already records operations producing bmap_64 via the W_bmap projection;
-// no new custom adjoints are required.
+// bmap_64 (ground-truth label drawn from the Intent Registry). The Warp tape
+// records operations producing bmap_64 via the W_bmap projection, so no custom
+// adjoints beyond the standard matmul/activation set are required.
 //
-// Classifier loss continues to be cross-entropy on classification logits.
-// Both losses flow through the same checkpointed backward.
+// Classifier loss is cross-entropy on classification logits. Both losses flow
+// through the same checkpointed backward.
+//
+// Only the two loss routers below have bodies; the tape recording and the
+// backward sweep (launch_backward) are declared-only — see their comments.
 
-#ifndef SLIME_2_1_AUTODIFF_WARP_TAPE_CU
-#define SLIME_2_1_AUTODIFF_WARP_TAPE_CU
+#ifndef COEVO_AUTODIFF_WARP_TAPE_CU
+#define COEVO_AUTODIFF_WARP_TAPE_CU
 
 #include "../config/constants.cuh"
 
@@ -41,7 +44,8 @@ struct WarpTape {
 };
 
 // Loss routers. Both write into the gradient buffers feeding W_bmap, W_flow,
-// W_inter, W_perc through the standard backward sweep.
+// and W_inter through the standard backward sweep (perception is a fixed
+// stencil, so there is no W_perc gradient).
 //
 // Classifier loss: numerically-stable softmax cross-entropy.
 //   p_i        = exp(z_i - max_z) / sum_j exp(z_j - max_z)
@@ -95,13 +99,25 @@ __host__ __device__ inline void predictor_mse_loss(const float* bmap_pred,
     if (loss_out) *loss_out = acc / static_cast<float>(BMAP_DIM);
 }
 
-// Checkpoint-aware backward sweep. Identical control flow for both roles;
-// only the seed gradient (dlogits vs dbmap_pred) and the upstream loss
-// computation differ.
+// DECLARED ONLY — blueprint-in-place.
+// The tape itself is also not yet recorded: the forward pass (A-201) does not
+// push TapeOp entries, so there is nothing to walk backward over. Both halves
+// are open:
+//   Recording: during forward, each matmul / activation / bmap-projection
+//   appends a TapeOp (atomicAdd on tape->head, bounds-checked against capacity;
+//   on overflow, fall back to gradient checkpointing — recompute from the last
+//   Checkpoint op). The 64-step CA rollout is the main source of tape length,
+//   which is exactly why checkpointing is in the design.
+//   launch_backward: seed the output gradient (dlogits for classifiers,
+//   dbmap_pred for predictors — both implemented above), then walk the tape in
+//   reverse, applying the adjoint of each op into the FP32 gradient buffers for
+//   W_bmap, W_flow, W_inter. Matmul adjoint: dA = dC.B^T, dB = A^T.dC.
+//   Activation adjoint: elementwise GELU'/identity. Re-run forward from the
+//   nearest checkpoint when the tape segment was not retained.
 void launch_backward(WarpTape* tape,
                      float* seed_grad,
                      cudaStream_t stream);
 
 }  // namespace slime::autodiff
 
-#endif  // SLIME_2_1_AUTODIFF_WARP_TAPE_CU
+#endif  // COEVO_AUTODIFF_WARP_TAPE_CU

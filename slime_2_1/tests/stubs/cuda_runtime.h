@@ -2,8 +2,8 @@
 // the minimum surface area that the 2.1 module headers reference so the
 // __host__ __device__ inlines can be compiled and exercised without CUDA.
 
-#ifndef SLIME_2_1_STUBS_CUDA_RUNTIME_H
-#define SLIME_2_1_STUBS_CUDA_RUNTIME_H
+#ifndef COEVO_STUBS_CUDA_RUNTIME_H
+#define COEVO_STUBS_CUDA_RUNTIME_H
 
 #include <cstddef>
 
@@ -24,4 +24,4 @@ using cudaStream_t = void*;
 using cudaError_t  = int;
 #define cudaSuccess 0
 
-#endif  // SLIME_2_1_STUBS_CUDA_RUNTIME_H
+#endif  // COEVO_STUBS_CUDA_RUNTIME_H

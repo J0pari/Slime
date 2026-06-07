@@ -371,6 +371,74 @@ static void test_came_confidence_converges() {
     EXPECT_TRUE(std::isfinite(last_step));
 }
 
+// ---- SOT reversible permutation (Feistel) --------------------------------
+// Re-pasted from curriculum/problem_generator.cu; the round structure must
+// stay in sync. The property under test is the one that matters for SOT:
+// the permutation is an exact bijection and its inverse undoes it.
+static uint32_t sot_feistel(uint32_t idx, uint64_t key, bool invert) {
+    uint32_t l = (idx >> 6) & 0x3Fu;
+    uint32_t r = idx & 0x3Fu;
+    const int ROUNDS = 4;
+    for (int round = 0; round < ROUNDS; ++round) {
+        int ri = invert ? (ROUNDS - 1 - round) : round;
+        uint32_t rk = static_cast<uint32_t>((key >> (8 * ri)) & 0xFFu);
+        uint32_t nl, nr;
+        if (!invert) {
+            uint32_t f = ((r * 73u) + rk * 0x9Eu + ri * 0x2Fu) & 0x3Fu;
+            nl = r; nr = l ^ f;
+        } else {
+            uint32_t f = ((l * 73u) + rk * 0x9Eu + ri * 0x2Fu) & 0x3Fu;
+            nl = r ^ f; nr = l;
+        }
+        l = nl; r = nr;
+    }
+    return ((l & 0x3Fu) << 6) | (r & 0x3Fu);
+}
+
+static void test_sot_feistel_bijection() {
+    const uint64_t key = 0xC0FFEE1234567890ull;
+    // Forward is a bijection on [0, 4096): every output hit exactly once.
+    int seen[4096] = {0};
+    for (uint32_t i = 0; i < 4096; ++i) {
+        uint32_t o = sot_feistel(i, key, false);
+        EXPECT_TRUE(o < 4096u);
+        seen[o]++;
+    }
+    int collisions = 0, misses = 0;
+    for (int i = 0; i < 4096; ++i) { if (seen[i] > 1) collisions++; if (seen[i] == 0) misses++; }
+    EXPECT_TRUE(collisions == 0);
+    EXPECT_TRUE(misses == 0);
+    // Inverse undoes forward for every index.
+    int roundtrip_ok = 1;
+    for (uint32_t i = 0; i < 4096; ++i) {
+        uint32_t f = sot_feistel(i, key, false);
+        uint32_t b = sot_feistel(f, key, true);
+        if (b != i) { roundtrip_ok = 0; break; }
+    }
+    EXPECT_TRUE(roundtrip_ok == 1);
+    // A different key generally yields a different permutation.
+    EXPECT_TRUE(sot_feistel(123u, key, false) != sot_feistel(123u, key ^ 0xFFull, false));
+}
+
+// ---- runaway_detected / l_role_collapse ----------------------------------
+static bool runaway_ref(float share, float growth, float threshold) {
+    return share > threshold && growth > 0.f;
+}
+static void test_runaway_detected() {
+    EXPECT_TRUE(runaway_ref(0.8f,  0.01f, 0.5f) == true);   // over + growing
+    EXPECT_TRUE(runaway_ref(0.8f, -0.01f, 0.5f) == false);  // over but shrinking
+    EXPECT_TRUE(runaway_ref(0.3f,  0.01f, 0.5f) == false);  // growing but small
+}
+static bool l_role_collapse_ref(float l_role_acc, float baseline) {
+    if (baseline < 0.6f) return false;
+    return l_role_acc < 0.85f * baseline;
+}
+static void test_l_role_collapse() {
+    EXPECT_TRUE(l_role_collapse_ref(0.70f, 0.95f) == true);   // dropped below 85% of baseline
+    EXPECT_TRUE(l_role_collapse_ref(0.92f, 0.95f) == false);  // healthy
+    EXPECT_TRUE(l_role_collapse_ref(0.30f, 0.50f) == false);  // baseline untrusted
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -389,6 +457,9 @@ int main() {
     test_xorshift_zero_seed();
     test_cusum_resets_after_alarm();
     test_came_confidence_converges();
+    test_sot_feistel_bijection();
+    test_runaway_detected();
+    test_l_role_collapse();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

@@ -1,6 +1,6 @@
 // Sheet S-001: Monitoring, Checkpointing & Resilience
 //
-// Unchanged from 2.0 in structure. Checkpoint state additionally includes:
+// Checkpoint state includes, alongside the population/archive/optimizer state:
 //   * role tags of all organisms
 //   * calibrated s_target value (frozen at first bootstrap crossing)
 //   * rolling correlation window state for hybrid blending (A-601)
@@ -8,8 +8,8 @@
 // CUSUM operates on blended surprise (A-601). A companion CUSUM on r itself
 // (the hybrid blending weight) raises an alert if correlation collapses.
 
-#ifndef SLIME_2_1_SAFETY_MONITORING_CU
-#define SLIME_2_1_SAFETY_MONITORING_CU
+#ifndef COEVO_SAFETY_MONITORING_CU
+#define COEVO_SAFETY_MONITORING_CU
 
 #include "../config/constants.cuh"
 
@@ -140,12 +140,29 @@ __host__ inline bool load_checkpoint_header(CheckpointHeader* hdr_out,
     return true;
 }
 
-// Full-state write/load thunks that the host driver calls during run() and
-// at shutdown. Bodies wire in payload writers from the integration layer
-// once the World struct is finalised.
+// DECLARED ONLY — blueprint-in-place.
+// write_checkpoint / load_checkpoint move the FULL run state, not just the
+// header above. The header path is done; the payload is not, and a header-only
+// checkpoint does not survive a restart. What the full payload must serialize,
+// in order, after the header:
+//   1. Organism table: for each of POOL_SIZE + STRESS_POOL_SIZE slots —
+//      genome bits, delta weights (count + indices + values), role, lineage_id,
+//      parent_id, spawn_gen, replica_tag. The CA grid is NOT serialized (it is
+//      recomputed from the genome on reload); the CAME momentum buffers ARE
+//      (m, v, c, prev_u), because PT swaps assume momentum follows the organism.
+//   2. Archive: alive entries (descriptor, rff_proj, fitness, lineage, bin,
+//      role) + per-role mu_rff vectors + inv_var_ema + bin caps/counts.
+//   3. Placeholder regressor: all weights + AdamW moments + replay buffer.
+//   4. Correlation window, both CUSUM states, calibrated s_target + its frozen
+//      flag, mutation-ladder replica assignments + beta + accept EMA, stress
+//      ladder state, sentinel ensemble + history, generation counter, RNG seeds.
+// Pointers in CameState (m/v/c/prev_u) must be flattened to inline arrays on
+// write and re-pointed on load — a raw fwrite(World) is wrong because of them.
+// Write to a temp path then rename() for atomic replacement. load_checkpoint
+// must re-decode every genome to rebuild CA grids before the first forward.
 void write_checkpoint(const CheckpointHeader& hdr, const char* path);
 bool load_checkpoint(CheckpointHeader* hdr_out,  const char* path);
 
 }  // namespace slime::safety
 
-#endif  // SLIME_2_1_SAFETY_MONITORING_CU
+#endif  // COEVO_SAFETY_MONITORING_CU

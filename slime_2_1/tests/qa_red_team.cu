@@ -1,7 +1,12 @@
 // Sheet Q-001: Quality Assurance
 //
-// Unit + integration tests inherit from 2.0 with role-aware extensions.
-// Red-team tests follow a single shared template (Q-001 restructured per 2.1):
+// Role-aware unit + integration tests. Every entry point in this file is
+// DECLARED ONLY: the attack-class table is data, but run_case and all the
+// unit/integ/longrun/perf functions have no bodies — they require the GPU
+// runtime and a built system to drive. They are a test plan, not a test suite.
+// The runnable host tests live in tests/host_unit_tests.cpp.
+//
+// Red-team tests follow a single shared template:
 //
 //   Inject(synthetic exemplar of attack class)
 //   Observe detection mechanism activation within T_detect generations
@@ -9,8 +14,8 @@
 //     detection
 //   Pass criterion: T_detect <= T_detect_max, T_remediate <= T_remediate_max
 
-#ifndef SLIME_2_1_TESTS_QA_RED_TEAM_CU
-#define SLIME_2_1_TESTS_QA_RED_TEAM_CU
+#ifndef COEVO_TESTS_QA_RED_TEAM_CU
+#define COEVO_TESTS_QA_RED_TEAM_CU
 
 #include "../config/constants.cuh"
 
@@ -66,7 +71,7 @@ constexpr int CASE_COUNT = sizeof(CASES) / sizeof(CASES[0]);
 // detection + remediation timing. Returns 0 on pass, nonzero on fail.
 int run_case(const RedTeamCase& c, AttackClass cls, int exemplar_idx);
 
-// Unit tests inherited / extended from 2.0:
+// Unit tests (role-aware):
 //   * BTRAJ correctness: bmap at each sample step matches a reference forward
 //   * role-switched input pathway: expected initial grid state for both roles
 //   * role mutation rate measured at the intended 1e-4
@@ -78,7 +83,7 @@ int unit_role_mutation_rate();
 int unit_hybrid_blending_limits();
 
 // Integration tests:
-//   * 100-gen classifier-only run still passes 2.0 acceptance criteria
+//   * a classifier-only run passes the baseline acceptance criteria
 //   * bootstrap-trigger run shows successful predictor seeding + surprise
 //     transition
 //   * role-balance scaling shifts archive composition in expected direction
@@ -91,9 +96,9 @@ int integ_role_balance_scaling();
 //   * 10^4-gen stability run with all subsystems active
 //   * behavioral-equivalence run between captured-graph and sequential modes
 //   * if MPK enabled, captured vs MPK behavioral-equivalence run
-//   * New for 2.1: 10^4-gen post-bootstrap run showing sustained predictor
-//     sub-population, healthy r > 0.5 sustained, no Class A-F red-team
-//     conditions emerging spontaneously
+//   * a long post-bootstrap run showing a sustained predictor sub-population,
+//     healthy r > 0.5 sustained, and no Class A-F red-team conditions emerging
+//     spontaneously
 int longrun_stability_10k();
 int longrun_post_bootstrap_10k();
 
@@ -105,4 +110,4 @@ int perf_stress_overhead();
 
 }  // namespace slime::tests
 
-#endif  // SLIME_2_1_TESTS_QA_RED_TEAM_CU
+#endif  // COEVO_TESTS_QA_RED_TEAM_CU

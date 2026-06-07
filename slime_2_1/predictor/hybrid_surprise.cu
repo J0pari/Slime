@@ -16,8 +16,8 @@
 // where r = clip(Pearson(s_placeholder, s_predictor) on probe set over the
 // last 100 generations, [0, 1]).
 
-#ifndef SLIME_2_1_PREDICTOR_HYBRID_SURPRISE_CU
-#define SLIME_2_1_PREDICTOR_HYBRID_SURPRISE_CU
+#ifndef COEVO_PREDICTOR_HYBRID_SURPRISE_CU
+#define COEVO_PREDICTOR_HYBRID_SURPRISE_CU
 
 #include "../config/constants.cuh"
 
@@ -65,14 +65,26 @@ struct PlaceholderReplayBuffer {
     int   filled;     // entries actually populated
 };
 
-// Compute (fitness_hat, log_uncertainty); surprise = (fitness_actual - hat)^2.
+// DECLARED ONLY — blueprint-in-place.
+// placeholder_forward: a 3-layer MLP forward. Concatenate bmap (32) and
+// task_emb (16) into a 48-d input; h1 = gelu(W1.x + b1) [128]; h2 =
+// gelu(W2.h1 + b2) [64]; out2 = W3.h2 + b3 [2] = (fitness_hat,
+// log_uncertainty). Surprise for a classifier is then
+// (fitness_actual - fitness_hat)^2, optionally scaled by exp(-log_uncertainty)
+// for a heteroscedastic weighting. Pure feed-forward; no shared state.
 __device__ void placeholder_forward(const PlaceholderRegressor& r,
                                     const float* bmap,
                                     const float* task_emb,
                                     float* out2);
 
-// One AdamW training step on the placeholder. Trained per generation in the
-// world_train_phase (A-102).
+// DECLARED ONLY — blueprint-in-place.
+// launch_placeholder_train: one AdamW step (lr 1e-4) on a minibatch drawn from
+// the replay buffer. Loss is a Gaussian NLL: 0.5 * (exp(-s) * (y - mu)^2 + s)
+// where (mu, s) = placeholder_forward outputs, y = stored fitness — this
+// trains both the mean and the uncertainty head. Backprop through the 3 layers,
+// apply AdamW to W1..W3 and biases using the m_/v_ buffers in the struct. Runs
+// once per generation in world_train_phase, isolated from organism weights
+// (A-601 gradient policy).
 void launch_placeholder_train(PlaceholderRegressor* r,
                               const PlaceholderReplayBuffer* buf,
                               cudaStream_t stream);
@@ -202,4 +214,4 @@ __host__ __device__ inline float blend_surprise(float s_placeholder,
 
 }  // namespace slime::predictor
 
-#endif  // SLIME_2_1_PREDICTOR_HYBRID_SURPRISE_CU
+#endif  // COEVO_PREDICTOR_HYBRID_SURPRISE_CU

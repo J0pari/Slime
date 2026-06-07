@@ -22,8 +22,8 @@
 // A lineage whose stress reps fail the SOT gate > 50% over the last 10
 // stress evaluations is flagged for operator review.
 
-#ifndef SLIME_2_1_SAFETY_PARALLEL_TEMPERING_CU
-#define SLIME_2_1_SAFETY_PARALLEL_TEMPERING_CU
+#ifndef COEVO_SAFETY_PARALLEL_TEMPERING_CU
+#define COEVO_SAFETY_PARALLEL_TEMPERING_CU
 
 #include "../config/constants.cuh"
 
@@ -102,14 +102,26 @@ __host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 
     l->swaps_accepted  = 0;
 }
 
-// Update the rolling best-fitness slot for each replica each generation.
+// DECLARED ONLY — blueprint-in-place.
+// record_best_fitness: for each replica, scan its 16 member slots, take the max
+// of organism_fitness over them, and write it into
+// best_fitness_history[replica][history_head]; then advance history_head mod
+// PT_SWAP_INTERVAL. Called once per generation. improvement_rate() (above,
+// implemented) consumes this ring buffer.
 void record_best_fitness(MutationLadder* l,
                          const float* organism_fitness,
                          cudaStream_t stream);
 
-// Propose swaps between adjacent replicas. Moves entire organisms
-// (CA grid, delta weights, CAME state) so optimizer momentum follows the
-// organism. Adapts beta to track PT_TARGET_ACCEPT.
+// DECLARED ONLY — blueprint-in-place.
+// propose_swaps: every PT_SWAP_INTERVAL generations, for each adjacent replica
+// pair (0-1, 1-2, 2-3): compute improvement_rate for each side, draw the
+// Metropolis accept using swap_accept_probability(l->beta, lo_rate, hi_rate),
+// increment l->swaps_attempted, and on accept swap the two replicas' organism
+// membership (the whole organism: genome, delta, CA grid, CAME m/v/c/prev_u)
+// so momentum follows, increment l->swaps_accepted, and update replica_of for
+// the moved slots. Then call update_beta() (implemented) once to adapt beta and
+// reset the round tally. The swap_accept math and beta adaptation are the parts
+// already implemented and host-tested; this wires them to the real pool.
 void propose_swaps(MutationLadder* l, cudaStream_t stream);
 
 // ---- SOT-density stress ladder ------------------------------------------
@@ -129,20 +141,33 @@ struct StressLadder {
     int      flagged_lineage_count;
 };
 
-// Seed/refresh slots. Sampling rate STRESS_REFRESH_FRACTION = 25%/gen.
-// Sampling is biased toward lineages whose stress evaluations are outdated.
+// DECLARED ONLY — blueprint-in-place.
+// refresh_stress_slots: replace round(STRESS_REFRESH_FRACTION * STRESS_POOL_SIZE)
+// = 6 slots per generation. Pick the slots with the oldest last_refresh_gen,
+// draw replacement lineages from eligible_lineages biased toward those with the
+// stalest stress data, clone the chosen lineage representative from the main
+// pool into the stress slot (preserving lineage_id and role to keep the
+// sub-pop role-balanced 4+4), and stamp last_refresh_gen = generation.
 void refresh_stress_slots(StressLadder* l,
                           uint32_t* eligible_lineages,
                           int n_eligible,
                           int generation,
                           cudaStream_t stream);
 
-// One evaluation cycle: run each stress organism on a batch at its
-// subpop-assigned SOT density. Update sot_gate_pass + eval_count.
+// DECLARED ONLY — blueprint-in-place.
+// evaluate_stress: run each of the 24 stress organisms through a forward pass
+// on a task batch whose SOT density is STRESS_SOT_DENSITIES[subpop] (10/20/40%),
+// score the SOT gate, write sot_gate_pass[i], and increment eval_count[i].
+// Stress organisms never enter the main archive; this is shadow evaluation
+// only. Reuses the A-201 forward and the A-401 SOT gate.
 void evaluate_stress(StressLadder* l, cudaStream_t stream);
 
-// Compute per-lineage failure rate over the last STRESS_HISTORY_WINDOW
-// evaluations; emit a flag (no automatic pruning - operator review only).
+// DECLARED ONLY — blueprint-in-place.
+// flag_stress_failures: for each lineage represented in the stress pool,
+// compute the SOT-gate failure rate over its last STRESS_HISTORY_WINDOW (10)
+// evaluations; if it exceeds STRESS_FAILURE_THRESHOLD (50%), set the lineage's
+// operator-review flag and bump flagged_lineage_count. No automatic pruning —
+// the operator decides (S-004).
 void flag_stress_failures(StressLadder* l, cudaStream_t stream);
 
 // Interaction note from the spec: organisms are not simultaneously assigned
@@ -152,4 +177,4 @@ void flag_stress_failures(StressLadder* l, cudaStream_t stream);
 
 }  // namespace slime::safety::pt
 
-#endif  // SLIME_2_1_SAFETY_PARALLEL_TEMPERING_CU
+#endif  // COEVO_SAFETY_PARALLEL_TEMPERING_CU

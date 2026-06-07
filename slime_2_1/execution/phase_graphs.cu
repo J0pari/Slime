@@ -1,7 +1,6 @@
 // Sheet A-102: Execution Backend — Phase-Major CUDA Graphs
 //
-// Unchanged from 2.0 in structure. Eight phase graphs replayed by host
-// orchestration. Two 2.1-specific notes:
+// Eight phase graphs replayed by host orchestration. Notes:
 //
 //   * forward_phase captures BTRAJ at four CA steps (16, 32, 48, 64) instead
 //     of only the final step. The additional managed-memory writes are small:
@@ -11,10 +10,13 @@
 //     predictor-organisms' standard CAME path. Predictors train through the
 //     same backward/optimizer phases as classifiers; only the loss differs.
 //
-// MPK experimental backend unchanged.
+// The capture/build/launch/destroy helpers below are real CUDA graph API
+// usage but capture NOTHING yet — the kernel sequence inside each phase is not
+// populated. None of this has been compiled. An optional MPK backend is a
+// possible alternative execution path, not implemented here.
 
-#ifndef SLIME_2_1_EXECUTION_PHASE_GRAPHS_CU
-#define SLIME_2_1_EXECUTION_PHASE_GRAPHS_CU
+#ifndef COEVO_EXECUTION_PHASE_GRAPHS_CU
+#define COEVO_EXECUTION_PHASE_GRAPHS_CU
 
 #include "../config/constants.cuh"
 
@@ -22,7 +24,7 @@
 
 namespace slime::execution {
 
-// Eight phase graphs (names match A-102 from 2.0).
+// Eight phase graphs (names match A-102).
 enum class Phase : int {
     Curriculum    = 0,
     Decode        = 1,
@@ -90,4 +92,4 @@ inline void destroy_phase_graphs(PhaseGraphs* g) {
 
 }  // namespace slime::execution
 
-#endif  // SLIME_2_1_EXECUTION_PHASE_GRAPHS_CU
+#endif  // COEVO_EXECUTION_PHASE_GRAPHS_CU

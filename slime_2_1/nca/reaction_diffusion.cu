@@ -1,11 +1,18 @@
 // Sheet A-202: Reaction-Diffusion Field
 //
-// Unchanged from 2.0 in spec. Operates on chemical channels 0-5 of the CA
-// grid. Reaction coefficients (channels 0-5 pairwise interactions) and
-// diffusion rates come from the genome (A-301 bits 34-281).
+// Operates on chemical channels 0-5 of the CA grid. Reaction coefficients
+// (pairwise interactions among the six chemical channels) and per-channel
+// diffusion rates are decoded from the genome (A-301 bits 34-281).
+//
+// NOT YET INTEGRATED: rd_step is written but forward_kernel (A-201) does not
+// call it, so the chemical channels currently evolve only through the
+// perception/interaction path. Wiring it in requires threading the decoded
+// Coefficients through the forward pass (decode once per organism at decode
+// time, then call rd_step alongside ca_step each step). Until that lands, the
+// reaction-diffusion field is inert. This file has not been compiled.
 
-#ifndef SLIME_2_1_NCA_REACTION_DIFFUSION_CU
-#define SLIME_2_1_NCA_REACTION_DIFFUSION_CU
+#ifndef COEVO_NCA_REACTION_DIFFUSION_CU
+#define COEVO_NCA_REACTION_DIFFUSION_CU
 
 #include "../config/constants.cuh"
 
@@ -105,4 +112,4 @@ __device__ inline void decode_coefficients(const uint32_t* genome_bits,
 
 }  // namespace slime::nca::rd
 
-#endif  // SLIME_2_1_NCA_REACTION_DIFFUSION_CU
+#endif  // COEVO_NCA_REACTION_DIFFUSION_CU

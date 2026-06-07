@@ -1,7 +1,7 @@
 // Sheet S-003: Structural Pressures — Audit, Sentinels, Lineage Pruning
 //
 // Audit, interpretability probe panel, sentinel population, lineage-share
-// runaway detector all carry forward from 2.0 with role-aware modifications:
+// runaway detector are role-aware:
 //
 //   * Audit. Predictive-sufficiency audit operates on final bmap_64.
 //     - Classifier target: fitness on the diagnostic task set.
@@ -9,7 +9,7 @@
 //       archived classifiers (signed at run start).
 //
 //   * Interpretability probe panel. Four classifiers: L_lineage, L_task,
-//     L_fit (all from 2.0), plus a new L_role predicting role from bmap.
+//     L_fit, plus L_role predicting role from bmap.
 //     L_role accuracy is expected to be high; a DROP signals representational
 //     collapse between roles and triggers operator review.
 //
@@ -21,8 +21,8 @@
 //     relationships (a classifier lineage spawning a predictor via role
 //     mutation) are tracked but not aggregated into a single share count.
 
-#ifndef SLIME_2_1_SAFETY_STRUCTURAL_CU
-#define SLIME_2_1_SAFETY_STRUCTURAL_CU
+#ifndef COEVO_SAFETY_STRUCTURAL_CU
+#define COEVO_SAFETY_STRUCTURAL_CU
 
 #include "../config/constants.cuh"
 
@@ -45,6 +45,17 @@ struct AuditRegressor {
 
 constexpr float LAMBDA_AUDIT = 0.1f;       // matches ROLE_BALANCE_COEFF
 
+// DECLARED ONLY — blueprint-in-place.
+// run_audit_cycle: refit the predictive-sufficiency regressors and emit the
+// per-organism audit_mult. Steps:
+//   1. For classifiers, least-squares fit weights_classifier (bmap_64 ->
+//      diagnostic-task fitness). For predictors, fit weights_predictor
+//      (bmap_64 -> prediction error on the signed diagnostic classifier set).
+//   2. R^2 of each fit measures how much of the role's fitness signal bmap_64
+//      explains. Low R^2 means bmaps are not predictive of behavior (a
+//      concealment red flag, Q-001 Class A).
+//   3. audit_mult = 1 - LAMBDA_AUDIT * (1 - R^2), clamped to [0.9, 1.0], folded
+//      into fitness composition (A-401). Refit cadence: AUDIT_INTERVAL.
 void run_audit_cycle(AuditRegressor* reg, cudaStream_t stream);
 
 // ---- Interpretability probe panel ----------------------------------------
@@ -55,15 +66,29 @@ struct ProbePanel {
     float l_lineage_acc;
     float l_task_acc;
     float l_fit_acc;
-    float l_role_acc;     // new for 2.1
+    float l_role_acc;     // role predictability from bmap
 };
 
+// DECLARED ONLY — blueprint-in-place.
+// refresh_probe_panel: refit the four interpretability probes on the current
+// archive snapshot and report their accuracies. Each is a small linear/softmax
+// classifier on bmap_64: L_lineage -> lineage id (top-N lineages), L_task ->
+// task id, L_fit -> fitness bucket, L_role -> {classifier, predictor}. Train a
+// few SGD epochs over a sampled balanced set; report held-out accuracy into
+// `out`. L_role is the corrigibility-relevant one (see l_role_collapse).
+// Cadence: PROBE_PANEL_INTERVAL.
 void refresh_probe_panel(ProbePanel* out, cudaStream_t stream);
 
-// L_role drop alarm. Caller compares against a recent EMA; this routine
-// reports the raw accuracy. Operator review triggered when accuracy drops
-// substantially from baseline.
-__host__ __device__ bool l_role_collapse(const ProbePanel& panel, float baseline_acc);
+// L_role drop alarm. L_role accuracy is expected to be high because
+// classifiers and predictors are operationally distinct; a substantial drop
+// signals representational collapse between the roles in bmap space. Fires
+// when current accuracy falls below 85% of the baseline (and the baseline was
+// itself meaningfully above chance, so early-run noise does not trip it).
+__host__ __device__ inline bool l_role_collapse(const ProbePanel& panel,
+                                                float baseline_acc) {
+    if (baseline_acc < 0.6f) return false;          // baseline not yet trusted
+    return panel.l_role_acc < 0.85f * baseline_acc;
+}
 
 // ---- Sentinels -----------------------------------------------------------
 // SENTINEL_COUNT linear classifiers on bmap_64, trained via SGD on pruning
@@ -147,6 +172,12 @@ __host__ __device__ inline void sentinel_history_push(SentinelHistory* h,
     if (h->filled < SENTINEL_HISTORY) h->filled++;
 }
 
+// DECLARED ONLY — blueprint-in-place.
+// launch_sentinel_score: one thread (or warp) per organism, call
+// sentinel_score_one on its descriptor, write the mean prune-probability into
+// anomaly_out[i]. The scoring math (sentinel_score_one) is implemented and
+// host-tested; this is just the device launch wrapper over `n` organisms.
+// anomaly_out feeds each organism's lineage-pruning vote.
 void launch_sentinel_score(const SentinelEnsemble* ens,
                            const float* descriptors,
                            float* anomaly_out,
@@ -165,10 +196,24 @@ struct LineageStats {
     int      last_seen_gen;
 };
 
+// DECLARED ONLY — blueprint-in-place.
+// update_lineage_stats: for each tracked lineage, recompute archive_count from
+// the archive (count alive entries with this lineage_id and role),
+// archive_share = count / (role total), growth_rate = (share - share_prev)
+// over the window, and stamp last_seen_gen. Per role: a lineage's share is
+// against its own role's archive population, never the union. Runs once per
+// generation over the (small) lineage table.
 void update_lineage_stats(LineageStats* stats, int n, cudaStream_t stream);
 
-bool runaway_detected(const LineageStats& stat, float threshold);
+// A lineage is a runaway when it occupies more than `threshold` fraction of
+// its role's archive AND is still growing. The growth guard prevents flagging
+// a large-but-stable lineage that has already stopped expanding (the
+// replacement brake handles steady-state crowding separately).
+__host__ __device__ inline bool runaway_detected(const LineageStats& stat,
+                                                 float threshold) {
+    return stat.archive_share > threshold && stat.growth_rate > 0.f;
+}
 
 }  // namespace slime::safety
 
-#endif  // SLIME_2_1_SAFETY_STRUCTURAL_CU
+#endif  // COEVO_SAFETY_STRUCTURAL_CU

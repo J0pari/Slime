@@ -7,11 +7,11 @@
 // insertion, audit, sentinels, lineage tracking, SOT pressure, hardware
 // off-switch) operates uniformly across roles.
 //
-// Architectural invariant unchanged from 2.0: GPU-resident state does not
+// Architectural invariant: GPU-resident state does not
 // influence the SOT / probe schedule or pruning commands.
 
-#ifndef SLIME_2_1_INTEGRATION_MAIN_LOOP_CU
-#define SLIME_2_1_INTEGRATION_MAIN_LOOP_CU
+#ifndef COEVO_INTEGRATION_MAIN_LOOP_CU
+#define COEVO_INTEGRATION_MAIN_LOOP_CU
 
 #include "../config/constants.cuh"
 #include "../execution/phase_graphs.cu"
@@ -101,4 +101,4 @@ int run(const char* checkpoint_path);
 
 }  // namespace slime::integration
 
-#endif  // SLIME_2_1_INTEGRATION_MAIN_LOOP_CU
+#endif  // COEVO_INTEGRATION_MAIN_LOOP_CU

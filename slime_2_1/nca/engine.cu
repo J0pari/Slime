@@ -5,11 +5,11 @@
 // reaction-diffusion machinery are role-blind.
 //
 // BTRAJ samples (bmap_16, bmap_32, bmap_48, bmap_64) are written to the
-// Intent Registry. bmap_64 retains its 2.0 roles (archive descriptor, audit
-// input, placeholder regressor input).
+// Intent Registry. bmap_64 is the archive descriptor, the audit input, and the
+// placeholder regressor input.
 
-#ifndef SLIME_2_1_NCA_ENGINE_CU
-#define SLIME_2_1_NCA_ENGINE_CU
+#ifndef COEVO_NCA_ENGINE_CU
+#define COEVO_NCA_ENGINE_CU
 
 #include "../config/constants.cuh"
 
@@ -162,19 +162,19 @@ __device__ inline float gelu_approx(float x) {
     return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 
-// Single CA step. role-blind: same W_perc / W_inter / W_flow / W_bmap path
-// as 2.0. Mass conservation hooks live in rd_step (A-202).
-//   W_perc  : [PERC_DIM x CA_CHANNELS]  (currently unused - perception via
-//             fixed Sobel stencils; kept in the API to mirror 2.0 weights
-//             and to leave room for learned perception kernels)
+// Single CA step. Role-blind. Perception is a fixed identity + Sobel_x +
+// Sobel_y stencil set (a deliberate design choice, as in Growing-NCA — there
+// is no learned perception matrix), feeding the learned W_inter / W_flow
+// path. The chemical channels are also stepped by rd_step (A-202); that step
+// is launched separately and is NOT yet called from forward_kernel (see the
+// module header note).
 //   W_inter : [PERC_DIM x HIDDEN_DIM]
 //   W_flow  : [HIDDEN_DIM x CA_CHANNELS]
 //
-// One thread = one cell. Block layout is (16, 16); each block covers a 16x16
-// tile of the 64x64 grid via four iterations.
+// One thread = one cell. Block layout is (16, 16); each block covers the
+// 64x64 grid via a grid-stride loop.
 __device__ inline void ca_step(const __half* state_curr,
                                __half* state_next,
-                               const float* /*W_perc*/,
                                const float* W_inter,
                                const float* W_flow) {
     for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
@@ -206,7 +206,7 @@ __device__ inline void ca_step(const __half* state_curr,
                 }
                 float prev = __half2float(state_curr[grid_idx(y, x, c)]);
                 float next = prev + acc;
-                // FP16 clamp; mirrors 2.0 numerical hygiene.
+                // Clamp to the FP16 representable range before narrowing.
                 if (next > 65504.f)  next = 65504.f;
                 if (next < -65504.f) next = -65504.f;
                 state_next[grid_idx(y, x, c)] = __float2half(next);
@@ -251,7 +251,7 @@ __global__ void forward_kernel(OrganismState* organisms,
     int sample_idx = 0;
 
     for (int step = 1; step <= CA_STEPS; ++step) {
-        ca_step(curr, next, /*W_perc*/ nullptr, W_inter, W_flow);
+        ca_step(curr, next, W_inter, W_flow);
         __half* tmp = curr; curr = next; next = tmp;
 
         if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
@@ -310,8 +310,13 @@ __device__ inline void project_bmap(const __half* state,
 }
 
 // ---- Public host launchers -----------------------------------------------
-// Mirrors forward_kernel's parameter list: the substrate weights (W_inter,
-// W_flow, W_bmap) are role-blind and shared across the launched organisms.
+// DECLARED ONLY — blueprint-in-place.
+// launch_forward: launch forward_kernel (implemented above) with n_organisms
+// blocks of (16, 16) threads on `stream`. Weights (W_inter, W_flow, W_bmap)
+// are role-blind and shared across organisms. The kernel body exists and is
+// internally complete; this wrapper is the grid config + launch + error check.
+// Block dim is fixed at 16x16 because seed_predictor_grid's centered-4x4 write
+// and project_bmap's reductions assume it.
 void launch_forward(OrganismState* organisms,
                     const ForwardInputs* inputs,
                     const float* W_inter,
@@ -320,9 +325,11 @@ void launch_forward(OrganismState* organisms,
                     int n_organisms,
                     cudaStream_t stream);
 
-// Copies bmap_64 (last BTRAJ slot) into the archive descriptor buffer for the
-// caller. bmap_16, bmap_32 stay in the Intent Registry for predictor consumers
-// (A-401, A-601).
+// DECLARED ONLY — blueprint-in-place.
+// extract_descriptor: copy each organism's bmap_64 (the last BTRAJ slot,
+// bmap_traj[3*BMAP_DIM .. 4*BMAP_DIM)) into descriptors_out[i*BMAP_DIM ..].
+// A plain strided device-to-device copy; bmap_16/bmap_32 stay in the Intent
+// Registry for predictor consumers (A-401, A-601).
 void extract_descriptor(const OrganismState* organisms,
                         float* descriptors_out,
                         int n_organisms,
@@ -330,4 +337,4 @@ void extract_descriptor(const OrganismState* organisms,
 
 }  // namespace slime::nca
 
-#endif  // SLIME_2_1_NCA_ENGINE_CU
+#endif  // COEVO_NCA_ENGINE_CU

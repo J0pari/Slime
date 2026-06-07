@@ -1,18 +1,30 @@
-# Slime 2.1 — Co-evolving Substrate with Emergent Predictive Role
+# Slime — Co-evolving Substrate with Emergent Predictive Role
 
-Implementation scaffold for blueprint Issue 2.1 (Revision E, 2026-05-27).
+Implementation of the blueprint at `docs/blueprint.md`.
 
-A single co-evolving population shares one substrate. Every organism is a 16-channel
-64×64 NCA carrying a 2-bit role tag (classifier or predictor). Roles select an
-input pathway and fitness function; all other machinery (delta codec, CAME,
-archive, audit, sentinels, lineage tracking, SOT pressure, hardware off-switch)
-is role-blind.
+A single co-evolving population shares one substrate. Every organism is a
+16-channel 64×64 NCA carrying a 2-bit role tag (classifier or predictor). Roles
+select an input pathway and fitness function; all other machinery (delta codec,
+CAME, archive, audit, sentinels, lineage tracking, SOT pressure, hardware
+off-switch) is role-blind.
 
-The hand-coded placeholder predictor from 2.0 is retained as a permanent
-ground-truth check. After the archive crosses 50% occupancy, a wave of
-predictor-role founders is injected and the dominant surprise signal blends
-toward an evolved predictor ensemble using live Pearson correlation as the
-blending weight.
+A hand-coded placeholder predictor is retained as a permanent ground-truth
+check. After the archive crosses 50% occupancy, a wave of predictor-role
+founders is injected and the dominant surprise signal blends toward an evolved
+predictor ensemble using live Pearson correlation as the blending weight.
+
+## Status
+
+This is early, GPU-untested code. **None of it has been compiled with nvcc or
+run on a CUDA device.** Host-side math has unit coverage; everything device-side
+is designed but unvalidated. The honest per-module breakdown — what is tested,
+what is written-but-unverified, and what is declared-only with a
+blueprint-in-place comment — lives in `docs/IMPLEMENTATION_STATUS.md`. Read that
+before assuming any subsystem works.
+
+The first real milestone is getting the tree to compile under the CUDA toolkit
+and pushing one classifier organism through a forward pass without a NaN (Stage 1
+of `docs/construction_plan.md`).
 
 ## Sheet Index → Source Layout
 
@@ -38,31 +50,23 @@ blending weight.
 | M-001  | Bill of Materials                                      | `docs/bom.md`                                  |
 | Q-001  | Quality Assurance                                      | `tests/qa_red_team.cu`                         |
 
-The full blueprint is reproduced at `docs/blueprint_2_1.md`. Every source file
-opens with the sheet identifier it implements; deviate only with a note in that
-header.
-
-## Status
-
-Scaffold only. Each module exposes the spec's data structures and entry points
-with stubbed bodies marked `// TODO(2.1):`. Phase ordering, public APIs, and
-shared types are committed so the modules can be filled in independently
-following C-001.
+Every source file opens with the sheet identifier it implements. Declared-only
+functions carry a blueprint-in-place comment describing what they must do — that
+comment is a specification, not a claim that the function works.
 
 ## Build
 
-The legacy `slime/` tree at the repository root still compiles standalone; the
-2.1 scaffold lives beside it under `slime_2_1/` to keep the working baseline
-unbroken during construction.
-
 ```
-make            # full nvcc build (requires CUDA toolkit, sm_86+)
+make            # nvcc build (requires CUDA toolkit, sm_86+); unrun so far
 make check      # host-only unit tests (no CUDA required)
 make clean
 ```
 
-`make check` exercises the math inlines that don't need a GPU: SOT gate,
-role-balance multipliers, hybrid surprise blending, PT swap probabilities,
-genome bit layout, BTRAJ step indices, archive geometry. The stub headers
-under `tests/stubs/` keep `<cuda_runtime.h>` and `<cuda_fp16.h>` references
-satisfied during a host-only compile.
+`make check` exercises the math that doesn't need a GPU: SOT gate, role-balance
+multipliers, hybrid surprise blending, PT swap probabilities, genome bit layout,
+losses, sentinel logistic, CUSUM reset, role canonicalization, and the optimizer
+confidence update. The stub headers under `tests/stubs/` satisfy
+`<cuda_runtime.h>` / `<cuda_fp16.h>` during a host-only compile.
+
+`make` (the nvcc target) has not been run; expect to fix compile errors on the
+first real build.

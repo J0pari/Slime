@@ -1,14 +1,14 @@
 // Sheet G-100: General Notes & Conventions
 //
 // FP16 forward, FP32 master weights, FP32 autodiff, captured-graph execution
-// is the primary backend. Added abbreviations from 2.1:
+// is the primary backend. Abbreviations:
 //   bmap_t  Behavioral Intent Map sampled at CA step t
 //   BTRAJ   Behavioral trajectory (bmap_16, bmap_32, bmap_48, bmap_64)
 //   PT      Parallel Tempering
 //   SOT-d   SOT density (fraction of task batch carrying SOT)
 
-#ifndef SLIME_2_1_CONFIG_CONSTANTS_CUH
-#define SLIME_2_1_CONFIG_CONSTANTS_CUH
+#ifndef COEVO_CONFIG_CONSTANTS_CUH
+#define COEVO_CONFIG_CONSTANTS_CUH
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -87,7 +87,7 @@ constexpr int  CALIBRATION_GEN_HI        = 700;
 // Fitness scaling (A-401). Coefficient matches λ_audit.
 constexpr float ROLE_BALANCE_COEFF       = 0.1f;
 
-// SOT gate (A-401, from 2.0): sigmoid(20·(x − 0.7)).
+// SOT gate (A-401): sigmoid(20·(x − 0.7)).
 constexpr float SOT_GATE_SLOPE           = 20.0f;
 constexpr float SOT_GATE_MIDPOINT        = 0.7f;
 
@@ -112,7 +112,7 @@ constexpr int CURRICULUM_INTERVAL    = 50;
 constexpr int AUDIT_INTERVAL         = 100;
 constexpr int PROBE_PANEL_INTERVAL   = 200;
 
-// ---- Error logging (carried from existing 2.0 conventions) ---------------
+// ---- Error logging -------------------------------------------------------
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
 #endif
@@ -130,4 +130,4 @@ constexpr int PROBE_PANEL_INTERVAL   = 200;
 #define CUDA_LAUNCH_CHECK() ((void)0)
 #endif
 
-#endif  // SLIME_2_1_CONFIG_CONSTANTS_CUH
+#endif  // COEVO_CONFIG_CONSTANTS_CUH
