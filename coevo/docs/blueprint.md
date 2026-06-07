@@ -194,8 +194,11 @@ initial grid state is populated at CA step 0:
   propagate the seeded information across the grid through the 64-step forward
   pass.
 
-The W_perc, W_inter, W_flow, W_bmap, and reaction-diffusion machinery are
-role-blind.
+Perception is a fixed bank of stencils — identity plus Sobel_x and Sobel_y per
+channel — so there is no learned perception matrix; the perceived neighborhood
+feeds the learned interaction path directly. The learned substrate weights are
+W_inter (interaction), W_flow (state update), and W_bmap (behavior projection).
+These weights and the reaction-diffusion machinery are role-blind.
 
 Behavioral trajectory. After CA steps 16, 32, 48, and 64, the cell state is
 globally average-pooled to a 16-d summary s_t and projected by W_bmap to bmap_t.

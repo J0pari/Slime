@@ -38,6 +38,13 @@ constexpr int CH_IMG_LAST      = 13;
 constexpr int CH_AUX_FIRST     = 14;
 constexpr int CH_AUX_LAST      = 15;
 
+// Channel ownership for the per-step update (A-201 / A-202):
+//   chemical channels 0-5 are owned by reaction-diffusion (rd_step). The
+//   perception/interaction path reads them as context but does not overwrite
+//   them. The CA delta therefore updates only the non-chemical channels 6-15.
+constexpr int CA_OUT_FIRST     = CH_TASK_FIRST;                 // 6
+constexpr int CA_OUT_CHANNELS  = CA_CHANNELS - CH_TASK_FIRST;   // 10 (channels 6..15)
+
 // BTRAJ sample steps (A-201).
 constexpr int BTRAJ_SAMPLES    = 4;
 constexpr int BTRAJ_STEPS[BTRAJ_SAMPLES] = { 16, 32, 48, 64 };

@@ -4,12 +4,12 @@
 // (pairwise interactions among the six chemical channels) and per-channel
 // diffusion rates are decoded from the genome (A-301 bits 34-281).
 //
-// NOT YET INTEGRATED: rd_step is written but forward_kernel (A-201) does not
-// call it, so the chemical channels currently evolve only through the
-// perception/interaction path. Wiring it in requires threading the decoded
-// Coefficients through the forward pass (decode once per organism at decode
-// time, then call rd_step alongside ca_step each step). Until that lands, the
-// reaction-diffusion field is inert. This file has not been compiled.
+// Integration: forward_kernel (A-201) calls rd_step each CA step when given a
+// non-null per-organism Coefficients array, so the chemical channels 0-5
+// evolve by reaction-diffusion while ca_step owns channels 6-15. The decoded
+// Coefficients must be produced (decode_coefficients) at decode time and
+// passed to launch_forward; passing null disables RD and freezes the chemical
+// field at its seed. UNVERIFIED: this file has not been compiled with nvcc.
 
 #ifndef COEVO_NCA_REACTION_DIFFUSION_CU
 #define COEVO_NCA_REACTION_DIFFUSION_CU
@@ -30,12 +30,16 @@ struct Coefficients {
 };
 
 // One reaction-diffusion step on chemical channels 0..5 of the grid.
-// Coupling into channels 6..15 is read-only (the CA dynamics push activity
-// back into the chemical field, but the RD step itself only writes chems).
+// Reads and writes only the chemical channels: the reaction term couples the
+// six chemical channels among themselves (A-202), and diffusion is per-channel.
+// The CA reads the chemical field as context (sample_neighborhood reads all 16
+// channels), but RD does not read the CA channels 6..15.
 //
-// dt is fixed at 0.1; diffusion uses a 5-point Laplacian on the toroidal
-// grid. Reaction terms are linear pairwise (A_i' += k_{ij} * A_j); the
-// 6x6 coefficient matrix decodes from the genome.
+// dt is fixed at 0.1; diffusion uses a 5-point Laplacian on the toroidal grid.
+// Explicit-Euler diffusion is stable here (dt * diffusion <= 0.1 < 0.25 CFL);
+// the linear reaction term can grow over many steps but is clamped to the FP16
+// range. Reaction is A_i' += sum_j k_{ij} * A_j over the 6x6 genome-decoded
+// coefficient matrix.
 __device__ inline void rd_step(__half* grid,
                                __half* scratch,
                                const Coefficients& coeffs) {

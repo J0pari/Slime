@@ -22,8 +22,8 @@ Three tiers:
 | Sheet | Module | Tested | Written, unverified | Declared only |
 | :---- | :----- | :----- | :------------------ | :------------ |
 | G-100 | `config/constants.cuh` | constants, role enum, genome bit layout | — | — |
-| A-201 | `nca/engine.cu` | — | seeding, `ca_step`, `forward_kernel`, `project_bmap`, perception stencils | `launch_forward`, `extract_descriptor` |
-| A-202 | `nca/reaction_diffusion.cu` | — | `rd_step`, `decode_coefficients` (**not yet called from the forward pass**) | — |
+| A-201 | `nca/engine.cu` | channel-ownership constants | seeding, `ca_step`, `forward_kernel`, `project_bmap`, perception stencils, `launch_forward` | `extract_descriptor` |
+| A-202 | `nca/reaction_diffusion.cu` | — | `rd_step` (wired into `forward_kernel`, but dormant — see below), `decode_coefficients` | — |
 | A-301 | `genome/codec.cu` | `mutate`, `crossover`, role/seed accessors, xorshift | — | `apply_delta`, `init_delta_from_prior` |
 | A-401 | `archive/soft_qd_archive.cu` | `compose_fitness`, role multipliers, SOT gate, `surprise_ratio` | `insert` (bin + fitness replacement only) | `recompute_bins`, `apply_lineage_brake` |
 | A-501 | `optimizer/came.cu` | — | `came_update`, `came_step_kernel` | `launch_came_step` |
@@ -41,21 +41,33 @@ Three tiers:
 ## What "Written, unverified" specifically risks
 
 - **`ca_step` / `forward_kernel`**: block-to-organism mapping, fully-unrolled
-  48- and 32-wide inner loops (register pressure), `__syncthreads()` placement,
-  and the double-buffer parity all assume a 16×16 block and 64 even CA steps.
-  None of this is checked by a compiler yet.
+  48- and 32-wide inner loops (register pressure — likely spills), `__syncthreads()`
+  placement, and the double-buffer parity all assume a 16×16 block and 64 even CA
+  steps. Not checked by a compiler yet.
 - **`project_bmap`**: per-cell `atomicAdd` into shared memory across 64×64×16
   elements — correct but possibly slow; throughput is a hardware question.
-- **`rd_step`**: implemented but **not wired into the CA forward**. The chemical
-  channels currently evolve only through the perception/interaction path. Wiring
-  it in is an open task (see the module header).
 - **CUDA graph capture** (`execution/phase_graphs.cu`): the capture/instantiate
   calls are real API usage but capture nothing yet — the kernel sequences inside
   each phase are not populated.
 
-## Next real milestone
+## The chemical field is dormant (honest gap)
 
-Get the tree to compile under nvcc (`make`) on a CUDA-capable machine and run a
-single classifier organism through one forward pass without a NaN. That is
-Stage 1 of `construction_plan.md`, and it is the first point at which any of the
-"Written, unverified" rows can begin to move to "Tested".
+`rd_step` is now wired into `forward_kernel` and `ca_step` correctly leaves the
+chemical channels 0–5 to it (A-202). But both seeding paths zero the chemical
+channels, and `rd_step` has no source term — linear diffusion + linear reaction
+of an all-zero field stays zero. So the chemical/reaction-diffusion subsystem,
+though present and correct, contributes **nothing** to behavior as currently
+specified: there is no mechanism that ever writes a non-zero value into channels
+0–5. This is a real blueprint gap, not a bug in the wiring. Until the spec
+defines a chemical seed or source, RD is a structurally-present no-op, and the
+forward smoke test runs it with `coeffs=null` because a non-null array would
+make no observable difference.
+
+## First GPU build target
+
+`make forward-smoke` (needs nvcc + an NVIDIA GPU) builds and runs
+`tests/forward_smoke.cu`: one classifier organism, one forward pass, assert the
+BTRAJ is finite and non-constant. It has **not been compiled** — expect to fix
+errors on the first real build. This is the smallest concrete step toward Stage
+1 of `construction_plan.md` and the first point at which the A-201 forward path
+can move from "written, unverified" toward "tested".

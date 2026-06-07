@@ -1,7 +1,8 @@
 // Sheet A-201: NCA Engine, Role-Switched Input, Behavioral Trajectory
 //
 // 16-channel 64x64 grid; 64 CA steps. The role tag in the genome selects how
-// the initial grid is populated; W_perc, W_inter, W_flow, W_bmap, and the
+// the initial grid is populated. Perception is a fixed identity+Sobel stencil
+// bank (no learned W_perc); the learned weights W_inter, W_flow, W_bmap and the
 // reaction-diffusion machinery are role-blind.
 //
 // BTRAJ samples (bmap_16, bmap_32, bmap_48, bmap_64) are written to the
@@ -12,6 +13,7 @@
 #define COEVO_NCA_ENGINE_CU
 
 #include "../config/constants.cuh"
+#include "reaction_diffusion.cu"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -164,12 +166,15 @@ __device__ inline float gelu_approx(float x) {
 
 // Single CA step. Role-blind. Perception is a fixed identity + Sobel_x +
 // Sobel_y stencil set (a deliberate design choice, as in Growing-NCA — there
-// is no learned perception matrix), feeding the learned W_inter / W_flow
-// path. The chemical channels are also stepped by rd_step (A-202); that step
-// is launched separately and is NOT yet called from forward_kernel (see the
-// module header note).
+// is no learned perception matrix), feeding the learned W_inter / W_flow path.
+//
+// Channel ownership (A-202): the CA delta updates only the non-chemical
+// channels 6-15. The chemical channels 0-5 are owned by rd_step and are copied
+// forward unchanged here, so state_next is fully defined whether or not
+// reaction-diffusion runs this step. Perception still READS all 16 channels
+// (chem provides spatial context); it just does not WRITE channels 0-5.
 //   W_inter : [PERC_DIM x HIDDEN_DIM]
-//   W_flow  : [HIDDEN_DIM x CA_CHANNELS]
+//   W_flow  : [HIDDEN_DIM x CA_OUT_CHANNELS]   (drives channels 6..15)
 //
 // One thread = one cell. Block layout is (16, 16); each block covers the
 // 64x64 grid via a grid-stride loop.
@@ -197,12 +202,20 @@ __device__ inline void ca_step(const __half* state_curr,
                 hidden[h] = gelu_approx(acc);
             }
 
+            // Carry the chemical channels 0-5 forward unchanged; rd_step owns
+            // them. This keeps state_next fully defined even when RD is off.
             #pragma unroll
-            for (int c = 0; c < CA_CHANNELS; ++c) {
+            for (int c = CH_CHEM_FIRST; c <= CH_CHEM_LAST; ++c) {
+                state_next[grid_idx(y, x, c)] = state_curr[grid_idx(y, x, c)];
+            }
+            // Update the non-chemical channels 6-15 from the learned W_flow.
+            #pragma unroll
+            for (int oc = 0; oc < CA_OUT_CHANNELS; ++oc) {
+                int c = CA_OUT_FIRST + oc;
                 float acc = 0.f;
                 #pragma unroll
                 for (int h = 0; h < HIDDEN_DIM; ++h) {
-                    acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
+                    acc += W_flow[h * CA_OUT_CHANNELS + oc] * hidden[h];
                 }
                 float prev = __half2float(state_curr[grid_idx(y, x, c)]);
                 float next = prev + acc;
@@ -219,10 +232,17 @@ __device__ inline void ca_step(const __half* state_curr,
 // 64-step forward, sampling bmap at BTRAJ_STEPS into bmap_traj. One block per
 // organism. The kernel itself iterates the substrate; outer host code maps
 // blocks to organisms.
+//
+// coeffs is the per-organism reaction-diffusion coefficient array (A-202). It
+// may be null, in which case reaction-diffusion is skipped and the chemical
+// channels remain at their seeded value for the whole pass (ca_step carries
+// them forward unchanged). When non-null, rd_step evolves channels 0-5 each
+// step; ca_step owns channels 6-15. The two writers are disjoint.
 __global__ void forward_kernel(OrganismState* organisms,
                                const ForwardInputs* inputs,
+                               const rd::Coefficients* coeffs,
                                const float* W_inter,    // [PERC_DIM x HIDDEN_DIM]
-                               const float* W_flow,     // [HIDDEN_DIM x CA_CHANNELS]
+                               const float* W_flow,     // [HIDDEN_DIM x CA_OUT_CHANNELS]
                                const float* W_bmap,     // [CA_CHANNELS x BMAP_DIM]
                                int n_organisms) {
     int org = blockIdx.x;
@@ -251,7 +271,13 @@ __global__ void forward_kernel(OrganismState* organisms,
     int sample_idx = 0;
 
     for (int step = 1; step <= CA_STEPS; ++step) {
+        // ca_step writes channels 6-15 of next and carries 0-5 forward;
+        // rd_step (when enabled) overwrites next's chemical channels 0-5 from
+        // curr's chemical field. Both read curr and write next before the swap.
         ca_step(curr, next, W_inter, W_flow);
+        if (coeffs != nullptr) {
+            rd::rd_step(curr, next, coeffs[org]);
+        }
         __half* tmp = curr; curr = next; next = tmp;
 
         if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
@@ -310,20 +336,25 @@ __device__ inline void project_bmap(const __half* state,
 }
 
 // ---- Public host launchers -----------------------------------------------
-// DECLARED ONLY — blueprint-in-place.
-// launch_forward: launch forward_kernel (implemented above) with n_organisms
-// blocks of (16, 16) threads on `stream`. Weights (W_inter, W_flow, W_bmap)
-// are role-blind and shared across organisms. The kernel body exists and is
-// internally complete; this wrapper is the grid config + launch + error check.
-// Block dim is fixed at 16x16 because seed_predictor_grid's centered-4x4 write
-// and project_bmap's reductions assume it.
-void launch_forward(OrganismState* organisms,
-                    const ForwardInputs* inputs,
-                    const float* W_inter,
-                    const float* W_flow,
-                    const float* W_bmap,
-                    int n_organisms,
-                    cudaStream_t stream);
+// launch_forward: one block of (16, 16) threads per organism on `stream`.
+// Weights (W_inter, W_flow, W_bmap) are role-blind and shared across
+// organisms. coeffs may be null to skip reaction-diffusion. Block dim is fixed
+// at 16x16 because seed_predictor_grid's centered-4x4 write and project_bmap's
+// reductions assume it. UNVERIFIED: this has not been compiled with nvcc.
+inline void launch_forward(OrganismState* organisms,
+                           const ForwardInputs* inputs,
+                           const rd::Coefficients* coeffs,
+                           const float* W_inter,
+                           const float* W_flow,
+                           const float* W_bmap,
+                           int n_organisms,
+                           cudaStream_t stream) {
+    if (n_organisms <= 0) return;
+    dim3 block(16, 16);
+    dim3 grid(static_cast<unsigned>(n_organisms));
+    forward_kernel<<<grid, block, 0, stream>>>(
+        organisms, inputs, coeffs, W_inter, W_flow, W_bmap, n_organisms);
+}
 
 // DECLARED ONLY — blueprint-in-place.
 // extract_descriptor: copy each organism's bmap_64 (the last BTRAJ slot,
