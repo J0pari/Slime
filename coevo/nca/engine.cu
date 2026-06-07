@@ -1,8 +1,8 @@
 // Sheet A-201: NCA Engine, Role-Switched Input, Behavioral Trajectory
 //
 // 16-channel 64x64 grid; 64 CA steps. The role tag in the genome selects how
-// the initial grid is populated. Perception is a fixed identity+Sobel stencil
-// bank (no learned W_perc); the learned weights W_inter, W_flow, W_bmap and the
+// the initial grid is populated. Perception is a learned bank of depthwise 3x3
+// filters (W_perc); the learned weights W_perc, W_inter, W_flow, W_bmap and the
 // reaction-diffusion machinery are role-blind.
 //
 // BTRAJ samples (bmap_16, bmap_32, bmap_48, bmap_64) are written to the
@@ -126,16 +126,20 @@ __device__ inline void seed_predictor_grid(__half* grid,
 
 // ---- Weight shapes (role-blind, A-201) -----------------------------------
 //
-// Perception: identity + Sobel_x + Sobel_y over the 16-channel state, giving
-// a 48-d perception vector per cell. W_inter mixes the perception vector
-// into a 32-d hidden representation (GELU). W_flow projects the hidden to a
-// 16-d delta. The new state is state + delta (clamped to FP16 range). RD
-// machinery for the chemical channels runs in parallel via rd_step.
-constexpr int PERC_DIM    = CA_CHANNELS * 3;   // 48
+// Perception: a learned bank of N_PERC_FILTERS depthwise 3x3 filters (W_perc,
+// shared across channels) convolved over each channel's neighborhood, giving a
+// PERC_DIM = N_PERC_FILTERS * CA_CHANNELS perception vector. W_inter mixes that
+// into a HIDDEN_DIM hidden representation (GELU). W_flow projects the hidden to
+// a 16-channel delta added to the state. Reaction-diffusion (A-202) then adds
+// spatial diffusion + decay to the chemical channels 0-5 on top of that delta.
+constexpr int PERC_DIM    = N_PERC_FILTERS * CA_CHANNELS;   // 48
 constexpr int HIDDEN_DIM  = 32;
 
-// 3x3 stencils used by perception (identity, Sobel_x, Sobel_y).
+// Learned depthwise perception: perc_out[f*CA_CHANNELS + c] is filter f convolved
+// over channel c's 3x3 toroidal neighborhood. W_perc layout: [N_PERC_FILTERS][3][3]
+// row-major, i.e. W_perc[f*9 + (ky+1)*3 + (kx+1)] for offsets ky,kx in {-1,0,1}.
 __device__ inline void sample_neighborhood(const __half* state,
+                                           const float* W_perc,
                                            int y, int x,
                                            float* perc_out) {  // [PERC_DIM]
     // Toroidal wrap on the grid edge.
@@ -144,17 +148,19 @@ __device__ inline void sample_neighborhood(const __half* state,
         int xx = (x + dx + GRID_SIZE) % GRID_SIZE;
         return __half2float(state[grid_idx(yy, xx, c)]);
     };
-    for (int c = 0; c < CA_CHANNELS; ++c) {
-        // Identity.
-        perc_out[c] = at(0, 0, c);
-        // Sobel_x.
-        float sx = -at(-1, -1, c) - 2.f * at(0, -1, c) - at(1, -1, c)
-                 + at(-1,  1, c) + 2.f * at(0,  1, c) + at(1,  1, c);
-        perc_out[CA_CHANNELS + c] = sx * 0.125f;
-        // Sobel_y.
-        float sy = -at(-1, -1, c) - 2.f * at(-1, 0, c) - at(-1, 1, c)
-                 + at( 1, -1, c) + 2.f * at( 1, 0, c) + at( 1, 1, c);
-        perc_out[2 * CA_CHANNELS + c] = sy * 0.125f;
+    for (int f = 0; f < N_PERC_FILTERS; ++f) {
+        const float* k = &W_perc[f * 9];
+        for (int c = 0; c < CA_CHANNELS; ++c) {
+            float acc = 0.f;
+            #pragma unroll
+            for (int ky = -1; ky <= 1; ++ky) {
+                #pragma unroll
+                for (int kx = -1; kx <= 1; ++kx) {
+                    acc += k[(ky + 1) * 3 + (kx + 1)] * at(ky, kx, c);
+                }
+            }
+            perc_out[f * CA_CHANNELS + c] = acc;
+        }
     }
 }
 
@@ -164,22 +170,20 @@ __device__ inline float gelu_approx(float x) {
     return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 
-// Single CA step. Role-blind. Perception is a fixed identity + Sobel_x +
-// Sobel_y stencil set (a deliberate design choice, as in Growing-NCA — there
-// is no learned perception matrix), feeding the learned W_inter / W_flow path.
-//
-// Channel ownership (A-202): the CA delta updates only the non-chemical
-// channels 6-15. The chemical channels 0-5 are owned by rd_step and are copied
-// forward unchanged here, so state_next is fully defined whether or not
-// reaction-diffusion runs this step. Perception still READS all 16 channels
-// (chem provides spatial context); it just does not WRITE channels 0-5.
+// Single CA step. Role-blind. Learned perception (W_perc) feeds the learned
+// W_inter / W_flow path; W_flow produces a delta for all 16 channels, added to
+// the state. The chemical channels 0-5 are updated here like any other channel
+// (cells produce/consume morphogens); reaction-diffusion (A-202) then adds
+// spatial diffusion + decay to those channels in a following rd_step.
+//   W_perc  : [N_PERC_FILTERS x 3 x 3]
 //   W_inter : [PERC_DIM x HIDDEN_DIM]
-//   W_flow  : [HIDDEN_DIM x CA_OUT_CHANNELS]   (drives channels 6..15)
+//   W_flow  : [HIDDEN_DIM x CA_CHANNELS]
 //
 // One thread = one cell. Block layout is (16, 16); each block covers the
 // 64x64 grid via a grid-stride loop.
 __device__ inline void ca_step(const __half* state_curr,
                                __half* state_next,
+                               const float* W_perc,
                                const float* W_inter,
                                const float* W_flow) {
     for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
@@ -189,7 +193,7 @@ __device__ inline void ca_step(const __half* state_curr,
             if (y >= GRID_SIZE || x >= GRID_SIZE) continue;
 
             float perc[PERC_DIM];
-            sample_neighborhood(state_curr, y, x, perc);
+            sample_neighborhood(state_curr, W_perc, y, x, perc);
 
             float hidden[HIDDEN_DIM];
             #pragma unroll
@@ -202,20 +206,14 @@ __device__ inline void ca_step(const __half* state_curr,
                 hidden[h] = gelu_approx(acc);
             }
 
-            // Carry the chemical channels 0-5 forward unchanged; rd_step owns
-            // them. This keeps state_next fully defined even when RD is off.
+            // W_flow drives all 16 channels (chemicals included). rd_step then
+            // adds spatial diffusion + decay to channels 0-5 on top of this.
             #pragma unroll
-            for (int c = CH_CHEM_FIRST; c <= CH_CHEM_LAST; ++c) {
-                state_next[grid_idx(y, x, c)] = state_curr[grid_idx(y, x, c)];
-            }
-            // Update the non-chemical channels 6-15 from the learned W_flow.
-            #pragma unroll
-            for (int oc = 0; oc < CA_OUT_CHANNELS; ++oc) {
-                int c = CA_OUT_FIRST + oc;
+            for (int c = 0; c < CA_CHANNELS; ++c) {
                 float acc = 0.f;
                 #pragma unroll
                 for (int h = 0; h < HIDDEN_DIM; ++h) {
-                    acc += W_flow[h * CA_OUT_CHANNELS + oc] * hidden[h];
+                    acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
                 }
                 float prev = __half2float(state_curr[grid_idx(y, x, c)]);
                 float next = prev + acc;
@@ -234,15 +232,15 @@ __device__ inline void ca_step(const __half* state_curr,
 // blocks to organisms.
 //
 // coeffs is the per-organism reaction-diffusion coefficient array (A-202). It
-// may be null, in which case reaction-diffusion is skipped and the chemical
-// channels remain at their seeded value for the whole pass (ca_step carries
-// them forward unchanged). When non-null, rd_step evolves channels 0-5 each
-// step; ca_step owns channels 6-15. The two writers are disjoint.
+// may be null, in which case the chemical channels still evolve cellwise (the
+// CA writes all 16 channels) but get no spatial diffusion. When non-null,
+// rd_step adds diffusion + decay to channels 0-5 after each ca_step.
 __global__ void forward_kernel(OrganismState* organisms,
                                const ForwardInputs* inputs,
                                const rd::Coefficients* coeffs,
+                               const float* W_perc,     // [N_PERC_FILTERS x 3 x 3]
                                const float* W_inter,    // [PERC_DIM x HIDDEN_DIM]
-                               const float* W_flow,     // [HIDDEN_DIM x CA_OUT_CHANNELS]
+                               const float* W_flow,     // [HIDDEN_DIM x CA_CHANNELS]
                                const float* W_bmap,     // [CA_CHANNELS x BMAP_DIM]
                                int n_organisms) {
     int org = blockIdx.x;
@@ -271,10 +269,11 @@ __global__ void forward_kernel(OrganismState* organisms,
     int sample_idx = 0;
 
     for (int step = 1; step <= CA_STEPS; ++step) {
-        // ca_step writes channels 6-15 of next and carries 0-5 forward;
-        // rd_step (when enabled) overwrites next's chemical channels 0-5 from
-        // curr's chemical field. Both read curr and write next before the swap.
-        ca_step(curr, next, W_inter, W_flow);
+        // ca_step writes all 16 channels of next (chemicals included);
+        // rd_step (when enabled) adds spatial diffusion + decay to next's
+        // chemical channels 0-5, using curr's chemical field for the Laplacian.
+        // Both read curr; ca_step then rd_step write next before the swap.
+        ca_step(curr, next, W_perc, W_inter, W_flow);
         if (coeffs != nullptr) {
             rd::rd_step(curr, next, coeffs[org]);
         }
@@ -337,13 +336,14 @@ __device__ inline void project_bmap(const __half* state,
 
 // ---- Public host launchers -----------------------------------------------
 // launch_forward: one block of (16, 16) threads per organism on `stream`.
-// Weights (W_inter, W_flow, W_bmap) are role-blind and shared across
+// Weights (W_perc, W_inter, W_flow, W_bmap) are role-blind and shared across
 // organisms. coeffs may be null to skip reaction-diffusion. Block dim is fixed
 // at 16x16 because seed_predictor_grid's centered-4x4 write and project_bmap's
 // reductions assume it. UNVERIFIED: this has not been compiled with nvcc.
 inline void launch_forward(OrganismState* organisms,
                            const ForwardInputs* inputs,
                            const rd::Coefficients* coeffs,
+                           const float* W_perc,
                            const float* W_inter,
                            const float* W_flow,
                            const float* W_bmap,
@@ -353,7 +353,7 @@ inline void launch_forward(OrganismState* organisms,
     dim3 block(16, 16);
     dim3 grid(static_cast<unsigned>(n_organisms));
     forward_kernel<<<grid, block, 0, stream>>>(
-        organisms, inputs, coeffs, W_inter, W_flow, W_bmap, n_organisms);
+        organisms, inputs, coeffs, W_perc, W_inter, W_flow, W_bmap, n_organisms);
 }
 
 // DECLARED ONLY — blueprint-in-place.

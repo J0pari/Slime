@@ -194,11 +194,15 @@ initial grid state is populated at CA step 0:
   propagate the seeded information across the grid through the 64-step forward
   pass.
 
-Perception is a fixed bank of stencils — identity plus Sobel_x and Sobel_y per
-channel — so there is no learned perception matrix; the perceived neighborhood
-feeds the learned interaction path directly. The learned substrate weights are
-W_inter (interaction), W_flow (state update), and W_bmap (behavior projection).
-These weights and the reaction-diffusion machinery are role-blind.
+Perception is a learned bank of depthwise 3×3 filters (W_perc). Each of the
+N_PERC_FILTERS filters is convolved over every channel's 3×3 neighborhood,
+producing an N_PERC_FILTERS×16 perception vector that feeds the interaction
+path. The filters are shared across channels (depthwise), so W_perc is small
+(N_PERC_FILTERS × 9 weights); a learned filter can represent identity, Sobel,
+or any other 3×3 stencil, so fixed stencils are the special case rather than the
+design. The learned substrate weights are W_perc (perception), W_inter
+(interaction), W_flow (state update), and W_bmap (behavior projection). These
+weights and the reaction-diffusion machinery are role-blind.
 
 Behavioral trajectory. After CA steps 16, 32, 48, and 64, the cell state is
 globally average-pooled to a 16-d summary s_t and projected by W_bmap to bmap_t.
@@ -224,13 +228,24 @@ archive pressure.
 
 A-202: Reaction-Diffusion Field
 
-Operates on chemical channels 0–5 of the CA grid in parallel with the main CA
-dynamics. Reaction coefficients (pairwise interactions among the six chemical
-channels) and per-channel diffusion rates are genome-encoded (A-301 bits
-34–281). The field provides slow spatial context that the perception/interaction
-path can read but does not directly overwrite. Detailed dynamics (timestep,
-Laplacian stencil, reaction form) are pinned by the implementation rather than a
-separate sheet.
+The chemical channels 0–5 are part of the cell state: the CA updates them each
+step like any other channel (cells produce and consume morphogens through the
+W_flow update), and reaction-diffusion then applies, on top of that cellwise
+update, the spatial and temporal coupling the per-cell update cannot express —
+diffusion via a 5-point Laplacian, a reaction coupling among the six chemical
+channels, and a small decay. This makes the chemical channels a morphogen field
+that cells both write (via W_flow) and sense (perception reads all 16 channels):
+a slowly-varying spatial memory of recent cell activity.
+
+Because the CA is the source, the field is non-trivial whenever cells are
+active; diffusion spreads it and the decay keeps it bounded. Reaction
+coefficients (pairwise interactions among the six chemical channels) and
+per-channel diffusion rates are genome-encoded (A-301 bits 34–281); the
+timestep and decay are implementation constants chosen so the explicit scheme is
+stable (dt·diffusion ≤ ¼ CFL; decay keeps a continuously-sourced field bounded).
+The reaction term is linear and, with arbitrary genome coefficients, can drive a
+channel to saturation; the FP16 clamp bounds it and selection penalises
+organisms whose chemical fields saturate into degenerate bmaps.
 
 A-301: Genome & Delta-Weight Codec (Role-Tagged)
 

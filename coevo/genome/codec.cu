@@ -125,12 +125,12 @@ struct DeltaWeights {
 
 // DECLARED ONLY — blueprint-in-place.
 // apply_delta: scatter the sparse perturbation onto the learned weight buffers.
-// The three learned matrices (W_inter, W_flow, W_bmap) are addressed as one
-// concatenated index space; each delta.indices[k] selects a global weight slot
-// and delta.values[k] is added to the base-initialized weight there. Perception
-// is a fixed stencil and has no weights, so there is no W_perc target. O(count)
-// scatter, run at decode time before the forward pass.
+// The four learned weight banks (W_perc, W_inter, W_flow, W_bmap) are addressed
+// as one concatenated index space; each delta.indices[k] selects a global
+// weight slot and delta.values[k] is added to the base-initialized weight there.
+// O(count) scatter, run at decode time before the forward pass.
 __device__ void apply_delta(const DeltaWeights& delta,
+                            float* W_perc,
                             float* W_inter,
                             float* W_flow,
                             float* W_bmap);

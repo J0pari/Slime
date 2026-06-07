@@ -38,12 +38,16 @@ constexpr int CH_IMG_LAST      = 13;
 constexpr int CH_AUX_FIRST     = 14;
 constexpr int CH_AUX_LAST      = 15;
 
-// Channel ownership for the per-step update (A-201 / A-202):
-//   chemical channels 0-5 are owned by reaction-diffusion (rd_step). The
-//   perception/interaction path reads them as context but does not overwrite
-//   them. The CA delta therefore updates only the non-chemical channels 6-15.
-constexpr int CA_OUT_FIRST     = CH_TASK_FIRST;                 // 6
-constexpr int CA_OUT_CHANNELS  = CA_CHANNELS - CH_TASK_FIRST;   // 10 (channels 6..15)
+// Perception (A-201): a learned bank of depthwise 3x3 filters (W_perc). Each
+// filter is convolved over every channel's neighborhood, so the perception
+// vector is N_PERC_FILTERS * CA_CHANNELS wide. Filters are shared across
+// channels, so W_perc holds N_PERC_FILTERS * 9 weights.
+constexpr int N_PERC_FILTERS   = 3;
+constexpr int W_PERC_SIZE      = N_PERC_FILTERS * 9;            // 27
+
+// The CA updates all 16 channels each step (including the chemical channels
+// 0-5: cells produce/consume morphogens). Reaction-diffusion (A-202) then adds
+// spatial diffusion + decay to channels 0-5 on top of that cellwise update.
 
 // BTRAJ sample steps (A-201).
 constexpr int BTRAJ_SAMPLES    = 4;

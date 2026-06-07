@@ -44,8 +44,8 @@ struct WarpTape {
 };
 
 // Loss routers. Both write into the gradient buffers feeding W_bmap, W_flow,
-// and W_inter through the standard backward sweep (perception is a fixed
-// stencil, so there is no W_perc gradient).
+// W_inter, and W_perc through the standard backward sweep. W_perc is a learned
+// depthwise filter bank, so the backward must include its (conv) adjoint.
 //
 // Classifier loss: numerically-stable softmax cross-entropy.
 //   p_i        = exp(z_i - max_z) / sum_j exp(z_j - max_z)

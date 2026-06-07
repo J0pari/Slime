@@ -4,12 +4,14 @@
 // (pairwise interactions among the six chemical channels) and per-channel
 // diffusion rates are decoded from the genome (A-301 bits 34-281).
 //
-// Integration: forward_kernel (A-201) calls rd_step each CA step when given a
-// non-null per-organism Coefficients array, so the chemical channels 0-5
-// evolve by reaction-diffusion while ca_step owns channels 6-15. The decoded
-// Coefficients must be produced (decode_coefficients) at decode time and
-// passed to launch_forward; passing null disables RD and freezes the chemical
-// field at its seed. UNVERIFIED: this file has not been compiled with nvcc.
+// Integration: ca_step writes all 16 channels each step, so the CA is the
+// source that drives the chemical channels 0-5 (they are part of the cell
+// state). forward_kernel then calls rd_step, which ADDS spatial diffusion +
+// decay to those channels on top of the cellwise update, when given a non-null
+// per-organism Coefficients array. Passing null skips the diffusion/decay step
+// but the chemicals still evolve cellwise via the CA. The decoded Coefficients
+// are produced by decode_coefficients at decode time and passed to
+// launch_forward. UNVERIFIED: this file has not been compiled with nvcc.
 
 #ifndef COEVO_NCA_REACTION_DIFFUSION_CU
 #define COEVO_NCA_REACTION_DIFFUSION_CU
@@ -35,16 +37,25 @@ struct Coefficients {
 // The CA reads the chemical field as context (sample_neighborhood reads all 16
 // channels), but RD does not read the CA channels 6..15.
 //
-// dt is fixed at 0.1; diffusion uses a 5-point Laplacian on the toroidal grid.
-// Explicit-Euler diffusion is stable here (dt * diffusion <= 0.1 < 0.25 CFL);
-// the linear reaction term can grow over many steps but is clamped to the FP16
-// range. Reaction is A_i' += sum_j k_{ij} * A_j over the 6x6 genome-decoded
-// coefficient matrix.
+// Additive: called AFTER ca_step has written the cellwise update into `scratch`
+// (next). rd_step reads the old chemical field from `grid` (curr) for the
+// Laplacian, reaction, and decay, and ADDS the reaction-diffusion contribution
+// on top of the cellwise value already in `scratch`. Reading curr (not next)
+// for the stencil is the standard explicit operator split and is race-free
+// (each thread writes only its own cell's scratch).
+//
+// dt = 0.1, decay = 0.05. Diffusion uses a 5-point Laplacian on the toroidal
+// grid; dt*diffusion <= 0.1 < 0.25 (CFL) keeps diffusion stable and the decay
+// keeps a continuously-sourced field bounded. The linear reaction term can
+// still drive a channel toward saturation under adversarial genome
+// coefficients; the FP16 clamp bounds it. Reaction is sum_j k_{ij} * A_j over
+// the 6x6 genome-decoded coefficient matrix.
 __device__ inline void rd_step(__half* grid,
                                __half* scratch,
                                const Coefficients& coeffs) {
     constexpr int CHEM_N = 6;
     constexpr float DT = 0.1f;
+    constexpr float DECAY = 0.05f;
     for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
         for (int bx = 0; bx < GRID_SIZE; bx += blockDim.x) {
             int y = by + threadIdx.y;
@@ -57,7 +68,7 @@ __device__ inline void rd_step(__half* grid,
             int ym = (y - 1 + GRID_SIZE) % GRID_SIZE;
             int xp = (x + 1) % GRID_SIZE;
             int xm = (x - 1 + GRID_SIZE) % GRID_SIZE;
-            float here[CHEM_N];
+            float here[CHEM_N];   // old chemical field (curr)
             #pragma unroll
             for (int c = 0; c < CHEM_N; ++c) {
                 here[c] = __half2float(grid[idx(y, x, c)]);
@@ -74,7 +85,9 @@ __device__ inline void rd_step(__half* grid,
                 for (int j = 0; j < CHEM_N; ++j) {
                     react += coeffs.reaction[c * CHEM_N + j] * here[j];
                 }
-                float updated = here[c] + DT * (coeffs.diffusion[c] * lap + react);
+                float base = __half2float(scratch[idx(y, x, c)]);  // cellwise update
+                float updated = base
+                    + DT * (coeffs.diffusion[c] * lap + react - DECAY * here[c]);
                 if (updated >  65504.f) updated =  65504.f;
                 if (updated < -65504.f) updated = -65504.f;
                 scratch[idx(y, x, c)] = __float2half(updated);

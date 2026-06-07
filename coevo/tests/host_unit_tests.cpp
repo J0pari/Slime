@@ -187,17 +187,16 @@ static void test_classifier_loss() {
                 || std::fabs(dlog[1]) < 1e-6f);
 }
 
-static void test_channel_ownership() {
-    // A-202: chemical channels 0-5 are owned by reaction-diffusion; the CA
-    // delta updates only the non-chemical channels 6-15. The two ranges must
-    // partition all 16 channels with no gap or overlap.
-    EXPECT_TRUE(CA_OUT_FIRST == CH_TASK_FIRST);
-    EXPECT_TRUE(CA_OUT_FIRST == 6);
-    EXPECT_TRUE(CA_OUT_CHANNELS == 10);
-    EXPECT_TRUE(CA_OUT_FIRST + CA_OUT_CHANNELS == CA_CHANNELS);
-    int chem_count = CH_CHEM_LAST - CH_CHEM_FIRST + 1;
-    EXPECT_TRUE(chem_count + CA_OUT_CHANNELS == CA_CHANNELS);
-    EXPECT_TRUE(CA_OUT_FIRST == CH_CHEM_LAST + 1);   // no gap between ranges
+static void test_perception_dims() {
+    // A-201: learned perception is N_PERC_FILTERS depthwise 3x3 filters; the
+    // perception vector is N_PERC_FILTERS * CA_CHANNELS wide, and W_perc holds
+    // N_PERC_FILTERS * 9 weights. The smoke test and ca_step rely on these.
+    EXPECT_TRUE(N_PERC_FILTERS == 3);
+    EXPECT_TRUE(W_PERC_SIZE == N_PERC_FILTERS * 9);
+    EXPECT_TRUE(W_PERC_SIZE == 27);
+    // PERC_DIM is defined in engine.cu (device TU); replicate the relation the
+    // host can check from constants alone.
+    EXPECT_TRUE(N_PERC_FILTERS * CA_CHANNELS == 48);
 }
 
 static void test_predictor_mse_loss() {
@@ -463,7 +462,7 @@ int main() {
     test_archive_geometry();
     test_classifier_loss();
     test_predictor_mse_loss();
-    test_channel_ownership();
+    test_perception_dims();
     test_checkpoint_schema_stable();
     test_sentinel_logistic();
     test_sentinel_sgd_decreases_loss();

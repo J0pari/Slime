@@ -22,8 +22,8 @@ Three tiers:
 | Sheet | Module | Tested | Written, unverified | Declared only |
 | :---- | :----- | :----- | :------------------ | :------------ |
 | G-100 | `config/constants.cuh` | constants, role enum, genome bit layout | — | — |
-| A-201 | `nca/engine.cu` | channel-ownership constants | seeding, `ca_step`, `forward_kernel`, `project_bmap`, perception stencils, `launch_forward` | `extract_descriptor` |
-| A-202 | `nca/reaction_diffusion.cu` | — | `rd_step` (wired into `forward_kernel`, but dormant — see below), `decode_coefficients` | — |
+| A-201 | `nca/engine.cu` | perception-dim constants | learned perception (`W_perc`), seeding, `ca_step`, `forward_kernel`, `project_bmap`, `launch_forward` | `extract_descriptor` |
+| A-202 | `nca/reaction_diffusion.cu` | — | `rd_step` (additive diffusion+decay, wired into `forward_kernel`; live because the CA sources the field), `decode_coefficients` | — |
 | A-301 | `genome/codec.cu` | `mutate`, `crossover`, role/seed accessors, xorshift | — | `apply_delta`, `init_delta_from_prior` |
 | A-401 | `archive/soft_qd_archive.cu` | `compose_fitness`, role multipliers, SOT gate, `surprise_ratio` | `insert` (bin + fitness replacement only) | `recompute_bins`, `apply_lineage_brake` |
 | A-501 | `optimizer/came.cu` | — | `came_update`, `came_step_kernel` | `launch_came_step` |
@@ -50,18 +50,19 @@ Three tiers:
   calls are real API usage but capture nothing yet — the kernel sequences inside
   each phase are not populated.
 
-## The chemical field is dormant (honest gap)
+## Chemical field: now live (resolved blueprint inconsistency)
 
-`rd_step` is now wired into `forward_kernel` and `ca_step` correctly leaves the
-chemical channels 0–5 to it (A-202). But both seeding paths zero the chemical
-channels, and `rd_step` has no source term — linear diffusion + linear reaction
-of an all-zero field stays zero. So the chemical/reaction-diffusion subsystem,
-though present and correct, contributes **nothing** to behavior as currently
-specified: there is no mechanism that ever writes a non-zero value into channels
-0–5. This is a real blueprint gap, not a bug in the wiring. Until the spec
-defines a chemical seed or source, RD is a structurally-present no-op, and the
-forward smoke test runs it with `coeffs=null` because a non-null array would
-make no observable difference.
+An earlier revision made `ca_step` leave the chemical channels to `rd_step`,
+which — combined with zero seeding and no source term — left the field
+provably zero forever (a field with no writer). That was an internal
+inconsistency. Resolved: the chemical channels 0–5 are part of the cell state,
+so `ca_step` writes all 16 channels (the CA is the source), and `rd_step` ADDS
+spatial diffusion + a small decay on top (A-202). The field is now driven by
+cell activity, diffusion is contractive (dt·diffusion ≤ ¼ CFL) and the decay
+keeps it bounded. The forward smoke test exercises RD with a small non-zero
+diffusion. Still unverified on hardware, and the genome-driven reaction term can
+saturate under adversarial coefficients (clamped, and selection-penalised) —
+that behavior is a runtime question.
 
 ## First GPU build target
 
