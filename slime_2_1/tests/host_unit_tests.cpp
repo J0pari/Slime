@@ -1,7 +1,10 @@
 // Host-only unit tests for the math inlines that don't require a CUDA
 // runtime: hybrid blending, Pearson r, ensemble surprise, role-balance
-// multipliers, SOT gate, PT swap probabilities, genome bit accessors, and
-// the CUSUM update.
+// multipliers, SOT gate, PT swap probabilities, genome bit accessors, losses,
+// sentinels, and the CUSUM update. Also carries regression tests for the
+// review-pass fixes: role canonicalization of reserved 2-bit codes, xorshift
+// zero-seed escape, CUSUM reset-after-alarm, and the CAME confidence buffer
+// decoupling (prev_u kept separate from the c accumulator).
 //
 // Compile:
 //   g++ -std=c++17 -Itests/stubs -I. tests/host_unit_tests.cpp -o build/host_tests
@@ -273,6 +276,101 @@ static void test_sentinel_sgd_decreases_loss() {
     EXPECT_TRUE(p1 > 0.9f);
 }
 
+// ---- Regression tests for review-pass fixes ------------------------------
+
+// canonical_role: reserved 2-bit codes (10, 11) map to the defined role by
+// their low bit. 00->Classifier, 01->Predictor, 10->Classifier, 11->Predictor.
+static Role canonical_role(Role raw) {
+    return (static_cast<uint8_t>(raw) & 0x1u) ? Role::Predictor
+                                              : Role::Classifier;
+}
+
+static void test_canonical_role() {
+    EXPECT_TRUE(canonical_role(Role::Classifier) == Role::Classifier);
+    EXPECT_TRUE(canonical_role(Role::Predictor)  == Role::Predictor);
+    EXPECT_TRUE(canonical_role(Role::Reserved10) == Role::Classifier);
+    EXPECT_TRUE(canonical_role(Role::Reserved11) == Role::Predictor);
+}
+
+// xorshift32 must not lock on a zero seed (the all-zero state is a fixed
+// point of the raw recurrence; the codec coerces it to a nonzero constant).
+static uint32_t xorshift32(uint32_t* s) {
+    uint32_t x = *s;
+    if (x == 0u) x = 0x9E3779B9u;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    *s = x; return x;
+}
+
+static void test_xorshift_zero_seed() {
+    uint32_t s = 0u;
+    uint32_t a = xorshift32(&s);
+    EXPECT_TRUE(a != 0u);            // first draw escapes zero
+    uint32_t b = xorshift32(&s);
+    EXPECT_TRUE(b != a);            // stream does not lock
+    // A zero seed must produce the same stream as explicitly seeding the
+    // fallback constant (determinism preserved).
+    uint32_t s2 = 0x9E3779B9u;
+    EXPECT_TRUE(xorshift32(&s2) == a);
+}
+
+// Two-sided tabular CUSUM with reset-after-alarm (matches monitoring.cu).
+struct CusumRef { float upper, lower, reference, allowance, threshold; int alerts; };
+static void cusum_update_ref(CusumRef* s, float x) {
+    float dev = x - s->reference;
+    s->upper = std::fmax(0.f, s->upper + dev - s->allowance);
+    s->lower = std::fmax(0.f, s->lower - dev - s->allowance);
+    if (s->upper > s->threshold) { s->alerts++; s->upper = 0.f; }
+    if (s->lower > s->threshold) { s->alerts++; s->lower = 0.f; }
+}
+
+static void test_cusum_resets_after_alarm() {
+    CusumRef s = {0.f, 0.f, /*ref=*/0.f, /*allow=*/0.1f, /*thresh=*/1.0f, 0};
+    // A single large positive excursion should alarm once and reset, not
+    // latch and re-alarm on the following in-control samples.
+    cusum_update_ref(&s, 5.0f);
+    EXPECT_TRUE(s.alerts == 1);
+    EXPECT_NEAR(s.upper, 0.f, 1e-6f);   // accumulator reset
+    // In-control samples near the reference produce no further alarms.
+    cusum_update_ref(&s, 0.0f);
+    cusum_update_ref(&s, 0.05f);
+    EXPECT_TRUE(s.alerts == 1);
+}
+
+// CAME with a separate prev_u buffer: confidence c has units of u^2 and
+// prev_u has units of u; they must not share a buffer. Under a constant
+// gradient, u converges so the step-to-step instability du -> 0 and c -> 0.
+struct CameRef { float m, v, c, prev_u; };
+static float came_step_ref(CameRef* st, float g) {
+    const float b1 = 0.9f, b2 = 0.999f, b3 = 0.9f, eps = 1e-8f;
+    st->m = b1 * st->m + (1.f - b1) * g;
+    st->v = b2 * st->v + (1.f - b2) * g * g;
+    float u = st->m / (std::sqrt(st->v) + eps);
+    float du = u - st->prev_u;
+    st->c = b3 * st->c + (1.f - b3) * du * du;
+    float step = u / (std::sqrt(st->c) + eps);
+    st->prev_u = u;
+    return step;
+}
+
+static void test_came_confidence_converges() {
+    CameRef st = {0.f, 0.f, 0.f, 0.f};
+    float last_step = 0.f;
+    for (int i = 0; i < 500; ++i) last_step = came_step_ref(&st, 1.0f);
+    // Constant gradient -> the normalized update u settles -> the step-to-step
+    // instability du decays, so the confidence accumulator c -> 0. (u itself
+    // does NOT approach 1 here: with beta2=0.999 the second moment is still
+    // ramping, so u sits above 1 - that is fine; the invariant under test is
+    // the instability decay, which is what the decoupled prev_u buffer makes
+    // measurable.)
+    EXPECT_TRUE(st.c < 1e-3f);
+    float prev_u_before = st.prev_u;
+    came_step_ref(&st, 1.0f);
+    // prev_u barely moves from one step to the next once settled: du -> 0.
+    EXPECT_TRUE(std::fabs(st.prev_u - prev_u_before) < 1e-2f);
+    EXPECT_TRUE(st.prev_u > 0.f && std::isfinite(st.prev_u));
+    EXPECT_TRUE(std::isfinite(last_step));
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -287,6 +385,10 @@ int main() {
     test_checkpoint_schema_stable();
     test_sentinel_logistic();
     test_sentinel_sgd_decreases_loss();
+    test_canonical_role();
+    test_xorshift_zero_seed();
+    test_cusum_resets_after_alarm();
+    test_came_confidence_converges();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

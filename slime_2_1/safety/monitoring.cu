@@ -53,12 +53,21 @@ struct GenerationTelemetry {
 };
 
 // CUSUM update used for blended-surprise drift detection and for r itself.
+// Two-sided tabular CUSUM. On crossing the decision interval the accumulator
+// that fired is reset to zero (standard practice): otherwise it stays latched
+// above threshold and re-signals on every subsequent generation, inflating
+// alert_count and masking the next genuine excursion.
 __host__ __device__ inline void cusum_update(CusumState* s, float x) {
     float dev = x - s->reference;
     s->upper = fmaxf(0.f, s->upper + dev - s->allowance);
     s->lower = fmaxf(0.f, s->lower - dev - s->allowance);
-    if (s->upper > s->threshold || s->lower > s->threshold) {
+    if (s->upper > s->threshold) {
         s->alert_count++;
+        s->upper = 0.f;
+    }
+    if (s->lower > s->threshold) {
+        s->alert_count++;
+        s->lower = 0.f;
     }
 }
 

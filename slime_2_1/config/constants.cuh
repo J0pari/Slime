@@ -14,6 +14,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cmath>   // expf/sqrtf/fmaxf/tanhf/logf used by __host__ __device__ inlines
 
 // ---- Substrate ------------------------------------------------------------
 // A-201: 16-channel 64×64 NCA, 64 CA steps per forward pass.

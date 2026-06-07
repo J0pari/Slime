@@ -90,9 +90,18 @@ __host__ __device__ inline float weighted_dist2(const float* a,
 }
 
 // Soft-QD insertion. Returns the index of the slot that received the
-// candidate, or -1 if rejected. Bin-local replacement; role-internal
-// nearest-neighbour replacement quality check (a candidate must beat the
-// weakest same-role occupant of its bin).
+// candidate, or -1 if rejected.
+//
+// Implemented so far: per-role bin capacity, then a fitness-based replacement
+// of the weakest same-role occupant of the candidate's PCA bin. This is the
+// quality half of the soft-QD rule.
+//
+// TODO(2.1, A-401): the diversity half. The full rule weights the replacement
+// decision by role-internal novelty (RFF KDE against mu_classifier /
+// mu_predictor), so a less-fit but more-novel candidate can still displace a
+// crowded incumbent. weighted_dist2() and the per-role mu_rff vectors are
+// staged for that term; until it lands, insertion is purely quality-ranked
+// within a bin and the archive under-rewards novelty.
 __host__ __device__ inline int insert(Archive* a, const ArchiveEntry& cand) {
     int b = cand.bin_x * ARCHIVE_BINS_Y + cand.bin_y;
     BinCaps& caps = a->bins[b];

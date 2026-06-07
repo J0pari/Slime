@@ -192,20 +192,13 @@ __host__ __device__ inline float blend_surprise(float s_placeholder,
     return (1.0f - r) * s_placeholder + r * s_predictor;
 }
 
-// CUSUM on r itself (companion to surprise CUSUM in S-001). Sudden drops in
-// r flag predictor population collapse or a discovery the placeholder misses;
-// both warrant operator review. cusum_state layout: [upper, lower, ref, k].
-__host__ __device__ inline void update_r_cusum(float r, float* cusum_state) {
-    float upper = cusum_state[0];
-    float lower = cusum_state[1];
-    float ref   = cusum_state[2];
-    float k     = cusum_state[3];
-    float dev   = r - ref;
-    upper = fmaxf(0.f, upper + dev - k);
-    lower = fmaxf(0.f, lower - dev - k);
-    cusum_state[0] = upper;
-    cusum_state[1] = lower;
-}
+// The CUSUM on r itself (companion to the surprise CUSUM, A-601 + S-001) runs
+// through the single safety::CusumState implementation in safety/monitoring.cu
+// rather than a second hand-rolled accumulator here. A-601 only specifies that
+// r is monitored for precipitous collapse; the driver feeds r into
+// safety::cusum_update(&world->cusum_r, r) each generation. Keeping one CUSUM
+// implementation avoids the two drifting apart (e.g. only one resetting its
+// accumulator after an alarm).
 
 }  // namespace slime::predictor
 

@@ -77,20 +77,29 @@ __host__ __device__ inline float swap_accept_probability(float beta,
 }
 
 // Adaptive beta EMA: nudge beta so the accept rate tracks PT_TARGET_ACCEPT.
-// Higher accept rate -> too easy -> increase beta. Spec says this removes the
-// "magic number" by adapting it.
-__host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 0.05f) {
+// Higher accept rate -> swaps too easy -> increase beta. Called once per swap
+// round (every PT_SWAP_INTERVAL generations) after propose_swaps has tallied
+// that round's attempts/accepts.
+//
+// The accept rate must be measured *per round*: swaps_attempted/accepted are
+// reset to zero here after folding the round's rate into the EMA. Using the
+// lifetime cumulative ratio would converge to a run-average and stall the
+// adaptation as the run grows.
+__host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 0.2f) {
     int attempted = l->swaps_attempted;
-    if (attempted <= 0) return;
-    float accept_rate = static_cast<float>(l->swaps_accepted)
-                      / static_cast<float>(attempted);
-    l->accept_ema = (1.0f - ema_rate) * l->accept_ema + ema_rate * accept_rate;
+    if (attempted <= 0) return;   // no round data yet; leave beta untouched
+    float round_rate = static_cast<float>(l->swaps_accepted)
+                     / static_cast<float>(attempted);
+    l->accept_ema = (1.0f - ema_rate) * l->accept_ema + ema_rate * round_rate;
     float err = l->accept_ema - PT_TARGET_ACCEPT;
     // accept_ema > target  => beta too small (everything accepted) -> increase
     // accept_ema < target  => beta too large (rejects too much)    -> decrease
     l->beta *= expf(0.5f * err);
     if (l->beta < 1e-3f) l->beta = 1e-3f;
     if (l->beta > 1e3f)  l->beta = 1e3f;
+    // Reset the per-round tally for the next swap round.
+    l->swaps_attempted = 0;
+    l->swaps_accepted  = 0;
 }
 
 // Update the rolling best-fitness slot for each replica each generation.

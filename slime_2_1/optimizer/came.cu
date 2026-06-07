@@ -25,9 +25,10 @@ struct CameHyperparams {
 };
 
 struct CameState {
-    float* m;   // first moment
-    float* v;   // second moment
-    float* c;   // confidence buffer
+    float* m;        // first moment of the gradient
+    float* v;        // second moment of the gradient
+    float* c;        // confidence: EMA of the squared update instability
+    float* prev_u;   // last generation's normalized update u_{t-1}
     int    size;
     int    step;
 };
@@ -35,15 +36,20 @@ struct CameState {
 // One CAME update on a flat weight buffer. Called role-blind from the
 // world_train_phase / backward_phase pair (A-102).
 //
-// CAME (Confidence-Adjusted Momentum Estimation): like Adam but uses a
-// confidence buffer c_t tracking the *variance* of the running squared
-// gradients, then dampens the effective step where confidence is low.
-//   m_t = b1*m_{t-1} + (1-b1)*g
-//   v_t = b2*v_{t-1} + (1-b2)*g^2
-//   u_t = m_t / (sqrt(v_t) + eps)
-//   c_t = b3*c_{t-1} + (1-b3)*(u_t - u_{t-1})^2  (instability tracker)
+// CAME (Confidence-Adjusted Momentum Estimation): like Adam but scales the
+// step by a confidence term that tracks how stable the normalized update is
+// from one step to the next. The confidence buffer c_t and the previous
+// update u_{t-1} are kept in separate buffers so the two quantities are not
+// conflated (c_t has units of u^2; prev_u has units of u):
+//   m_t  = b1*m_{t-1} + (1-b1)*g
+//   v_t  = b2*v_{t-1} + (1-b2)*g^2
+//   u_t  = m_t / (sqrt(v_t) + eps)
+//   c_t  = b3*c_{t-1} + (1-b3)*(u_t - u_{t-1})^2     (instability tracker)
 //   step = u_t / (sqrt(c_t) + eps)
-// (Approximation that captures the spec's intent without forking from 2.0.)
+// where a noisy lineage (large step-to-step change in u) inflates c_t and so
+// damps the effective step. This captures the spec's confidence intent
+// without the matrix factorization the full 2.0 optimizer uses on 2-D
+// weights; the flat-buffer form is the scaffold's simplification.
 __device__ inline void came_update(float* weights,
                                    const float* grads,
                                    CameState* state,
@@ -53,22 +59,24 @@ __device__ inline void came_update(float* weights,
     float m = hp.beta1 * state->m[idx] + (1.f - hp.beta1) * g;
     float v = hp.beta2 * state->v[idx] + (1.f - hp.beta2) * g * g;
     float u = m / (sqrtf(v) + hp.epsilon);
-    float prev_u = state->c[idx];   // we stash previous u in c[] alongside conf
-    float du = u - prev_u;
+    float du = u - state->prev_u[idx];
     float c_new = hp.beta3 * state->c[idx] + (1.f - hp.beta3) * du * du;
     float step = u / (sqrtf(c_new) + hp.epsilon);
-    weights[idx] -= hp.lr * (step + hp.weight_decay * weights[idx]);
-    state->m[idx] = m;
-    state->v[idx] = v;
-    state->c[idx] = c_new;
+    // Decoupled weight decay (AdamW-style): applied to the weight directly,
+    // not routed through the adaptive denominator.
+    weights[idx] -= hp.lr * step + hp.lr * hp.weight_decay * weights[idx];
+    state->m[idx]      = m;
+    state->v[idx]      = v;
+    state->c[idx]      = c_new;
+    state->prev_u[idx] = u;
 }
 
 // Block-wide launcher: one thread per weight element.
-__global__ inline void came_step_kernel(float* weights,
-                                        const float* grads,
-                                        CameState* state,
-                                        CameHyperparams hp,
-                                        int n) {
+__global__ void came_step_kernel(float* weights,
+                                 const float* grads,
+                                 CameState* state,
+                                 CameHyperparams hp,
+                                 int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     came_update(weights, grads, state, hp, i);

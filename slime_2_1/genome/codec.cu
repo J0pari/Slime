@@ -44,8 +44,12 @@ __host__ __device__ inline uint32_t read_seed(const Genome& g) {
 }
 
 // xorshift32 PRNG. Cheap, register-resident, suitable for per-thread state.
+// The all-zero state is a fixed point of xorshift, so a zero seed (a valid
+// genome seed value) would otherwise emit a constant stream — coerce it to a
+// nonzero constant on entry.
 __host__ __device__ inline uint32_t xorshift32(uint32_t* s) {
     uint32_t x = *s;
+    if (x == 0u) x = 0x9E3779B9u;   // golden-ratio nonzero fallback
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;

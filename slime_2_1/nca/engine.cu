@@ -41,6 +41,22 @@ __host__ __device__ inline int grid_idx(int y, int x, int c) {
     return (y * GRID_SIZE + x) * CA_CHANNELS + c;
 }
 
+// The 2-bit role tag has four codes but only two defined roles; 10/11 are
+// reserved (A-301). Until additional roles exist, canonicalize a reserved
+// code to its low bit so role-switched logic stays total: 10 -> Classifier,
+// 11 -> Predictor. read_role in the codec returns the raw 2-bit value; the
+// substrate uses this canonical view to pick an input pathway.
+__host__ __device__ inline Role canonical_role(Role raw) {
+    return (static_cast<uint8_t>(raw) & 0x1u) ? Role::Predictor
+                                              : Role::Classifier;
+}
+
+// Forward declaration: forward_kernel calls project_bmap, which is defined
+// after it (the definition needs no forward refs of its own).
+__device__ inline void project_bmap(const __half* state,
+                                    const float* W_bmap,
+                                    float* bmap_out_32);
+
 // ---- Role-switched grid initialization -----------------------------------
 // A-201: classifier seeds channels 11-13 (image), 6-10 (task), zero elsewhere.
 // Predictor seeds channels 14-15 in a centered 4x4 region with bmap_32
@@ -214,13 +230,21 @@ __global__ void forward_kernel(OrganismState* organisms,
     OrganismState* o     = &organisms[org];
     const ForwardInputs& in = inputs[org];
 
-    // Role-switched seeding (A-201).
-    if (in.role == Role::Classifier) {
+    // Role-switched seeding (A-201). Reserved role codes canonicalize to a
+    // defined role so the pathway choice is total.
+    if (canonical_role(in.role) == Role::Classifier) {
         seed_classifier_grid(o->grid, in.image_rgb, in.task_embedding);
     } else {
         seed_predictor_grid(o->grid, in.target_bmap_32, in.task_embedding);
     }
     __syncthreads();
+
+    // Copy the BTRAJ sample schedule into registers so the inner loop never
+    // indexes the namespace-scope constexpr array with a runtime subscript
+    // (which is not guaranteed to be addressable from device code).
+    int steps[BTRAJ_SAMPLES];
+    #pragma unroll
+    for (int i = 0; i < BTRAJ_SAMPLES; ++i) steps[i] = BTRAJ_STEPS[i];
 
     __half* curr = o->grid;
     __half* next = o->scratch;
@@ -230,7 +254,7 @@ __global__ void forward_kernel(OrganismState* organisms,
         ca_step(curr, next, /*W_perc*/ nullptr, W_inter, W_flow);
         __half* tmp = curr; curr = next; next = tmp;
 
-        if (sample_idx < BTRAJ_SAMPLES && step == BTRAJ_STEPS[sample_idx]) {
+        if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
             project_bmap(curr,
                          W_bmap,
                          &o->bmap_traj[sample_idx * BMAP_DIM]);
@@ -249,7 +273,8 @@ __global__ void forward_kernel(OrganismState* organisms,
 }
 
 // Global average pool + W_bmap projection. Produces bmap_t at the requested
-// step. Called inside forward_kernel after each BTRAJ step.
+// step. Called inside forward_kernel after each BTRAJ step (forward-declared
+// above).
 //
 // Spatial average over GRID_SIZE*GRID_SIZE cells produces a 16-d summary s_t
 // (one value per channel); W_bmap is [CA_CHANNELS x BMAP_DIM].
@@ -285,8 +310,12 @@ __device__ inline void project_bmap(const __half* state,
 }
 
 // ---- Public host launchers -----------------------------------------------
+// Mirrors forward_kernel's parameter list: the substrate weights (W_inter,
+// W_flow, W_bmap) are role-blind and shared across the launched organisms.
 void launch_forward(OrganismState* organisms,
                     const ForwardInputs* inputs,
+                    const float* W_inter,
+                    const float* W_flow,
                     const float* W_bmap,
                     int n_organisms,
                     cudaStream_t stream);

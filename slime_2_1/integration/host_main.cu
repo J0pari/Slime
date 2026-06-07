@@ -60,11 +60,18 @@ void step_generation(World* world) {
     // execution::launch_phase(&world->graphs, execution::Phase::Curriculum);
     // ... remaining phases ...
 
-    // Update rolling correlation window + CUSUM each generation.
-    predictor::push_correlation(&world->r_window,
-                                world->s_placeholder,
-                                world->s_predictor);
-    float r = predictor::pearson_r_clipped(world->r_window);
+    // Update rolling correlation window + CUSUM each generation. Before the
+    // predictor sub-population exists, s_predictor is undefined; pushing it
+    // would seed the 100-generation Pearson window with pre-bootstrap zeros
+    // that linger after the transition. Only feed the window once predictors
+    // are live (A-601: before bootstrap r is treated as 0).
+    float r = 0.f;
+    if (world->bootstrap_fired) {
+        predictor::push_correlation(&world->r_window,
+                                    world->s_placeholder,
+                                    world->s_predictor);
+        r = predictor::pearson_r_clipped(world->r_window);
+    }
     world->s_blended = predictor::blend_surprise(world->s_placeholder,
                                                  world->s_predictor, r);
     safety::cusum_update(&world->cusum_surprise, world->s_blended);
