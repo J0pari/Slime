@@ -1,105 +1,209 @@
-// Sheet A-501: Optimizer — CAME
+// Wave 1: CAME Optimizer + Gradient Aggregation
 //
-// Confidence-Adjusted Momentum Estimation. Operates uniformly across roles;
-// only the loss feeding the backward pass differs between classifiers
-// (cross-entropy on logits) and predictors (MSE on bmap_64; see A-103, A-601).
-//
-// This is a flat-buffer approximation of CAME, not a faithful port of the
-// matrix-factored optimizer the blueprint names (the factorization is a
-// memory trick on 2-D weight tensors; on a flat weight buffer it degenerates).
-// See came_update for exactly what is computed. Unverified: not compiled.
+// Per cuda_engineering.md sections 4.3, 4.7, 8.
+// aggregate_gradients_kernel: averages per-organism GradBuffers into d_mean_grad.
+// came_step_kernel: confidence-adjusted momentum update on shared weights.
 
 #ifndef COEVO_OPTIMIZER_CAME_CU
 #define COEVO_OPTIMIZER_CAME_CU
 
-#include "../config/constants.cuh"
-
-#include <cuda_runtime.h>
+#include "../autodiff/warp_tape.cu"
 
 namespace slime::optimizer {
 
-// CAME hyperparameters. Concrete values are set by the caller at construction;
-// none are pinned here.
+using autodiff::GradBuffers;
+using autodiff::TOTAL_WEIGHTS;
+
+// CAME hyperparameters (pinned by spec, cuda_engineering.md section 8).
 struct CameHyperparams {
-    float lr;          // base learning rate
-    float beta1;       // first-moment EMA
-    float beta2;       // second-moment EMA
-    float beta3;       // confidence EMA
-    float epsilon;     // numerical floor
+    float lr;
+    float beta1;
+    float beta2;
+    float beta3;
+    float epsilon;
     float weight_decay;
 };
 
-struct CameState {
-    float* m;        // first moment of the gradient
-    float* v;        // second moment of the gradient
-    float* c;        // confidence: EMA of the squared update instability
-    float* prev_u;   // last generation's normalized update u_{t-1}
-    int    size;
-    int    step;
+constexpr CameHyperparams CAME_DEFAULTS = {
+    1e-3f,   // lr
+    0.9f,    // beta1
+    0.999f,  // beta2
+    0.999f,  // beta3
+    1e-8f,   // epsilon
+    0.01f    // weight_decay
 };
 
-// One CAME update on a flat weight buffer. Called role-blind from the
-// world_train_phase / backward_phase pair (A-102).
-//
-// CAME (Confidence-Adjusted Momentum Estimation): like Adam but scales the
-// step by a confidence term that tracks how stable the normalized update is
-// from one step to the next. The confidence buffer c_t and the previous
-// update u_{t-1} are kept in separate buffers so the two quantities are not
-// conflated (c_t has units of u^2; prev_u has units of u):
-//   m_t  = b1*m_{t-1} + (1-b1)*g
-//   v_t  = b2*v_{t-1} + (1-b2)*g^2
-//   u_t  = m_t / (sqrt(v_t) + eps)
-//   c_t  = b3*c_{t-1} + (1-b3)*(u_t - u_{t-1})^2     (instability tracker)
-//   step = u_t / (sqrt(c_t) + eps)
-// where a noisy lineage (large step-to-step change in u) inflates c_t and so
-// damps the effective step. This captures the spec's confidence intent
-// without the matrix factorization that the named optimizer applies to 2-D
-// weight tensors; the flat-buffer form here is the simplification.
-__device__ inline void came_update(float* weights,
-                                   const float* grads,
-                                   CameState* state,
-                                   const CameHyperparams& hp,
-                                   int idx) {
-    float g = grads[idx];
-    float m = hp.beta1 * state->m[idx] + (1.f - hp.beta1) * g;
-    float v = hp.beta2 * state->v[idx] + (1.f - hp.beta2) * g * g;
-    float u = m / (sqrtf(v) + hp.epsilon);
-    float du = u - state->prev_u[idx];
-    float c_new = hp.beta3 * state->c[idx] + (1.f - hp.beta3) * du * du;
-    float step = u / (sqrtf(c_new) + hp.epsilon);
-    // Decoupled weight decay (AdamW-style): applied to the weight directly,
-    // not routed through the adaptive denominator.
-    weights[idx] -= hp.lr * step + hp.lr * hp.weight_decay * weights[idx];
-    state->m[idx]      = m;
-    state->v[idx]      = v;
-    state->c[idx]      = c_new;
-    state->prev_u[idx] = u;
-}
+// CAME state: 4 arrays of TOTAL_WEIGHTS on device, plus step counter on host.
+struct CameState {
+    float* d_m;        // 1st moment
+    float* d_v;        // 2nd moment
+    float* d_c;        // confidence accumulator
+    float* d_prev_u;   // previous update direction
+    float* d_mean_grad; // averaged gradient buffer
+    int step;
+};
 
-// Block-wide launcher: one thread per weight element.
-__global__ void came_step_kernel(float* weights,
-                                 const float* grads,
-                                 CameState* state,
-                                 CameHyperparams hp,
-                                 int n) {
+// ---- aggregate_gradients_kernel -----------------------------------------
+// Per cuda_engineering.md section 4.7.
+// Grid: <<<ceil(TOTAL_WEIGHTS/256), 256>>>
+// Averages per-organism GradBuffers into a flat d_mean_grad buffer.
+
+__global__ void aggregate_gradients_kernel(
+    const GradBuffers* grads,
+    float* mean_grad,
+    int n_organisms)
+{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    came_update(weights, grads, state, hp, i);
-    if (i == 0) state->step++;
+    if (i >= TOTAL_WEIGHTS) return;
+
+    float sum = 0.f;
+    for (int org = 0; org < n_organisms; ++org) {
+        sum += grads[org].dW[i];
+    }
+    mean_grad[i] = sum / static_cast<float>(n_organisms);
 }
 
-// DECLARED ONLY — blueprint-in-place.
-// launch_came_step: thin host wrapper that launches came_step_kernel (above,
-// implemented) with ceil(n / 256) blocks of 256 threads on `stream`. The
-// per-element update math is done and host-tested; this is only the grid-config
-// + launch. One call per trainable weight buffer (W_inter, W_flow, W_bmap) per
-// organism, or one fused call over a concatenated buffer.
-void launch_came_step(float* weights,
-                      const float* grads,
-                      CameState* state,
-                      const CameHyperparams& hp,
-                      int n,
-                      cudaStream_t stream);
+// ---- came_step_kernel ---------------------------------------------------
+// Per cuda_engineering.md section 4.3.
+// Grid: <<<ceil(TOTAL_WEIGHTS/256), 256>>>
+// CAME update per weight:
+//   g = mean_grad[i]
+//   m = beta1*m + (1-beta1)*g
+//   v = beta2*v + (1-beta2)*g^2
+//   u = m / (sqrt(v) + eps)
+//   instability = (u - prev_u)^2
+//   c = beta3*c + (1-beta3)*instability
+//   confidence = 1 / (1 + c)
+//   w -= lr * confidence * u + weight_decay * w
+//   prev_u = u
+
+__global__ void came_step_kernel(
+    float* weights,
+    const float* mean_grad,
+    float* m,
+    float* v,
+    float* c,
+    float* prev_u,
+    float lr,
+    float beta1,
+    float beta2,
+    float beta3,
+    float epsilon,
+    float weight_decay)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= TOTAL_WEIGHTS) return;
+
+    float g = mean_grad[i];
+
+    // Momentum update.
+    float mi = beta1 * m[i] + (1.f - beta1) * g;
+    m[i] = mi;
+
+    // Variance update.
+    float vi = beta2 * v[i] + (1.f - beta2) * g * g;
+    v[i] = vi;
+
+    // Update direction.
+    float u = mi / (sqrtf(vi) + epsilon);
+
+    // Instability tracking.
+    float diff = u - prev_u[i];
+    float instability = diff * diff;
+    float ci = beta3 * c[i] + (1.f - beta3) * instability;
+    c[i] = ci;
+
+    // Confidence-adjusted step.
+    float confidence = 1.f / (1.f + ci);
+    weights[i] -= lr * confidence * u + weight_decay * weights[i];
+
+    prev_u[i] = u;
+}
+
+// ---- Host API -----------------------------------------------------------
+
+inline void allocate_came(CameState& state) {
+    cudaMalloc(&state.d_m,         sizeof(float) * TOTAL_WEIGHTS);
+    cudaMalloc(&state.d_v,         sizeof(float) * TOTAL_WEIGHTS);
+    cudaMalloc(&state.d_c,         sizeof(float) * TOTAL_WEIGHTS);
+    cudaMalloc(&state.d_prev_u,    sizeof(float) * TOTAL_WEIGHTS);
+    cudaMalloc(&state.d_mean_grad, sizeof(float) * TOTAL_WEIGHTS);
+    cudaMemset(state.d_m,       0, sizeof(float) * TOTAL_WEIGHTS);
+    cudaMemset(state.d_v,       0, sizeof(float) * TOTAL_WEIGHTS);
+    cudaMemset(state.d_c,       0, sizeof(float) * TOTAL_WEIGHTS);
+    cudaMemset(state.d_prev_u,  0, sizeof(float) * TOTAL_WEIGHTS);
+    state.step = 0;
+}
+
+inline void free_came(CameState& state) {
+    cudaFree(state.d_m);
+    cudaFree(state.d_v);
+    cudaFree(state.d_c);
+    cudaFree(state.d_prev_u);
+    cudaFree(state.d_mean_grad);
+}
+
+inline void launch_aggregate_gradients(
+    const GradBuffers* d_grads,
+    float* d_mean_grad,
+    int n_organisms,
+    cudaStream_t stream)
+{
+    int grid = (TOTAL_WEIGHTS + 255) / 256;
+    aggregate_gradients_kernel<<<grid, 256, 0, stream>>>(
+        d_grads, d_mean_grad, n_organisms);
+}
+
+inline void launch_came_step(
+    float* d_weights,
+    CameState& state,
+    const CameHyperparams& hp,
+    cudaStream_t stream)
+{
+    int grid = (TOTAL_WEIGHTS + 255) / 256;
+    came_step_kernel<<<grid, 256, 0, stream>>>(
+        d_weights, state.d_mean_grad,
+        state.d_m, state.d_v, state.d_c, state.d_prev_u,
+        hp.lr, hp.beta1, hp.beta2, hp.beta3, hp.epsilon, hp.weight_decay);
+    state.step++;
+}
+
+// ---- grad_norm_reduce_kernel ---------------------------------------------
+// Per cuda_engineering.md section 8. Device-side L2 norm of d_mean_grad.
+// Grid: <<<ceil(TOTAL_WEIGHTS/256), 256>>>
+// Writes one float (the squared norm) to d_out. Host takes sqrt after read.
+// Uses shared-memory tree reduction.
+
+__global__ void grad_norm_reduce_kernel(const float* mean_grad,
+                                        float* d_out, int n) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    float val = 0.f;
+    if (i < n) val = mean_grad[i] * mean_grad[i];
+    sdata[tid] = val;
+    __syncthreads();
+
+    // Tree reduction in shared memory.
+    for (int s = 128; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+
+    // Block 0 thread 0 writes partial sum; use atomicAdd for multi-block.
+    if (tid == 0) atomicAdd(d_out, sdata[0]);
+}
+
+inline void launch_grad_norm_reduce(const float* d_mean_grad,
+                                    float* d_grad_norm,
+                                    cudaStream_t stream) {
+    // Zero the output scalar first.
+    cudaMemsetAsync(d_grad_norm, 0, sizeof(float), stream);
+    int grid = (TOTAL_WEIGHTS + 255) / 256;
+    grad_norm_reduce_kernel<<<grid, 256, 0, stream>>>(
+        d_mean_grad, d_grad_norm, TOTAL_WEIGHTS);
+}
 
 }  // namespace slime::optimizer
 

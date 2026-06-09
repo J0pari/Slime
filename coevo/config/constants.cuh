@@ -16,6 +16,42 @@
 #include <cstdio>
 #include <cmath>   // expf/sqrtf/fmaxf/tanhf/logf used by __host__ __device__ inlines
 
+// constexpr arrays need a __device__ shadow to be addressable from device code.
+// Host code uses the constexpr originals; device code uses the d_* copies.
+// The COEVO_DEVICE_SHADOW macro emits the __device__ copy only under nvcc.
+
+// ---- PRNG (G-100) ---------------------------------------------------------
+// PCG32 (O'Neill 2014). 128-bit state: 64-bit state word + 64-bit stream.
+struct Pcg32 {
+    uint64_t state;
+    uint64_t inc;    // stream selector (must be odd; stored as inc = 2*stream+1)
+};
+
+__host__ __device__ inline uint32_t pcg32_random(Pcg32* rng) {
+    uint64_t oldstate = rng->state;
+    rng->state = oldstate * 6364136223846793005ULL + rng->inc;
+    uint32_t xorshifted = static_cast<uint32_t>(((oldstate >> 18u) ^ oldstate) >> 27u);
+    uint32_t rot = static_cast<uint32_t>(oldstate >> 59u);
+    return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));
+}
+
+__host__ __device__ inline void pcg32_seed(Pcg32* rng, uint64_t seed, uint64_t stream) {
+    rng->state = 0u;
+    rng->inc = (stream << 1u) | 1u;
+    pcg32_random(rng);
+    rng->state += seed;
+    pcg32_random(rng);
+}
+
+// Default seed pinned for reproducibility (section 15.1).
+constexpr uint64_t PCG32_DEFAULT_STATE  = 0x853C49E6748FEA9BULL;
+constexpr uint64_t PCG32_DEFAULT_STREAM = 0xDA3E39CB94B95BDBULL;
+
+// Uniform float in [0, 1).
+__host__ __device__ inline float pcg32_float(Pcg32* rng) {
+    return static_cast<float>(pcg32_random(rng)) * (1.0f / 4294967296.0f);
+}
+
 // ---- Substrate ------------------------------------------------------------
 // A-201: 16-channel 64×64 NCA, 64 CA steps per forward pass.
 constexpr int GRID_SIZE        = 64;
@@ -23,6 +59,7 @@ constexpr int CA_CHANNELS      = 16;
 constexpr int CA_STEPS         = 64;
 constexpr int BMAP_DIM         = 32;
 constexpr int TASK_EMBED_DIM   = 16;
+constexpr int NUM_CLASSES      = 16;   // A-401: distinct from CA_CHANNELS
 
 // Channel partition (A-201 role-switched input):
 //   0–5   chemical (A-202 reaction-diffusion)
@@ -52,6 +89,9 @@ constexpr int W_PERC_SIZE      = N_PERC_FILTERS * 9;            // 27
 // BTRAJ sample steps (A-201).
 constexpr int BTRAJ_SAMPLES    = 4;
 constexpr int BTRAJ_STEPS[BTRAJ_SAMPLES] = { 16, 32, 48, 64 };
+#ifdef __CUDACC__
+__device__ constexpr int d_BTRAJ_STEPS[BTRAJ_SAMPLES] = { 16, 32, 48, 64 };
+#endif
 
 // ---- Population & archive (A-401) ----------------------------------------
 constexpr int POOL_SIZE        = 64;     // active organisms
@@ -106,22 +146,39 @@ constexpr float SOT_GATE_MIDPOINT        = 0.7f;
 constexpr int   PT_NUM_REPLICAS          = 4;
 constexpr int   PT_REPLICA_SIZE          = POOL_SIZE / PT_NUM_REPLICAS;   // 16
 constexpr float PT_MUTATION_RATES[PT_NUM_REPLICAS] = { 0.005f, 0.01f, 0.02f, 0.04f };
+#ifdef __CUDACC__
+__device__ constexpr float d_PT_MUTATION_RATES[PT_NUM_REPLICAS] = { 0.005f, 0.01f, 0.02f, 0.04f };
+#endif
 constexpr int   PT_SWAP_INTERVAL         = 50;   // generations
 constexpr float PT_TARGET_ACCEPT         = 0.25f;
 
 constexpr int   STRESS_SUBPOP_COUNT      = 3;
 constexpr int   STRESS_SUBPOP_SIZE       = 8;
 constexpr float STRESS_SOT_DENSITIES[STRESS_SUBPOP_COUNT] = { 0.10f, 0.20f, 0.40f };
+#ifdef __CUDACC__
+__device__ constexpr float d_STRESS_SOT_DENSITIES[STRESS_SUBPOP_COUNT] = { 0.10f, 0.20f, 0.40f };
+#endif
 constexpr float STRESS_REFRESH_FRACTION  = 0.25f;
 constexpr int   STRESS_HISTORY_WINDOW    = 10;
 constexpr float STRESS_FAILURE_THRESHOLD = 0.50f;
 
 constexpr int   STRESS_POOL_SIZE = STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE;  // 24
 
+// Total organism slots: active pool + stress sub-populations.
+constexpr int   TOTAL_ORG = POOL_SIZE + STRESS_POOL_SIZE;  // 88
+
+// ---- SOT density (A-701) -------------------------------------------------
+constexpr float MAIN_SOT_DENSITY     = 0.05f;  // 5% for main pool
+
 // ---- Intervals (I-001) ---------------------------------------------------
 constexpr int CURRICULUM_INTERVAL    = 50;
 constexpr int AUDIT_INTERVAL         = 100;
 constexpr int PROBE_PANEL_INTERVAL   = 200;
+constexpr int TELEMETRY_INTERVAL     = 10;
+
+// ---- Gradient health (A-501) ---------------------------------------------
+constexpr float EPS_GRAD             = 1e-8f;
+constexpr int   GRAD_HEALTH_WINDOW   = 10;
 
 // ---- Error logging -------------------------------------------------------
 #ifndef SLIME_DEBUG_CHECKS

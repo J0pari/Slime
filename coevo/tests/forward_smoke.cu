@@ -30,13 +30,13 @@
 using slime::nca::OrganismState;
 using slime::nca::ForwardInputs;
 
-// Deterministic small weights from a seed (xorshift32, same generator family as
-// the genome RNG). Range ~[-0.1, 0.1] to keep the 64-step rollout bounded.
+// Deterministic small weights from a seed via PCG32 (consistent with G-100).
+// Range ~[-0.1, 0.1] to keep the 64-step rollout bounded.
 static void fill_weights(float* w, int n, uint32_t seed) {
-    uint32_t s = seed ? seed : 0x9E3779B9u;
+    Pcg32 rng;
+    pcg32_seed(&rng, static_cast<uint64_t>(seed), 0xFEED0001u);
     for (int i = 0; i < n; ++i) {
-        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
-        float u = static_cast<float>(s) * (1.0f / 4294967296.0f);  // [0,1)
+        float u = pcg32_float(&rng);
         w[i] = (u - 0.5f) * 0.2f;
     }
 }

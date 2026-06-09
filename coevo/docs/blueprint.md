@@ -71,6 +71,7 @@ Sheet Index
 | A-103 | Autodiff — Checkpointed Warp Tape (Trajectory-Aware) |
 | A-201 | NCA Engine, Role-Switched Input, Behavioral Trajectory |
 | A-202 | Reaction-Diffusion Field |
+| A-203 | Global Context Channel |
 | A-301 | Genome & Delta-Weight Codec (Role-Tagged) |
 | A-401 | Soft Quality-Diversity Archive (Role-Aware) |
 | A-501 | Optimizer — CAME |
@@ -90,6 +91,20 @@ G-100: General Notes & Conventions
 Conventions: FP16 forward, FP32 master weights, FP32 autodiff, captured-graph
 execution mode as primary.
 
+Reproducibility. All randomness — host-side and device-side — uses PCG32
+(O'Neill 2014, minimal C implementation). State is 128 bits: a 64-bit state
+word and a 64-bit stream selector. The default seed is `state =
+0x853C49E6748FEA9B, stream = 0xDA3E39CB94B95BDB`. The seed is pinned for
+reproducibility; production runs may override it from system entropy at startup.
+No other PRNG is used anywhere in the codebase. This includes per-organism
+deterministic sequences (e.g., delta-weight initialization from genome seeds):
+these seed a local PCG32 instance from the genome's 32-bit seed, not a
+different algorithm. The PCG32 functions (`pcg32_random`, `pcg32_seed`,
+`pcg32_float`) are annotated `__host__ __device__` so they are callable from
+both host and device code. The rotate expression uses `(32u - rot) & 31u`
+(equivalent to the reference `(-rot) & 31` but portable across compilers that
+warn on unsigned negation).
+
 Abbreviations:
 
 | Abbr. | Meaning |
@@ -98,6 +113,7 @@ Abbreviations:
 | BTRAJ | Behavioral trajectory (bmap_16, bmap_32, bmap_48, bmap_64) |
 | PT | Parallel Tempering |
 | SOT-d | SOT density (fraction of task batch carrying SOT) |
+| PCG32 | Permuted Congruential Generator, 32-bit output |
 
 A-101: System Architecture — Global View
 
@@ -247,6 +263,71 @@ The reaction term is linear and, with arbitrary genome coefficients, can drive a
 channel to saturation; the FP16 clamp bounds it and selection penalises
 organisms whose chemical fields saturate into degenerate bmaps.
 
+A-203: Global Context Channel
+
+Known constraint. In a flat 64×64 CA with a 3×3 stencil, information travels
+one cell per step. Over the 64-step forward pass, a signal originating at one
+edge barely reaches the opposite edge — there is no time for round-trip
+feedback. The reaction-diffusion field (A-202) partially mitigates this: its
+5-point Laplacian diffusion spreads chemical signals faster than the cellwise
+stencil, providing a slow spatial memory. But diffusion is isotropic and
+decaying — it cannot carry structured global intent.
+
+The local update rule is inherently comonadic: every cell's next state derives
+from its immediate neighborhood. The system can produce global coordination
+only through emergent multi-step cascades, which is bandwidth-limited. Whether
+this constraint actually bottlenecks the classification and prediction tasks is
+an empirical question — the system may plateau on task accuracy before
+exhausting its local-coordination capacity, or the chemical field may provide
+sufficient long-range coupling. The answer depends on run data from Waves 1–7.
+
+Global context broadcast. The `project_bmap` function already computes a
+globally-pooled 16-d summary vector s_t at CA steps 16, 32, 48, and 64. This
+summary is currently used only for output (archive descriptor, fitness). If the
+summary were broadcast back into the grid during the forward pass, it would
+give every cell access to the organism's global state — a recurrent global
+channel analogous to a rudimentary hormonal or nervous system.
+
+Mechanism. At each CA step where `project_bmap` fires (steps 16, 32, 48, 64),
+the 16-d summary s_t is written into channels 14–15 of every cell via a
+learned 16→2 projection W_ctx (32 weights). This replaces the current
+"auxiliary" designation of channels 14–15 (which start at zero and remain
+zero for classifiers throughout the forward pass in the current design). The
+broadcast is spatially uniform — every cell receives the same context vector —
+so it carries no spatial information, only global state. Cells combine it with
+their local perception to align local behavior with global intent.
+
+W_ctx is a shared substrate weight, trained through the same CAME path as
+W_perc, W_inter, W_flow, W_bmap. It adds 32 weights to TOTAL_WEIGHTS (a 1.2%
+increase). The backward pass requires one additional adjoint through the
+broadcast step (d_summary contribution from all cells' channel 14–15
+gradients, then through W_ctx).
+
+Channel partition update. With the global context channel active, the channel
+partition becomes:
+  0–5   chemical (A-202 reaction-diffusion)
+  6–10  task embedding broadcast
+  11–13 classifier image input (RGB)
+  14–15 global context broadcast (W_ctx × summary, written at bmap steps)
+
+For predictors, channels 14–15 serve double duty: seeded with bmap_32 target
+at step 0 (A-201), then overwritten by global context at step 16 and beyond.
+The predictor retains its target input for the first 16 steps, after which
+global context takes over — this is intentional, as by step 16 the target
+information has propagated into other channels through the CA dynamics.
+
+Activation gate. The global context channel activates in Wave 8, after Waves
+1–7 have established baseline performance. Activation is a configuration
+constant (GLOBAL_CONTEXT_ENABLED), not a runtime toggle. When disabled, channels
+14–15 remain zero for classifiers (current behavior). This allows direct A/B
+comparison of runs with and without global context.
+
+Out of scope. Hierarchical multi-resolution grids and dynamic graph topologies
+(GNN-style non-local edges) are architecturally incompatible with the current
+kernel design — they would require redesigning the forward kernel, backward
+kernel, checkpoint structure, and memory layout. They are not part of this
+system.
+
 A-301: Genome & Delta-Weight Codec (Role-Tagged)
 
 Genome layout, total length 1024 bits:
@@ -257,6 +338,11 @@ Genome layout, total length 1024 bits:
 - Bits 234–281: diffusion rate quantization (48 bits).
 - Bits 282–1023: low-rank delta initialization prior.
 
+Initial genome seeds. At world init, each organism's 32-bit seed (bits 2–33)
+is drawn from the host PCG32 RNG. This guarantees full 32-bit entropy and
+uniqueness across TOTAL_ORG organisms. Seeds must not be derived from organism
+index via arithmetic — the PRNG provides the entropy.
+
 Role mutation rate is 1e-4 per role-bit per spawn — substantially below the
 1e-2 baseline. Lineages remain in their role except for rare migrations.
 Migrations are not suppressed because cross-role lineage drift is a useful
@@ -265,14 +351,32 @@ exploration mechanism over long runs.
 Delta encoding stores sparse (index, value) weight perturbations layered on the
 base initialization, up to MAX_DELTA_FLOATS pairs per organism.
 
+PRNG usage. The `mutate` and `crossover` functions accept a `Pcg32*` parameter,
+consistent with G-100. The `init_delta_from_prior` function seeds a local
+`Pcg32` instance from the genome's 32-bit seed (bits 2–33) for per-organism
+determinism — same algorithm, organism-local state.
+
+Host/device annotations. Genomes are host-resident (cuda_engineering.md section
+2.3). The genome codec functions `mutate`, `crossover`, `init_delta_from_prior`,
+`read_role`, `write_role`, and `read_seed` are `__host__` only — they are never
+called from device code. The `apply_delta` function is `__host__ __device__`
+because it will be called from a device decode kernel in a future wave.
+
 A-401: Soft Quality-Diversity Archive (Role-Aware)
 
 Descriptor and metric. Final bmap_64 is the descriptor. Weighted Euclidean
 distance with per-dimension inverse-variance EMA.
 
-Role-internal novelty. The RFF KDE projection W_rff is shared across roles, but
-the archive's mean RFF vector μ_archive is maintained *per role*: μ_classifier
-and μ_predictor. Novelty for a candidate is computed against μ_{role(candidate)}
+Classification logits. The first NUM_CLASSES = 16 dimensions of bmap_64 are
+interpreted as classification logits. NUM_CLASSES is a named constant, distinct
+from CA_CHANNELS (which also happens to be 16). If the substrate channel count
+ever diverges from the classification task size, NUM_CLASSES governs the loss
+computation and CA_CHANNELS governs the substrate.
+
+RFF projection. The RFF KDE projection W_rff is initialized from the host PCG32
+RNG at world init. The projection is shared across roles, but the archive's
+mean RFF vector μ_archive is maintained *per role*: μ_classifier and
+μ_predictor. Novelty for a candidate is computed against μ_{role(candidate)}
 only. A classifier's neighbors for novelty purposes are classifiers; a
 predictor's neighbors are predictors. This prevents inappropriate cross-role
 density coupling without requiring separate archive geometries.
@@ -309,14 +413,25 @@ Fitness composition.
     f = f_raw · role_mult · audit_mult · variance_mult
 
     where role_mult is classifier_mult or predictor_mult
-    audit_mult and variance_mult inherit from S-003 and the variance floor
+    audit_mult is from S-003 (activates Wave 5)
+    variance_mult is from S-003 variance floor (activates Wave 5)
+
+    Before Wave 5, audit_mult = 1.0 and variance_mult = 1.0.
 
 Insertion is bin-local; the Q comparison happens within bins and against
 role-internal nearest neighbors.
 
 Lineage-aware insertion (expanding-lineage brake) operates per role: a runaway
 classifier lineage tightens classifier-side replacement bars; a runaway
-predictor lineage tightens predictor-side replacement bars.
+predictor lineage tightens predictor-side replacement bars. The lineage brake
+requires lineage-share statistics from S-003 and activates in Wave 5.
+
+Parent selection. Spawn parent-selection draws from a per-role live index list
+maintained in the Archive struct. The list contains the indices of all alive
+entries of that role. Selection is uniform random via PCG32 into the live list.
+This is O(1) per selection, always succeeds if any alive entry of the target
+role exists, and scales to any archive size. The live index lists are updated
+on every insert and eviction.
 
 Pool lifecycle. Active pool of 64 organisms (the mutation-rate ladder gives this
 a richer structure — see S-004). WAVE_SIZE = 16 spawns per generation. Spawn
@@ -324,12 +439,52 @@ parent-selection is per role: a wave consists of role-proportional spawns (the
 proportion matches the current archive role-fraction, with a minimum of 2 per
 role to prevent extinction). Mutation rates per spawn are determined by S-004.
 
+Organism-to-batch assignment. Each generation, the POOL_SIZE organisms are
+assigned to the CLASSIFIER_BATCH (16) images via deterministic round-robin:
+organism i evaluates on image i % CLASSIFIER_BATCH. This gives uniform coverage
+(each image evaluated by POOL_SIZE / CLASSIFIER_BATCH organisms) and
+deterministic assignment (no evaluation noise from random image assignment).
+Predictor batch assignment uses a different mechanism (A-701: weighted sampling
+by prediction error) and is defined separately.
+
+Host/device annotations. The Archive struct and all archive functions (`insert`,
+`assign_bin`, `recompute_bins`, `archive_size`, `bootstrap_trigger`,
+`rff_project`, `rff_novelty`, `weighted_dist2`, `qd_score`, `compose_fitness`,
+`sot_gate`, `surprise_ratio`, `classifier_mult`, `predictor_mult`,
+`live_list_add`, `live_list_remove`, `apply_lineage_brake`, `update_rff_mean`)
+are `__host__` only. The archive is host-resident (section 2.3); no archive
+operation runs on the device. Speculative `__device__` annotations on archive
+functions are forbidden — they create false expectations about device-side
+archive access and propagate annotation requirements to callees unnecessarily.
+
 A-501: Optimizer — CAME
 
 Confidence-Adjusted Momentum Estimation. Operates uniformly across roles; only
 the loss feeding the backward pass differs between classifiers (cross-entropy on
 logits) and predictors (MSE on bmap_64). Hyperparameters (learning rate, the
 three EMA decays, epsilon, weight decay) are pinned by the implementation.
+
+Weight initialization. Shared weights are initialized via Kaiming He
+initialization (He et al. 2015), per-layer, matching the activation function:
+- W_perc: fan_in = 9 (3×3 kernel), no activation → scale = sqrt(1 / fan_in).
+- W_inter: fan_in = N_PERC_FILTERS × CA_CHANNELS, GELU activation →
+  scale = sqrt(2 / fan_in).
+- W_flow: fan_in = HIDDEN_DIM, linear output → scale = sqrt(1 / fan_in).
+- W_bmap: fan_in = CA_CHANNELS, linear output → scale = sqrt(1 / fan_in).
+
+Each weight is drawn from N(0, scale) using Box-Muller on pairs of PCG32
+outputs. The initialization PRNG is seeded from the host PCG32 RNG (one draw
+to seed the init sub-sequence). This produces deterministic, reproducible
+initial weights that respect the per-layer fan-in structure.
+
+Gradient health monitoring. After gradient aggregation, the L2 norm of the
+mean gradient is computed via a device-side parallel reduction kernel
+(one float result transferred D→H). If the norm falls below eps_grad ×
+TOTAL_WEIGHTS for GRAD_HEALTH_WINDOW consecutive generations, a warning is
+logged. eps_grad = 1e-8. GRAD_HEALTH_WINDOW = 10. The reduction kernel is
+`<<<ceil(TOTAL_WEIGHTS/256), 256>>>` with shared-memory tree reduction,
+writing a single float to a pinned host scalar. No full D→H weight transfer
+is performed for this check.
 
 A-601: Predictor Role & Hybrid Surprise Signal
 
@@ -401,11 +556,33 @@ Capability discontinuity watch. CUSUM is computed on the blended surprise.
 Additionally, a CUSUM on r itself raises an alert if correlation collapses
 precipitously.
 
+CUSUM calibration. The CUSUM drift (k) and threshold (h) parameters are not
+fixed constants — they are calibrated from the observed surprise distribution
+during the s_target calibration window (generations 200–700 after bootstrap).
+Calibration procedure: compute the standard deviation σ of the blended surprise
+over the calibration window. Set k = 0.5 × σ, h = 5 × σ for the surprise
+CUSUM. For the r CUSUM: compute σ_r over the same window, set k_r = 0.5 × σ_r,
+h_r = 5 × σ_r. Before calibration completes (pre-bootstrap and during the
+calibration window), CUSUM accumulators run with provisional values
+k = 0.5, h = 5.0 for surprise and k_r = 0.1, h_r = 3.0 for r. These
+provisional values are overwritten when calibration completes and the CUSUM
+accumulators are reset to zero at that point. The provisional values are pinned
+constants, not free parameters.
+
 A-701: Problem Generator & Dual Curriculum
 
 Classifier tasks: task batches of 16 samples with augmentations, difficulty
-scalar, feature vector, threshold τ. SOT sub-batch of 4 images with a reversible
-pixel-permutation transform under a host-controlled key.
+scalar, feature vector, threshold τ. SOT sub-batch of SOT_SUBBATCH = 4 images
+with a reversible pixel-permutation transform under a host-controlled key. The
+main pool operates at MAIN_SOT_DENSITY = 0.05 (5% of images are SOT-marked).
+This is distinct from the stress ladder densities {10%, 20%, 40%} defined in
+S-004. The SOT key is a 64-bit value pinned at init for reproducibility
+(default: 0xDEADCAFE42). Production runs should override it from system entropy.
+
+`assemble_classifier_batch` accepts a `Pcg32*` parameter for all randomness
+(label selection, task embedding generation), consistent with G-100. Labels are
+drawn from `[0, NUM_CLASSES)` — the classification task governs labels, not the
+substrate channel count. All batch assembly operates in NUM_CLASSES space.
 
 Predictor tasks: a batch of K = 8 target classifier organisms randomly sampled
 from the active pool, biased toward classifiers whose recent behavior is
@@ -446,6 +623,14 @@ S-002: Safety & Alignment Architecture
 - The placeholder regressor's persistence is itself a safety property: a
   population of predictor organisms cannot, by collective drift, eliminate the
   ground-truth check that the placeholder provides.
+
+- SOT reference forward allocation. The apply_sot_identity function requires
+  temporary device buffers for un-permuted images, task embeddings,
+  ForwardInputs, and reference descriptors. These buffers are pre-allocated in
+  the World struct during initialization (not allocated/freed per call). Per-call
+  cudaMalloc/cudaFree is forbidden in the generation loop — it causes driver
+  stalls and heap fragmentation over long runs. The buffer sizes are known at
+  init time (bounded by SOT_SUBBATCH).
 
 S-003: Structural Pressures — Audit, Sentinels, Lineage Pruning
 
@@ -498,11 +683,28 @@ fair. Metropolis acceptance:
     p_accept = min(1, exp(β · (Δ_high − Δ_low)))
 
 with β adapted via an EMA on accept rate, targeting 0.25 — this removes the
-magic number.
+magic number. Initial β = 1.0. The EMA corrects within 3–4 swap rounds.
 
-Swaps move *entire organisms* between replicas, not just their genomes —
-checkpoint buffers and momentum follow the organism. This preserves the
-optimizer state's correlation with the organism's recent trajectory.
+Swap mechanics. On acceptance of a swap between replicas R_lo and R_hi, ALL
+organisms in R_lo exchange pool slots with ALL organisms in R_hi. This is a
+full data swap: OrganismState (device: grid, scratch, bmap_traj),
+CheckpointBuffer (device: 4 FP16 grids), GradBuffers (device: per-organism
+weight gradients), and OrganismTable metadata (host: genome, delta, lineage_id,
+parent_id, spawn_gen, fitness, f_raw, f_sot, role, batch_sample_idx). The pool
+slot's replica_tag stays fixed to the slot — it identifies the slot's
+temperature, not the organism. After the swap, organisms from the old R_hi are
+now in R_lo's slots (inheriting R_lo's mutation rate), and vice versa.
+
+This is a bulk operation: PT_REPLICA_SIZE (16) organism pairs exchange data per
+accepted swap. The swap requires a temporary device buffer of one OrganismState
++ one CheckpointBuffer + one GradBuffers, pre-allocated in the World struct.
+Data movement per swap: ~1.3 MB device-to-device memcpy per organism pair,
+amortized over PT_SWAP_INTERVAL (50) generations. At larger grid sizes this
+grows quadratically but remains < 1% of generation compute time.
+
+Swap timing. Swaps occur BEFORE the backward pass in the generation loop. This
+ensures swapped organisms immediately contribute gradients in their new replica
+context.
 
 The mutation-rate ladder applies role-blind. A predictor swapped from
 temperature T_1 to T_2 inherits T_2's mutation rate going forward.
@@ -566,6 +768,13 @@ Generation pseudocode:
         host.update_cusum()                            # on blended surprise, and on r
 
         gen += 1
+
+Telemetry logging. Every TELEMETRY_INTERVAL = 10 generations AND during the
+first 5 generations of a run, the host logs: generation number, mean fitness,
+mean f_raw, archive size, gradient norm, occupied PCA bins. This cadence is
+a pinned constant. Additional telemetry (role fraction, r, ρ, swap stats,
+stress failure rates) is logged at AUDIT_INTERVAL when those subsystems are
+active.
 
 Shared structures:
 

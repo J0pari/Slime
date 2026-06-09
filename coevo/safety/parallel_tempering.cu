@@ -1,6 +1,6 @@
 // Sheet S-004: Parallel Tempering Ladders
 //
-// Two narrow PT applications, both role-blind, both independent.
+// Per cuda_engineering.md section 13 and blueprint S-004.
 //
 // Mutation-rate ladder. The active pool of 64 organisms is partitioned into
 // 4 replicas of 16 organisms each, with per-replica mutation rates
@@ -11,26 +11,35 @@
 //
 //   p_accept = min(1, exp(beta * (delta_high - delta_low)))
 //
-// beta is adapted via EMA on accept rate targeting 0.25 (removes the magic
-// number). Swaps move ENTIRE organisms (checkpoint buffers + momentum follow).
+// beta is adapted via EMA on accept rate targeting 0.25.
+//
+// On acceptance of a swap between replicas R_lo and R_hi, ALL organisms in
+// R_lo exchange pool slots with ALL organisms in R_hi. This is a full data
+// swap: OrganismState (device), CheckpointBuffer (device), GradBuffers
+// (device), and OrganismTable rows (host). The pool slot's replica_tag stays
+// fixed to the slot — it identifies the temperature, not the organism.
 //
 // SOT-density stress ladder. Independent of the main pool. Three stress
 // sub-populations of 8 organisms each at SOT densities {10%, 20%, 40%}.
-// Each is role-balanced (4 classifiers + 4 predictors). Seeded each
-// generation by sampling lineage representatives from the main pool with
-// 25% slot refresh rate. Stress organisms do NOT compete in the main archive.
-// A lineage whose stress reps fail the SOT gate > 50% over the last 10
-// stress evaluations is flagged for operator review.
 
 #ifndef COEVO_SAFETY_PARALLEL_TEMPERING_CU
 #define COEVO_SAFETY_PARALLEL_TEMPERING_CU
 
 #include "../config/constants.cuh"
+#include "../nca/engine.cu"
+#include "../autodiff/warp_tape.cu"
+#include "../genome/codec.cu"
 
 #include <cstdint>
+#include <cstring>
 #include <cuda_runtime.h>
 
 namespace slime::safety::pt {
+
+using nca::OrganismState;
+using nca::ForwardInputs;
+using autodiff::CheckpointBuffer;
+using autodiff::GradBuffers;
 
 // ---- Mutation-rate ladder -----------------------------------------------
 struct MutationLadder {
@@ -49,9 +58,15 @@ struct MutationLadder {
 };
 
 // Each organism's mutation rate when it spawns offspring.
-__host__ __device__ inline float mutation_rate_for(const MutationLadder& l, int idx) {
+#ifdef __CUDA_ARCH__
+__device__ inline float mutation_rate_for(const MutationLadder& l, int idx) {
+    return d_PT_MUTATION_RATES[l.replica_of[idx]];
+}
+#else
+__host__ inline float mutation_rate_for(const MutationLadder& l, int idx) {
     return PT_MUTATION_RATES[l.replica_of[idx]];
 }
+#endif
 
 // Fitness improvement RATE per replica over the prior PT_SWAP_INTERVAL
 // generations: delta between most-recent best and oldest best, normalised by
@@ -77,52 +92,182 @@ __host__ __device__ inline float swap_accept_probability(float beta,
 }
 
 // Adaptive beta EMA: nudge beta so the accept rate tracks PT_TARGET_ACCEPT.
-// Higher accept rate -> swaps too easy -> increase beta. Called once per swap
-// round (every PT_SWAP_INTERVAL generations) after propose_swaps has tallied
-// that round's attempts/accepts.
-//
-// The accept rate must be measured *per round*: swaps_attempted/accepted are
-// reset to zero here after folding the round's rate into the EMA. Using the
-// lifetime cumulative ratio would converge to a run-average and stall the
-// adaptation as the run grows.
+// Called once per swap round after propose_swaps tallies that round's
+// attempts/accepts. Resets per-round counters.
 __host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 0.2f) {
     int attempted = l->swaps_attempted;
-    if (attempted <= 0) return;   // no round data yet; leave beta untouched
+    if (attempted <= 0) return;
     float round_rate = static_cast<float>(l->swaps_accepted)
                      / static_cast<float>(attempted);
     l->accept_ema = (1.0f - ema_rate) * l->accept_ema + ema_rate * round_rate;
     float err = l->accept_ema - PT_TARGET_ACCEPT;
-    // accept_ema > target  => beta too small (everything accepted) -> increase
-    // accept_ema < target  => beta too large (rejects too much)    -> decrease
     l->beta *= expf(0.5f * err);
     if (l->beta < 1e-3f) l->beta = 1e-3f;
     if (l->beta > 1e3f)  l->beta = 1e3f;
-    // Reset the per-round tally for the next swap round.
     l->swaps_attempted = 0;
     l->swaps_accepted  = 0;
 }
 
-// DECLARED ONLY — blueprint-in-place.
-// record_best_fitness: for each replica, scan its 16 member slots, take the max
-// of organism_fitness over them, and write it into
-// best_fitness_history[replica][history_head]; then advance history_head mod
-// PT_SWAP_INTERVAL. Called once per generation. improvement_rate() (above,
-// implemented) consumes this ring buffer.
-void record_best_fitness(MutationLadder* l,
-                         const float* organism_fitness,
-                         cudaStream_t stream);
+// For each replica, scan its member slots, take the max fitness, and write it
+// into best_fitness_history[replica][history_head]; then advance history_head.
+// Called once per generation.
+inline void record_best_fitness(MutationLadder* l,
+                                const float* organism_fitness) {
+    for (int r = 0; r < PT_NUM_REPLICAS; ++r) {
+        float best = -1e30f;
+        for (int i = 0; i < POOL_SIZE; ++i) {
+            if (l->replica_of[i] == r && organism_fitness[i] > best) {
+                best = organism_fitness[i];
+            }
+        }
+        l->best_fitness_history[r][l->history_head] = best;
+    }
+    l->history_head = (l->history_head + 1) % PT_SWAP_INTERVAL;
+}
 
-// DECLARED ONLY — blueprint-in-place.
-// propose_swaps: every PT_SWAP_INTERVAL generations, for each adjacent replica
-// pair (0-1, 1-2, 2-3): compute improvement_rate for each side, draw the
-// Metropolis accept using swap_accept_probability(l->beta, lo_rate, hi_rate),
-// increment l->swaps_attempted, and on accept swap the two replicas' organism
-// membership (the whole organism: genome, delta, CA grid, CAME m/v/c/prev_u)
-// so momentum follows, increment l->swaps_accepted, and update replica_of for
-// the moved slots. Then call update_beta() (implemented) once to adapt beta and
-// reset the round tally. The swap_accept math and beta adaptation are the parts
-// already implemented and host-tested; this wires them to the real pool.
-void propose_swaps(MutationLadder* l, cudaStream_t stream);
+// ---- SwapContext -----------------------------------------------------------
+// Holds all pointers needed for full organism data swap. Passed to
+// propose_swaps instead of a World* to avoid circular header dependency.
+// The integration layer constructs this from the World struct.
+struct SwapContext {
+    // Device pointers for organism data swap.
+    OrganismState*    d_organisms;
+    CheckpointBuffer* d_checkpoints;
+    GradBuffers*      d_grads;
+    // Temp buffers for device-side swap (pre-allocated in World).
+    OrganismState*    d_swap_org;
+    CheckpointBuffer* d_swap_ckpt;
+    GradBuffers*      d_swap_grad;
+    // Host-side organism table arrays for row swaps.
+    genome::Genome*       genomes;
+    genome::DeltaWeights* deltas;
+    uint32_t*             lineage_id;
+    uint32_t*             parent_id;
+    int*                  spawn_gen;
+    float*                fitness;
+    float*                f_raw;
+    float*                f_sot;
+    Role*                 role;
+    // Stream for device memcpy.
+    cudaStream_t stream;
+};
+
+// Swap device data for two pool-slot organisms through temp buffer.
+// A ↔ B via: temp = A; A = B; B = temp.
+static inline void swap_device_organism(SwapContext& ctx, int slot_a, int slot_b) {
+    // OrganismState swap.
+    cudaMemcpyAsync(ctx.d_swap_org, &ctx.d_organisms[slot_a],
+                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_organisms[slot_a], &ctx.d_organisms[slot_b],
+                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_organisms[slot_b], ctx.d_swap_org,
+                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
+
+    // CheckpointBuffer swap.
+    cudaMemcpyAsync(ctx.d_swap_ckpt, &ctx.d_checkpoints[slot_a],
+                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_checkpoints[slot_a], &ctx.d_checkpoints[slot_b],
+                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_checkpoints[slot_b], ctx.d_swap_ckpt,
+                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
+
+    // GradBuffers swap.
+    cudaMemcpyAsync(ctx.d_swap_grad, &ctx.d_grads[slot_a],
+                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_grads[slot_a], &ctx.d_grads[slot_b],
+                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_grads[slot_b], ctx.d_swap_grad,
+                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
+}
+
+// Swap host-side OrganismTable row data between two pool slots.
+static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) {
+    // Genome.
+    genome::Genome tmp_genome = ctx.genomes[slot_a];
+    ctx.genomes[slot_a] = ctx.genomes[slot_b];
+    ctx.genomes[slot_b] = tmp_genome;
+
+    // DeltaWeights.
+    genome::DeltaWeights tmp_delta = ctx.deltas[slot_a];
+    ctx.deltas[slot_a] = ctx.deltas[slot_b];
+    ctx.deltas[slot_b] = tmp_delta;
+
+    // Scalars.
+    {
+        uint32_t t;
+        t = ctx.lineage_id[slot_a]; ctx.lineage_id[slot_a] = ctx.lineage_id[slot_b]; ctx.lineage_id[slot_b] = t;
+        t = ctx.parent_id[slot_a];  ctx.parent_id[slot_a]  = ctx.parent_id[slot_b];  ctx.parent_id[slot_b]  = t;
+    }
+    {
+        int t = ctx.spawn_gen[slot_a]; ctx.spawn_gen[slot_a] = ctx.spawn_gen[slot_b]; ctx.spawn_gen[slot_b] = t;
+    }
+    {
+        float t;
+        t = ctx.fitness[slot_a]; ctx.fitness[slot_a] = ctx.fitness[slot_b]; ctx.fitness[slot_b] = t;
+        t = ctx.f_raw[slot_a];   ctx.f_raw[slot_a]   = ctx.f_raw[slot_b];   ctx.f_raw[slot_b]   = t;
+        t = ctx.f_sot[slot_a];   ctx.f_sot[slot_a]   = ctx.f_sot[slot_b];   ctx.f_sot[slot_b]   = t;
+    }
+    {
+        Role t = ctx.role[slot_a]; ctx.role[slot_a] = ctx.role[slot_b]; ctx.role[slot_b] = t;
+    }
+}
+
+// Every PT_SWAP_INTERVAL generations, for each adjacent replica pair: compute
+// improvement_rate, draw Metropolis accept, swap ALL organisms between the two
+// replicas on accept. Per section 13: full organism data swap. The pool slot's
+// replica_tag stays fixed — it identifies the temperature, not the organism.
+//
+// Swap timing: before backward in the generation loop, so swapped organisms
+// contribute gradients in their new replica context.
+inline void propose_swaps(MutationLadder* l,
+                          const float* organism_fitness,
+                          Pcg32* rng,
+                          SwapContext& ctx) {
+    for (int pair = 0; pair < PT_NUM_REPLICAS - 1; ++pair) {
+        int lo = pair;
+        int hi = pair + 1;
+        float rate_lo = improvement_rate(*l, lo);
+        float rate_hi = improvement_rate(*l, hi);
+        float p = swap_accept_probability(l->beta, rate_lo, rate_hi);
+        l->swaps_attempted++;
+
+        float u = pcg32_float(rng);
+
+        if (u < p) {
+            l->swaps_accepted++;
+
+            // Collect all organism indices in each replica.
+            int lo_slots[PT_REPLICA_SIZE];
+            int hi_slots[PT_REPLICA_SIZE];
+            int n_lo = 0, n_hi = 0;
+            for (int i = 0; i < POOL_SIZE; ++i) {
+                if (l->replica_of[i] == lo && n_lo < PT_REPLICA_SIZE) {
+                    lo_slots[n_lo++] = i;
+                }
+                if (l->replica_of[i] == hi && n_hi < PT_REPLICA_SIZE) {
+                    hi_slots[n_hi++] = i;
+                }
+            }
+
+            // Swap paired organisms (by offset within replica).
+            int n_pairs = (n_lo < n_hi) ? n_lo : n_hi;
+            for (int k = 0; k < n_pairs; ++k) {
+                int slot_a = lo_slots[k];
+                int slot_b = hi_slots[k];
+
+                // Device data swap (OrganismState + Checkpoint + Grads).
+                swap_device_organism(ctx, slot_a, slot_b);
+
+                // Host data swap (genome, delta, metadata).
+                swap_host_organism(ctx, slot_a, slot_b);
+            }
+
+            // Sync device copies before proceeding to next pair.
+            cudaStreamSynchronize(ctx.stream);
+        }
+    }
+    update_beta(l);
+}
 
 // ---- SOT-density stress ladder ------------------------------------------
 struct StressLadder {
@@ -135,19 +280,10 @@ struct StressLadder {
     int      eval_count[STRESS_POOL_SIZE];
     int      last_refresh_gen[STRESS_POOL_SIZE];
 
-    // Rolling failure window per lineage (S-004: > 50% failure over last 10
-    // evals flags operator review).
-    // External lineage table holds the actual ring buffer; this is a count.
     int      flagged_lineage_count;
 };
 
 // DECLARED ONLY — blueprint-in-place.
-// refresh_stress_slots: replace round(STRESS_REFRESH_FRACTION * STRESS_POOL_SIZE)
-// = 6 slots per generation. Pick the slots with the oldest last_refresh_gen,
-// draw replacement lineages from eligible_lineages biased toward those with the
-// stalest stress data, clone the chosen lineage representative from the main
-// pool into the stress slot (preserving lineage_id and role to keep the
-// sub-pop role-balanced 4+4), and stamp last_refresh_gen = generation.
 void refresh_stress_slots(StressLadder* l,
                           uint32_t* eligible_lineages,
                           int n_eligible,
@@ -155,25 +291,10 @@ void refresh_stress_slots(StressLadder* l,
                           cudaStream_t stream);
 
 // DECLARED ONLY — blueprint-in-place.
-// evaluate_stress: run each of the 24 stress organisms through a forward pass
-// on a task batch whose SOT density is STRESS_SOT_DENSITIES[subpop] (10/20/40%),
-// score the SOT gate, write sot_gate_pass[i], and increment eval_count[i].
-// Stress organisms never enter the main archive; this is shadow evaluation
-// only. Reuses the A-201 forward and the A-401 SOT gate.
 void evaluate_stress(StressLadder* l, cudaStream_t stream);
 
 // DECLARED ONLY — blueprint-in-place.
-// flag_stress_failures: for each lineage represented in the stress pool,
-// compute the SOT-gate failure rate over its last STRESS_HISTORY_WINDOW (10)
-// evaluations; if it exceeds STRESS_FAILURE_THRESHOLD (50%), set the lineage's
-// operator-review flag and bump flagged_lineage_count. No automatic pruning —
-// the operator decides (S-004).
 void flag_stress_failures(StressLadder* l, cudaStream_t stream);
-
-// Interaction note from the spec: organisms are not simultaneously assigned
-// mutation-rate replica AND stress-replica positions. Stress evaluations
-// sample from the main pool across all mutation-rate replicas using only
-// lineage_id.
 
 }  // namespace slime::safety::pt
 

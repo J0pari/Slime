@@ -262,7 +262,7 @@ __global__ void forward_kernel(OrganismState* organisms,
     // (which is not guaranteed to be addressable from device code).
     int steps[BTRAJ_SAMPLES];
     #pragma unroll
-    for (int i = 0; i < BTRAJ_SAMPLES; ++i) steps[i] = BTRAJ_STEPS[i];
+    for (int i = 0; i < BTRAJ_SAMPLES; ++i) steps[i] = d_BTRAJ_STEPS[i];
 
     __half* curr = o->grid;
     __half* next = o->scratch;
@@ -303,27 +303,67 @@ __global__ void forward_kernel(OrganismState* organisms,
 //
 // Spatial average over GRID_SIZE*GRID_SIZE cells produces a 16-d summary s_t
 // (one value per channel); W_bmap is [CA_CHANNELS x BMAP_DIM].
+//
+// Deterministic reduction: each thread accumulates its cells into thread-local
+// registers, then a tree reduction in shared memory produces the final sum.
+// No atomicAdd — guarantees identical bit patterns for the same thread layout
+// across kernel launches. Required because BTRAJ feeds scoring, archive, and
+// loss (see cuda_engineering.md section 4.1).
 __device__ inline void project_bmap(const __half* state,
                                     const float* W_bmap,
                                     float* bmap_out_32) {
-    __shared__ float summary[CA_CHANNELS];
+    // 256 threads (16x16 block), CA_CHANNELS = 16.
+    // Shared memory layout: [nthreads * CA_CHANNELS] for the tree reduction.
+    constexpr int NTHREADS = 256; // blockDim.x * blockDim.y
+    __shared__ float reduce_buf[NTHREADS * CA_CHANNELS];
+
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int nthreads = blockDim.x * blockDim.y;
-    // Reset summary.
-    for (int c = tid; c < CA_CHANNELS; c += nthreads) summary[c] = 0.f;
-    __syncthreads();
-    // Spatial sum into per-channel accumulators.
-    constexpr float scale = 1.0f / static_cast<float>(GRID_SIZE * GRID_SIZE);
+
+    // Phase 1: Each thread accumulates its cells into thread-local registers.
+    float local_sum[CA_CHANNELS];
+    #pragma unroll
+    for (int c = 0; c < CA_CHANNELS; ++c) local_sum[c] = 0.f;
+
     for (int idx = tid; idx < GRID_SIZE * GRID_SIZE; idx += nthreads) {
         int y = idx / GRID_SIZE;
         int x = idx % GRID_SIZE;
+        #pragma unroll
         for (int c = 0; c < CA_CHANNELS; ++c) {
-            float v = __half2float(state[grid_idx(y, x, c)]) * scale;
-            atomicAdd(&summary[c], v);
+            local_sum[c] += __half2float(state[grid_idx(y, x, c)]);
         }
     }
+
+    // Phase 2: Tree reduction in shared memory across all threads.
+    // Store thread-local sums.
+    #pragma unroll
+    for (int c = 0; c < CA_CHANNELS; ++c) {
+        reduce_buf[tid * CA_CHANNELS + c] = local_sum[c];
+    }
     __syncthreads();
-    // Project: bmap_out_32[d] = sum_c W_bmap[c, d] * summary[c].
+
+    // Binary tree reduction. At each step, thread tid adds the value from
+    // tid + stride. Deterministic because the reduction tree is fixed.
+    for (int stride = nthreads / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            #pragma unroll
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                reduce_buf[tid * CA_CHANNELS + c] += reduce_buf[(tid + stride) * CA_CHANNELS + c];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Thread 0 now has the total sum in reduce_buf[0..CA_CHANNELS-1].
+    // Compute mean into shared memory for all threads to read.
+    __shared__ float summary[CA_CHANNELS];
+    constexpr float scale = 1.0f / static_cast<float>(GRID_SIZE * GRID_SIZE);
+    if (tid < CA_CHANNELS) {
+        summary[tid] = reduce_buf[tid] * scale;
+    }
+    __syncthreads();
+
+    // Phase 3: Project: bmap_out_32[d] = sum_c W_bmap[c, d] * summary[c].
     for (int d = tid; d < BMAP_DIM; d += nthreads) {
         float acc = 0.f;
         for (int c = 0; c < CA_CHANNELS; ++c) {
@@ -356,15 +396,29 @@ inline void launch_forward(OrganismState* organisms,
         organisms, inputs, coeffs, W_perc, W_inter, W_flow, W_bmap, n_organisms);
 }
 
-// DECLARED ONLY — blueprint-in-place.
-// extract_descriptor: copy each organism's bmap_64 (the last BTRAJ slot,
-// bmap_traj[3*BMAP_DIM .. 4*BMAP_DIM)) into descriptors_out[i*BMAP_DIM ..].
-// A plain strided device-to-device copy; bmap_16/bmap_32 stay in the Intent
-// Registry for predictor consumers (A-401, A-601).
-void extract_descriptor(const OrganismState* organisms,
-                        float* descriptors_out,
-                        int n_organisms,
-                        cudaStream_t stream);
+// Extract bmap_64 (the last BTRAJ slot) into a contiguous output array.
+// One thread per float, one organism per block-row.
+__global__ void extract_descriptor_kernel(const OrganismState* organisms,
+                                          float* descriptors_out,
+                                          int n_organisms) {
+    int org = blockIdx.x;
+    int d   = threadIdx.x;
+    if (org >= n_organisms || d >= BMAP_DIM) return;
+    // bmap_64 is the last BTRAJ sample: index (BTRAJ_SAMPLES - 1) * BMAP_DIM + d.
+    descriptors_out[org * BMAP_DIM + d] =
+        organisms[org].bmap_traj[(BTRAJ_SAMPLES - 1) * BMAP_DIM + d];
+}
+
+inline void extract_descriptor(const OrganismState* organisms,
+                                float* descriptors_out,
+                                int n_organisms,
+                                cudaStream_t stream) {
+    if (n_organisms <= 0) return;
+    dim3 block(BMAP_DIM);  // 32 threads
+    dim3 grid(static_cast<unsigned>(n_organisms));
+    extract_descriptor_kernel<<<grid, block, 0, stream>>>(
+        organisms, descriptors_out, n_organisms);
+}
 
 }  // namespace slime::nca
 

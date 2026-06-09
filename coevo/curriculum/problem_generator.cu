@@ -45,20 +45,6 @@ struct PredictorBatch {
     float    task_embedding[TASK_EMBED_DIM];
 };
 
-// ---- Classifier curriculum ----------------------------------------------
-// DECLARED ONLY — blueprint-in-place.
-// assemble_classifier_batch: draw CLASSIFIER_BATCH (16) samples from the active
-// dataset, scale each to 64x64, fill labels and the 16-d task embedding, set
-// the difficulty scalar and threshold tau from the current curriculum state,
-// and mark the first round(sot_density * batch) entries (at least 1 when
-// sot_density > 0, capped at SOT_SUBBATCH) as SOT, applying
-// apply_sot_permutation to those images under host_sot_key. Difficulty bias
-// targets weak archive niches. Cadence: CURRICULUM_INTERVAL.
-void assemble_classifier_batch(ClassifierBatch* out,
-                               float sot_density,
-                               uint64_t host_sot_key,
-                               cudaStream_t stream);
-
 // SOT pixel permutation: a reversible index permutation of the 64x64 pixel
 // grid (channels move together) under a host-held key. Implemented as a
 // balanced Feistel network over the 12-bit pixel index (64*64 = 4096 = 2^12),
@@ -108,17 +94,63 @@ __host__ __device__ inline void apply_sot_permutation(__half* image_64x64x3,
     for (int i = 0; i < GRID_SIZE * GRID_SIZE * 3; ++i) image_64x64x3[i] = scratch_64x64x3[i];
 }
 
-// ---- Predictor curriculum -----------------------------------------------
-// DECLARED ONLY — blueprint-in-place.
-// assemble_predictor_batch: sample PREDICTOR_BATCH (8) active classifiers
-// weighted by per_organism_ensemble_error (softmax or roulette over the error
-// vector) so predictors are pushed toward their own weak spots. For each
-// chosen target, copy its bmap_32 (input) and bmap_64 (ground truth) from the
-// Intent Registry into `out`, record its id and SOT flag, and copy the shared
-// task embedding. Sampling without replacement within a batch.
-void assemble_predictor_batch(PredictorBatch* out,
-                              const float* per_organism_ensemble_error,
-                              cudaStream_t stream);
+// Assemble a classifier batch. Draws CLASSIFIER_BATCH (16) samples, fills
+// labels and task embedding, marks SOT entries and applies pixel permutation.
+// Images are procedurally generated patterns (deterministic per label) that
+// give classifiers distinct spatial structure to differentiate. The rng_state
+// is advanced so successive calls produce different batches.
+inline void assemble_classifier_batch(ClassifierBatch* out,
+                                      float sot_density,
+                                      uint64_t host_sot_key,
+                                      Pcg32* rng) {
+    // Task embedding: deterministic from PCG32.
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) {
+        out->task_embedding[d] = pcg32_float(rng) - 0.5f;
+    }
+    out->difficulty = 1.0f;
+    out->tau = 0.5f;
+
+    // Number of SOT entries.
+    int n_sot = static_cast<int>(sot_density * CLASSIFIER_BATCH + 0.5f);
+    if (sot_density > 0.f && n_sot < 1) n_sot = 1;
+    if (n_sot > SOT_SUBBATCH) n_sot = SOT_SUBBATCH;
+
+    // Scratch buffer for SOT permutation (24KB on stack).
+    __half sot_scratch[GRID_SIZE * GRID_SIZE * 3];
+
+    for (int s = 0; s < CLASSIFIER_BATCH; ++s) {
+        // Label: cycle through 0..NUM_CLASSES-1.
+        out->label[s] = static_cast<int>(pcg32_random(rng) % NUM_CLASSES);
+        int lab = out->label[s];
+
+        // Generate a distinct spatial pattern per label: sinusoidal bars whose
+        // frequency and phase depend on the label. Each class has a visually
+        // distinct structure the NCA can learn to decode.
+        __half* img = &out->image[s * GRID_SIZE * GRID_SIZE * 3];
+        float freq = 1.0f + static_cast<float>(lab);
+        float phase = static_cast<float>(lab) * 0.3f;
+        for (int y = 0; y < GRID_SIZE; ++y) {
+            for (int xp = 0; xp < GRID_SIZE; ++xp) {
+                int idx = (y * GRID_SIZE + xp) * 3;
+                float vy = sinf(freq * 6.2831853f * static_cast<float>(y) / GRID_SIZE + phase);
+                float vx = cosf(freq * 6.2831853f * static_cast<float>(xp) / GRID_SIZE + phase);
+                img[idx + 0] = __float2half(0.5f + 0.4f * vy);
+                img[idx + 1] = __float2half(0.5f + 0.4f * vx);
+                img[idx + 2] = __float2half(0.5f + 0.2f * vy * vx);
+            }
+        }
+
+        // Mark and permute SOT entries.
+        out->is_sot[s] = (s < n_sot);
+        if (out->is_sot[s]) {
+            apply_sot_permutation(img, host_sot_key, false, sot_scratch);
+        }
+    }
+}
+
+// Predictor batch assembly is implemented at Stage 6 when role machinery is
+// wired. The PredictorBatch struct above is retained as it is referenced by
+// the integration layer's type declarations.
 
 // ---- Probe set ----------------------------------------------------------
 // Signed at run start. Used by both populations. The signature is host-held
