@@ -1,0 +1,7 @@
+build/slime.exe
+build/*.obj
+build/*.exp
+build/*.lib
+build/tmpxft_*
+*.pdb
+telemetry/
