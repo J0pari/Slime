@@ -1,55 +1,3 @@
-// Core - must come first
-#include "../slime/config/config.cu"
-#include "../slime/core/organism.cu"
-
-// Utilities and debug
-#include "../slime/debug/device_trace.cu"
-#include "../slime/debug/param_validator.cu"
-
-// Memory management
-#include "../slime/memory/archive.cu"
-#include "../slime/memory/pool.cu"
-#include "../slime/memory/tubes.cu"
-#include "../slime/memory/parallel_compaction.cu"
-
-// Core computations
-#include "../slime/core/pseudopod.cu"
-#include "../slime/core/pseudopod_tensor.cu"
-#include "../slime/core/chemotaxis.cu"
-#include "../slime/core/correlation_matrix.cu"
-
-// Compute
-#include "../slime/compute/tensor_core_ca.cu"
-#include "../slime/compute/warp_ca.cu"
-
-// Learning
-#include "../slime/learning/autodiff.cu"
-#include "../slime/learning/diresa.cu"
-
-// Training
-#include "../slime/training/training_types.cu"
-#include "../slime/training/losses.cu"
-#include "../slime/training/classification.cu"
-#include "../slime/training/optimizer.cu"
-#include "../slime/training/autodiff_integration.cu"
-#include "../slime/training/gradient_fitness.cu"
-#include "../slime/training/hybrid_lifecycle.cu"
-
-// Data
-#include "../slime/data/dataset_loader.cu"
-
-// Lifecycle
-#include "../slime/lifecycle/genealogy.cu"
-#include "../slime/lifecycle/archive_sampling.cu"
-#include "../slime/lifecycle/lifecycle_stages.cu"
-
-// Metrics and diagnostics
-#include "../slime/metrics/hardware_geometry.cu"
-#include "../slime/diagnostics/telemetry_probes.cu"
-#include "../slime/diagnostics/report_generator.cu"
-#include "../slime/diagnostics/audit_writer.cu"
-
-// Runtime - must come last
 #include "../slime/runtime.cu"
 #include <stdio.h>
 #include <stdlib.h>
@@ -235,7 +183,7 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.pool_fitness_values, sizeof(float) * POOL_CAPACITY_MAX, "pool_fitness_values");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_flags, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_flags");
     CUDA_ALLOC_CHECK(buffers_host.pool_compaction_scan, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_scan");
-    CUDA_ALLOC_CHECK(buffers_host.pool_compaction_recursive_workspace, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_recursive_workspace");
+    CUDA_ALLOC_CHECK(buffers_host.pool_compaction_scan_recursive, sizeof(int) * POOL_CAPACITY_MAX, "pool_compaction_scan_recursive");
     CUDA_ALLOC_CHECK(buffers_host.archive, sizeof(GPUElite), "archive");
     CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_keys, sizeof(uint64_t) * GENOME_HASH_TABLE_SIZE, "archive_hash_table_keys");
     CUDA_ALLOC_CHECK(buffers_host.archive_hash_table_values, sizeof(int) * GENOME_HASH_TABLE_SIZE, "archive_hash_table_values");
@@ -359,18 +307,26 @@ int main() {
     CUDA_ALLOC_CHECK(buffers_host.fc_weights_grad, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "fc_weights_grad");
     CUDA_ALLOC_CHECK(buffers_host.fc_bias_grad, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "fc_bias_grad");
     CUDA_ALLOC_CHECK(buffers_host.features_grad, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * CLASSIFIER_FEATURE_DIM, "features_grad");
-    constexpr size_t ADAM_CA_ENTRY_SIZE =
-        (NUM_HEADS * CHANNELS * HEAD_DIM) +
-        (NUM_HEADS * HEAD_DIM * HEAD_DIM) +
-        (NUM_HEADS * 2 * HEAD_DIM);
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_m_ca_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_ca_pool, sizeof(float) * ADAM_CA_ENTRY_SIZE * POOL_CAPACITY_MAX, "adam_v_ca_pool");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_pooling, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_m_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_pooling, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_v_pooling");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_weights, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_m_fc_weights");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_weights, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "adam_v_fc_weights");
-    CUDA_ALLOC_CHECK(buffers_host.adam_m_fc_bias, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "adam_m_fc_bias");
-    CUDA_ALLOC_CHECK(buffers_host.adam_v_fc_bias, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "adam_v_fc_bias");
+    // CA gradient buffers — contiguous per weight type, per entry
+    CUDA_ALLOC_CHECK(buffers_host.perception_grads, sizeof(float) * PERCEPTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "perception_grads");
+    CUDA_ALLOC_CHECK(buffers_host.interaction_grads, sizeof(float) * INTERACTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "interaction_grads");
+    CUDA_ALLOC_CHECK(buffers_host.flow_projection_grads, sizeof(float) * FLOW_PROJECTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "flow_projection_grads");
+
+    // CAME momentum — per weight type, per entry
+    CUDA_ALLOC_CHECK(buffers_host.came_m_perception_pool, sizeof(float) * PERCEPTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "came_m_perception");
+    CUDA_ALLOC_CHECK(buffers_host.came_m_interaction_pool, sizeof(float) * INTERACTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "came_m_interaction");
+    CUDA_ALLOC_CHECK(buffers_host.came_m_flow_projection_pool, sizeof(float) * FLOW_PROJECTION_ENTRY_SIZE * POOL_CAPACITY_MAX, "came_m_flow_projection");
+    CUDA_ALLOC_CHECK(buffers_host.came_m_pooling_pool, sizeof(float) * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "came_m_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.came_m_fc_weights_pool, sizeof(float) * NUM_CLASSES_MAX * CLASSIFIER_FEATURE_DIM * POOL_CAPACITY_MAX, "came_m_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.came_m_fc_bias_pool, sizeof(float) * NUM_CLASSES_MAX * POOL_CAPACITY_MAX, "came_m_fc_bias");
+
+    // CAME confidence — one scalar per entry per weight type
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_perception_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_perception");
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_interaction_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_interaction");
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_flow_projection_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_flow_projection");
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_pooling_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_pooling");
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_fc_weights_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_fc_weights");
+    CUDA_ALLOC_CHECK(buffers_host.came_confidence_fc_bias_pool, sizeof(float) * POOL_CAPACITY_MAX, "came_confidence_fc_bias");
 
     // Wave-based buffers use per-entry accumulated offsets, must size for POOL_CAPACITY_MAX
     CUDA_ALLOC_CHECK(buffers_host.batch_ca_states_pool, sizeof(float) * POOL_CAPACITY_MAX * BATCH_SIZE * NUM_HEADS * CA_FIELD_SIZE * CHANNELS, "batch_ca_states_pool");
