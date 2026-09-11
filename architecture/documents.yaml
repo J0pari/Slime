@@ -1,0 +1,72 @@
+# Concern ownership registry (architecture-control layer).
+#
+# Every first-party markdown document belongs to exactly one concern.
+# `architecture/compiler.py check` fails when a docs/*.md file is undeclared,
+# when a canonical document has two owners, or when a generated document is
+# hand-maintained (generated documents must contain the
+# <!-- architecture-status:start --> / <!-- architecture-status:end --> block
+# and nothing else in the generated region is authored by hand).
+#
+# A new design document cannot quietly become an unofficial fourth
+# specification: adding one requires declaring it here.
+
+documents:
+  behavioral-architecture:
+    kind: canonical
+    files:
+      - docs/blueprint.md
+
+  cuda-execution:
+    kind: canonical
+    files:
+      - docs/cuda_engineering.md
+
+  delivery:
+    kind: canonical
+    files:
+      - docs/construction_plan.md
+
+  implementation-evidence:
+    kind: generated
+    files:
+      - docs/IMPLEMENTATION_STATUS.md
+
+  observations:
+    kind: operational
+    files:
+      - docs/arch-signals.md
+
+  work-queue:
+    kind: operational
+    files:
+      - TODO.md
+
+  readme:
+    kind: operational
+    files:
+      - README.md
+
+  agent-protocol:
+    kind: operational
+    files:
+      - AGENTS.md
+
+# Capabilities whose runtime behavior is still `planned` may not be asserted
+# in present tense in the status surface documents listed below.
+# compiler.py check fails on matches. Future prose uses "will", "planned",
+# "specified to", or "after activation".
+capability-drift:
+  predictor-role:
+    status: planned
+    surface-docs:
+      - README.md
+      - docs/IMPLEMENTATION_STATUS.md
+      - TODO.md
+    banned-present-tense:
+      - "predictors are scored"
+      - "predictors receive"
+      - "the predictor population"
+      - "predictors reproduce"
+      - "predictor organisms model"
+      - "predictors are evaluated"
+      - "predictors train"

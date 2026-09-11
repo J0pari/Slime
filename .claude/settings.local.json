@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi)",
+      "Bash(nvcc --version)",
+      "Bash(python -c \"import torch; print\\(f''PyTorch: {torch.__version__}''\\); print\\(f''CUDA available: {torch.cuda.is_available\\(\\)}''\\); print\\(f''CUDA version: {torch.version.cuda}''\\); print\\(f''Device: {torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else \"\"N/A\"\"}''\\); print\\(f''VRAM: {torch.cuda.get_device_properties\\(0\\).total_mem / 1024**3:.1f} GB'' if torch.cuda.is_available\\(\\) else ''''\\)\")",
+      "Bash(python -c \"import torch; props = torch.cuda.get_device_properties\\(0\\); print\\(f''VRAM: {props.total_memory / 1024**3:.1f} GB''\\)\")",
+      "Bash(where choco:*)",
+      "Bash(where winget:*)",
+      "Bash(where pacman:*)",
+      "Bash(source env.sh)",
+      "Bash(make check:*)",
+      "Bash(make stage3-test:*)",
+      "Bash(make stage4-test:*)",
+      "Bash(make all:*)",
+      "Bash(./build/coevo)",
+      "Bash(./build/coevo.exe)",
+      "Bash(build/coevo.exe)",
+      "Bash(\"/c/Slime Evolution/build/coevo.exe\")",
+      "Bash(ldd build/coevo.exe)",
+      "Bash(ldd build/forward_smoke.exe)",
+      "Bash(make clean:*)",
+      "Bash(nvcc -arch=sm_86 -rdc=true --extended-lambda --expt-relaxed-constexpr -std=c++17 -O2 tests/coevo_minimal.cu -o build/coevo_minimal -lcudadevrt)",
+      "Bash(build/coevo_minimal)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(./build/coevo 100)",
+      "Bash(make forward-smoke:*)",
+      "Bash(make wave1-test:*)",
+      "mcp__filesystem__search_files",
+      "mcp__filesystem__read_text_file",
+      "Bash(taskkill //F //IM coevo.exe)",
+      "Bash(./build/coevo.exe 20)"
+    ]
+  }
+}

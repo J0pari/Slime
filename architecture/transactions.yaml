@@ -1,0 +1,84 @@
+# Transaction bundles and the executable generation-phase model.
+#
+# A "transaction" is a set of correlated state that must move (or be replaced)
+# atomically. The compiler turns these lists into completeness checks: any
+# organism-identity buffer that spans a PT exchange must appear in the
+# pt_swap organism_identity list, and the phase model below is validated as
+# executable state transitions (see architecture/compiler.py phase-model).
+#
+# Mechanism anchors in claim blocks may reference entries here as
+#   architecture/transactions.yaml::<key>
+
+# Registry of organism-identity state. Every buffer listed here must appear
+# in pt_swap.organism_identity; the compiler enforces the completeness check
+# (a new organism-associated buffer that spans a PT exchange must be added to
+# the transaction, not silently forgotten).
+organism_buffers:
+  - organism_state
+  - checkpoint
+  - genome
+  - delta
+  - role
+  - lineage
+  - batch_sample_idx
+  - seed_grad
+
+transactions:
+  pt_swap:
+    comment: "One accepted PT swap moves every organism-associated rollout state together (S004.pt-swap-transaction)."
+    organism_identity:
+      - organism_state
+      - checkpoint
+      - genome
+      - delta
+      - role
+      - lineage
+      - batch_sample_idx
+      - seed_grad
+    slot_identity:
+      - replica_tag
+
+  spawn:
+    comment: "One spawn replaces a single pool slot with one evaluated-once child (I001.spawn-wave-unique)."
+    steps:
+      - select_parent
+      - select_unique_victim
+      - construct_genome
+      - construct_delta
+      - assign_lineage
+      - invalidate_prior_evaluation
+      - install_child
+
+  archive_replacement:
+    comment: "Archive replacement preserves all declared sufficient statistics (A401.live-statistics-exact)."
+    steps:
+      - remove_old_contribution
+      - insert_new_contribution
+      - update_bin_count
+      - update_live_list
+      - update_rff_mean
+      - update_lineage_state
+
+# Generation phase model (I001.phase-order). Phases execute in the listed
+# order; the seed-gradient transfer MUST follow the PT exchange so backward
+# differentiates each trajectory with its own organism's objective.
+generation_phases:
+  order:
+    - curriculum
+    - input_transfer
+    - forward
+    - descriptor
+    - host_readback
+    - sot
+    - scoring
+    - archive
+    - pt
+    - seed_transfer
+    - backward
+    - optimize
+    - spawn
+    - audit
+  invariants:
+    - after: [pt, seed_transfer]
+    - before: [seed_transfer, backward]
+    - before: [pt, backward]

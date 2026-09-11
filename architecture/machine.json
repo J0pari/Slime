@@ -1,0 +1,12 @@
+{
+  "schema": "slime-machine/v1",
+  "cudaMajor": 13,
+  "cudaMinor": 0,
+  "minComputeCapability": "8.6",
+  "minVramMiB": 6000,
+  "required": {
+    "fp16": true,
+    "cudaMallocManagedForbidden": true
+  },
+  "notes": "Startup diagnostics (safety/monitoring.cu::emit_cuda_diagnostics) must match this envelope; evidence manifests record the observed machine contract so a GPU result from a materially different configuration cannot silently count as evidence."
+}
