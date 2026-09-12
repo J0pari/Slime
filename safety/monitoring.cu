@@ -146,11 +146,11 @@ inline bool benchmark_cuda_transfers(CudaDiagnostics* out, cudaStream_t stream) 
            && cuda_diagnostics_ok(cudaEventCreate(&start), "cudaEventCreate start")
            && cuda_diagnostics_ok(cudaEventCreate(&stop), "cudaEventCreate stop");
     if (!ok) {
-        if (start) cudaEventDestroy(start);
-        if (stop) cudaEventDestroy(stop);
-        if (d_source) cudaFree(d_source);
-        if (d_destination) cudaFree(d_destination);
-        if (h_buffer) cudaFreeHost(h_buffer);
+        if (start) cuda_diagnostics_ok(cudaEventDestroy(start), "event destroy");
+        if (stop) cuda_diagnostics_ok(cudaEventDestroy(stop), "event destroy");
+        if (d_source) cuda_diagnostics_ok(cudaFree(d_source), "free source");
+        if (d_destination) cuda_diagnostics_ok(cudaFree(d_destination), "free destination");
+        if (h_buffer) cuda_diagnostics_ok(cudaFreeHost(h_buffer), "free host buffer");
         return false;
     }
     std::memset(h_buffer, 0, probe_bytes);
@@ -176,11 +176,11 @@ inline bool benchmark_cuda_transfers(CudaDiagnostics* out, cudaStream_t stream) 
       && measure(cudaMemcpyDeviceToHost, h_buffer, d_destination, &out->d2h_gbps, "D2H probe")
       && measure(cudaMemcpyDeviceToDevice, d_source, d_destination, &out->d2d_gbps, "D2D probe");
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_source);
-    cudaFree(d_destination);
-    cudaFreeHost(h_buffer);
+    cuda_diagnostics_ok(cudaEventDestroy(start), "event destroy");
+    cuda_diagnostics_ok(cudaEventDestroy(stop), "event destroy");
+    cuda_diagnostics_ok(cudaFree(d_source), "free source");
+    cuda_diagnostics_ok(cudaFree(d_destination), "free destination");
+    cuda_diagnostics_ok(cudaFreeHost(h_buffer), "free host buffer");
     if (!ok) return false;
     out->transfer_probe_completed = true;
     return true;

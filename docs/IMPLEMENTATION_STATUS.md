@@ -30,7 +30,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/current |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/current |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS
 
 Claims: 24 total, 22 established, 2 provisional, 0 planned.
 <!-- architecture-status:end -->

@@ -1,6 +1,6 @@
 {
-  "binary": "build/coevo.exe",
-  "binarySha256": "cab327068c17b477a3af626bd2ac61d88b46344eb64223b0736224de7732a358",
+  "binary": "none",
+  "binarySha256": "",
   "claimHashes": {
     "A101.sot-schedule-independent": "8ead548dd109e7bd06f50129e8681e5d84f4797829c637e3fc74677e97dcdbce",
     "A103.checkpoint-replay-equivalence": "5c693f0ab209338acba64acd488663550c950c48aaa9b580f8beb331307f07fc",
@@ -28,22 +28,46 @@
     "S004.pt-swap-transaction": "920c4a779c91429011f578cf868f6228e2f7076fade69b640e2dc176fccb3ade"
   },
   "claims": {
+    "A101.sot-schedule-independent": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_gate_schedule_host_only_catches_plant"
+    },
+    "A202.rd-disabled-until-adjoint": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_gate_rd_disabled_catches_nonnull"
+    },
+    "C001.acceptance-evidence-current": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_stale_evidence_detected"
+    },
+    "G100.single-prng": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_gate_no_ambient_rng_catches_plant"
+    },
     "I001.phase-order": {
       "result": "pass",
-      "witness": "build/coevo.exe"
+      "witness": "tests/architecture/test_architecture.py::test_phase_model_rejects_seed_before_pt"
     },
     "I001.replay-evaluation-identity": {
       "result": "pass",
-      "witness": "build/coevo.exe"
+      "witness": "tests/architecture/test_architecture.py::test_gate_replay_before_spawn_catches_plant"
     },
     "S001.cuda-errors-fatal": {
       "result": "pass",
-      "witness": "build/coevo.exe"
+      "witness": "tests/architecture/test_architecture.py::test_gate_checked_cuda_calls_catches_plant"
+    },
+    "S002.host-authority": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_gate_host_authority_catches_plant"
+    },
+    "S002.operator-command-effective": {
+      "result": "pass",
+      "witness": "tests/architecture/test_architecture.py::test_gate_operator_polling_catches_plant"
     }
   },
-  "cuda": "13.0.48",
-  "generatedAt": "2026-09-12T20:24:38.381149+00:00",
-  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "cuda": "n/a",
+  "generatedAt": "2026-09-12T20:39:11.675504+00:00",
+  "gpu": "host-only",
   "machineContract": {
     "cudaMajor": 13,
     "cudaMinor": 0,
@@ -57,33 +81,33 @@
     "schema": "slime-machine/v1"
   },
   "mechanismHashes": {
-    "A101.sot-schedule-independent": "cb2933eec6f10adb18a8f4abb9eb01368a194c027adeb3a213acdad78568df67",
-    "A103.checkpoint-replay-equivalence": "5b182ac9c44aac329108e0c74fd6aaad16a2acce7641c0b98c62f872d0c4a39e",
-    "A103.gradient-correctness": "63144af5a7690ca5d3b4c7bdeb553f342cf097d305abaa6c2f4028730902ca95",
-    "A201.bounded-residual-dynamics": "98179833a0e6dbc378ee4d36632284e66d77ae6954458c9996b9444c1eb4acee",
+    "A101.sot-schedule-independent": "bab1478387cfa94fb419837d0b14f28abc18e1a6e1c1a05d1f8fc3852d06b151",
+    "A103.checkpoint-replay-equivalence": "11c41a336466a30a4efbc3cd0f64d426ab4cb0b58a65068fd1cd936e07e366dd",
+    "A103.gradient-correctness": "77435f8daeeee5475664a0db680410134b33ab81ad6b17f0c7b17d8ed0d588cd",
+    "A201.bounded-residual-dynamics": "e7a9452f72dbcc91278793d7c37ff8634fc9ca9f740a011ef0ec02a45d0706ea",
     "A201.role-canonicalization": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
-    "A201.shared-substrate": "09526b44e1c34ed2ea2f73b672b44381d737d749efcf7b75f3ec7cf57d983660",
-    "A201.task-conditioning-complete": "103bbc2cc9e8dd02dda8e0138590519f0ce6082ed174223bcb204f177c319f36",
-    "A202.rd-disabled-until-adjoint": "63144af5a7690ca5d3b4c7bdeb553f342cf097d305abaa6c2f4028730902ca95",
-    "A301.genotype-causes-phenotype": "32893df7e8253c846b87fe7ea7185e723267cd95d867069ab15db3d033d3c9ca",
-    "A401.archive-genotype-attribution": "db5b7d44e0cb8cf02dc4df8be3f8328dfcf364b8fe0a190f19268c5fc1eb7d17",
+    "A201.shared-substrate": "0fdc5252c292e0c007735959cd46d58beac675e81d4f9eaaf158568aaace19e9",
+    "A201.task-conditioning-complete": "0c247758dc98cd53aa01f3ebaccdb0067babdca30519c2c75d6782a077f2fd9b",
+    "A202.rd-disabled-until-adjoint": "77435f8daeeee5475664a0db680410134b33ab81ad6b17f0c7b17d8ed0d588cd",
+    "A301.genotype-causes-phenotype": "e924e70c0840f86304d9304b199e9e2b3dc01d42f7b4f214bf85a69fb493224b",
+    "A401.archive-genotype-attribution": "7af6356c0cd76d457ebde6065c44eed8fe4911beed9ac3b01d187276ae22e722",
     "A401.bin-capacity": "2b63192536bcc3eea66105dbe1261fb7bc41dc3dbd2fef3fd4a6b257ce9359b3",
     "A401.live-statistics-exact": "0dbce7b5a5b74c3ca4d490c49e25a66437b032a228babf31cce301c7311b5d67",
     "A401.weighted-metric-active": "2b63192536bcc3eea66105dbe1261fb7bc41dc3dbd2fef3fd4a6b257ce9359b3",
-    "A501.came-production-equation": "31ef8b0954200a0e4625469c5aa556af3e5455b238b776fbf58f01c0d8d62dfd",
+    "A501.came-production-equation": "13649409a16fc0433132801f0d294caa1273ea3012d0b691380a725abb0f7dc9",
     "C001.acceptance-evidence-current": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "G100.deterministic-seed": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
     "G100.single-prng": "4239811d1956aad7a89a731676000a4b933b4f8b7d0140a49ec98d6123cfcb23",
-    "I001.phase-order": "9a30bb979d0d15c829bcb14df205cabd59597e1d73195816a559238376ab24a5",
-    "I001.replay-evaluation-identity": "9a30bb979d0d15c829bcb14df205cabd59597e1d73195816a559238376ab24a5",
-    "I001.spawn-wave-unique": "d34e96d65d0bd3cab5c58f44b80c7ac1286074bc0de0a72866a8dd8d6f3cb705",
-    "S001.cuda-errors-fatal": "db5b7d44e0cb8cf02dc4df8be3f8328dfcf364b8fe0a190f19268c5fc1eb7d17",
-    "S002.host-authority": "81afc2cf7747762d852db0d4afe7e44fe0f84bd5b3b89128eca02d8fd80d2fe8",
-    "S002.operator-command-effective": "746830bc9968073e7c439a59bd187205614d97cef2e7ae2f5141bcad35501023",
-    "S004.pt-swap-transaction": "6e82d30ad8e792e6712ac0730b4a8c1af337684e2fb26055f40d2742804e6c65"
+    "I001.phase-order": "6817cb244ba764dc90bb4ad4e46def139caabf825bc87448a705b5456aa35f4e",
+    "I001.replay-evaluation-identity": "6817cb244ba764dc90bb4ad4e46def139caabf825bc87448a705b5456aa35f4e",
+    "I001.spawn-wave-unique": "1b6fb0542ec4f8bacc6ec2f98495784051572bbcd1af027db279a6f0286e4301",
+    "S001.cuda-errors-fatal": "7af6356c0cd76d457ebde6065c44eed8fe4911beed9ac3b01d187276ae22e722",
+    "S002.host-authority": "83d35b1683b1248fffcfba79bf1b6f3c2d2d25fc91529458fad5cca7fc0c044d",
+    "S002.operator-command-effective": "c3b9e8400e805d8a21155578ff9c63d35cc58b16634b4a5364e5c62efe4a3d0d",
+    "S004.pt-swap-transaction": "8fd90661d366632f5c603233c0815e305da531788f09fdfa35eb5596a6fb2ee8"
   },
-  "name": "run3-20260912e",
-  "runId": "run3-20260912e-2026-09-12T202438",
+  "name": "arch-20260912f",
+  "runId": "arch-20260912f-2026-09-12T203911",
   "schema": "slime-evidence/v1",
   "seed": "default",
   "specHash": "a96a6e4de68d0597d20f6d138a02b279afde5278091b083f3eea490f28549055",

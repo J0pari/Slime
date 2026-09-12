@@ -7,6 +7,15 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: The `checked_cuda_calls` allowlist is empty. Every production
+  raw CUDA call is in a checked context: `CUDA_ABORT`/`TRANSFER_ABORT` for
+  the generation loop, `CUDA_WARN` for shutdown frees, `cuda_diagnostics_ok`
+  for the startup probe, and bool-returning allocation helpers
+  (`allocate_checkpoints`/`allocate_grad_buffers`/`allocate_backward_workspace`/
+  `allocate_came`). The launchers `launch_grad_norm_reduce`,
+  `launch_telemetry_kernels`, `propose_swaps`, and `apply_sot_identity` now
+  report failure and the run invalidates. `source_gates.py --strict` reports
+  0 errors / 0 warnings.
 - 2026-09-12: The task-conditioning defect is fixed with an explicit FIXED
   16→5 projection: TASK_PROJ (the first five rows of the 16-point DCT-II)
   folds every task embedding dimension into channels 6..10 at seeding, so no

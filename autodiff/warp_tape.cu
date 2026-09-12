@@ -773,38 +773,69 @@ __global__ void residual_magnitude_kernel(
 }
 
 // ---- Host API -----------------------------------------------------------
+// Checked allocation helpers: report the failing call and return false.
 
-inline void allocate_checkpoints(CheckpointBuffer** d_ckpt, int n_organisms) {
-    cudaMalloc(d_ckpt, sizeof(CheckpointBuffer) * n_organisms);
+inline bool allocate_checkpoints(CheckpointBuffer** d_ckpt, int n_organisms) {
+    cudaError_t e = cudaMalloc(d_ckpt, sizeof(CheckpointBuffer) * n_organisms);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA alloc checkpoints failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
-inline void free_checkpoints(CheckpointBuffer* d_ckpt) {
-    cudaFree(d_ckpt);
+inline bool free_checkpoints(CheckpointBuffer* d_ckpt) {
+    cudaError_t e = cudaFree(d_ckpt);
+    if (e != cudaSuccess) {
+        std::printf("[WARN] CUDA free checkpoints failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
-inline void allocate_grad_buffers(GradBuffers** d_grads, int n_organisms) {
-    cudaMalloc(d_grads, sizeof(GradBuffers) * n_organisms);
+inline bool allocate_grad_buffers(GradBuffers** d_grads, int n_organisms) {
+    cudaError_t e = cudaMalloc(d_grads, sizeof(GradBuffers) * n_organisms);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA alloc grads failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
-inline void free_grad_buffers(GradBuffers* d_grads) {
-    cudaFree(d_grads);
+inline bool free_grad_buffers(GradBuffers* d_grads) {
+    cudaError_t e = cudaFree(d_grads);
+    if (e != cudaSuccess) {
+        std::printf("[WARN] CUDA free grads failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
-inline void allocate_backward_workspace(BackwardWorkspace& ws, int n_organisms) {
+inline bool allocate_backward_workspace(BackwardWorkspace& ws, int n_organisms) {
     ws.n_organisms = n_organisms;
-    cudaMalloc(&ws.d_state[0], sizeof(float) * GRID_ELEMS * n_organisms);
-    cudaMalloc(&ws.d_state[1], sizeof(float) * GRID_ELEMS * n_organisms);
-    cudaMalloc(&ws.d_perc,     sizeof(float) * PERC_ELEMS * n_organisms);
-    cudaMalloc(&ws.recomp[0],  sizeof(__half) * GRID_ELEMS * n_organisms);
-    cudaMalloc(&ws.recomp[1],  sizeof(__half) * GRID_ELEMS * n_organisms);
+    cudaError_t e = cudaMalloc(&ws.d_state[0], sizeof(float) * GRID_ELEMS * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_state[1], sizeof(float) * GRID_ELEMS * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_perc,     sizeof(float) * PERC_ELEMS * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.recomp[0],  sizeof(__half) * GRID_ELEMS * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.recomp[1],  sizeof(__half) * GRID_ELEMS * n_organisms);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA alloc backward workspace failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
-inline void free_backward_workspace(BackwardWorkspace& ws) {
-    cudaFree(ws.d_state[0]);
-    cudaFree(ws.d_state[1]);
-    cudaFree(ws.d_perc);
-    cudaFree(ws.recomp[0]);
-    cudaFree(ws.recomp[1]);
+inline bool free_backward_workspace(BackwardWorkspace& ws) {
+    cudaError_t e = cudaFree(ws.d_state[0]);
+    if (e == cudaSuccess) e = cudaFree(ws.d_state[1]);
+    if (e == cudaSuccess) e = cudaFree(ws.d_perc);
+    if (e == cudaSuccess) e = cudaFree(ws.recomp[0]);
+    if (e == cudaSuccess) e = cudaFree(ws.recomp[1]);
+    if (e != cudaSuccess) {
+        std::printf("[WARN] CUDA free backward workspace failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
 inline void launch_forward_with_checkpoints(

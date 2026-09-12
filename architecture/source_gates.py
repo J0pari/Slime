@@ -24,44 +24,20 @@ SRC_SUFFIXES = {".cu", ".cuh", ".cpp", ".h", ".hpp"}
 EXCLUDED_DIRS = {"tests", "build", "architecture", "evidence", ".claude", ".vscode", ".continue", ".git"}
 EXCLUDED_FILES = {"env.sh"}
 
-# Approved wrappers around raw CUDA calls. The remaining production call sites
-# must route through checked wrappers (CUDA_CHECK / CUDA_ABORT) or appear here
-# with a justification. Open items are tracked in TODO.md; `--strict` fails on
-# any allowlisted hit so the list cannot grow silently.
-CUDA_WRAPPER_ALLOWLIST = {
-    "autodiff/warp_tape.cu": {
-        "allocate_checkpoints", "free_checkpoints", "allocate_grad_buffers",
-        "free_grad_buffers", "allocate_backward_workspace", "free_backward_workspace",
-    },
-    "optimizer/came.cu": {
-        "allocate_came", "free_came",
-        # TODO(architecture): convert these launcher memsets to a checked
-        # wrapper instead of relying on the following phase_trace sync.
-        "launch_grad_norm_reduce", "launch_telemetry_kernels",
-    },
-    "integration/host_main.cu": {"free_gpu_buffers"},
-    "safety/parallel_tempering.cu": {
-        "swap_device_organism",
-        # TODO(architecture): give propose_swaps an error channel; today its
-        # stream synchronize surfaces at the caller's next phase_trace.
-        "propose_swaps",
-    },
-    "safety/alignment.cu": {"apply_sot_identity"},
-    "safety/monitoring.cu": {"collect_cuda_diagnostics", "benchmark_cuda_transfers", "emit_cuda_diagnostics"},
-    "nca/engine.cu": {},   # launchers only (no raw runtime calls expected)
-    "nca/reaction_diffusion.cu": {},
-    "genome/codec.cu": {},
-    "curriculum/problem_generator.cu": {},
-    "archive/soft_qd_archive.cu": {},
-    "integration/main_loop.cu": {},
-    "config/constants.cuh": {},
-}
+# Approved wrappers around raw CUDA calls. Every production call site routes
+# through checked wrappers (CUDA_CHECK / CUDA_ABORT / TRANSFER_ABORT /
+# CUDA_WARN / cuda_diagnostics_ok) or the bool-returning allocation helpers
+# in autodiff/warp_tape.cu and optimizer/came.cu. The map is empty: any new
+# raw call outside a checked context is an ERROR even without --strict.
+CUDA_WRAPPER_ALLOWLIST = {}
 
 CUDA_CALL_PATTERN = re.compile(
     r"\b(cudaMalloc|cudaMallocHost|cudaMemcpy|cudaMemcpyAsync|cudaMemset|cudaMemsetAsync"
     r"|cudaStreamSynchronize|cudaStreamCreate|cudaFree|cudaFreeHost)\s*\("
 )
-CHECKED_CONTEXT = re.compile(r"CUDA_CHECK|CUDA_ABORT|TRANSFER_ABORT|cuda_diagnostics_ok|_err|cudaError_t")
+CHECKED_CONTEXT = re.compile(
+    r"CUDA_CHECK|CUDA_ABORT|TRANSFER_ABORT|CUDA_WARN|cuda_diagnostics_ok"
+    r"|cudaSuccess|_err|_ce|cudaError_t")
 
 ALLOWLISTED_CTX = {
     "cudaGetLastError", "cudaGetErrorString", "cudaDeviceSynchronize",

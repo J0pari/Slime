@@ -38,9 +38,13 @@ completed or its verification state changes.
   is established — the witness (perturb task dim 12 → output must change)
   now passes with a 2.5e-2 descriptor shift. A learnable W_task bank remains
   a future architecture decision.
-- [ ] Shrink the `checked_cuda_calls` allowlist: convert
-  `launch_grad_norm_reduce` / `launch_telemetry_kernels` / `propose_swaps` /
-  `apply_sot_identity` to checked wrappers so `--strict` passes.
+- [x] Shrink the `checked_cuda_calls` allowlist to empty: every production
+  raw CUDA call now routes through a checked wrapper (`CUDA_ABORT`,
+  `TRANSFER_ABORT`, `CUDA_WARN`, `cuda_diagnostics_ok`) or a bool-returning
+  allocation helper; launchers (`launch_grad_norm_reduce`,
+  `launch_telemetry_kernels`, `propose_swaps`, `apply_sot_identity`) report
+  failure and the run invalidates. `source_gates.py --strict` reports
+  0 errors / 0 warnings.
 - [x] Give the archive claims witnesses and repair their semantics:
   `A401.bin-capacity` (transactional rebin with QD-ranked eviction),
   `A401.live-statistics-exact` (invariant checker on every insert/rebin +

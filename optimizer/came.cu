@@ -99,25 +99,35 @@ __global__ void came_step_kernel(
 
 // ---- Host API -----------------------------------------------------------
 
-inline void allocate_came(CameState& state) {
-    cudaMalloc(&state.d_m,         sizeof(float) * TOTAL_WEIGHTS);
-    cudaMalloc(&state.d_v,         sizeof(float) * TOTAL_WEIGHTS);
-    cudaMalloc(&state.d_c,         sizeof(float) * TOTAL_WEIGHTS);
-    cudaMalloc(&state.d_prev_u,    sizeof(float) * TOTAL_WEIGHTS);
-    cudaMalloc(&state.d_mean_grad, sizeof(float) * TOTAL_WEIGHTS);
-    cudaMemset(state.d_m,       0, sizeof(float) * TOTAL_WEIGHTS);
-    cudaMemset(state.d_v,       0, sizeof(float) * TOTAL_WEIGHTS);
-    cudaMemset(state.d_c,       0, sizeof(float) * TOTAL_WEIGHTS);
-    cudaMemset(state.d_prev_u,  0, sizeof(float) * TOTAL_WEIGHTS);
+inline bool allocate_came(CameState& state) {
+    cudaError_t e = cudaMalloc(&state.d_m,         sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMalloc(&state.d_v,         sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMalloc(&state.d_c,         sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMalloc(&state.d_prev_u,    sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMalloc(&state.d_mean_grad, sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMemset(state.d_m,       0, sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMemset(state.d_v,       0, sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMemset(state.d_c,       0, sizeof(float) * TOTAL_WEIGHTS);
+    if (e == cudaSuccess) e = cudaMemset(state.d_prev_u,  0, sizeof(float) * TOTAL_WEIGHTS);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA CAME allocation failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
     state.step = 0;
+    return true;
 }
 
-inline void free_came(CameState& state) {
-    cudaFree(state.d_m);
-    cudaFree(state.d_v);
-    cudaFree(state.d_c);
-    cudaFree(state.d_prev_u);
-    cudaFree(state.d_mean_grad);
+inline bool free_came(CameState& state) {
+    cudaError_t e = cudaFree(state.d_m);
+    if (e == cudaSuccess) e = cudaFree(state.d_v);
+    if (e == cudaSuccess) e = cudaFree(state.d_c);
+    if (e == cudaSuccess) e = cudaFree(state.d_prev_u);
+    if (e == cudaSuccess) e = cudaFree(state.d_mean_grad);
+    if (e != cudaSuccess) {
+        std::printf("[WARN] CUDA CAME free failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
 inline void launch_aggregate_gradients(
@@ -172,14 +182,24 @@ __global__ void grad_norm_reduce_kernel(const float* mean_grad,
     if (tid == 0) atomicAdd(d_out, sdata[0]);
 }
 
-inline void launch_grad_norm_reduce(const float* d_mean_grad,
+inline bool launch_grad_norm_reduce(const float* d_mean_grad,
                                     float* d_grad_norm,
                                     cudaStream_t stream) {
     // Zero the output scalar first.
-    cudaMemsetAsync(d_grad_norm, 0, sizeof(float), stream);
+    cudaError_t e = cudaMemsetAsync(d_grad_norm, 0, sizeof(float), stream);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA grad-norm memset failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
     int grid = (TOTAL_WEIGHTS + 255) / 256;
     grad_norm_reduce_kernel<<<grid, 256, 0, stream>>>(
         d_mean_grad, d_grad_norm, TOTAL_WEIGHTS);
+    e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA grad-norm launch failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
 // ---- Numerical telemetry kernels (A-501) ---------------------------------
@@ -278,7 +298,7 @@ __global__ void nonfinite_scan_kernel(const float* weights,
     if (bad > 0) atomicAdd(&out->nonfinite_count, static_cast<float>(bad));
 }
 
-inline void launch_telemetry_kernels(
+inline bool launch_telemetry_kernels(
     const float* d_mean_grad,
     const float* d_weights,
     const float* d_came_m,
@@ -288,7 +308,11 @@ inline void launch_telemetry_kernels(
     TelemetryScalars* d_tel,
     cudaStream_t stream)
 {
-    cudaMemsetAsync(d_tel, 0, sizeof(TelemetryScalars), stream);
+    cudaError_t e = cudaMemsetAsync(d_tel, 0, sizeof(TelemetryScalars), stream);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA telemetry memset failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
     int grid = (TOTAL_WEIGHTS + 255) / 256;
     grad_bank_norm_kernel<<<grid, 256, 0, stream>>>(d_mean_grad, d_tel);
     weight_and_update_norm_kernel<<<grid, 256, 0, stream>>>(
@@ -296,6 +320,12 @@ inline void launch_telemetry_kernels(
     came_stats_kernel<<<1, 256, 0, stream>>>(d_came_c, d_tel);
     nonfinite_scan_kernel<<<grid, 256, 0, stream>>>(
         d_weights, d_came_m, d_came_v, d_came_c, d_came_prev_u, d_tel);
+    e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA telemetry launch failed: %s\n", cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
 }  // namespace slime::optimizer

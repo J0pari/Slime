@@ -46,6 +46,17 @@ namespace cur = slime::curriculum;
     } \
 } while (0)
 
+// Shutdown-path checked call: reports a failure but cannot abort the run
+// (used while releasing resources after the experiment has finished).
+#define CUDA_WARN(expr, ctx) do { \
+    cudaError_t _we = (expr); \
+    if (_we != cudaSuccess) { \
+        std::printf("[WARN] CUDA %s failed at %s:%d: %s\n", \
+                    ctx, __FILE__, __LINE__, cudaGetErrorString(_we)); \
+        std::fflush(stdout); \
+    } \
+} while (0)
+
 // ---- Probe set evaluation (Wave 3, A-601) -----------------------------------
 // Evaluate placeholder surprise on the probe set. Returns the mean surprise
 // across all 64 probe samples.
@@ -147,46 +158,46 @@ static bool alloc_gpu_buffers(World* w) {
 }
 
 static void free_gpu_buffers(World* w) {
-    cudaFree(w->d_organisms);
-    cudaFree(w->d_weights);
-    cudaFree(w->d_eff_weights);
-    cudaFree(w->d_deltas);
-    cudaFree(w->d_fwd_inputs);
-    cudaFree(w->d_checkpoints);
-    cudaFree(w->d_grads);
-    cudaFree(w->d_mean_grad);
-    cudaFree(w->d_came_m);
-    cudaFree(w->d_came_v);
-    cudaFree(w->d_came_c);
-    cudaFree(w->d_came_prev_u);
-    cudaFree(w->d_descriptors);
-    cudaFree(w->d_seed_grad);
-    cudaFree(w->d_batch_image);
-    cudaFree(w->d_batch_task_emb);
-    cudaFree(w->d_btraj);
-    cudaFree(w->d_grad_norm);
-    cudaFree(w->d_tel);
-    cudaFree(w->d_sot_temp_images);
-    cudaFree(w->d_sot_task_emb);
-    cudaFree(w->d_sot_fwd_inputs);
-    cudaFree(w->d_sot_descriptors);
-    cudaFree(w->d_sot_bank_of);
-    cudaFree(w->d_pt_swap_org);
-    cudaFree(w->d_pt_swap_ckpt);
-    cudaFree(w->d_pt_swap_grad);
-    cudaFree(w->d_pt_swap_wbank);
-    cudaFree(w->bwd_workspace.d_state[0]);
-    cudaFree(w->bwd_workspace.d_state[1]);
-    cudaFree(w->bwd_workspace.d_perc);
-    cudaFree(w->bwd_workspace.recomp[0]);
-    cudaFree(w->bwd_workspace.recomp[1]);
-    cudaFreeHost(w->h_descriptors);
-    cudaFreeHost(w->h_btraj);
-    cudaFreeHost(w->h_seed_grad);
-    cudaFreeHost(w->h_fwd_inputs);
-    cudaFreeHost(w->h_weights);
-    cudaFreeHost(w->h_tel);
-    cudaStreamDestroy(w->stream);
+    CUDA_WARN(cudaFree(w->d_organisms), "free d_organisms");
+    CUDA_WARN(cudaFree(w->d_weights), "free d_weights");
+    CUDA_WARN(cudaFree(w->d_eff_weights), "free d_eff_weights");
+    CUDA_WARN(cudaFree(w->d_deltas), "free d_deltas");
+    CUDA_WARN(cudaFree(w->d_fwd_inputs), "free d_fwd_inputs");
+    CUDA_WARN(cudaFree(w->d_checkpoints), "free d_checkpoints");
+    CUDA_WARN(cudaFree(w->d_grads), "free d_grads");
+    CUDA_WARN(cudaFree(w->d_mean_grad), "free d_mean_grad");
+    CUDA_WARN(cudaFree(w->d_came_m), "free d_came_m");
+    CUDA_WARN(cudaFree(w->d_came_v), "free d_came_v");
+    CUDA_WARN(cudaFree(w->d_came_c), "free d_came_c");
+    CUDA_WARN(cudaFree(w->d_came_prev_u), "free d_came_prev_u");
+    CUDA_WARN(cudaFree(w->d_descriptors), "free d_descriptors");
+    CUDA_WARN(cudaFree(w->d_seed_grad), "free d_seed_grad");
+    CUDA_WARN(cudaFree(w->d_batch_image), "free d_batch_image");
+    CUDA_WARN(cudaFree(w->d_batch_task_emb), "free d_batch_task_emb");
+    CUDA_WARN(cudaFree(w->d_btraj), "free d_btraj");
+    CUDA_WARN(cudaFree(w->d_grad_norm), "free d_grad_norm");
+    CUDA_WARN(cudaFree(w->d_tel), "free d_tel");
+    CUDA_WARN(cudaFree(w->d_sot_temp_images), "free d_sot_temp_images");
+    CUDA_WARN(cudaFree(w->d_sot_task_emb), "free d_sot_task_emb");
+    CUDA_WARN(cudaFree(w->d_sot_fwd_inputs), "free d_sot_fwd_inputs");
+    CUDA_WARN(cudaFree(w->d_sot_descriptors), "free d_sot_descriptors");
+    CUDA_WARN(cudaFree(w->d_sot_bank_of), "free d_sot_bank_of");
+    CUDA_WARN(cudaFree(w->d_pt_swap_org), "free d_pt_swap_org");
+    CUDA_WARN(cudaFree(w->d_pt_swap_ckpt), "free d_pt_swap_ckpt");
+    CUDA_WARN(cudaFree(w->d_pt_swap_grad), "free d_pt_swap_grad");
+    CUDA_WARN(cudaFree(w->d_pt_swap_wbank), "free d_pt_swap_wbank");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_state[0]), "free d_state[0]");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_state[1]), "free d_state[1]");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_perc), "free d_perc");
+    CUDA_WARN(cudaFree(w->bwd_workspace.recomp[0]), "free recomp[0]");
+    CUDA_WARN(cudaFree(w->bwd_workspace.recomp[1]), "free recomp[1]");
+    CUDA_WARN(cudaFreeHost(w->h_descriptors), "freeHost h_descriptors");
+    CUDA_WARN(cudaFreeHost(w->h_btraj), "freeHost h_btraj");
+    CUDA_WARN(cudaFreeHost(w->h_seed_grad), "freeHost h_seed_grad");
+    CUDA_WARN(cudaFreeHost(w->h_fwd_inputs), "freeHost h_fwd_inputs");
+    CUDA_WARN(cudaFreeHost(w->h_weights), "freeHost h_weights");
+    CUDA_WARN(cudaFreeHost(w->h_tel), "freeHost h_tel");
+    CUDA_WARN(cudaStreamDestroy(w->stream), "destroy stream");
 }
 
 // ---- Kaiming He weight initialization (section 15.2) ------------------------
@@ -634,15 +645,17 @@ bool step_generation(World* w) {
     // ---- SOT identity check (section 12, pre-allocated buffers) ----
     // Each SOT-evaluated organism is compared against a reference computed
     // with ITS OWN effective weights (organism-specific phenotype).
-    safety::alignment::apply_sot_identity(
-        w->d_organisms, w->d_weights, w->d_eff_weights,
-        w->classifier_batch, w->host_sot_key,
-        w->h_descriptors, w->org_table.batch_sample_idx,
-        w->org_table.f_sot,
-        w->d_sot_temp_images, w->d_sot_task_emb,
-        w->d_sot_fwd_inputs, w->d_sot_descriptors,
-        w->d_sot_bank_of, TOTAL_WEIGHTS,
-        w->stream);
+    if (!safety::alignment::apply_sot_identity(
+            w->d_organisms, w->d_weights, w->d_eff_weights,
+            w->classifier_batch, w->host_sot_key,
+            w->h_descriptors, w->org_table.batch_sample_idx,
+            w->org_table.f_sot,
+            w->d_sot_temp_images, w->d_sot_task_emb,
+            w->d_sot_fwd_inputs, w->d_sot_descriptors,
+            w->d_sot_bank_of, TOTAL_WEIGHTS,
+            w->stream)) {
+        return false;
+    }
     if (!phase_trace("SOT", gen, w->stream)) return false;
 
     // ---- Score organisms (section 6) ----
@@ -661,9 +674,11 @@ bool step_generation(World* w) {
                                     w->org_table.fitness);
     if (gen > 0 && gen % PT_SWAP_INTERVAL == 0) {
         safety::pt::SwapContext ctx = make_swap_context(w);
-        safety::pt::propose_swaps(&w->mutation_ladder,
-                                  w->org_table.fitness,
-                                  &w->rng, ctx);
+        if (!safety::pt::propose_swaps(&w->mutation_ladder,
+                                       w->org_table.fitness,
+                                       &w->rng, ctx)) {
+            return false;
+        }
     }
     if (!phase_trace("score+archive+PT", gen, w->stream)) return false;
 
@@ -684,8 +699,10 @@ bool step_generation(World* w) {
                                           POOL_SIZE, w->stream);
 
     // ---- GPU: gradient norm via device-side reduction (section 8) ----
-    optimizer::launch_grad_norm_reduce(w->d_mean_grad, w->d_grad_norm,
-                                       w->stream);
+    if (!optimizer::launch_grad_norm_reduce(w->d_mean_grad, w->d_grad_norm,
+                                            w->stream)) {
+        return false;
+    }
 
     // ---- GPU: CAME step ----
     optimizer::CameState came_state;
@@ -702,10 +719,12 @@ bool step_generation(World* w) {
     // launch_telemetry_kernels zeroes the TelemetryScalars struct first, so
     // it must be enqueued BEFORE the state-saturation/residual kernels write
     // their fields; stream order preserves the accumulation.
-    optimizer::launch_telemetry_kernels(
-        w->d_mean_grad, w->d_weights,
-        w->d_came_m, w->d_came_v, w->d_came_c, w->d_came_prev_u,
-        w->d_tel, w->stream);
+    if (!optimizer::launch_telemetry_kernels(
+            w->d_mean_grad, w->d_weights,
+            w->d_came_m, w->d_came_v, w->d_came_c, w->d_came_prev_u,
+            w->d_tel, w->stream)) {
+        return false;
+    }
     autodiff::launch_state_saturation(w->d_checkpoints, w->d_organisms,
                                       w->d_tel, POOL_SIZE, w->stream);
     // The residual-magnitude measurement costs several forward passes worth

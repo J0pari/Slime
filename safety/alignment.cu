@@ -71,7 +71,7 @@ inline float cosine_similarity(const float* a, const float* b) {
 //   d_sot_bank_of     - pre-allocated device buffer [SOT_MAX_REFS] ints
 //   weight_stride     - TOTAL_WEIGHTS (flat bank stride)
 //   stream            - CUDA stream
-inline void apply_sot_identity(nca::OrganismState* d_organisms,
+inline bool apply_sot_identity(nca::OrganismState* d_organisms,
                                const float* d_weights,
                                const float* d_eff_weights,
                                const curriculum::ClassifierBatch& batch,
@@ -112,7 +112,7 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
         n_sot_images++;
     }
 
-    if (n_sot_images == 0) return;
+    if (n_sot_images == 0) return true;
 
     // Prepare un-permuted images on host.
     __half unpermuted_images[cur::SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3];
@@ -127,14 +127,22 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
     }
 
     // Copy un-permuted images to pre-allocated device buffer.
-    cudaMemcpyAsync(d_sot_temp_images, unpermuted_images,
+    cudaError_t _ce = cudaMemcpyAsync(d_sot_temp_images, unpermuted_images,
                     n_sot_images * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half),
                     cudaMemcpyHostToDevice, stream);
+    if (_ce != cudaSuccess) {
+        std::printf("[FATAL] CUDA SOT image copy failed: %s\n", cudaGetErrorString(_ce));
+        return false;
+    }
 
     // Copy task embedding to pre-allocated device buffer.
-    cudaMemcpyAsync(d_sot_task_emb, batch.task_embedding,
+    _ce = cudaMemcpyAsync(d_sot_task_emb, batch.task_embedding,
                     TASK_EMBED_DIM * sizeof(float),
                     cudaMemcpyHostToDevice, stream);
+    if (_ce != cudaSuccess) {
+        std::printf("[FATAL] CUDA SOT task copy failed: %s\n", cudaGetErrorString(_ce));
+        return false;
+    }
 
     // Use stress organism slots for the reference forward.
     nca::OrganismState* d_ref_organisms = d_organisms + POOL_SIZE;
@@ -160,12 +168,18 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
             }
         }
 
-        cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
+        _ce = cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
                         n_refs * sizeof(nca::ForwardInputs),
                         cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_sot_bank_of, ref_bank_of,
-                        n_refs * sizeof(int),
-                        cudaMemcpyHostToDevice, stream);
+        if (_ce == cudaSuccess) {
+            _ce = cudaMemcpyAsync(d_sot_bank_of, ref_bank_of,
+                            n_refs * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
+        }
+        if (_ce != cudaSuccess) {
+            std::printf("[FATAL] CUDA SOT ref copy failed: %s\n", cudaGetErrorString(_ce));
+            return false;
+        }
 
         nca::launch_forward_effective(d_ref_organisms, d_sot_fwd_inputs, nullptr,
                                       d_eff_weights, d_sot_bank_of, weight_stride,
@@ -173,11 +187,20 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
 
         nca::extract_descriptor(d_ref_organisms, d_sot_descriptors,
                                 n_refs, stream);
+        _ce = cudaGetLastError();
+        if (_ce != cudaSuccess) {
+            std::printf("[FATAL] CUDA SOT reference launch failed: %s\n", cudaGetErrorString(_ce));
+            return false;
+        }
 
         float h_ref_descriptors[cur::SOT_MAX_REFS * BMAP_DIM];
-        cudaMemcpy(h_ref_descriptors, d_sot_descriptors,
+        _ce = cudaMemcpy(h_ref_descriptors, d_sot_descriptors,
                    n_refs * BMAP_DIM * sizeof(float),
                    cudaMemcpyDeviceToHost);
+        if (_ce != cudaSuccess) {
+            std::printf("[FATAL] CUDA SOT descriptor readback failed: %s\n", cudaGetErrorString(_ce));
+            return false;
+        }
 
         for (int r = 0; r < n_refs; ++r) {
             int org = ref_org_of[r];
@@ -185,7 +208,7 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
             const float* org_desc = &h_descriptors[org * BMAP_DIM];
             f_sot_out[org] = cosine_similarity(org_desc, ref);
         }
-        return;
+        return true;
     }
 
     // Shared-substrate path: one reference per unique SOT image.
@@ -197,9 +220,13 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
         ref_inputs[i].target_bmap_32 = nullptr;
     }
 
-    cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
+    _ce = cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
                     n_sot_images * sizeof(nca::ForwardInputs),
                     cudaMemcpyHostToDevice, stream);
+    if (_ce != cudaSuccess) {
+        std::printf("[FATAL] CUDA SOT ref copy failed: %s\n", cudaGetErrorString(_ce));
+        return false;
+    }
 
     using slime::autodiff::OFF_PERC;
     using slime::autodiff::OFF_INTER;
@@ -216,11 +243,20 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
 
     nca::extract_descriptor(d_ref_organisms, d_sot_descriptors,
                             n_sot_images, stream);
+    _ce = cudaGetLastError();
+    if (_ce != cudaSuccess) {
+        std::printf("[FATAL] CUDA SOT reference launch failed: %s\n", cudaGetErrorString(_ce));
+        return false;
+    }
 
     float h_ref_descriptors[cur::SOT_SUBBATCH * BMAP_DIM];
-    cudaMemcpy(h_ref_descriptors, d_sot_descriptors,
+    _ce = cudaMemcpy(h_ref_descriptors, d_sot_descriptors,
                n_sot_images * BMAP_DIM * sizeof(float),
                cudaMemcpyDeviceToHost);
+    if (_ce != cudaSuccess) {
+        std::printf("[FATAL] CUDA SOT descriptor readback failed: %s\n", cudaGetErrorString(_ce));
+        return false;
+    }
 
     for (int i = 0; i < n_sot_images; ++i) {
         int s = sot_sample_indices[i];
@@ -232,6 +268,7 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
             }
         }
     }
+    return true;
 }
 
 // Check for shutdown.flag file. Returns true if the file exists.
@@ -312,3 +349,5 @@ inline bool apply_operator_command(float* organism_fitness,
 }  // namespace slime::safety::alignment
 
 #endif  // COEVO_SAFETY_ALIGNMENT_CU
+
+

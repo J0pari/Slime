@@ -86,46 +86,47 @@ struct SwapContext {
 };
 
 // Swap device data for two pool-slot organisms through temp buffer.
-// A ↔ B via: temp = A; A = B; B = temp.
-static inline void swap_device_organism(SwapContext& ctx, int slot_a, int slot_b) {
+// A ↔ B via: temp = A; A = B; B = temp. Returns false (with a report) if any
+// enqueue fails; the caller aborts the run.
+static inline bool swap_device_organism(SwapContext& ctx, int slot_a, int slot_b) {
+    cudaError_t cuda_err = cudaSuccess;
+    auto copy = [&](void* dst, const void* src, size_t bytes) {
+        if (cuda_err != cudaSuccess) return;
+        cuda_err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToDevice, ctx.stream);
+    };
+
     // OrganismState swap.
-    cudaMemcpyAsync(ctx.d_swap_org, &ctx.d_organisms[slot_a],
-                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_organisms[slot_a], &ctx.d_organisms[slot_b],
-                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_organisms[slot_b], ctx.d_swap_org,
-                    sizeof(OrganismState), cudaMemcpyDeviceToDevice, ctx.stream);
+    copy(ctx.d_swap_org, &ctx.d_organisms[slot_a], sizeof(OrganismState));
+    copy(&ctx.d_organisms[slot_a], &ctx.d_organisms[slot_b], sizeof(OrganismState));
+    copy(&ctx.d_organisms[slot_b], ctx.d_swap_org, sizeof(OrganismState));
 
     // CheckpointBuffer swap.
-    cudaMemcpyAsync(ctx.d_swap_ckpt, &ctx.d_checkpoints[slot_a],
-                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_checkpoints[slot_a], &ctx.d_checkpoints[slot_b],
-                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_checkpoints[slot_b], ctx.d_swap_ckpt,
-                    sizeof(CheckpointBuffer), cudaMemcpyDeviceToDevice, ctx.stream);
+    copy(ctx.d_swap_ckpt, &ctx.d_checkpoints[slot_a], sizeof(CheckpointBuffer));
+    copy(&ctx.d_checkpoints[slot_a], &ctx.d_checkpoints[slot_b], sizeof(CheckpointBuffer));
+    copy(&ctx.d_checkpoints[slot_b], ctx.d_swap_ckpt, sizeof(CheckpointBuffer));
 
     // GradBuffers swap.
-    cudaMemcpyAsync(ctx.d_swap_grad, &ctx.d_grads[slot_a],
-                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_grads[slot_a], &ctx.d_grads[slot_b],
-                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_grads[slot_b], ctx.d_swap_grad,
-                    sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
+    copy(ctx.d_swap_grad, &ctx.d_grads[slot_a], sizeof(GradBuffers));
+    copy(&ctx.d_grads[slot_a], &ctx.d_grads[slot_b], sizeof(GradBuffers));
+    copy(&ctx.d_grads[slot_b], ctx.d_swap_grad, sizeof(GradBuffers));
 
     // Effective-weight bank swap: backward must re-forward each trajectory
     // with the phenotype that produced it.
-    cudaMemcpyAsync(ctx.d_swap_wbank,
-                    &ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
-                    autodiff::TOTAL_WEIGHTS * sizeof(float),
-                    cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
-                    &ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
-                    autodiff::TOTAL_WEIGHTS * sizeof(float),
-                    cudaMemcpyDeviceToDevice, ctx.stream);
-    cudaMemcpyAsync(&ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
-                    ctx.d_swap_wbank,
-                    autodiff::TOTAL_WEIGHTS * sizeof(float),
-                    cudaMemcpyDeviceToDevice, ctx.stream);
+    copy(ctx.d_swap_wbank,
+         &ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
+         autodiff::TOTAL_WEIGHTS * sizeof(float));
+    copy(&ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
+         &ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+         autodiff::TOTAL_WEIGHTS * sizeof(float));
+    copy(&ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+         ctx.d_swap_wbank,
+         autodiff::TOTAL_WEIGHTS * sizeof(float));
+
+    if (cuda_err != cudaSuccess) {
+        std::printf("[FATAL] CUDA PT swap failed: %s\n", cudaGetErrorString(cuda_err));
+        return false;
+    }
+    return true;
 }
 
 // Swap host-side OrganismTable row data between two pool slots, including the
@@ -181,8 +182,9 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
 // replica_tag stays fixed — it identifies the temperature, not the organism.
 //
 // Swap timing: before backward in the generation loop, so swapped organisms
-// contribute gradients in their new replica context.
-inline void propose_swaps(MutationLadder* l,
+// contribute gradients in their new replica context. Returns false (run
+// invalidated) if any device operation fails.
+inline bool propose_swaps(MutationLadder* l,
                           const float* organism_fitness,
                           Pcg32* rng,
                           SwapContext& ctx) {
@@ -218,18 +220,24 @@ inline void propose_swaps(MutationLadder* l,
                 int slot_a = lo_slots[k];
                 int slot_b = hi_slots[k];
 
-                // Device data swap (OrganismState + Checkpoint + Grads).
-                swap_device_organism(ctx, slot_a, slot_b);
+                // Device data swap (OrganismState + Checkpoint + Grads +
+                // effective weights).
+                if (!swap_device_organism(ctx, slot_a, slot_b)) return false;
 
                 // Host data swap (genome, delta, metadata).
                 swap_host_organism(ctx, slot_a, slot_b);
             }
 
             // Sync device copies before proceeding to next pair.
-            cudaStreamSynchronize(ctx.stream);
+            cudaError_t e = cudaStreamSynchronize(ctx.stream);
+            if (e != cudaSuccess) {
+                std::printf("[FATAL] CUDA PT sync failed: %s\n", cudaGetErrorString(e));
+                return false;
+            }
         }
     }
     update_beta(l);
+    return true;
 }
 
 // ---- SOT-density stress ladder ------------------------------------------
@@ -262,6 +270,7 @@ void flag_stress_failures(StressLadder* l, cudaStream_t stream);
 }  // namespace slime::safety::pt
 
 #endif  // COEVO_SAFETY_PARALLEL_TEMPERING_CU
+
 
 
 
