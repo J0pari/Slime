@@ -166,7 +166,8 @@ __device__ inline float gelu_approx(float x) {
 
 // Single CA step. Role-blind. Learned perception (W_perc) feeds the learned
 // W_inter / W_flow path; W_flow produces a delta for all 16 channels, added to
-// the state. The chemical channels 0-5 are updated here like any other channel
+// the state with residual timestep alpha: next = prev + alpha * F(x) (A-201).
+// The chemical channels 0-5 are updated here like any other channel
 // (cells produce/consume morphogens); reaction-diffusion (A-202) then adds
 // spatial diffusion + decay to those channels in a following rd_step.
 //   W_perc  : [N_PERC_FILTERS x 3 x 3]
@@ -179,7 +180,8 @@ __device__ inline void ca_step(const __half* state_curr,
                                __half* state_next,
                                const float* W_perc,
                                const float* W_inter,
-                               const float* W_flow) {
+                               const float* W_flow,
+                               float alpha) {
     for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
         for (int bx = 0; bx < GRID_SIZE; bx += blockDim.x) {
             int y = by + threadIdx.y;
@@ -202,6 +204,7 @@ __device__ inline void ca_step(const __half* state_curr,
 
             // W_flow drives all 16 channels (chemicals included). rd_step then
             // adds spatial diffusion + decay to channels 0-5 on top of this.
+            // Residual timestep: next = prev + RESIDUAL_ALPHA * F(x) (A-201).
             #pragma unroll
             for (int c = 0; c < CA_CHANNELS; ++c) {
                 float acc = 0.f;
@@ -210,7 +213,7 @@ __device__ inline void ca_step(const __half* state_curr,
                     acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
                 }
                 float prev = __half2float(state_curr[grid_idx(y, x, c)]);
-                float next = prev + acc;
+                float next = prev + alpha * acc;
                 // Clamp to the FP16 representable range before narrowing.
                 if (next > 65504.f)  next = 65504.f;
                 if (next < -65504.f) next = -65504.f;
@@ -239,7 +242,8 @@ __device__ inline void forward_one(OrganismState* o,
                                    const float* W_perc,     // [N_PERC_FILTERS x 3 x 3]
                                    const float* W_inter,    // [PERC_DIM x HIDDEN_DIM]
                                    const float* W_flow,     // [HIDDEN_DIM x CA_CHANNELS]
-                                   const float* W_bmap) {   // [CA_CHANNELS x BMAP_DIM]
+                                   const float* W_bmap,     // [CA_CHANNELS x BMAP_DIM]
+                                   float alpha) {           // residual timestep (A-201)
     // Role-switched seeding (A-201). Reserved role codes canonicalize to a
     // defined role so the pathway choice is total.
     if (canonical_role(in.role) == Role::Classifier) {
@@ -265,7 +269,7 @@ __device__ inline void forward_one(OrganismState* o,
         // rd_step (when enabled) adds spatial diffusion + decay to next's
         // chemical channels 0-5, using curr's chemical field for the Laplacian.
         // Both read curr; ca_step then rd_step write next before the swap.
-        ca_step(curr, next, W_perc, W_inter, W_flow);
+        ca_step(curr, next, W_perc, W_inter, W_flow, alpha);
         if (coeffs != nullptr) {
             rd::rd_step(curr, next, *coeffs);
         }
@@ -297,13 +301,14 @@ __global__ void forward_kernel(OrganismState* organisms,
                                const float* W_inter,    // [PERC_DIM x HIDDEN_DIM]
                                const float* W_flow,     // [HIDDEN_DIM x CA_CHANNELS]
                                const float* W_bmap,     // [CA_CHANNELS x BMAP_DIM]
+                               float alpha,             // residual timestep
                                int n_organisms) {
     int org = blockIdx.x;
     if (org >= n_organisms) return;
     const rd::Coefficients* org_coeffs =
         (coeffs != nullptr) ? &coeffs[org] : nullptr;
     forward_one(&organisms[org], inputs[org], org_coeffs,
-                W_perc, W_inter, W_flow, W_bmap);
+                W_perc, W_inter, W_flow, W_bmap, alpha);
 }
 
 // Effective-weight forward: organism `org` uses the flat weight bank
@@ -319,6 +324,7 @@ __global__ void forward_effective_kernel(OrganismState* organisms,
                                          const float* eff_weights,  // [n_banks * weight_stride]
                                          const int* bank_of,        // [n_organisms] or null (identity)
                                          int weight_stride,
+                                         float alpha,               // residual timestep
                                          int n_organisms) {
     int org = blockIdx.x;
     if (org >= n_organisms) return;
@@ -328,7 +334,8 @@ __global__ void forward_effective_kernel(OrganismState* organisms,
         (coeffs != nullptr) ? &coeffs[org] : nullptr;
     forward_one(&organisms[org], inputs[org], org_coeffs,
                 wbase + genome::DELTA_OFF_PERC, wbase + genome::DELTA_OFF_INTER,
-                wbase + genome::DELTA_OFF_FLOW, wbase + genome::DELTA_OFF_BMAP);
+                wbase + genome::DELTA_OFF_FLOW, wbase + genome::DELTA_OFF_BMAP,
+                alpha);
 }
 
 // Global average pool + W_bmap projection. Produces bmap_t at the requested
@@ -424,13 +431,15 @@ inline void launch_forward(OrganismState* organisms,
                            const float* W_inter,
                            const float* W_flow,
                            const float* W_bmap,
+                           float alpha,
                            int n_organisms,
                            cudaStream_t stream) {
     if (n_organisms <= 0) return;
     dim3 block(16, 16);
     dim3 grid(static_cast<unsigned>(n_organisms));
     forward_kernel<<<grid, block, 0, stream>>>(
-        organisms, inputs, coeffs, W_perc, W_inter, W_flow, W_bmap, n_organisms);
+        organisms, inputs, coeffs, W_perc, W_inter, W_flow, W_bmap,
+        alpha, n_organisms);
 }
 
 // launch_forward_effective: per-organism flat weight banks (W_shared + delta)
@@ -442,6 +451,7 @@ inline void launch_forward_effective(OrganismState* organisms,
                                      const float* eff_weights,
                                      const int* bank_of,
                                      int weight_stride,
+                                     float alpha,
                                      int n_organisms,
                                      cudaStream_t stream) {
     if (n_organisms <= 0) return;
@@ -449,7 +459,7 @@ inline void launch_forward_effective(OrganismState* organisms,
     dim3 grid(static_cast<unsigned>(n_organisms));
     forward_effective_kernel<<<grid, block, 0, stream>>>(
         organisms, inputs, coeffs, eff_weights, bank_of,
-        weight_stride, n_organisms);
+        weight_stride, alpha, n_organisms);
 }
 
 // Extract bmap_64 (the last BTRAJ slot) into a contiguous output array.

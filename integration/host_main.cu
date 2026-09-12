@@ -551,6 +551,7 @@ static bool phase_trace(const char* tag, int gen, cudaStream_t stream) {
 // nonfinite numerical state); run() then aborts the experiment.
 bool step_generation(World* w) {
     int gen = w->generation;
+    const bool log_this_gen = (gen % TELEMETRY_INTERVAL == 0 || gen < 5);
     std::printf("step_generation(%d) begin\n", gen);
     std::fflush(stdout);
 
@@ -600,7 +601,7 @@ bool step_generation(World* w) {
     autodiff::launch_forward_with_checkpoints(
         w->d_organisms, w->d_fwd_inputs, nullptr,
         w->d_weights, w->d_eff_weights, w->d_checkpoints,
-        POOL_SIZE, w->stream);
+        RESIDUAL_ALPHA, POOL_SIZE, w->stream);
     if (!phase_trace("forward", gen, w->stream)) return false;
 
     // ---- GPU: extract_descriptor ----
@@ -673,7 +674,7 @@ bool step_generation(World* w) {
     autodiff::launch_backward_all(
         w->d_organisms, w->d_weights, w->d_eff_weights, w->d_seed_grad,
         w->d_checkpoints, w->d_grads,
-        w->bwd_workspace, POOL_SIZE, w->stream);
+        w->bwd_workspace, RESIDUAL_ALPHA, POOL_SIZE, w->stream);
     if (!phase_trace("backward", gen, w->stream)) return false;
 
     // ---- GPU: aggregate gradients ----
@@ -697,14 +698,21 @@ bool step_generation(World* w) {
 
     // ---- GPU: numerical telemetry (A-501) ----
     // launch_telemetry_kernels zeroes the TelemetryScalars struct first, so
-    // it must be enqueued BEFORE the state-saturation kernel writes its two
-    // fields; stream order preserves the accumulation.
+    // it must be enqueued BEFORE the state-saturation/residual kernels write
+    // their fields; stream order preserves the accumulation.
     optimizer::launch_telemetry_kernels(
         w->d_mean_grad, w->d_weights,
         w->d_came_m, w->d_came_v, w->d_came_c, w->d_came_prev_u,
         w->d_tel, w->stream);
     autodiff::launch_state_saturation(w->d_checkpoints, w->d_organisms,
                                       w->d_tel, POOL_SIZE, w->stream);
+    // The residual-magnitude measurement costs several forward passes worth
+    // of work; run it only on generations that will be logged.
+    if (log_this_gen) {
+        autodiff::launch_residual_magnitude(w->d_checkpoints, w->d_organisms,
+                                            w->d_weights, w->d_eff_weights,
+                                            w->d_tel, POOL_SIZE, w->stream);
+    }
     if (!phase_trace("optimizer", gen, w->stream)) return false;
 
     // ---- Telemetry readback (single small struct D→H) ----
@@ -716,9 +724,15 @@ bool step_generation(World* w) {
     float grad_norm = sqrtf(h_grad_norm_sq);
 
     // Nonfinite numerical state invalidates the run immediately.
-    if (!(w->h_tel->nonfinite_count == 0.f) ||
-        !std::isfinite(grad_norm) ||
-        !std::isfinite(w->h_tel->state_max_abs)) {
+    bool tel_nonfinite = !(w->h_tel->nonfinite_count == 0.f)
+        || !std::isfinite(grad_norm) || !std::isfinite(w->h_tel->state_max_abs);
+    if (log_this_gen) {
+        for (int m = 0; m < 5 && !tel_nonfinite; ++m) {
+            tel_nonfinite = !std::isfinite(w->h_tel->res_ratio_max[m])
+                || !std::isfinite(w->h_tel->res_F_norm2[m]);
+        }
+    }
+    if (tel_nonfinite) {
         std::printf("[FATAL] gen %d: nonfinite numerical state "
                     "(nonfinite_count=%.0f, grad_norm=%.2e, state_max_abs=%.2e) — run invalidated\n",
                     w->generation, w->h_tel->nonfinite_count,
@@ -756,7 +770,7 @@ bool step_generation(World* w) {
     }
 
     // ---- Logging (section 15.8): every TELEMETRY_INTERVAL AND first 5 gens ----
-    if (w->generation % TELEMETRY_INTERVAL == 0 || w->generation < 5) {
+    if (log_this_gen) {
         float sum_fit = 0.f, sum_raw = 0.f;
         int count = 0;
         for (int i = 0; i < POOL_SIZE; ++i) {
@@ -787,6 +801,20 @@ bool step_generation(World* w) {
                     "state_max=%.2e state_near_max=%.0f\n",
                     t.c_mean, t.c_max, t.conf_mean, t.conf_min,
                     t.state_max_abs, t.state_near_max);
+        std::printf("         residual |F| step0/16/32/48/64: [%.2e %.2e %.2e %.2e %.2e]  "
+                    "|x|: [%.2e %.2e %.2e %.2e %.2e]\n",
+                    sqrtf(t.res_F_norm2[0]), sqrtf(t.res_F_norm2[1]),
+                    sqrtf(t.res_F_norm2[2]), sqrtf(t.res_F_norm2[3]),
+                    sqrtf(t.res_F_norm2[4]),
+                    sqrtf(t.res_x_norm2[0]), sqrtf(t.res_x_norm2[1]),
+                    sqrtf(t.res_x_norm2[2]), sqrtf(t.res_x_norm2[3]),
+                    sqrtf(t.res_x_norm2[4]));
+        std::printf("         residual ratio mean: [%.3f %.3f %.3f %.3f %.3f]  "
+                    "max: [%.3f %.3f %.3f %.3f %.3f]\n",
+                    t.res_ratio_mean[0], t.res_ratio_mean[1], t.res_ratio_mean[2],
+                    t.res_ratio_mean[3], t.res_ratio_mean[4],
+                    t.res_ratio_max[0], t.res_ratio_max[1], t.res_ratio_max[2],
+                    t.res_ratio_max[3], t.res_ratio_max[4]);
         std::fflush(stdout);
     }
 
@@ -890,3 +918,4 @@ int main(int argc, char** argv) {
     slime::integration::run(n_gen);
     return 0;
 }
+

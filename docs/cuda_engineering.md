@@ -173,11 +173,15 @@ Steps:
    predictor gets target_bmap_32).
 2. Save checkpoint 0 (initial state after seeding).
 3. For step 1..64:
-   a. `ca_step(curr, next, W_perc, W_inter, W_flow)` — existing, proven.
+   a. `ca_step(curr, next, W_perc, W_inter, W_flow, alpha)` — existing,
+      proven. The residual timestep is x_{t+1} = x_t + alpha*F_theta(x_t)
+      with alpha = RESIDUAL_ALPHA = 1/CA_STEPS (A-201); the re-forward in
+      section 4.2 and the weight-gradient adjoint (dF = alpha*d_state_next)
+      use the same alpha.
    b. `rd_step(curr, next, coeffs)` if coeffs != null.
    c. Swap curr/next pointers.
    d. At steps 16, 32, 48: save checkpoint (index 1, 2, 3).
-   e. At steps 16, 32, 48, 64: `project_bmap` → write to bmap_traj.
+   e. At steps 16, 32, 48, 64: `project_bmap` — write to bmap_traj.
 4. Ensure final state is in `o->grid`.
 
 This kernel reuses `ca_step`, `rd_step`,

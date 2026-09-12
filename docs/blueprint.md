@@ -267,6 +267,17 @@ W+ tests/task_conditioning.cu::check_task_conditioning
 T provisional
 C unobserved
 
+@claim A201.bounded-residual-dynamics empirical
+S under the residual timestep x_{t+1} = x_t + alpha F_theta(x_t) with
+  alpha = 1/CA_STEPS, a default-initialized 64-step forward stays finite
+  and far from FP16 saturation
+M config/constants.cuh::RESIDUAL_ALPHA
+M nca/engine.cu::ca_step
+M autodiff/warp_tape.cu::bwd_reforward_step_kernel
+W+ tests/wave2_evolution.cu::test_residual_dynamics_bounded
+T established
+C observed
+
 
 Grid: 16-channel 64×64. CA steps: 64. The substrate carries perception,
 interaction, flow, bmap-projection, and reaction-diffusion machinery, all

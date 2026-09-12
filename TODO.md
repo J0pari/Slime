@@ -62,15 +62,19 @@ completed or its verification state changes.
   telemetry with nonfinite hard aborts.
 - [ ] Reduce the current 10-generation integration run below the binding
   60-second Wave 2.5 limit, then repeat its acceptance run.
-- [ ] Diagnose and stabilize the training dynamics: telemetry shows the 64-step
-  forward saturates ~50% of FP16 state values at ±65504 with logits ~1e5,
-  mean CE ~69, and per-bank gradient norms ~1e16–1e17 at generation 0. Follow
-  the Gate 3 order: first measure per-timestep distributions of
-  ‖F_θ(x_t)‖, ‖x_t‖, and ‖F_θ(x_t)‖/(‖x_t‖+ε) across the 64 recurrent
-  steps (residual-magnitude telemetry), then decide between initialization
-  scaling and an explicit residual timestep x_{t+1} = x_t + α·F_θ(x_t);
-  gradient clipping / residual scaling / initialization redesign only after
-  the finite-difference suite stays green.
+- [x] Diagnose and stabilize the training dynamics: residual-magnitude
+  telemetry (‖F_θ(x_t)‖, ‖x_t‖, ratio at steps 0/16/32/48/64) showed the
+  unnormalized recurrence had ‖F‖ ≈ ‖x‖ at step 0 (ratio max 1.36), doubling
+  the state per step into FP16 saturation by step 16. Fixed with the explicit
+  residual timestep x_{t+1} = x_t + RESIDUAL_ALPHA·F_θ(x_t),
+  RESIDUAL_ALPHA = 1/CA_STEPS (claim A201.bounded-residual-dynamics, witness
+  passing). Fresh 5-generation run: state_max ~1.4 (was 65504), mean CE
+  decreasing 2.998 → 2.713 (below the random baseline), fitness rising
+  0.0539 → 0.0675, zero saturation. The finite-difference suite validates the
+  alpha-adjoint at alpha=1 (tight per-bank) and production alpha (coarse,
+  catching a missing alpha scaling).
+- [ ] Watch long-run dynamics under the new timestep (50+ generations,
+  PT swap interval) and re-measure the 10-generation timing gate.
 - [ ] Repair archive semantics before Wave 4+: inverse-variance metric update
   and use, exact RFF-mean adjustment on replacement, capacity enforcement on
   PCA rebin, robust PCA initialization, and an archive invariant checker.

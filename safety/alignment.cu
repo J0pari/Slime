@@ -168,7 +168,7 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
 
         nca::launch_forward_effective(d_ref_organisms, d_sot_fwd_inputs, nullptr,
                                       d_eff_weights, d_sot_bank_of, weight_stride,
-                                      n_refs, stream);
+                                      RESIDUAL_ALPHA, n_refs, stream);
 
         nca::extract_descriptor(d_ref_organisms, d_sot_descriptors,
                                 n_refs, stream);
@@ -211,7 +211,7 @@ inline void apply_sot_identity(nca::OrganismState* d_organisms,
 
     nca::launch_forward(d_ref_organisms, d_sot_fwd_inputs, nullptr,
                         d_W_perc, d_W_inter, d_W_flow, d_W_bmap,
-                        n_sot_images, stream);
+                        RESIDUAL_ALPHA, n_sot_images, stream);
 
     nca::extract_descriptor(d_ref_organisms, d_sot_descriptors,
                             n_sot_images, stream);

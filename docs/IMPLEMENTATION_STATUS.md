@@ -8,6 +8,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | A101.sot-schedule-independent | invariant | provisional | ✅ | ❌ | never |
 | A103.checkpoint-replay-equivalence | invariant | established | ✅ | ✅ | pass/current |
 | A103.gradient-correctness | acceptance | established | ✅ | ✅ | pass/current |
+| A201.bounded-residual-dynamics | empirical | established | ✅ | ✅ | pass/current |
 | A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/current |
 | A201.shared-substrate | invariant | provisional | ✅ | ❌ | pass/current |
 | A201.task-conditioning-complete | contract | provisional | ✅ | ✅ | fail |
@@ -30,5 +31,5 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS
 
-Claims: 22 total, 14 established, 8 provisional, 0 planned.
+Claims: 23 total, 15 established, 8 provisional, 0 planned.
 <!-- architecture-status:end -->

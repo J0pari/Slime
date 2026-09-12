@@ -81,7 +81,7 @@ static int check_task_conditioning() {
 
     launch_forward(d_org, d_inputs, nullptr,
                    &d_weights[OFF_PERC], &d_weights[OFF_INTER],
-                   &d_weights[OFF_FLOW], &d_weights[OFF_BMAP], N, 0);
+                   &d_weights[OFF_FLOW], &d_weights[OFF_BMAP], RESIDUAL_ALPHA, N, 0);
     if (cudaDeviceSynchronize() != cudaSuccess) return 1;
     float desc0[BMAP_DIM];
     if (descriptor(desc0)) return 1;
@@ -94,7 +94,7 @@ static int check_task_conditioning() {
 
     launch_forward(d_org, d_inputs, nullptr,
                    &d_weights[OFF_PERC], &d_weights[OFF_INTER],
-                   &d_weights[OFF_FLOW], &d_weights[OFF_BMAP], N, 0);
+                   &d_weights[OFF_FLOW], &d_weights[OFF_BMAP], RESIDUAL_ALPHA, N, 0);
     if (cudaDeviceSynchronize() != cudaSuccess) return 1;
     float desc1[BMAP_DIM];
     if (descriptor(desc1)) return 1;
@@ -130,3 +130,4 @@ int main() {
     }
     return rc;
 }
+

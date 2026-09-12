@@ -90,7 +90,8 @@ int main() {
     in[0].target_bmap_32  = nullptr;
 
     slime::nca::launch_forward(org, in, coeffs,
-                               W_perc, W_inter, W_flow, W_bmap, N, /*stream=*/0);
+                               W_perc, W_inter, W_flow, W_bmap,
+                               RESIDUAL_ALPHA, N, /*stream=*/0);
     cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) { std::printf("FAIL: launch/sync: %s\n", cudaGetErrorString(e)); return 1; }
 

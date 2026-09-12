@@ -113,12 +113,12 @@ static int test_forward_match_and_backward() {
     launch_forward(d_org_fwd, d_inputs, nullptr,
                    &d_weights[OFF_PERC], &d_weights[OFF_INTER],
                    &d_weights[OFF_FLOW], &d_weights[OFF_BMAP],
-                   N, 0);
+                   RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Run forward_with_checkpoints.
     launch_forward_with_checkpoints(d_org_ckpt, d_inputs, nullptr,
-                                    d_weights, nullptr, d_ckpt, N, 0);
+                                    d_weights, nullptr, d_ckpt, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Compare bmap_traj (all 4 samples).
@@ -161,7 +161,7 @@ static int test_forward_match_and_backward() {
     for (int d = 0; d < BMAP_DIM; ++d) h_seed[d] = 0.1f * (d + 1);
     CUDA_CHECK(cudaMemcpy(d_seed_grad, h_seed, sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
 
-    launch_backward_all(d_org_ckpt, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, N, 0);
+    launch_backward_all(d_org_ckpt, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Read gradients back.
@@ -291,7 +291,7 @@ static int test_loss_decreases() {
     for (int iter = 0; iter < ITERS; ++iter) {
         // Forward.
         launch_forward_with_checkpoints(d_org, d_inputs, nullptr,
-                                        d_weights, nullptr, d_ckpt, N, 0);
+                                        d_weights, nullptr, d_ckpt, RESIDUAL_ALPHA, N, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Extract descriptor (bmap_64).
@@ -312,7 +312,7 @@ static int test_loss_decreases() {
         CUDA_CHECK(cudaMemcpy(d_seed_grad, h_seed, sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
 
         // Backward.
-        launch_backward_all(d_org, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, N, 0);
+        launch_backward_all(d_org, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Aggregate + CAME.
@@ -429,3 +429,4 @@ int main() {
     std::printf("WAVE 1: PASS\n");
     return 0;
 }
+

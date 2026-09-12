@@ -83,6 +83,12 @@ struct TelemetryScalars {
     float nonfinite_count;    // nonfinite values across optimizer state
     float state_max_abs;      // max |x| over checkpointed + final FP16 states
     float state_near_max;     // count of state values with |x| > 60000
+    // Residual-magnitude telemetry at measurement steps 0/16/32/48/64
+    // (dynamics diagnosis: does the recurrent residual dominate the state?).
+    float res_F_norm2[5];     // mean over pool of ||F_theta(x_t)||^2
+    float res_x_norm2[5];     // mean over pool of ||x_t||^2
+    float res_ratio_mean[5];  // mean over pool of ||F||/||x||
+    float res_ratio_max[5];   // max over pool of per-cell ||F||/||x||
 };
 
 // ---- Loss functions (host-callable, proven in host tests) ----------------
@@ -148,6 +154,7 @@ __global__ void forward_with_checkpoints_kernel(
     const float* weights,          // [TOTAL_WEIGHTS] shared bank
     const float* eff_weights,      // [n_banks * TOTAL_WEIGHTS] or null
     CheckpointBuffer* checkpoints,
+    float alpha,                   // residual timestep (A-201)
     int n_organisms)
 {
     int org = blockIdx.x;
@@ -188,7 +195,7 @@ __global__ void forward_with_checkpoints_kernel(
     int sample_idx = 0;
 
     for (int step = 1; step <= CA_STEPS; ++step) {
-        nca::ca_step(curr, next, W_perc, W_inter, W_flow);
+        nca::ca_step(curr, next, W_perc, W_inter, W_flow, alpha);
         if (coeffs != nullptr) {
             nca::rd::rd_step(curr, next, coeffs[org]);
         }
@@ -354,6 +361,7 @@ __global__ void bwd_reforward_step_kernel(
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
     const __half* recomp_curr, // [n_org * GRID_ELEMS]
     __half* recomp_next,       // [n_org * GRID_ELEMS]
+    float alpha,               // residual timestep (must mirror the forward)
     int n_organisms)
 {
     int org = blockIdx.x;
@@ -392,7 +400,8 @@ __global__ void bwd_reforward_step_kernel(
                 acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
             }
             float prev = __half2float(rc[cell * CA_CHANNELS + c]);
-            float nxt = prev + acc;
+            // Residual timestep must mirror the forward (A-201).
+            float nxt = prev + alpha * acc;
             if (nxt >  65504.f) nxt =  65504.f;
             if (nxt < -65504.f) nxt = -65504.f;
             rn[cell * CA_CHANNELS + c] = __float2half(nxt);
@@ -401,7 +410,8 @@ __global__ void bwd_reforward_step_kernel(
 }
 
 // Sub-kernel 6 (Phase A): Weight gradient accumulation + d_perc computation.
-// eff_weights (nullable) selects each organism's own weight bank.
+// eff_weights (nullable) selects each organism's own weight bank. alpha is
+// the residual timestep: x_{t+1} = x_t + alpha*F(x_t), so dF = alpha*d_state.
 __global__ void bwd_weight_grad_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
@@ -409,6 +419,7 @@ __global__ void bwd_weight_grad_kernel(
     const float* d_state_A,    // [n_org * GRID_ELEMS] — d_state_next
     GradBuffers* grads,
     float* d_perc_buf,         // [n_org * PERC_ELEMS]
+    float alpha,               // residual timestep
     int n_organisms)
 {
     int org = blockIdx.x;
@@ -445,7 +456,9 @@ __global__ void bwd_weight_grad_kernel(
 
         float d_state[CA_CHANNELS];
         for (int c = 0; c < CA_CHANNELS; ++c) {
-            d_state[c] = dA[cell * CA_CHANNELS + c];
+            // x_{t+1} = x_t + alpha * F(x_t)  =>  dF = alpha * d_state_next.
+            // Every weight gradient and d_perc below derives from dF.
+            d_state[c] = alpha * dA[cell * CA_CHANNELS + c];
         }
 
         // dW_flow
@@ -657,6 +670,108 @@ __global__ void state_saturation_kernel(
     }
 }
 
+// ---- residual_magnitude_kernel ------------------------------------------
+// Dynamics diagnosis: at the checkpointed measurement steps (0/16/32/48) and
+// the final state (step 64), measure ||F_theta(x_t)||, ||x_t||, and the
+// per-cell ratio ||F||/||x|| for the residual recurrence
+// x_{t+1} = x_t + F_theta(x_t). Uses each organism's effective weight bank
+// so the measurement reflects the executed dynamics. Grid: <<<n_organisms,
+// 256>>>. Accumulates pool means/maxes into TelemetryScalars.
+__global__ void residual_magnitude_kernel(
+    const CheckpointBuffer* checkpoints,
+    const OrganismState* organisms,
+    const float* weights,          // shared bank
+    const float* eff_weights,      // [n_banks * TOTAL_WEIGHTS] or null
+    TelemetryScalars* out,
+    int n_organisms)
+{
+    int org = blockIdx.x;
+    if (org >= n_organisms) return;
+    const float* wbase = (eff_weights != nullptr)
+        ? &eff_weights[static_cast<size_t>(org) * TOTAL_WEIGHTS] : weights;
+    const float* W_perc = wbase + OFF_PERC;
+    const float* W_inter = wbase + OFF_INTER;
+    const float* W_flow = wbase + OFF_FLOW;
+
+    const __half* states[5] = {
+        checkpoints[org].data[0],
+        checkpoints[org].data[1],
+        checkpoints[org].data[2],
+        checkpoints[org].data[3],
+        organisms[org].grid,
+    };
+
+    __shared__ float s_F[256];
+    __shared__ float s_x[256];
+    __shared__ float s_ratio_max[256];
+    int tid = threadIdx.x;
+
+    for (int m = 0; m < 5; ++m) {
+        const __half* st = states[m];
+        float F2 = 0.f, x2 = 0.f, ratio_max = 0.f;
+        for (int cell = tid; cell < CELLS; cell += blockDim.x) {
+            int y, x;
+            cell_yx(cell, y, x);
+
+            float perc[PERC_DIM];
+            nca::sample_neighborhood(st, W_perc, y, x, perc);
+
+            float hidden[HIDDEN_DIM];
+            #pragma unroll
+            for (int h = 0; h < HIDDEN_DIM; ++h) {
+                float acc = 0.f;
+                for (int p = 0; p < PERC_DIM; ++p) {
+                    acc += W_inter[p * HIDDEN_DIM + h] * perc[p];
+                }
+                hidden[h] = nca::gelu_approx(acc);
+            }
+
+            float cell_F2 = 0.f, cell_x2 = 0.f;
+            #pragma unroll
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                float acc = 0.f;
+                for (int h = 0; h < HIDDEN_DIM; ++h) {
+                    acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
+                }
+                cell_F2 += acc * acc;
+                float v = __half2float(st[cell * CA_CHANNELS + c]);
+                cell_x2 += v * v;
+            }
+            F2 += cell_F2;
+            x2 += cell_x2;
+            float cell_ratio = sqrtf(cell_F2) / (sqrtf(cell_x2) + 1e-12f);
+            ratio_max = fmaxf(ratio_max, cell_ratio);
+        }
+
+        s_F[tid] = F2;
+        s_x[tid] = x2;
+        s_ratio_max[tid] = ratio_max;
+        __syncthreads();
+
+        for (int s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                s_F[tid] += s_F[tid + s];
+                s_x[tid] += s_x[tid + s];
+                s_ratio_max[tid] = fmaxf(s_ratio_max[tid], s_ratio_max[tid + s]);
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            float Fn = sqrtf(s_F[0]);
+            float xn = sqrtf(s_x[0]);
+            float ratio = Fn / (xn + 1e-12f);
+            float inv_n = 1.0f / static_cast<float>(n_organisms);
+            atomicAdd(&out->res_F_norm2[m], Fn * Fn * inv_n);
+            atomicAdd(&out->res_x_norm2[m], xn * xn * inv_n);
+            atomicAdd(&out->res_ratio_mean[m], ratio * inv_n);
+            atomicMax(reinterpret_cast<int*>(&out->res_ratio_max[m]),
+                      __float_as_int(s_ratio_max[0]));
+        }
+        __syncthreads();
+    }
+}
+
 // ---- Host API -----------------------------------------------------------
 
 inline void allocate_checkpoints(CheckpointBuffer** d_ckpt, int n_organisms) {
@@ -699,6 +814,7 @@ inline void launch_forward_with_checkpoints(
     const float* d_weights,
     const float* d_eff_weights,      // [n_banks * TOTAL_WEIGHTS] or null
     CheckpointBuffer* d_checkpoints,
+    float alpha,
     int n_organisms,
     cudaStream_t stream)
 {
@@ -708,7 +824,7 @@ inline void launch_forward_with_checkpoints(
     forward_with_checkpoints_kernel<<<grid, block, 0, stream>>>(
         d_organisms, d_fwd_inputs, d_coeffs,
         d_weights, d_eff_weights,
-        d_checkpoints, n_organisms);
+        d_checkpoints, alpha, n_organisms);
 }
 
 inline void launch_materialize_effective_weights(
@@ -735,6 +851,21 @@ inline void launch_state_saturation(
         d_checkpoints, d_organisms, d_tel, n_organisms);
 }
 
+inline void launch_residual_magnitude(
+    const CheckpointBuffer* d_checkpoints,
+    const OrganismState* d_organisms,
+    const float* d_weights,
+    const float* d_eff_weights,
+    TelemetryScalars* d_tel,
+    int n_organisms,
+    cudaStream_t stream)
+{
+    if (n_organisms <= 0) return;
+    residual_magnitude_kernel<<<n_organisms, 256, 0, stream>>>(
+        d_checkpoints, d_organisms, d_weights, d_eff_weights,
+        d_tel, n_organisms);
+}
+
 inline void launch_backward_all(
     OrganismState* d_organisms,
     const float* d_weights,
@@ -743,6 +874,7 @@ inline void launch_backward_all(
     CheckpointBuffer* d_checkpoints,
     GradBuffers* d_grads,
     BackwardWorkspace& ws,
+    float alpha,                     // residual timestep (mirrors the forward)
     int n_organisms,
     cudaStream_t stream)
 {
@@ -779,14 +911,15 @@ inline void launch_backward_all(
             // Re-forward (local_step - 1) steps.
             for (int fwd = 0; fwd < local_step - 1; ++fwd) {
                 bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                    d_weights, d_eff_weights, rc, rn, N);
+                    d_weights, d_eff_weights, rc, rn, alpha, N);
                 // Swap curr/next.
                 __half* tmp = rc; rc = rn; rn = tmp;
             }
 
             // Phase A: weight grads + d_perc.
             bwd_weight_grad_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                d_weights, d_eff_weights, rc, dA, d_grads, ws.d_perc, N);
+                d_weights, d_eff_weights, rc, dA, d_grads, ws.d_perc,
+                alpha, N);
 
             // Phase B: stencil gather.
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(

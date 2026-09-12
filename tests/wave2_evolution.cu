@@ -202,14 +202,14 @@ static int test_genotype_causality() {
     if (upload_delta(&r, empty)) return 1;
     launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                     r.d_weights, r.d_eff_weights,
-                                    r.d_ckpt, 1, 0);
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     float desc_eff_empty[BMAP_DIM];
     if (read_descriptor(&r, desc_eff_empty)) return 1;
 
     launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                     r.d_weights, nullptr,
-                                    r.d_ckpt, 1, 0);
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     float desc_shared[BMAP_DIM];
     if (read_descriptor(&r, desc_shared)) return 1;
@@ -226,13 +226,13 @@ static int test_genotype_causality() {
     CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed,
         sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
     launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
-                        r.d_ckpt, r.d_grads, r.ws, 1, 0);
+                        r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g_eff;
     CUDA_CHECK(cudaMemcpy(&g_eff, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
 
     launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
-                        r.d_ckpt, r.d_grads, r.ws, 1, 0);
+                        r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g_shared;
     CUDA_CHECK(cudaMemcpy(&g_shared, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
@@ -275,7 +275,7 @@ static int test_genotype_causality() {
     if (upload_delta(&r, dA)) return 1;
     launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                     r.d_weights, r.d_eff_weights,
-                                    r.d_ckpt, 1, 0);
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     float descA[BMAP_DIM];
     if (read_descriptor(&r, descA)) return 1;
@@ -283,7 +283,7 @@ static int test_genotype_causality() {
     if (upload_delta(&r, dB)) return 1;
     launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                     r.d_weights, r.d_eff_weights,
-                                    r.d_ckpt, 1, 0);
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     float descB[BMAP_DIM];
     if (read_descriptor(&r, descB)) return 1;
@@ -302,7 +302,7 @@ static int test_genotype_causality() {
     if (upload_delta(&r, dA)) return 1;
     launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                     r.d_weights, r.d_eff_weights,
-                                    r.d_ckpt, 1, 0);
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     float descA2[BMAP_DIM];
     if (read_descriptor(&r, descA2)) return 1;
@@ -574,7 +574,7 @@ static int test_pt_swap_backward_correspondence() {
     CUDA_CHECK(cudaMemcpy(d_inputs, h_inputs, sizeof(h_inputs), cudaMemcpyHostToDevice));
 
     launch_forward_with_checkpoints(d_org, d_inputs, nullptr,
-                                    d_weights, d_eff, d_ckpt, N, 0);
+                                    d_weights, d_eff, d_ckpt, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Distinct seed gradients per organism.
@@ -587,7 +587,7 @@ static int test_pt_swap_backward_correspondence() {
 
     // Pre-swap backward: gradients of logical organisms 0 and 1 in place.
     launch_backward_all(d_org, d_weights, d_eff, d_seed,
-                        d_ckpt, d_grads, ws, N, 0);
+                        d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_pre[2];
     CUDA_CHECK(cudaMemcpy(h_pre, d_grads, sizeof(h_pre), cudaMemcpyDeviceToHost));
@@ -642,7 +642,7 @@ static int test_pt_swap_backward_correspondence() {
 
     // Post-swap backward.
     launch_backward_all(d_org, d_weights, d_eff, d_seed,
-                        d_ckpt, d_grads, ws, N, 0);
+                        d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_post[2];
     CUDA_CHECK(cudaMemcpy(h_post, d_grads, sizeof(h_post), cudaMemcpyDeviceToHost));
@@ -674,7 +674,7 @@ static int test_pt_swap_backward_correspondence() {
     launch_materialize_effective_weights(d_weights, d_deltas, d_eff, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     launch_backward_all(d_org, d_weights, d_eff, d_seed,
-                        d_ckpt, d_grads, ws, N, 0);
+                        d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_buggy[2];
     CUDA_CHECK(cudaMemcpy(h_buggy, d_grads, sizeof(h_buggy), cudaMemcpyDeviceToHost));
@@ -687,7 +687,10 @@ static int test_pt_swap_backward_correspondence() {
     }
     std::printf("  sensitivity: stale-bank backward diverges by %.3e (scale %.3e)\n",
                 buggy_diff, scale);
-    CHECK(buggy_diff > 1e-2f * (1.f + scale),
+    // With the residual timestep the stale-bank divergence scales by alpha,
+    // but it must still sit far above the match tolerance (1e-4) — the two
+    // measured regimes are separated by ~5 orders of magnitude.
+    CHECK(buggy_diff > 1e-3f * (1.f + scale),
           "missing bank swap is detected (sensitivity)");
 
     free(h_weights);
@@ -712,23 +715,25 @@ static int test_pt_swap_backward_correspondence() {
 }
 
 // ---- Test 4: directional finite difference --------------------------------
-static int test_finite_difference_gradient() {
-    // [claim:A103.gradient-correctness]
-    std::printf("--- Test: analytic gradient agrees with finite differences ---\n");
-    std::fflush(stdout);
-
-    Rig r{};
-    if (rig_init(&r)) return 1;
-
+// The directional finite-difference comparison runs at TWO residual
+// timesteps:
+//   alpha = 1.0 — the adjoint structure is identical for any alpha, and at
+//                 alpha = 1 the loss sensitivity is large enough for tight
+//                 per-bank assertions (the discriminating regime).
+//   alpha = RESIDUAL_ALPHA (production) — the recurrent weights' true
+//                 derivative is small here and FP16 forward quantization
+//                 noise limits achievable agreement; the all-direction check
+//                 still catches a missing alpha scaling (~64x mismatch) at a
+//                 coarse tolerance.
+static int fd_run(Rig& r, float alpha, float eps, bool assert_banks) {
     const int target_class = 2;
-    const float eps = 0.05f;
 
     auto forward_and_loss = [&](const float* w, float* loss_out, float* desc_out) {
         CUDA_CHECK(cudaMemcpy(r.d_weights, w, sizeof(float) * TOTAL_WEIGHTS,
                               cudaMemcpyHostToDevice));
         launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                         r.d_weights, nullptr,
-                                        r.d_ckpt, 1, 0);
+                                        r.d_ckpt, alpha, 1, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
         if (read_descriptor(&r, desc_out)) return 1;
         float dlogits[NUM_CLASSES];
@@ -752,7 +757,7 @@ static int test_finite_difference_gradient() {
     CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed,
         sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
     launch_backward_all(r.d_org, r.d_weights, nullptr, r.d_seed_grad,
-                        r.d_ckpt, r.d_grads, r.ws, 1, 0);
+                        r.d_ckpt, r.d_grads, r.ws, alpha, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g;
     CUDA_CHECK(cudaMemcpy(&g, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
@@ -760,13 +765,9 @@ static int test_finite_difference_gradient() {
     const int bank_lo[4] = { OFF_PERC, OFF_INTER, OFF_FLOW, OFF_BMAP };
     const int bank_hi[4] = { OFF_INTER, OFF_FLOW, OFF_BMAP, TOTAL_WEIGHTS };
     const char* bank_name[4] = { "W_perc", "W_inter", "W_flow", "W_bmap" };
-    // Per-bank tolerances. W_perc/W_bmap are near-exact; W_inter/W_flow sit
-    // behind the 64-step FP16-quantized recurrent chain, whose finite-
-    // difference noise dominates (observed ~6-9%). The per-bank assertion
-    // exists so a sign flip or an isolated bank bug cannot hide inside the
-    // combined all-weights direction.
     const float bank_tol[4] = { 5e-2f, 0.20f, 0.20f, 5e-3f };
     float bank_rel_err[4] = {};
+    int rc = 0;
 
     for (int bank = 0; bank < 4; ++bank) {
         float v[TOTAL_WEIGHTS] = {};
@@ -801,11 +802,13 @@ static int test_finite_difference_gradient() {
         std::printf("  %-8s d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
                     bank_name[bank], d_analytic, d_numeric, rel_err);
     }
-    for (int bank = 0; bank < 4; ++bank) {
-        CHECK(bank_rel_err[bank] < bank_tol[bank],
-              bank_name[bank]);
+    if (assert_banks) {
+        for (int bank = 0; bank < 4; ++bank) {
+            CHECK(bank_rel_err[bank] < bank_tol[bank], bank_name[bank]);
+        }
     }
 
+    // All-weights direction.
     {
         float v[TOTAL_WEIGHTS];
         uint32_t s = 0x1234ABCDu;
@@ -838,12 +841,13 @@ static int test_finite_difference_gradient() {
         std::printf("  %-8s d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
                     "all", d_analytic, d_numeric, rel_err);
         CHECK(std::fabs(d_numeric) > 1e-9f, "finite-difference direction is informative");
-        CHECK(rel_err < 5e-2f, "analytic directional derivative matches central difference");
+        CHECK(rel_err < (assert_banks ? 5e-2f : 0.5f),
+              assert_banks
+                  ? "analytic directional derivative matches central difference"
+                  : "production-alpha directional derivative agrees (coarse)");
     }
 
-    // Effective-bank case: the production loop runs forward and backward with
-    // W_eff = W_shared + delta, so the analytic gradient must agree with
-    // finite differences along the SAME path, not only the shared path above.
+    // Effective-bank case (production path W_eff = W_shared + delta).
     {
         DeltaWeights delta;
         std::memset(&delta, 0, sizeof(delta));
@@ -857,7 +861,7 @@ static int test_finite_difference_gradient() {
             if (upload_delta(&r, delta)) return 1;
             launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
                                             r.d_weights, r.d_eff_weights,
-                                            r.d_ckpt, 1, 0);
+                                            r.d_ckpt, alpha, 1, 0);
             CUDA_CHECK(cudaDeviceSynchronize());
             if (read_descriptor(&r, desc_out)) return 1;
             float dlogits[NUM_CLASSES];
@@ -879,7 +883,7 @@ static int test_finite_difference_gradient() {
         CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed_e,
             sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
         launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
-                            r.d_ckpt, r.d_grads, r.ws, 1, 0);
+                            r.d_ckpt, r.d_grads, r.ws, alpha, 1, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
         GradBuffers ge;
         CUDA_CHECK(cudaMemcpy(&ge, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
@@ -913,10 +917,64 @@ static int test_finite_difference_gradient() {
                         / std::fmax(std::fabs(d_numeric_e), 1e-12f);
         std::printf("  eff-bank d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
                     d_analytic_e, d_numeric_e, rel_err_e);
-        CHECK(rel_err_e < 5e-2f,
-              "effective-bank analytic directional derivative matches central difference");
+        CHECK(rel_err_e < (assert_banks ? 5e-2f : 0.5f),
+              assert_banks
+                  ? "effective-bank analytic directional derivative matches central difference"
+                  : "effective-bank production-alpha derivative agrees (coarse)");
     }
+    return rc;
+}
 
+static int test_finite_difference_gradient() {
+    // [claim:A103.gradient-correctness]
+    std::printf("--- Test: analytic gradient agrees with finite differences ---\n");
+    std::fflush(stdout);
+
+    Rig r{};
+    if (rig_init(&r)) return 1;
+
+    std::printf("  [alpha = 1.0, discriminating regime]\n");
+    std::fflush(stdout);
+    if (fd_run(r, 1.0f, 0.05f, true)) return 1;
+
+    std::printf("  [alpha = RESIDUAL_ALPHA (production), noise-limited regime]\n");
+    std::fflush(stdout);
+    if (fd_run(r, RESIDUAL_ALPHA, 0.05f, false)) return 1;
+
+    rig_free(&r);
+    return 0;
+}
+
+// ---- Test 5: residual dynamics bounded under RESIDUAL_ALPHA ----------------
+static int test_residual_dynamics_bounded() {
+    // [claim:A201.bounded-residual-dynamics]
+    std::printf("--- Test: default-init forward stays far from FP16 saturation ---\n");
+    std::fflush(stdout);
+
+    Rig r{};
+    if (rig_init(&r)) return 1;
+
+    launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                    r.d_weights, nullptr,
+                                    r.d_ckpt, RESIDUAL_ALPHA, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    TelemetryScalars* d_tel = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_tel, sizeof(TelemetryScalars)));
+    CUDA_CHECK(cudaMemset(d_tel, 0, sizeof(TelemetryScalars)));
+    launch_state_saturation(r.d_ckpt, r.d_org, d_tel, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    TelemetryScalars h_tel;
+    CUDA_CHECK(cudaMemcpy(&h_tel, d_tel, sizeof(TelemetryScalars),
+                          cudaMemcpyDeviceToHost));
+    std::printf("  state_max_abs=%.3e state_near_max=%.0f\n",
+                h_tel.state_max_abs, h_tel.state_near_max);
+    CHECK(h_tel.state_max_abs < 60000.f,
+          "64-step forward stays far from FP16 saturation");
+    CHECK(h_tel.state_near_max == 0.f,
+          "no state value approaches the FP16 limit");
+
+    cudaFree(d_tel);
     rig_free(&r);
     return 0;
 }
@@ -932,6 +990,7 @@ int main() {
     rc |= test_forced_pt_swap();
     rc |= test_pt_swap_backward_correspondence();
     rc |= test_finite_difference_gradient();
+    rc |= test_residual_dynamics_bounded();
 
     std::printf("\n========================================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);
@@ -942,6 +1001,7 @@ int main() {
     std::printf("WAVE2 REGRESSION: PASS\n");
     return 0;
 }
+
 
 
 

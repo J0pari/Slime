@@ -7,6 +7,19 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Residual-magnitude telemetry (‖F_θ(x_t)‖, ‖x_t‖, per-cell
+  ratio at steps 0/16/32/48/64) diagnosed the FP16 saturation: at step 0 the
+  residual was already ~0.94× the state norm (per-cell max 1.36), so the
+  unnormalized recurrence doubled the state per step and hit the clamp by
+  step 16 (74 → 4.5e5 → 1.6e7). Fixed with the explicit residual timestep
+  x_{t+1} = x_t + α·F_θ(x_t), α = 1/CA_STEPS, mirrored in the checkpoint
+  re-forward and the weight-gradient adjoint (dF = α·d_state_next). The
+  finite-difference suite now validates the adjoint at α=1 (tight per-bank
+  assertions) and at production α (coarse; still catches a missing α
+  scaling, ~64x mismatch). Fresh 5-generation run: state_max ~1.4, CE
+  decreasing 2.998→2.713, fitness rising, zero saturation. The residual
+  measurement kernel is gated to logging generations (it costs several
+  forward passes of work).
 - 2026-09-12: External review found the PT swap still left per-organism
   effective-weight banks behind: backward would reconstruct a moved
   trajectory with the stale slot's phenotype. Fixed by swapping the banks

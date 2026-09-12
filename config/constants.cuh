@@ -86,6 +86,13 @@ constexpr int W_PERC_SIZE      = N_PERC_FILTERS * 9;            // 27
 // 0-5: cells produce/consume morphogens). Reaction-diffusion (A-202) then adds
 // spatial diffusion + decay to channels 0-5 on top of that cellwise update.
 
+// Residual timestep (A-201): x_{t+1} = x_t + RESIDUAL_ALPHA * F_theta(x_t).
+// Measured residual telemetry showed ||F|| ~ ||x|| at step 0 for default
+// initialization, so an unnormalized recurrence saturates FP16 within ~16
+// steps. alpha = 1/CA_STEPS keeps the total displacement across a rollout at
+// the order of one state magnitude.
+constexpr float RESIDUAL_ALPHA = 1.0f / static_cast<float>(CA_STEPS);
+
 // BTRAJ sample steps (A-201).
 constexpr int BTRAJ_SAMPLES    = 4;
 constexpr int BTRAJ_STEPS[BTRAJ_SAMPLES] = { 16, 32, 48, 64 };
