@@ -265,10 +265,11 @@ S every task embedding dimension the configuration advertises reaches the
   fixed changes the executed output
 M curriculum/problem_generator.cu::assemble_classifier_batch
 M nca/engine.cu::seed_classifier_grid
+M nca/engine.cu::task_channel_value
 M integration/host_main.cu::step_generation
 W+ tests/task_conditioning.cu::check_task_conditioning
-T provisional
-C unobserved
+T established
+C observed
 
 @claim A201.bounded-residual-dynamics empirical
 S under the residual timestep x_{t+1} = x_t + alpha F_theta(x_t) with

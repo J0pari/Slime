@@ -7,6 +7,13 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: The task-conditioning defect is fixed with an explicit FIXED
+  16→5 projection: TASK_PROJ (the first five rows of the 16-point DCT-II)
+  folds every task embedding dimension into channels 6..10 at seeding, so no
+  advertised dimension is inert. The failing witness now passes (perturbing
+  task dim 12 shifts the descriptor by 2.5e-2). A learnable W_task bank
+  remains a future architecture decision rather than a silent omission.
+  With this, all 24 claims carry current passing evidence.
 - 2026-09-12: Operator commands are durable now. Parsing lives in the pure
   `safety/operator_cmds.cuh`; the run loop owns `OperatorState` and applies
   pause gating (no generation steps while paused) and durable prunes

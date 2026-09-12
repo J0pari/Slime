@@ -32,10 +32,12 @@ completed or its verification state changes.
 - [x] Evidence is now witness-attributed (`claim=witness:result`) and
   staleness includes a per-claim proposition hash; the status surface renders
   source-gate WARN states.
-- [ ] Implement the 16→5 task-embedding projection (or another explicit
-  conditioning path): `A201.task-conditioning-complete` is red with a failing
-  witness (`tests/task_conditioning.cu`) because task dims 5..15 do not reach
-  the NCA.
+- [x] Implement the explicit 16→5 task-embedding projection: a FIXED DCT-II
+  mixing matrix (TASK_PROJ in config/constants.cuh) folds all 16 task
+  dimensions into channels 6..10 at seeding; `A201.task-conditioning-complete`
+  is established — the witness (perturb task dim 12 → output must change)
+  now passes with a 2.5e-2 descriptor shift. A learnable W_task bank remains
+  a future architecture decision.
 - [ ] Shrink the `checked_cuda_calls` allowlist: convert
   `launch_grad_norm_reduce` / `launch_telemetry_kernels` / `propose_swaps` /
   `apply_sot_identity` to checked wrappers so `--strict` passes.
@@ -55,12 +57,14 @@ completed or its verification state changes.
   `I001.replay-evaluation-identity` (replay-before-spawn source gate with a
   planted-violation test), `A101.sot-schedule-independent`
   (schedule-host-only source gate + batch determinism host test). All three
-  established with passing evidence; only `A201.task-conditioning-complete`
-  remains red.
-- [ ] Implement the 16→5 task-embedding projection (or another explicit
-  conditioning path): `A201.task-conditioning-complete` is red with a failing
-  witness (`tests/task_conditioning.cu`) because task dims 5..15 do not reach
-  the NCA.
+  established with passing evidence; `A201.task-conditioning-complete` now
+  passes after the fixed DCT-II 16→5 projection (see below).
+- [x] Implement the explicit 16→5 task-embedding projection: a FIXED DCT-II
+  mixing matrix (TASK_PROJ in config/constants.cuh) folds all 16 task
+  dimensions into channels 6..10 at seeding; `A201.task-conditioning-complete`
+  is established — the witness (perturb task dim 12 → output must change)
+  now passes with a 2.5e-2 descriptor shift. A learnable W_task bank remains
+  a future architecture decision.
 
 ## P0 — Restore a trustworthy baseline
 

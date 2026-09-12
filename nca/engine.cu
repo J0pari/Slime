@@ -53,6 +53,25 @@ __device__ inline void project_bmap(const __half* state,
                                     const float* W_bmap,
                                     float* bmap_out_32);
 
+// Fixed task-embedding projection (A-201): channel `ch` (0..4) of the task
+// field carries the DCT row `ch` of the 16-d embedding. Every embedding
+// dimension contributes to every task channel, so no advertised task
+// dimension is inert in the forward.
+__host__ __device__ inline float task_channel_value(const float* task_embedding,
+                                                    int ch) {
+    float acc = 0.f;
+#ifdef __CUDA_ARCH__
+    const float* row = d_TASK_PROJ[ch];
+#else
+    const float* row = TASK_PROJ[ch];
+#endif
+    #pragma unroll
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) {
+        acc += row[d] * task_embedding[d];
+    }
+    return acc;
+}
+
 // ---- Role-switched grid initialization -----------------------------------
 // A-201: classifier seeds channels 11-13 (image), 6-10 (task), zero elsewhere.
 // Predictor seeds channels 14-15 in a centered 4x4 region with bmap_32
@@ -68,13 +87,13 @@ __device__ inline void seed_classifier_grid(__half* grid,
                 grid[grid_idx(y, x, c)] = __float2half(0.f);
             for (int c = CH_AUX_FIRST; c <= CH_AUX_LAST; ++c)
                 grid[grid_idx(y, x, c)] = __float2half(0.f);
-            // Task embedding broadcast spatially. TASK_EMBED_DIM = 16,
-            // channels 6..10 carry the first 5 dims; remaining task dims fold
-            // into a small dot-product mixing applied during ca_step.
+            // Task embedding broadcast spatially through the fixed 16->5
+            // projection (A-201): channels 6..10 carry TASK_PROJ * e.
             #pragma unroll
             for (int c = CH_TASK_FIRST; c <= CH_TASK_LAST; ++c) {
                 int t_idx = c - CH_TASK_FIRST;
-                grid[grid_idx(y, x, c)] = __float2half(task_embedding[t_idx]);
+                grid[grid_idx(y, x, c)] =
+                    __float2half(task_channel_value(task_embedding, t_idx));
             }
             // Image into channels 11..13.
             int pix = (y * GRID_SIZE + x) * 3;
@@ -94,11 +113,12 @@ __device__ inline void seed_predictor_grid(__half* grid,
             for (int c = 0; c < CA_CHANNELS; ++c) {
                 grid[grid_idx(y, x, c)] = __float2half(0.f);
             }
-            // Task embedding broadcast on chans 6..10 (same as classifier).
+            // Task embedding broadcast on chans 6..10 (same fixed projection).
             #pragma unroll
             for (int c = CH_TASK_FIRST; c <= CH_TASK_LAST; ++c) {
                 int t_idx = c - CH_TASK_FIRST;
-                grid[grid_idx(y, x, c)] = __float2half(task_embedding[t_idx]);
+                grid[grid_idx(y, x, c)] =
+                    __float2half(task_channel_value(task_embedding, t_idx));
             }
         }
     }

@@ -11,7 +11,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | A201.bounded-residual-dynamics | empirical | established | ✅ | ✅ | pass/current |
 | A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/current |
 | A201.shared-substrate | invariant | provisional | ✅ | ❌ | pass/current |
-| A201.task-conditioning-complete | contract | provisional | ✅ | ✅ | fail |
+| A201.task-conditioning-complete | contract | established | ✅ | ✅ | pass/current |
 | A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/current |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/current |
 | A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/current |
@@ -32,5 +32,5 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS
 
-Claims: 24 total, 21 established, 3 provisional, 0 planned.
+Claims: 24 total, 22 established, 2 provisional, 0 planned.
 <!-- architecture-status:end -->

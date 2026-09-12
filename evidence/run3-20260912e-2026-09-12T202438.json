@@ -1,6 +1,6 @@
 {
-  "binary": "none",
-  "binarySha256": "",
+  "binary": "build/coevo.exe",
+  "binarySha256": "cab327068c17b477a3af626bd2ac61d88b46344eb64223b0736224de7732a358",
   "claimHashes": {
     "A101.sot-schedule-independent": "8ead548dd109e7bd06f50129e8681e5d84f4797829c637e3fc74677e97dcdbce",
     "A103.checkpoint-replay-equivalence": "5c693f0ab209338acba64acd488663550c950c48aaa9b580f8beb331307f07fc",
@@ -8,7 +8,7 @@
     "A201.bounded-residual-dynamics": "945ade1a981c85ad6aaa602c50200bb1e674ca75577acfb96929884ae2b95004",
     "A201.role-canonicalization": "6060315935f1a35fd538daf3b6eeceecb66f71995f3c2fbc74075530292ad159",
     "A201.shared-substrate": "56a93e39fe23fcacd293609b41ddb19060a30ec53197c09ca24199ded0050221",
-    "A201.task-conditioning-complete": "09335437522e9f0a3a40f52d83d6384703bfc7057cce516269469b3f7a36705a",
+    "A201.task-conditioning-complete": "2b67c2027d10e5d87746c15653f71e1b1c91f3bb0656146b6e977cb803cc7643",
     "A202.rd-disabled-until-adjoint": "07558226013abd8a11cb3a46041ac30bc0da2874ae044d77de3927dde4eb6ef9",
     "A301.genotype-causes-phenotype": "9b8026577ddeab269f232502c91402ce9fb1dfd53d1188dc7790901b1c998ecb",
     "A401.archive-genotype-attribution": "bcaf76a6d7bed529addabc72a6242a55c644acd6529ea742468599f749e1c89b",
@@ -28,46 +28,22 @@
     "S004.pt-swap-transaction": "920c4a779c91429011f578cf868f6228e2f7076fade69b640e2dc176fccb3ade"
   },
   "claims": {
-    "A101.sot-schedule-independent": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_schedule_host_only_catches_plant"
-    },
-    "A202.rd-disabled-until-adjoint": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_rd_disabled_catches_nonnull"
-    },
-    "C001.acceptance-evidence-current": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_stale_evidence_detected"
-    },
-    "G100.single-prng": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_no_ambient_rng_catches_plant"
-    },
     "I001.phase-order": {
       "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_phase_model_rejects_seed_before_pt"
+      "witness": "build/coevo.exe"
     },
     "I001.replay-evaluation-identity": {
       "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_replay_before_spawn_catches_plant"
+      "witness": "build/coevo.exe"
     },
     "S001.cuda-errors-fatal": {
       "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_checked_cuda_calls_catches_plant"
-    },
-    "S002.host-authority": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_host_authority_catches_plant"
-    },
-    "S002.operator-command-effective": {
-      "result": "pass",
-      "witness": "tests/architecture/test_architecture.py::test_gate_operator_polling_catches_plant"
+      "witness": "build/coevo.exe"
     }
   },
-  "cuda": "n/a",
-  "generatedAt": "2026-09-12T19:57:57.513766+00:00",
-  "gpu": "host-only",
+  "cuda": "13.0.48",
+  "generatedAt": "2026-09-12T20:24:38.381149+00:00",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
   "machineContract": {
     "cudaMajor": 13,
     "cudaMinor": 0,
@@ -84,10 +60,10 @@
     "A101.sot-schedule-independent": "cb2933eec6f10adb18a8f4abb9eb01368a194c027adeb3a213acdad78568df67",
     "A103.checkpoint-replay-equivalence": "5b182ac9c44aac329108e0c74fd6aaad16a2acce7641c0b98c62f872d0c4a39e",
     "A103.gradient-correctness": "63144af5a7690ca5d3b4c7bdeb553f342cf097d305abaa6c2f4028730902ca95",
-    "A201.bounded-residual-dynamics": "fdc6cf1bc0317f823e35d0817bdedf7efeff834c51cb22ef9850d2952a4af105",
-    "A201.role-canonicalization": "0c2a710ea02d9db56e0138f0c40c7221c4e0d93e0c58bf81fbc67103fddcdfad",
-    "A201.shared-substrate": "30828bced5929de16325c90540ecad1a20327614f98695129b52bb20fe2d722f",
-    "A201.task-conditioning-complete": "a5ae334164c4f603fb750b366bf39931107a12231937cd7cc367292600137ba4",
+    "A201.bounded-residual-dynamics": "98179833a0e6dbc378ee4d36632284e66d77ae6954458c9996b9444c1eb4acee",
+    "A201.role-canonicalization": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
+    "A201.shared-substrate": "09526b44e1c34ed2ea2f73b672b44381d737d749efcf7b75f3ec7cf57d983660",
+    "A201.task-conditioning-complete": "103bbc2cc9e8dd02dda8e0138590519f0ce6082ed174223bcb204f177c319f36",
     "A202.rd-disabled-until-adjoint": "63144af5a7690ca5d3b4c7bdeb553f342cf097d305abaa6c2f4028730902ca95",
     "A301.genotype-causes-phenotype": "32893df7e8253c846b87fe7ea7185e723267cd95d867069ab15db3d033d3c9ca",
     "A401.archive-genotype-attribution": "db5b7d44e0cb8cf02dc4df8be3f8328dfcf364b8fe0a190f19268c5fc1eb7d17",
@@ -96,8 +72,8 @@
     "A401.weighted-metric-active": "2b63192536bcc3eea66105dbe1261fb7bc41dc3dbd2fef3fd4a6b257ce9359b3",
     "A501.came-production-equation": "31ef8b0954200a0e4625469c5aa556af3e5455b238b776fbf58f01c0d8d62dfd",
     "C001.acceptance-evidence-current": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "G100.deterministic-seed": "0c2a710ea02d9db56e0138f0c40c7221c4e0d93e0c58bf81fbc67103fddcdfad",
-    "G100.single-prng": "515f069eb5fee7aef656a8dad47d7328b8dfbe75078a5f99cfa9bc3765f2a229",
+    "G100.deterministic-seed": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
+    "G100.single-prng": "4239811d1956aad7a89a731676000a4b933b4f8b7d0140a49ec98d6123cfcb23",
     "I001.phase-order": "9a30bb979d0d15c829bcb14df205cabd59597e1d73195816a559238376ab24a5",
     "I001.replay-evaluation-identity": "9a30bb979d0d15c829bcb14df205cabd59597e1d73195816a559238376ab24a5",
     "I001.spawn-wave-unique": "d34e96d65d0bd3cab5c58f44b80c7ac1286074bc0de0a72866a8dd8d6f3cb705",
@@ -106,11 +82,11 @@
     "S002.operator-command-effective": "746830bc9968073e7c439a59bd187205614d97cef2e7ae2f5141bcad35501023",
     "S004.pt-swap-transaction": "6e82d30ad8e792e6712ac0730b4a8c1af337684e2fb26055f40d2742804e6c65"
   },
-  "name": "arch-20260912d",
-  "runId": "arch-20260912d-2026-09-12T195757",
+  "name": "run3-20260912e",
+  "runId": "run3-20260912e-2026-09-12T202438",
   "schema": "slime-evidence/v1",
   "seed": "default",
-  "specHash": "bdbb0b6cc2524424e873ef093c50deb7e67ffc0a9f9b56f738687d9d5e76b516",
+  "specHash": "a96a6e4de68d0597d20f6d138a02b279afde5278091b083f3eea490f28549055",
   "witnessHashes": {
     "A101.sot-schedule-independent": "c1d72c4b16938f1508a8d8aa64a5d96130b8788c8ade6bb33a1b17bc1730636d",
     "A103.checkpoint-replay-equivalence": "4e887778c89e6f560bf1989ed537c5caeefb5b851f651a19a234bdaa5524217f",
