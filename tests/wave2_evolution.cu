@@ -329,15 +329,19 @@ static int test_forced_pt_swap() {
     OrganismState* d_org = nullptr;
     CheckpointBuffer* d_ckpt = nullptr;
     GradBuffers* d_grads = nullptr;
+    float* d_eff = nullptr;           // [N * TOTAL_WEIGHTS] effective banks
     OrganismState* d_tmp_org = nullptr;
     CheckpointBuffer* d_tmp_ckpt = nullptr;
     GradBuffers* d_tmp_grad = nullptr;
+    float* d_tmp_wbank = nullptr;
     CUDA_CHECK(cudaMalloc(&d_org, sizeof(OrganismState) * N));
     CUDA_CHECK(cudaMalloc(&d_ckpt, sizeof(CheckpointBuffer) * N));
     CUDA_CHECK(cudaMalloc(&d_grads, sizeof(GradBuffers) * N));
+    CUDA_CHECK(cudaMalloc(&d_eff, sizeof(float) * TOTAL_WEIGHTS * N));
     CUDA_CHECK(cudaMalloc(&d_tmp_org, sizeof(OrganismState)));
     CUDA_CHECK(cudaMalloc(&d_tmp_ckpt, sizeof(CheckpointBuffer)));
     CUDA_CHECK(cudaMalloc(&d_tmp_grad, sizeof(GradBuffers)));
+    CUDA_CHECK(cudaMalloc(&d_tmp_wbank, sizeof(float) * TOTAL_WEIGHTS));
 
     OrganismState h_org[2];
     CheckpointBuffer h_ckpt[2];
@@ -358,6 +362,18 @@ static int test_forced_pt_swap() {
     CUDA_CHECK(cudaMemcpy(d_org, h_org, sizeof(h_org), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_ckpt, h_ckpt, sizeof(h_ckpt), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_grads, h_grads, sizeof(h_grads), cudaMemcpyHostToDevice));
+
+    // Effective-weight banks with sentinels: slot 0 all 1.0f, slot 1 all 2.0f.
+    {
+        float* h_eff = (float*)malloc(sizeof(float) * TOTAL_WEIGHTS * N);
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+            h_eff[0 * TOTAL_WEIGHTS + i] = 1.0f;
+            h_eff[1 * TOTAL_WEIGHTS + i] = 2.0f;
+        }
+        CUDA_CHECK(cudaMemcpy(d_eff, h_eff, sizeof(float) * TOTAL_WEIGHTS * N,
+                              cudaMemcpyHostToDevice));
+        free(h_eff);
+    }
 
     // Host organism-table rows with sentinels.
     genome::Genome genomes[2];
@@ -393,9 +409,11 @@ static int test_forced_pt_swap() {
     ctx.d_organisms = d_org;
     ctx.d_checkpoints = d_ckpt;
     ctx.d_grads = d_grads;
+    ctx.d_eff_weights = d_eff;
     ctx.d_swap_org = d_tmp_org;
     ctx.d_swap_ckpt = d_tmp_ckpt;
     ctx.d_swap_grad = d_tmp_grad;
+    ctx.d_swap_wbank = d_tmp_wbank;
     ctx.genomes = genomes;
     ctx.deltas = deltas;
     ctx.lineage_id = lineage;
@@ -450,12 +468,246 @@ static int test_forced_pt_swap() {
     if (batch_idx[0] != 12 || batch_idx[1] != 3) ok = false;
     CHECK(ok, "seed-gradient rows and batch assignment swapped with the organism");
 
+    // Effective-weight banks moved with the organism: backward must re-forward
+    // each trajectory with the phenotype that produced it.
+    {
+        float* h_eff = (float*)malloc(sizeof(float) * TOTAL_WEIGHTS * N);
+        CUDA_CHECK(cudaMemcpy(h_eff, d_eff, sizeof(float) * TOTAL_WEIGHTS * N,
+                              cudaMemcpyDeviceToHost));
+        bool banks_ok = true;
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+            if (h_eff[0 * TOTAL_WEIGHTS + i] != 2.0f) banks_ok = false;
+            if (h_eff[1 * TOTAL_WEIGHTS + i] != 1.0f) banks_ok = false;
+        }
+        CHECK(banks_ok, "effective-weight banks swapped with the organism");
+        free(h_eff);
+    }
+
     cudaFree(d_org);
     cudaFree(d_ckpt);
     cudaFree(d_grads);
+    cudaFree(d_eff);
     cudaFree(d_tmp_org);
     cudaFree(d_tmp_ckpt);
     cudaFree(d_tmp_grad);
+    cudaFree(d_tmp_wbank);
+    return 0;
+}
+
+// ---- Test 3b: backward correspondence after a forced PT swap --------------
+// After an accepted swap, a backward at slot A must reproduce the gradient
+// that logical organism B produced before the swap: checkpoint, effective
+// weights, and seed gradient moved together, so the gradient attribution is
+// unchanged by the exchange.
+static int test_pt_swap_backward_correspondence() {
+    // [claim:S004.pt-swap-transaction]
+    std::printf("--- Test: backward correspondence across a PT swap ---\n");
+    std::fflush(stdout);
+
+    const int N = 2;
+
+    OrganismState* d_org = nullptr;
+    ForwardInputs* d_inputs = nullptr;
+    float* d_weights = nullptr;
+    float* d_eff = nullptr;
+    DeltaWeights* d_deltas = nullptr;
+    CheckpointBuffer* d_ckpt = nullptr;
+    GradBuffers* d_grads = nullptr;
+    float* d_seed = nullptr;
+    BackwardWorkspace ws;
+    OrganismState* d_tmp_org = nullptr;
+    CheckpointBuffer* d_tmp_ckpt = nullptr;
+    GradBuffers* d_tmp_grad = nullptr;
+    float* d_tmp_wbank = nullptr;
+    __half* d_img = nullptr;
+    float* d_task = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&d_org, sizeof(OrganismState) * N));
+    CUDA_CHECK(cudaMalloc(&d_inputs, sizeof(ForwardInputs) * N));
+    CUDA_CHECK(cudaMalloc(&d_weights, sizeof(float) * TOTAL_WEIGHTS));
+    CUDA_CHECK(cudaMalloc(&d_eff, sizeof(float) * TOTAL_WEIGHTS * N));
+    CUDA_CHECK(cudaMalloc(&d_deltas, sizeof(DeltaWeights) * N));
+    CUDA_CHECK(cudaMalloc(&d_img, sizeof(__half) * GRID_SIZE * GRID_SIZE * 3));
+    CUDA_CHECK(cudaMalloc(&d_task, sizeof(float) * TASK_EMBED_DIM));
+    CUDA_CHECK(cudaMalloc(&d_seed, sizeof(float) * N * BMAP_DIM));
+    CUDA_CHECK(cudaMalloc(&d_tmp_org, sizeof(OrganismState)));
+    CUDA_CHECK(cudaMalloc(&d_tmp_ckpt, sizeof(CheckpointBuffer)));
+    CUDA_CHECK(cudaMalloc(&d_tmp_grad, sizeof(GradBuffers)));
+    CUDA_CHECK(cudaMalloc(&d_tmp_wbank, sizeof(float) * TOTAL_WEIGHTS));
+    allocate_checkpoints(&d_ckpt, N);
+    allocate_grad_buffers(&d_grads, N);
+    allocate_backward_workspace(ws, N);
+
+    float* h_weights = (float*)malloc(sizeof(float) * TOTAL_WEIGHTS);
+    fill_weights(h_weights, TOTAL_WEIGHTS, 42u);
+    CUDA_CHECK(cudaMemcpy(d_weights, h_weights, sizeof(float) * TOTAL_WEIGHTS,
+                          cudaMemcpyHostToDevice));
+
+    __half* h_img = (__half*)malloc(sizeof(__half) * GRID_SIZE * GRID_SIZE * 3);
+    float* h_task = (float*)malloc(sizeof(float) * TASK_EMBED_DIM);
+    for (int i = 0; i < GRID_SIZE * GRID_SIZE * 3; ++i)
+        h_img[i] = __float2half(static_cast<float>((i * 37) % 64) / 64.0f);
+    for (int i = 0; i < TASK_EMBED_DIM; ++i)
+        h_task[i] = 0.1f * static_cast<float>(i + 1);
+    CUDA_CHECK(cudaMemcpy(d_img, h_img, sizeof(__half) * GRID_SIZE * GRID_SIZE * 3,
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_task, h_task, sizeof(float) * TASK_EMBED_DIM,
+                          cudaMemcpyHostToDevice));
+
+    // Two distinct genotypes: same delta index, opposite values -> distinct
+    // effective banks (and therefore distinct trajectories).
+    DeltaWeights h_deltas[2];
+    std::memset(&h_deltas, 0, sizeof(h_deltas));
+    h_deltas[0].count = 1; h_deltas[0].indices[0] = OFF_FLOW + 3; h_deltas[0].values[0] =  0.25f;
+    h_deltas[1].count = 1; h_deltas[1].indices[0] = OFF_FLOW + 3; h_deltas[1].values[0] = -0.25f;
+    CUDA_CHECK(cudaMemcpy(d_deltas, h_deltas, sizeof(h_deltas), cudaMemcpyHostToDevice));
+    launch_materialize_effective_weights(d_weights, d_deltas, d_eff, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    ForwardInputs h_inputs[2];
+    for (int a = 0; a < N; ++a) {
+        h_inputs[a].role = Role::Classifier;
+        h_inputs[a].task_embedding = d_task;
+        h_inputs[a].image_rgb = d_img;
+        h_inputs[a].target_bmap_32 = nullptr;
+    }
+    CUDA_CHECK(cudaMemcpy(d_inputs, h_inputs, sizeof(h_inputs), cudaMemcpyHostToDevice));
+
+    launch_forward_with_checkpoints(d_org, d_inputs, nullptr,
+                                    d_weights, d_eff, d_ckpt, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Distinct seed gradients per organism.
+    float h_seed[2 * BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        h_seed[0 * BMAP_DIM + d] = 0.1f * (d + 1);
+        h_seed[1 * BMAP_DIM + d] = 0.2f * (d + 1);
+    }
+    CUDA_CHECK(cudaMemcpy(d_seed, h_seed, sizeof(h_seed), cudaMemcpyHostToDevice));
+
+    // Pre-swap backward: gradients of logical organisms 0 and 1 in place.
+    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+                        d_ckpt, d_grads, ws, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    GradBuffers h_pre[2];
+    CUDA_CHECK(cudaMemcpy(h_pre, d_grads, sizeof(h_pre), cudaMemcpyDeviceToHost));
+
+    // Forced swap of slots 0 <-> 1 (device data + host rows + seed rows).
+    genome::Genome genomes[2];
+    DeltaWeights deltas_h[2];
+    uint32_t lineage[2], parent[2];
+    int spawn_gen[2], batch_idx[2];
+    float fitness[2], f_raw[2], f_sot[2];
+    Role role[2];
+    std::memset(&genomes, 0, sizeof(genomes));
+    std::memset(&deltas_h, 0, sizeof(deltas_h));
+    genomes[0].bits[5] = 0xAAAAAAAAu; genomes[1].bits[5] = 0x55555555u;
+    lineage[0] = 101; lineage[1] = 202;
+    parent[0] = 1001; parent[1] = 2002;
+    spawn_gen[0] = 5; spawn_gen[1] = 9;
+    fitness[0] = 0.25f; fitness[1] = 0.75f;
+    f_raw[0] = 0.2f; f_raw[1] = 0.8f;
+    f_sot[0] = 0.3f; f_sot[1] = 0.9f;
+    role[0] = Role::Classifier; role[1] = Role::Classifier;
+    batch_idx[0] = 3; batch_idx[1] = 12;
+
+    safety::pt::SwapContext ctx;
+    ctx.d_organisms = d_org;
+    ctx.d_checkpoints = d_ckpt;
+    ctx.d_grads = d_grads;
+    ctx.d_eff_weights = d_eff;
+    ctx.d_swap_org = d_tmp_org;
+    ctx.d_swap_ckpt = d_tmp_ckpt;
+    ctx.d_swap_grad = d_tmp_grad;
+    ctx.d_swap_wbank = d_tmp_wbank;
+    ctx.genomes = genomes;
+    ctx.deltas = deltas_h;
+    ctx.lineage_id = lineage;
+    ctx.parent_id = parent;
+    ctx.spawn_gen = spawn_gen;
+    ctx.fitness = fitness;
+    ctx.f_raw = f_raw;
+    ctx.f_sot = f_sot;
+    ctx.role = role;
+    ctx.seed_grad = h_seed;          // host rows move with the organism
+    ctx.batch_sample_idx = batch_idx;
+    ctx.stream = 0;
+
+    safety::pt::swap_device_organism(ctx, 0, 1);
+    safety::pt::swap_host_organism(ctx, 0, 1);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Production order: T3 uploads the REORDERED host seed rows after PT.
+    CUDA_CHECK(cudaMemcpy(d_seed, h_seed, sizeof(h_seed), cudaMemcpyHostToDevice));
+
+    // Post-swap backward.
+    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+                        d_ckpt, d_grads, ws, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    GradBuffers h_post[2];
+    CUDA_CHECK(cudaMemcpy(h_post, d_grads, sizeof(h_post), cudaMemcpyDeviceToHost));
+
+    // Slot 0 now holds logical organism 1's rollout: its gradient must equal
+    // the pre-swap gradient of organism 1 (and vice versa). Without the
+    // effective-weight swap this fails because backward would re-forward
+    // organism 1's checkpoints with organism 0's stale bank.
+    bool match = true;
+    float max_diff = 0.f, scale = 0.f;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        float d01 = std::fabs(h_post[0].dW[i] - h_pre[1].dW[i]);
+        float d10 = std::fabs(h_post[1].dW[i] - h_pre[0].dW[i]);
+        if (d01 > max_diff) max_diff = d01;
+        if (d10 > max_diff) max_diff = d10;
+        scale = std::fmax(scale, std::fabs(h_pre[1].dW[i]));
+        scale = std::fmax(scale, std::fabs(h_pre[0].dW[i]));
+    }
+    if (max_diff > 1e-4f * (1.f + scale)) match = false;
+    std::printf("  max |dW_post - dW_pre(moved org)| = %.3e (scale %.3e)\n",
+                max_diff, scale);
+    CHECK(match, "post-swap backward matches the moved organism's pre-swap gradient");
+
+    // Sensitivity check: simulate the pre-fix arrangement (banks following
+    // slots, not organisms) by re-materializing from the unswapped device
+    // delta array, then run backward again. It MUST diverge from the
+    // reference gradient — this proves the test above detects the missing
+    // bank swap rather than passing vacuously.
+    launch_materialize_effective_weights(d_weights, d_deltas, d_eff, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+                        d_ckpt, d_grads, ws, N, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    GradBuffers h_buggy[2];
+    CUDA_CHECK(cudaMemcpy(h_buggy, d_grads, sizeof(h_buggy), cudaMemcpyDeviceToHost));
+    float buggy_diff = 0.f;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        float d01 = std::fabs(h_buggy[0].dW[i] - h_pre[1].dW[i]);
+        float d10 = std::fabs(h_buggy[1].dW[i] - h_pre[0].dW[i]);
+        if (d01 > buggy_diff) buggy_diff = d01;
+        if (d10 > buggy_diff) buggy_diff = d10;
+    }
+    std::printf("  sensitivity: stale-bank backward diverges by %.3e (scale %.3e)\n",
+                buggy_diff, scale);
+    CHECK(buggy_diff > 1e-2f * (1.f + scale),
+          "missing bank swap is detected (sensitivity)");
+
+    free(h_weights);
+    free(h_img);
+    free(h_task);
+    cudaFree(d_org);
+    cudaFree(d_inputs);
+    cudaFree(d_weights);
+    cudaFree(d_eff);
+    cudaFree(d_deltas);
+    cudaFree(d_img);
+    cudaFree(d_task);
+    cudaFree(d_seed);
+    cudaFree(d_tmp_org);
+    cudaFree(d_tmp_ckpt);
+    cudaFree(d_tmp_grad);
+    cudaFree(d_tmp_wbank);
+    free_checkpoints(d_ckpt);
+    free_grad_buffers(d_grads);
+    free_backward_workspace(ws);
     return 0;
 }
 
@@ -508,6 +760,13 @@ static int test_finite_difference_gradient() {
     const int bank_lo[4] = { OFF_PERC, OFF_INTER, OFF_FLOW, OFF_BMAP };
     const int bank_hi[4] = { OFF_INTER, OFF_FLOW, OFF_BMAP, TOTAL_WEIGHTS };
     const char* bank_name[4] = { "W_perc", "W_inter", "W_flow", "W_bmap" };
+    // Per-bank tolerances. W_perc/W_bmap are near-exact; W_inter/W_flow sit
+    // behind the 64-step FP16-quantized recurrent chain, whose finite-
+    // difference noise dominates (observed ~6-9%). The per-bank assertion
+    // exists so a sign flip or an isolated bank bug cannot hide inside the
+    // combined all-weights direction.
+    const float bank_tol[4] = { 5e-2f, 0.20f, 0.20f, 5e-3f };
+    float bank_rel_err[4] = {};
 
     for (int bank = 0; bank < 4; ++bank) {
         float v[TOTAL_WEIGHTS] = {};
@@ -538,8 +797,13 @@ static int test_finite_difference_gradient() {
         float d_numeric = (Lp - Lm) / (2.0f * eps);
         float rel_err = std::fabs(d_analytic - d_numeric)
                       / std::fmax(std::fabs(d_numeric), 1e-12f);
+        bank_rel_err[bank] = rel_err;
         std::printf("  %-8s d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
                     bank_name[bank], d_analytic, d_numeric, rel_err);
+    }
+    for (int bank = 0; bank < 4; ++bank) {
+        CHECK(bank_rel_err[bank] < bank_tol[bank],
+              bank_name[bank]);
     }
 
     {
@@ -577,6 +841,82 @@ static int test_finite_difference_gradient() {
         CHECK(rel_err < 5e-2f, "analytic directional derivative matches central difference");
     }
 
+    // Effective-bank case: the production loop runs forward and backward with
+    // W_eff = W_shared + delta, so the analytic gradient must agree with
+    // finite differences along the SAME path, not only the shared path above.
+    {
+        DeltaWeights delta;
+        std::memset(&delta, 0, sizeof(delta));
+        delta.count = 2;
+        delta.indices[0] = OFF_FLOW + 7; delta.values[0] = 0.2f;
+        delta.indices[1] = OFF_INTER + 41; delta.values[1] = -0.15f;
+
+        auto eff_forward_and_loss = [&](const float* w, float* loss_out, float* desc_out) {
+            CUDA_CHECK(cudaMemcpy(r.d_weights, w, sizeof(float) * TOTAL_WEIGHTS,
+                                  cudaMemcpyHostToDevice));
+            if (upload_delta(&r, delta)) return 1;
+            launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                            r.d_weights, r.d_eff_weights,
+                                            r.d_ckpt, 1, 0);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            if (read_descriptor(&r, desc_out)) return 1;
+            float dlogits[NUM_CLASSES];
+            classifier_loss(desc_out, target_class, NUM_CLASSES, dlogits, loss_out);
+            return 0;
+        };
+
+        float desc_eff[BMAP_DIM];
+        float L0e = 0.f;
+        if (eff_forward_and_loss(r.h_weights, &L0e, desc_eff)) return 1;
+
+        float h_seed_e[BMAP_DIM] = {};
+        {
+            float dlogits[NUM_CLASSES];
+            float tmp;
+            classifier_loss(desc_eff, target_class, NUM_CLASSES, dlogits, &tmp);
+            for (int d = 0; d < NUM_CLASSES; ++d) h_seed_e[d] = dlogits[d];
+        }
+        CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed_e,
+            sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
+        launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
+                            r.d_ckpt, r.d_grads, r.ws, 1, 0);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        GradBuffers ge;
+        CUDA_CHECK(cudaMemcpy(&ge, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
+
+        float v[TOTAL_WEIGHTS];
+        uint32_t s = 0x1234ABCDu;
+        float norm2 = 0.f;
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            float u = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+            v[i] = u;
+            norm2 += u * u;
+        }
+        float inv = 1.0f / sqrtf(norm2);
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) v[i] *= inv;
+
+        float d_analytic_e = 0.f;
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) d_analytic_e += ge.dW[i] * v[i];
+
+        float w_plus[TOTAL_WEIGHTS], w_minus[TOTAL_WEIGHTS];
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+            w_plus[i]  = r.h_weights[i] + eps * v[i];
+            w_minus[i] = r.h_weights[i] - eps * v[i];
+        }
+        float Lpe = 0.f, Lme = 0.f;
+        float desc_tmp[BMAP_DIM];
+        if (eff_forward_and_loss(w_plus, &Lpe, desc_tmp)) return 1;
+        if (eff_forward_and_loss(w_minus, &Lme, desc_tmp)) return 1;
+        float d_numeric_e = (Lpe - Lme) / (2.0f * eps);
+        float rel_err_e = std::fabs(d_analytic_e - d_numeric_e)
+                        / std::fmax(std::fabs(d_numeric_e), 1e-12f);
+        std::printf("  eff-bank d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
+                    d_analytic_e, d_numeric_e, rel_err_e);
+        CHECK(rel_err_e < 5e-2f,
+              "effective-bank analytic directional derivative matches central difference");
+    }
+
     rig_free(&r);
     return 0;
 }
@@ -590,6 +930,7 @@ int main() {
     rc |= test_materialize_matches_reference();
     rc |= test_genotype_causality();
     rc |= test_forced_pt_swap();
+    rc |= test_pt_swap_backward_correspondence();
     rc |= test_finite_difference_gradient();
 
     std::printf("\n========================================\n");

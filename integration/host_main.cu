@@ -113,6 +113,7 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_pt_swap_org,  sizeof(OrganismState)), "alloc d_pt_swap_org");
     CUDA_ABORT(cudaMalloc(&w->d_pt_swap_ckpt, sizeof(CheckpointBuffer)), "alloc d_pt_swap_ckpt");
     CUDA_ABORT(cudaMalloc(&w->d_pt_swap_grad, sizeof(GradBuffers)), "alloc d_pt_swap_grad");
+    CUDA_ABORT(cudaMalloc(&w->d_pt_swap_wbank, TOTAL_WEIGHTS * sizeof(float)), "alloc d_pt_swap_wbank");
 
     // Section 10: backward workspace (per-organism, for batched backward).
     constexpr int GRID_ELEMS = GRID_SIZE * GRID_SIZE * CA_CHANNELS;
@@ -171,6 +172,7 @@ static void free_gpu_buffers(World* w) {
     cudaFree(w->d_pt_swap_org);
     cudaFree(w->d_pt_swap_ckpt);
     cudaFree(w->d_pt_swap_grad);
+    cudaFree(w->d_pt_swap_wbank);
     cudaFree(w->bwd_workspace.d_state[0]);
     cudaFree(w->bwd_workspace.d_state[1]);
     cudaFree(w->bwd_workspace.d_perc);
@@ -490,9 +492,11 @@ static safety::pt::SwapContext make_swap_context(World* w) {
     ctx.d_organisms  = w->d_organisms;
     ctx.d_checkpoints = w->d_checkpoints;
     ctx.d_grads      = w->d_grads;
+    ctx.d_eff_weights = w->d_eff_weights;
     ctx.d_swap_org   = w->d_pt_swap_org;
     ctx.d_swap_ckpt  = w->d_pt_swap_ckpt;
     ctx.d_swap_grad  = w->d_pt_swap_grad;
+    ctx.d_swap_wbank = w->d_pt_swap_wbank;
     ctx.genomes      = w->org_table.genomes;
     ctx.deltas       = w->org_table.deltas;
     ctx.lineage_id   = w->org_table.lineage_id;

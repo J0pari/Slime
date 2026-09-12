@@ -84,18 +84,38 @@ An established claim requires established dependencies and at least one
 witness. A claim whose witness is only `W` cannot be marked `established` on
 the strength of exercising alone.
 
+## Organism-identity buffers
+
+When adding organism-associated state to `World` or `OrganismTable`, annotate
+the field:
+
+```
+float* d_something;   // [identity:organism] [lifetime:rollout] [crosses:pt=something]
+```
+
+and add `something` to BOTH `organism_buffers` and
+`pt_swap.organism_identity` in `architecture/transactions.yaml`. The compiler
+checks both directions: an annotated field missing from the registry, and a
+registry entry missing its annotation, both fail `architecture-check`. State
+that must move with the organism through a PT exchange is declared here, not
+remembered.
+
 ## Evidence discipline
 
-When a run exercises a claim, record a manifest:
+When a run exercises a claim, record a manifest. The witness must be named —
+the record entry carries the provenance:
 
 ```
 python architecture/evidence.py record --name <run> --binary build/coevo.exe \
   --cuda <ver> --gpu "<name>" --seed <seed> \
-  --result <claim-id>:pass|fail [--result ...]
+  --result <claim-id>=<witness-anchor>:pass|fail [--result ...]
 ```
 
-Manifests live in `evidence/`. The status renderer only reads manifests —
-prose status claims have no effect. Editing a mechanism or witness file makes
+The witness anchor must be registered for the claim (or be the executed
+binary itself for integration-run attestation), and its file must declare
+`[claim:<claim-id>]`. Manifests live in `evidence/`. The status renderer only
+reads manifests — prose status claims have no effect. Editing a claim's
+statement, mechanisms, or witnesses — or any mechanism/witness file — makes
 prior evidence STALE until the witness reruns.
 
 ## What not to do

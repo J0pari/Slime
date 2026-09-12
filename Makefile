@@ -18,11 +18,11 @@ WAVE2_TEST   := $(BUILD_DIR)/wave2_test.exe
 SRC := integration/host_main.cu
 HOST_SRC := tests/host_unit_tests.cpp
 
-HOST_CXX      ?= $(NVCC)
-HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Xcompiler /EHsc -Xcompiler /W3
+HOST_CXX      ?= g++
+HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Wall -Wextra
 
 .PHONY: all run run-10 clean host-tests check forward-smoke wave1-test wave2-test \
-	architecture-check architecture-test architecture-status architecture-report
+	task-conditioning-test architecture-check architecture-test architecture-status architecture-report
 
 all: $(BIN)
 
@@ -86,6 +86,15 @@ $(WAVE2_TEST): tests/wave2_evolution.cu safety/parallel_tempering.cu safety/pt_l
 
 wave2-test: $(WAVE2_TEST)
 	./$(WAVE2_TEST)
+
+# Task-conditioning witness (A201.task-conditioning-complete). Currently
+# expected to FAIL: task embedding dims 5..15 do not reach the NCA forward.
+TASK_CONDITIONING := $(BUILD_DIR)/task_conditioning.exe
+$(TASK_CONDITIONING): tests/task_conditioning.cu autodiff/warp_tape.cu nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/task_conditioning.cu -o $@ -lcudadevrt
+
+task-conditioning-test: $(TASK_CONDITIONING)
+	./$(TASK_CONDITIONING)
 
 clean:
 	rm -rf $(BUILD_DIR)

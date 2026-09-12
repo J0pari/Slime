@@ -10,9 +10,9 @@ A manifest can be created from a real run with:
 
     python architecture/evidence.py record --name run5 --binary build/coevo.exe \
         --cuda 13.0.48 --gpu "RTX 3060 Laptop" --seed default \
-        --result A103.checkpoint-replay-equivalence:pass ...
+        --result A103.checkpoint-replay-equivalence=tests/wave1_autodiff.cu::test_forward_match_and_backward:pass
 
-stdlib-only.
+stdlib-only (plus the project's own claims module).
 """
 
 from __future__ import annotations
@@ -23,6 +23,11 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from architecture import claims as claims_mod  # noqa: E402
+from architecture.claims import claim_hash  # noqa: E402
 
 SCHEMA = "slime-evidence/v1"
 
@@ -93,7 +98,7 @@ def witness_file_hashes(claims, root: Path) -> dict[str, str]:
 
 
 def new_manifest(*, name: str, root: Path, binary: str, cuda: str, gpu: str,
-                 seed: str, results: dict[str, str], claims, machine: dict) -> dict:
+                 seed: str, results: dict[str, dict], claims, machine: dict) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     manifest = {
         "schema": SCHEMA,
@@ -107,7 +112,9 @@ def new_manifest(*, name: str, root: Path, binary: str, cuda: str, gpu: str,
         "seed": seed,
         "machineContract": machine,
         "specHash": spec_hash(claims),
-        "claims": {cid: {"witness": "", "result": res} for cid, res in sorted(results.items())},
+        "claims": {cid: {"witness": entry["witness"], "result": entry["result"]}
+                   for cid, entry in sorted(results.items())},
+        "claimHashes": {c.id: claim_hash(c) for c in claims},
         "mechanismHashes": mechanism_file_hashes(claims, root),
         "witnessHashes": witness_file_hashes(claims, root),
     }
@@ -151,35 +158,85 @@ def verdict(claim, manifests: list[dict], root: Path) -> Verdict:
     entry = man["claims"][claim.id]
     result = entry.get("result", "unknown")
     current_mech = mechanism_file_hashes([claim], root)[claim.id]
-    stale = man.get("mechanismHashes", {}).get(claim.id) != current_mech
     current_wit = witness_file_hashes([claim], root)[claim.id]
+    current_prop = claim_hash(claim)
+    stale = man.get("mechanismHashes", {}).get(claim.id) != current_mech
     stale = stale or man.get("witnessHashes", {}).get(claim.id) != current_wit
+    stale = stale or man.get("claimHashes", {}).get(claim.id) != current_prop
     if result != "pass":
         return Verdict(claim.id, "fail", man, f"latest witness result: {result}")
     if stale:
         return Verdict(claim.id, "pass/stale", man,
-                       "mechanism or witness changed since this evidence")
+                       "claim, mechanism, or witness changed since this evidence")
     return Verdict(claim.id, "pass/current", man, "")
 
 
+def parse_and_validate_results(result_args: list[str], claims, binary: str,
+                               root: Path):
+    """Validate --result entries (claim=witness:result) and return
+    ({claim_id: {"witness": w, "result": r}}, [errors]). The witness must be
+    registered for the claim — or be the executed binary itself for
+    integration-run attestation — and its file must declare [claim:<id>]."""
+    by_id = {c.id: c for c in claims}
+    results: dict[str, dict] = {}
+    errors: list[str] = []
+    for kv in result_args:
+        if "=" not in kv or ":" not in kv.split("=", 1)[1]:
+            errors.append(f"bad --result {kv!r} (expected claim=witness:result)")
+            continue
+        cid, rest = kv.split("=", 1)
+        witness, res = rest.rsplit(":", 1)
+        if res not in ("pass", "fail"):
+            errors.append(f"bad --result {kv!r}: result must be pass or fail")
+            continue
+        if cid not in by_id:
+            errors.append(f"bad --result {kv!r}: unknown claim {cid}")
+            continue
+        claim = by_id[cid]
+        registered = {w.anchor for w in claim.witnesses}
+        if witness in registered:
+            ok, msg = claims_mod.resolve_witness(
+                next(w for w in claim.witnesses if w.anchor == witness),
+                root, cid)
+            if not ok:
+                errors.append(f"bad --result {kv!r}: {msg}")
+                continue
+        elif binary and witness == binary:
+            # Integration-run attestation: the executed binary is the witness
+            # for runtime-observable claims. Provenance rests on the recorded
+            # binary sha256 plus claim/mechanism/witness hashes.
+            pass
+        else:
+            errors.append(
+                f"bad --result {kv!r}: witness {witness} is not registered "
+                f"for {cid} (registered: {', '.join(sorted(registered)) or 'none'})")
+            continue
+        results[cid] = {"witness": witness, "result": res}
+    return results, errors
+
+
 def record(args) -> int:
-    """CLI: record a manifest from a completed run."""
+    """CLI: record a manifest from a completed run.
+
+    --result has the form <claim>=<witness>:<pass|fail>, e.g.
+        --result A301.genotype-causes-phenotype=tests/wave2_evolution.cu::test_genotype_causality:pass
+    The witness must be registered for the claim (or be the executed binary
+    itself for integration-run attestation), and its file must declare
+    [claim:<id>]. This makes the manifest a provenance record, not a promise.
+    """
     root = Path(args.root)
-    results = {}
-    for kv in args.result:
-        if ":" not in kv:
-            print(f"bad --result {kv!r} (expected claim:result)")
-            return 2
-        cid, res = kv.split(":", 1)
-        results[cid] = res
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    import architecture.claims as claims_mod
-    import architecture.compiler as compiler_mod
-    claims, errors = claims_mod.load_registry(compiler_mod.SPEC_DOCS)
+    claims, errors = claims_mod.load_registry(claims_mod.SPEC_DOCS)
     if errors:
         for e in errors:
             print(e)
         return 2
+    results, verrors = parse_and_validate_results(args.result, claims,
+                                                  args.binary, root)
+    if verrors:
+        for e in verrors:
+            print(e)
+        return 2
+
     machine = json.loads((root / "architecture/machine.json").read_text(encoding="utf-8"))
     manifest = new_manifest(name=args.name, root=root, binary=args.binary,
                             cuda=args.cuda, gpu=args.gpu, seed=args.seed,

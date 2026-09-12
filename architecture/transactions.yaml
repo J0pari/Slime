@@ -10,16 +10,25 @@
 #   architecture/transactions.yaml::<key>
 
 # Registry of organism-identity state. Every buffer listed here must appear
-# in pt_swap.organism_identity; the compiler enforces the completeness check
-# (a new organism-associated buffer that spans a PT exchange must be added to
-# the transaction, not silently forgotten).
+# in pt_swap.organism_identity, and every C++ field annotated
+# [identity:organism] / [crosses:pt=<key>] in integration/main_loop.cu must
+# appear here; the compiler enforces both directions (a new organism-
+# associated buffer that spans a PT exchange must be declared in BOTH the
+# code annotations and this registry, not silently forgotten in either).
 organism_buffers:
   - organism_state
   - checkpoint
+  - grads
+  - effective_weights
   - genome
   - delta
   - role
   - lineage
+  - parent_id
+  - spawn_gen
+  - fitness
+  - f_raw
+  - f_sot
   - batch_sample_idx
   - seed_grad
 
@@ -29,10 +38,17 @@ transactions:
     organism_identity:
       - organism_state
       - checkpoint
+      - grads
+      - effective_weights
       - genome
       - delta
       - role
       - lineage
+      - parent_id
+      - spawn_gen
+      - fitness
+      - f_raw
+      - f_sot
       - batch_sample_idx
       - seed_grad
     slot_identity:

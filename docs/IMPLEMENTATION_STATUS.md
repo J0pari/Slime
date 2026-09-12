@@ -10,6 +10,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | A103.gradient-correctness | acceptance | established | ✅ | ✅ | pass/current |
 | A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/current |
 | A201.shared-substrate | invariant | provisional | ✅ | ❌ | pass/current |
+| A201.task-conditioning-complete | contract | provisional | ✅ | ✅ | fail |
 | A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/current |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/current |
 | A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/current |
@@ -27,7 +28,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | S002.operator-command-effective | contract | provisional | ✅ | ❌ | never |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/current |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS
 
-Claims: 21 total, 14 established, 7 provisional, 0 planned.
+Claims: 22 total, 14 established, 8 provisional, 0 planned.
 <!-- architecture-status:end -->

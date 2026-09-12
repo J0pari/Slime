@@ -24,88 +24,29 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 ARCH = Path(__file__).parent
 
-SPEC_DOCS = [
-    "docs/blueprint.md",
-    "docs/cuda_engineering.md",
-    "docs/construction_plan.md",
-]
+sys.path.insert(0, str(ROOT))
+
+import yaml  # noqa: E402
+
+from architecture.claims import (  # noqa: E402
+    Claim, WitnessRef, SPEC_DOCS, CODE_SUFFIXES, code_token_re, flatten_keys,
+    load_registry, resolve_mechanism, resolve_witness, claim_hash,
+)
+from architecture import evidence as evidence_mod  # noqa: E402
+from architecture import source_gates as gates  # noqa: E402
 
 STATUS_DOC = "docs/IMPLEMENTATION_STATUS.md"
 STATUS_START = "<!-- architecture-status:start -->"
 STATUS_END = "<!-- architecture-status:end -->"
 
-sys.path.insert(0, str(ROOT))
-
-import yaml  # noqa: E402
-
-from architecture.claims import Claim, WitnessRef, load_registry  # noqa: E402
-from architecture import evidence as evidence_mod  # noqa: E402
-from architecture import source_gates as gates  # noqa: E402
-
-CODE_SUFFIXES = {".cu", ".cuh", ".cpp", ".h", ".hpp"}
-CODE_TOKEN_RE_CACHE: dict[str, re.Pattern] = {}
-
-
-def code_token_re(symbol: str) -> re.Pattern:
-    pat = CODE_TOKEN_RE_CACHE.get(symbol)
-    if pat is None:
-        pat = re.compile(r"\b" + re.escape(symbol) + r"\b")
-        CODE_TOKEN_RE_CACHE[symbol] = pat
-    return pat
-
-
-def resolve_mechanism(anchor: str, root: Path, transactions: dict) -> tuple[bool, str]:
-    if "::" not in anchor:
-        return False, "anchor missing ::symbol"
-    path, symbol = anchor.split("::", 1)
-    p = root / path
-    if not p.exists():
-        return False, f"file missing: {path}"
-    if path == "architecture/transactions.yaml":
-        flat = flatten_keys(transactions)
-        leaves = {k.rsplit(".", 1)[-1] for k in flat}
-        tops = set(transactions.keys())
-        if symbol not in flat and symbol not in leaves and symbol not in tops:
-            return False, f"transactions.yaml key missing: {symbol}"
-        return True, ""
-    if p.suffix in CODE_SUFFIXES:
-        text = p.read_text(encoding="utf-8", errors="replace")
-        return bool(code_token_re(symbol).search(text)), f"symbol missing: {path}::{symbol}"
-    if p.suffix == ".py":
-        text = p.read_text(encoding="utf-8", errors="replace")
-        return bool(re.search(r"def\s+" + re.escape(symbol) + r"\b", text)), \
-            f"python symbol missing: {path}::{symbol}"
-    return False, f"unsupported mechanism file type: {path}"
-
-
-def flatten_keys(d: dict, prefix: str = "") -> set[str]:
-    keys = set()
-    for k, v in d.items():
-        full = f"{prefix}.{k}" if prefix else k
-        keys.add(full)
-        if isinstance(v, dict):
-            keys |= flatten_keys(v, full)
-    return keys
-
-
-def resolve_witness(w: WitnessRef, root: Path, claim_id: str) -> tuple[bool, str]:
-    p = root / w.path
-    if not p.exists():
-        return False, f"witness file missing: {w.path}"
-    text = p.read_text(encoding="utf-8", errors="replace")
-    if w.symbol:
-        if p.suffix == ".py":
-            if not re.search(r"def\s+" + re.escape(w.symbol) + r"\b", text):
-                return False, f"witness symbol missing: {w.path}::{w.symbol}"
-        elif p.suffix in CODE_SUFFIXES:
-            if not code_token_re(w.symbol).search(text):
-                return False, f"witness symbol missing: {w.path}::{w.symbol}"
-        else:
-            return False, f"unsupported witness file type: {w.path}"
-    # Bidirectional linkage: the witness must declare the claim it witnesses.
-    if f"[claim:{claim_id}]" not in text:
-        return False, f"witness does not declare [claim:{claim_id}]: {w.path}"
-    return True, ""
+# Source annotations in integration/main_loop.cu (see its OrganismTable/World
+# comments). The compiler enforces registry completeness in BOTH directions:
+#   code [crosses:pt=X]  ->  X must be in pt_swap.organism_identity
+#   pt_swap.organism_identity entry  ->  must have a [crosses:pt=...]
+#                                       annotation in code
+ANNOTATION_CROSSES_RE = re.compile(r"\[crosses:pt=([A-Za-z_][\w]*)\]")
+ANNOTATION_IDENTITY_RE = re.compile(r"\[identity:organism\]")
+MAIN_LOOP_SRC = "integration/main_loop.cu"
 
 
 def reverse_witness_index(root: Path) -> tuple[dict[str, list[str]], list[str]]:
@@ -289,16 +230,56 @@ def check_phase_and_transactions(root: Path, transactions: dict,
     gen = transactions.get("generation_phases", {})
     errors.extend(validate_phase_model(gen.get("order", []), gen.get("invariants", [])))
 
-    # Transaction completeness: every declared organism-identity buffer must be
-    # moved by the PT transaction.
-    buffers = transactions.get("organism_buffers", [])
     pt_swap = transactions.get("transactions", {}).get("pt_swap", {})
     identity = pt_swap.get("organism_identity", [])
+    buffers = transactions.get("organism_buffers", [])
+
+    # Registry-internal completeness.
     for b in buffers:
         if b not in identity:
             errors.append(
                 f"transactions.yaml: organism buffer '{b}' is not in "
                 f"pt_swap.organism_identity")
+    for b in identity:
+        if b not in buffers:
+            errors.append(
+                f"transactions.yaml: pt_swap.organism_identity entry '{b}' "
+                f"is not in organism_buffers")
+
+    # Code-internal completeness: every [crosses:pt=<key>] annotation in
+    # integration/main_loop.cu must name an identity entry, and every identity
+    # entry must be annotated in code. This catches buffers like d_eff_weights
+    # that exist in the World struct but were never told to either list.
+    src_path = root / MAIN_LOOP_SRC
+    if src_path.exists():
+        text = src_path.read_text(encoding="utf-8", errors="replace")
+        annotated = set(ANNOTATION_CROSSES_RE.findall(text))
+        n_identity = len(ANNOTATION_IDENTITY_RE.findall(text))
+        for key in sorted(annotated):
+            if key not in identity:
+                errors.append(
+                    f"{MAIN_LOOP_SRC}: field annotated [crosses:pt={key}] is "
+                    f"not in pt_swap.organism_identity")
+        for key in sorted(identity):
+            if key not in annotated:
+                errors.append(
+                    f"transactions.yaml: pt_swap.organism_identity entry "
+                    f"'{key}' has no [crosses:pt={key}] annotation in "
+                    f"{MAIN_LOOP_SRC}")
+        if n_identity < len(identity):
+            errors.append(
+                f"{MAIN_LOOP_SRC}: {n_identity} [identity:organism] "
+                f"annotations for {len(identity)} registry buffers")
+
+
+def gate_summary_line(gates_report: gates.GateReport) -> str:
+    parts = []
+    for g in gates.GATE_NAMES:
+        errs = [f for f in gates_report.errors if f.gate == g]
+        warns = [f for f in gates_report.warnings if f.gate == g]
+        state = "FAIL" if errs else ("WARN" if warns else "PASS")
+        parts.append(f"{g}: {state}")
+    return ", ".join(parts)
 
 
 def render_status(claims: list[Claim], root: Path, manifests: list[dict],
@@ -322,9 +303,7 @@ def render_status(claims: list[Claim], root: Path, manifests: list[dict],
 def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
                       transactions: dict, gates_report: gates.GateReport) -> str:
     table = render_status(claims, root, manifests, transactions)
-    gate_summary = ", ".join(
-        f"{g}: {'PASS' if not any(f.gate == g for f in gates_report.errors) else 'FAIL'}"
-        for g in gates.GATE_NAMES)
+    gate_summary = gate_summary_line(gates_report)
     return (
         "# Implementation Status\n"
         "\n"

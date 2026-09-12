@@ -44,18 +44,25 @@ struct IntentRegistry {
 // ---- OrganismTable ---------------------------------------------------------
 // Host-side metadata per organism. Genomes and delta weights live here, not
 // on the device (section 2.3).
+//
+// Buffer annotations (read by architecture/compiler.py):
+//   [identity:organism]   this state belongs to one logical organism
+//   [lifetime:rollout]    meaningful across the forward→backward window
+//   [crosses:pt=<key>]    must move with the organism through a PT exchange;
+//                         <key> names the entry in
+//                         architecture/transactions.yaml pt_swap.organism_identity
 struct OrganismTable {
-    genome::Genome       genomes[TOTAL_ORG];
-    genome::DeltaWeights deltas[TOTAL_ORG];
-    uint32_t             lineage_id[TOTAL_ORG];
-    uint32_t             parent_id[TOTAL_ORG];
-    int                  spawn_gen[TOTAL_ORG];
-    uint8_t              replica_tag[TOTAL_ORG];  // mirrors MutationLadder::replica_of
-    float                fitness[TOTAL_ORG];       // composed fitness per organism
-    float                f_raw[TOTAL_ORG];
-    float                f_sot[TOTAL_ORG];
-    Role                 role[TOTAL_ORG];          // cached from genome
-    int                  batch_sample_idx[POOL_SIZE]; // which batch sample this org got
+    genome::Genome       genomes[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=genome]
+    genome::DeltaWeights deltas[TOTAL_ORG];    // [identity:organism] [lifetime:rollout] [crosses:pt=delta]
+    uint32_t             lineage_id[TOTAL_ORG];// [identity:organism] [lifetime:rollout] [crosses:pt=lineage]
+    uint32_t             parent_id[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=parent_id]
+    int                  spawn_gen[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=spawn_gen]
+    uint8_t              replica_tag[TOTAL_ORG];  // slot identity (temperature), never swapped
+    float                fitness[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=fitness]
+    float                f_raw[TOTAL_ORG];     // [identity:organism] [lifetime:rollout] [crosses:pt=f_raw]
+    float                f_sot[TOTAL_ORG];     // [identity:organism] [lifetime:rollout] [crosses:pt=f_sot]
+    Role                 role[TOTAL_ORG];      // [identity:organism] [lifetime:rollout] [crosses:pt=role]
+    int                  batch_sample_idx[POOL_SIZE]; // [identity:organism] [lifetime:rollout] [crosses:pt=batch_sample_idx]
 };
 
 // ---- World -----------------------------------------------------------------
@@ -64,14 +71,15 @@ struct OrganismTable {
 // cudaMallocHost (pinned) buffers.
 struct World {
     // ---- Device-resident buffers (section 2.1) ----
-    OrganismState*    d_organisms;        // [TOTAL_ORG]
-    float*            d_weights;          // [TOTAL_WEIGHTS]
-    float*            d_eff_weights;      // [POOL_SIZE * TOTAL_WEIGHTS] W_shared + genome delta
-    genome::DeltaWeights* d_deltas;       // [POOL_SIZE] device copy of org_table.deltas
-    ForwardInputs*    d_fwd_inputs;       // [POOL_SIZE]
-    CheckpointBuffer* d_checkpoints;      // [POOL_SIZE]
-    GradBuffers*      d_grads;            // [POOL_SIZE]
-    BackwardWorkspace bwd_workspace;      // 2 d_state + d_perc + 2 recomp
+    // Buffer annotations as in OrganismTable above.
+    OrganismState*    d_organisms;        // [TOTAL_ORG] [identity:organism] [lifetime:rollout] [crosses:pt=organism_state]
+    float*            d_weights;          // [TOTAL_WEIGHTS] shared substrate (identity:shared)
+    float*            d_eff_weights;      // [POOL_SIZE * TOTAL_WEIGHTS] W_shared + genome delta [identity:organism] [lifetime:rollout] [crosses:pt=effective_weights]
+    genome::DeltaWeights* d_deltas;       // [POOL_SIZE] device copy of org_table.deltas (derived cache, re-uploaded each T1)
+    ForwardInputs*    d_fwd_inputs;       // [POOL_SIZE] [identity:organism] [lifetime:generation]
+    CheckpointBuffer* d_checkpoints;      // [POOL_SIZE] [identity:organism] [lifetime:rollout] [crosses:pt=checkpoint]
+    GradBuffers*      d_grads;            // [POOL_SIZE] [identity:organism] [lifetime:rollout] [crosses:pt=grads]
+    BackwardWorkspace bwd_workspace;      // 2 d_state + d_perc + 2 recomp (recomputed each backward)
     float*            d_mean_grad;        // [TOTAL_WEIGHTS]
     float*            d_came_m;           // [TOTAL_WEIGHTS]
     float*            d_came_v;           // [TOTAL_WEIGHTS]
@@ -101,12 +109,13 @@ struct World {
     OrganismState*    d_pt_swap_org;      // [1]
     CheckpointBuffer* d_pt_swap_ckpt;    // [1]
     GradBuffers*      d_pt_swap_grad;     // [1]
+    float*            d_pt_swap_wbank;    // [TOTAL_WEIGHTS] effective-bank swap temp
 
     // ---- Pinned host buffers (section 2.2) ----
-    float*            h_descriptors;      // [POOL_SIZE * BMAP_DIM]
-    float*            h_btraj;            // [POOL_SIZE * BTRAJ_SAMPLES * BMAP_DIM]
-    float*            h_seed_grad;        // [POOL_SIZE * BMAP_DIM]
-    ForwardInputs*    h_fwd_inputs;       // [POOL_SIZE]
+    float*            h_descriptors;      // [POOL_SIZE * BMAP_DIM] (derived cache, re-read each T2)
+    float*            h_btraj;            // [POOL_SIZE * BTRAJ_SAMPLES * BMAP_DIM] (derived cache)
+    float*            h_seed_grad;        // [POOL_SIZE * BMAP_DIM] [identity:organism] [lifetime:rollout] [crosses:pt=seed_grad]
+    ForwardInputs*    h_fwd_inputs;       // [POOL_SIZE] (rebuilt each generation)
     float*            h_weights;          // [TOTAL_WEIGHTS]
 
     // ---- Host-only state (section 2.3) ----

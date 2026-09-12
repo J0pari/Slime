@@ -1,0 +1,114 @@
+{
+  "binary": "build/wave2_test.exe",
+  "binarySha256": "e52a7be5f5b09e1670d45d9b1190df5adbf285b2a3a2bdb8a41531064ce9efc3",
+  "claimHashes": {
+    "A101.sot-schedule-independent": "53378b17bab0b5c144506ef21ad63235a24475922081b025ac94194432567223",
+    "A103.checkpoint-replay-equivalence": "5c693f0ab209338acba64acd488663550c950c48aaa9b580f8beb331307f07fc",
+    "A103.gradient-correctness": "e9939d2bd7d504890eb56019f5ee731ec69b7de78905055c8c6cb7675af4ce1d",
+    "A201.role-canonicalization": "6060315935f1a35fd538daf3b6eeceecb66f71995f3c2fbc74075530292ad159",
+    "A201.shared-substrate": "56a93e39fe23fcacd293609b41ddb19060a30ec53197c09ca24199ded0050221",
+    "A201.task-conditioning-complete": "09335437522e9f0a3a40f52d83d6384703bfc7057cce516269469b3f7a36705a",
+    "A202.rd-disabled-until-adjoint": "07558226013abd8a11cb3a46041ac30bc0da2874ae044d77de3927dde4eb6ef9",
+    "A301.genotype-causes-phenotype": "9b8026577ddeab269f232502c91402ce9fb1dfd53d1188dc7790901b1c998ecb",
+    "A401.archive-genotype-attribution": "bcaf76a6d7bed529addabc72a6242a55c644acd6529ea742468599f749e1c89b",
+    "A401.bin-capacity": "cfb962952c6ed8b92a80c9ec73f869304e8b2d5cc806412ea2b1f574d05940cb",
+    "A401.live-statistics-exact": "86de746ecfbbfbd61146f860e1946bbef399d59339c0ae749b29cc7223c3017c",
+    "A501.came-production-equation": "bb8571ba276dcb19c30baef35b6cd6c8b6c310b7c87f87dbdc32576d4506b13f",
+    "C001.acceptance-evidence-current": "87089b5ee6d2b045d4863f76ed175f8a26155667d80c8ccc58d3edca445dff1a",
+    "G100.deterministic-seed": "ad1a90837be155ca6a0ff94cbe01867a3f4bb5e7d1acd0504b0aa0deb699e4e8",
+    "G100.single-prng": "ff358fa2f511dcf5336543cb74def6b36da9863d766554d93a9d901eaaf27a1b",
+    "I001.phase-order": "49ca5943d1c208026bceb3063f4d7bf75587d04030432031027704e109248144",
+    "I001.replay-evaluation-identity": "b32315c7a04c0509e743d2c2fcc27cb214688720c8fef50e524798f0287671c2",
+    "I001.spawn-wave-unique": "f8a16ce8ca01939ceb57ad72968fb71c2cd258d7a6d5d9cb09ece00ebc6465ac",
+    "S001.cuda-errors-fatal": "8ae99de6dd89596f041edd40e22e8a6e947bf7778a16caff1a5ce94763580c5b",
+    "S002.host-authority": "1cba08a01b4bae45e40eec1c0e7a23ffe75f557e14031ceb369352f95cb90b01",
+    "S002.operator-command-effective": "e8130c71ef93d56847fcf9838452a08d00729ccdc8a311e650f08ea972bbb090",
+    "S004.pt-swap-transaction": "920c4a779c91429011f578cf868f6228e2f7076fade69b640e2dc176fccb3ade"
+  },
+  "claims": {
+    "A103.gradient-correctness": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_finite_difference_gradient"
+    },
+    "A301.genotype-causes-phenotype": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_genotype_causality"
+    },
+    "A401.archive-genotype-attribution": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_genotype_causality"
+    },
+    "S004.pt-swap-transaction": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_pt_swap_backward_correspondence"
+    }
+  },
+  "cuda": "13.0.48",
+  "generatedAt": "2026-09-12T04:44:49.838250+00:00",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "machineContract": {
+    "cudaMajor": 13,
+    "cudaMinor": 0,
+    "minComputeCapability": "8.6",
+    "minVramMiB": 6000,
+    "notes": "Startup diagnostics (safety/monitoring.cu::emit_cuda_diagnostics) must match this envelope; evidence manifests record the observed machine contract so a GPU result from a materially different configuration cannot silently count as evidence.",
+    "required": {
+      "cudaMallocManagedForbidden": true,
+      "fp16": true
+    },
+    "schema": "slime-machine/v1"
+  },
+  "mechanismHashes": {
+    "A101.sot-schedule-independent": "fdb39b12851dbaca43cf6d68434ad17a23484534d3e65757b7bb6dbba8751462",
+    "A103.checkpoint-replay-equivalence": "7932d7c6b9a682e033aee7e3a4b33282045efcdee9beb7b8e9489480b85d3b88",
+    "A103.gradient-correctness": "8b0d2e3e005207b52ada038fa73208e941887de2626c287a08908ceb2b6a8518",
+    "A201.role-canonicalization": "da365de529f2de323bb8965f50b6b0cce8b51694f7fe77bf8d875460d3b26ba0",
+    "A201.shared-substrate": "e6321151f1d21196a2c3dd2228c2322522dc93e7833f6c576b3cd51f2d11106c",
+    "A201.task-conditioning-complete": "4b1b158ac58afb699f5f981565fe990aefc7dd972dbe3a327d92b010b7ee0343",
+    "A202.rd-disabled-until-adjoint": "8b0d2e3e005207b52ada038fa73208e941887de2626c287a08908ceb2b6a8518",
+    "A301.genotype-causes-phenotype": "f5c7d6da77de71c0ff188ba01017d6f9db9bccfa4a13e95b5d05c1ac6f0de737",
+    "A401.archive-genotype-attribution": "04d223d1bea4190f7cc7c092aeb14605db9a1b2148bbb49b92ad7486495865a0",
+    "A401.bin-capacity": "7e44b9f01d44f5a6f2b42ea9cb988e89174267e46c8d95a785dbdc64b683000a",
+    "A401.live-statistics-exact": "7e44b9f01d44f5a6f2b42ea9cb988e89174267e46c8d95a785dbdc64b683000a",
+    "A501.came-production-equation": "31ef8b0954200a0e4625469c5aa556af3e5455b238b776fbf58f01c0d8d62dfd",
+    "C001.acceptance-evidence-current": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "G100.deterministic-seed": "da365de529f2de323bb8965f50b6b0cce8b51694f7fe77bf8d875460d3b26ba0",
+    "G100.single-prng": "3ef97c34de2c2a4fbba5891afa361e5c44af74d90c047297487c7cd9724b13d9",
+    "I001.phase-order": "c03e378e1927784e856c48fdb09c9c2fc17d8c3051723776296d00f12446265e",
+    "I001.replay-evaluation-identity": "c03e378e1927784e856c48fdb09c9c2fc17d8c3051723776296d00f12446265e",
+    "I001.spawn-wave-unique": "7136461ec06479d218d7943a9cc35c2543a3e18fedd680cab926e14edd04c4a2",
+    "S001.cuda-errors-fatal": "04d223d1bea4190f7cc7c092aeb14605db9a1b2148bbb49b92ad7486495865a0",
+    "S002.host-authority": "550a4ddcd494368f94dd91fe945def18e6fbb9c714a8feae2fbad27479376c84",
+    "S002.operator-command-effective": "550a4ddcd494368f94dd91fe945def18e6fbb9c714a8feae2fbad27479376c84",
+    "S004.pt-swap-transaction": "6e82d30ad8e792e6712ac0730b4a8c1af337684e2fb26055f40d2742804e6c65"
+  },
+  "name": "wave2-20260912",
+  "runId": "wave2-20260912-2026-09-12T044449",
+  "schema": "slime-evidence/v1",
+  "seed": "default",
+  "specHash": "ae2b82ec0516ff1df901a25e8d2e69285868f29b6d5be0dc0fcc7adb5d61b3ab",
+  "witnessHashes": {
+    "A101.sot-schedule-independent": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "A103.checkpoint-replay-equivalence": "727e844e44e8e6d77eb1d18fc12cd4db1063e9374eca13784f5d54e68b70168d",
+    "A103.gradient-correctness": "25ae9abd7fc21758456bacc72e77d1716be4cfae634e4343e9e38a5eaa0807d0",
+    "A201.role-canonicalization": "c29bc7a66db36b44958736225a0b7653afa3424faad38ad9f07a23a823161d1c",
+    "A201.shared-substrate": "727e844e44e8e6d77eb1d18fc12cd4db1063e9374eca13784f5d54e68b70168d",
+    "A201.task-conditioning-complete": "0bd69c4a7be1c137906b1e219f816b134be6a521d726350414f6019af24f5606",
+    "A202.rd-disabled-until-adjoint": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "A301.genotype-causes-phenotype": "25ae9abd7fc21758456bacc72e77d1716be4cfae634e4343e9e38a5eaa0807d0",
+    "A401.archive-genotype-attribution": "25ae9abd7fc21758456bacc72e77d1716be4cfae634e4343e9e38a5eaa0807d0",
+    "A401.bin-capacity": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "A401.live-statistics-exact": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "A501.came-production-equation": "c29bc7a66db36b44958736225a0b7653afa3424faad38ad9f07a23a823161d1c",
+    "C001.acceptance-evidence-current": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "G100.deterministic-seed": "c29bc7a66db36b44958736225a0b7653afa3424faad38ad9f07a23a823161d1c",
+    "G100.single-prng": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "I001.phase-order": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "I001.replay-evaluation-identity": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "I001.spawn-wave-unique": "c29bc7a66db36b44958736225a0b7653afa3424faad38ad9f07a23a823161d1c",
+    "S001.cuda-errors-fatal": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "S002.host-authority": "0b437a0e646c92b4330b98fd6c108ff5ff83c7aad65296cfedffefcd9007b9cb",
+    "S002.operator-command-effective": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "S004.pt-swap-transaction": "25ae9abd7fc21758456bacc72e77d1716be4cfae634e4343e9e38a5eaa0807d0"
+  }
+}

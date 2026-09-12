@@ -128,6 +128,92 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(any("brand_new_buffer" in e for e in errors),
                         "undeclared organism buffer not caught")
 
+    def test_crosses_annotation_completeness_both_directions(self):
+        # A code field annotated [crosses:pt=rogue] that is missing from the
+        # transaction registry must be caught — this is exactly how
+        # d_eff_weights escaped the first version of the transaction model.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "integration"
+            src.mkdir(parents=True)
+            (src / "main_loop.cu").write_text(
+                "float* d_eff_weights; // [identity:organism] [crosses:pt=rogue]\n",
+                encoding="utf-8")
+            transactions = {
+                "generation_phases": {"order": ["a", "b"], "invariants": []},
+                "organism_buffers": ["organism_state"],
+                "transactions": {"pt_swap": {"organism_identity": ["organism_state"]}},
+            }
+            errors: list[str] = []
+            compiler.check_phase_and_transactions(root, transactions, errors)
+            self.assertTrue(any("crosses:pt=rogue" in e for e in errors),
+                            "unregistered [crosses:pt=...] annotation not caught")
+            # The reverse direction: a registry entry with no code annotation.
+            errors2: list[str] = []
+            transactions["transactions"]["pt_swap"]["organism_identity"].append(
+                "effective_weights")
+            transactions["organism_buffers"].append("effective_weights")
+            compiler.check_phase_and_transactions(root, transactions, errors2)
+            self.assertTrue(
+                any("no [crosses:pt=effective_weights]" in e for e in errors2),
+                "registry entry without code annotation not caught")
+
+    def test_evidence_witness_attribution_enforced(self):
+        # A claim=witness:result entry whose witness is not registered for the
+        # claim must be rejected; an unregistered-but-executed binary is
+        # accepted as integration-run attestation.
+        claim = Claim(id="X001.foo", kind="invariant", doc="d", line=1)
+        claim.witnesses = [WitnessRef("W+", "tests/t.cu::real", "X001.foo")]
+        results, errors = evidence.parse_and_validate_results(
+            ["X001.foo=tests/t.cu::impostor:pass"], [claim], "", ROOT)
+        self.assertTrue(errors, "unregistered witness was accepted")
+        results2, errors2 = evidence.parse_and_validate_results(
+            ["X001.foo=build/coevo.exe:pass"], [claim], "build/coevo.exe", ROOT)
+        self.assertFalse(errors2, "binary attestation was rejected")
+        self.assertEqual(results2["X001.foo"]["witness"], "build/coevo.exe")
+
+    def test_claim_hash_staleness(self):
+        # Editing the proposition itself (statement/mechanisms/witnesses/deps)
+        # must stale evidence even when no mechanism FILE changed.
+        claim = Claim(id="X001.foo", kind="invariant", doc="d", line=1)
+        claim.mechanisms = ["architecture/transactions.yaml::pt_swap"]
+        h1 = compiler.claim_hash(claim)
+        claim.statement = "a different proposition"
+        h2 = compiler.claim_hash(claim)
+        self.assertNotEqual(h1, h2)
+        # Unrelated claims do not affect each other's hash.
+        other = Claim(id="X002.bar", kind="invariant", doc="d", line=1)
+        other.mechanisms = ["architecture/transactions.yaml::pt_swap"]
+        h_other = compiler.claim_hash(other)
+        self.assertEqual(compiler.claim_hash(claim), h2)
+        self.assertNotEqual(h_other, h2)
+
+    def test_manifest_records_witness_and_result(self):
+        # Regression: new_manifest must store the ACTUAL witness anchor and
+        # pass/fail result, not the dict keys ("witness"/"result").
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tests").mkdir()
+            (root / "tests/t.cu").write_text(
+                "// [claim:X001.foo]\nvoid real() {}\n", encoding="utf-8")
+            (root / "src").mkdir()
+            (root / "src/m.cu").write_text("void m_fn() {}\n", encoding="utf-8")
+            claim = Claim(id="X001.foo", kind="invariant", doc="d", line=1)
+            claim.mechanisms = ["src/m.cu::m_fn"]
+            claim.witnesses = [WitnessRef("W+", "tests/t.cu::real", "X001.foo")]
+            results, errs = evidence.parse_and_validate_results(
+                ["X001.foo=tests/t.cu::real:pass"], [claim], "", root)
+            self.assertFalse(errs)
+            machine = {"schema": "slime-machine/v1"}
+            man = evidence.new_manifest(
+                name="t", root=root, binary="none", cuda="x", gpu="y",
+                seed="s", results=results, claims=[claim], machine=machine)
+            self.assertEqual(man["claims"]["X001.foo"]["result"], "pass")
+            self.assertEqual(man["claims"]["X001.foo"]["witness"],
+                             "tests/t.cu::real")
+            v = evidence.verdict(claim, [man], root)
+            self.assertEqual(v.state, "pass/current")
+
     def test_stale_evidence_detected(self):
         # [claim:C001.acceptance-evidence-current]
         with tempfile.TemporaryDirectory() as td:
@@ -142,6 +228,7 @@ class CompilerTests(unittest.TestCase):
                 "schema": "slime-evidence/v1",
                 "generatedAt": "2026-01-01T00:00:00+00:00",
                 "claims": {"X001.foo": {"witness": "t", "result": "pass"}},
+                "claimHashes": {claim.id: compiler.claim_hash(claim)},
                 "mechanismHashes": {claim.id: "0" * 64},
                 "witnessHashes": {claim.id: "0" * 64},
             }
@@ -154,6 +241,11 @@ class CompilerTests(unittest.TestCase):
                 evidence.witness_file_hashes([claim], root)[claim.id]
             v2 = evidence.verdict(claim, [manifest], root)
             self.assertEqual(v2.state, "pass/current")
+            # Editing the proposition itself stales evidence even when no
+            # mechanism or witness file changed.
+            claim.statement = "a changed proposition"
+            v3 = evidence.verdict(claim, [manifest], root)
+            self.assertEqual(v3.state, "pass/stale")
 
     def test_claim_parser_and_validation(self):
         text = (

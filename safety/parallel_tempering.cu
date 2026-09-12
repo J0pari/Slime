@@ -55,10 +55,16 @@ struct SwapContext {
     OrganismState*    d_organisms;
     CheckpointBuffer* d_checkpoints;
     GradBuffers*      d_grads;
+    // Per-organism effective weight banks (W_shared + genome delta). These
+    // must move with the organism: backward reconstructs each checkpoint with
+    // the organism's own bank, so a swap that leaves the bank behind would
+    // differentiate trajectory B with phenotype A.
+    float*            d_eff_weights;   // [pool_size * TOTAL_WEIGHTS]
     // Temp buffers for device-side swap (pre-allocated in World).
     OrganismState*    d_swap_org;
     CheckpointBuffer* d_swap_ckpt;
     GradBuffers*      d_swap_grad;
+    float*            d_swap_wbank;    // [TOTAL_WEIGHTS]
     // Host-side organism table arrays for row swaps.
     genome::Genome*       genomes;
     genome::DeltaWeights* deltas;
@@ -105,6 +111,21 @@ static inline void swap_device_organism(SwapContext& ctx, int slot_a, int slot_b
                     sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
     cudaMemcpyAsync(&ctx.d_grads[slot_b], ctx.d_swap_grad,
                     sizeof(GradBuffers), cudaMemcpyDeviceToDevice, ctx.stream);
+
+    // Effective-weight bank swap: backward must re-forward each trajectory
+    // with the phenotype that produced it.
+    cudaMemcpyAsync(ctx.d_swap_wbank,
+                    &ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
+                    autodiff::TOTAL_WEIGHTS * sizeof(float),
+                    cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
+                    &ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+                    autodiff::TOTAL_WEIGHTS * sizeof(float),
+                    cudaMemcpyDeviceToDevice, ctx.stream);
+    cudaMemcpyAsync(&ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+                    ctx.d_swap_wbank,
+                    autodiff::TOTAL_WEIGHTS * sizeof(float),
+                    cudaMemcpyDeviceToDevice, ctx.stream);
 }
 
 // Swap host-side OrganismTable row data between two pool slots, including the
@@ -241,3 +262,6 @@ void flag_stress_failures(StressLadder* l, cudaStream_t stream);
 }  // namespace slime::safety::pt
 
 #endif  // COEVO_SAFETY_PARALLEL_TEMPERING_CU
+
+
+

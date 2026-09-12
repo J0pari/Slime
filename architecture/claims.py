@@ -29,6 +29,8 @@ This module is stdlib-only so the compiler runs anywhere python3 is present.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,9 +39,97 @@ VALID_KINDS = {"invariant", "contract", "capability", "policy", "empirical", "ac
 VALID_LIFECYCLE = {"planned", "provisional", "established", "deprecated"}
 VALID_CONFIDENCE = {"unobserved", "inferred", "observed", "repeatedly_observed"}
 
+# Binding specification documents that carry @claim blocks.
+SPEC_DOCS = [
+    "docs/blueprint.md",
+    "docs/cuda_engineering.md",
+    "docs/construction_plan.md",
+]
+
+CODE_SUFFIXES = {".cu", ".cuh", ".cpp", ".h", ".hpp"}
+
 CLAIM_RE = re.compile(r"^@claim\s+(\S+)\s+(\S+)\s*$")
 FIELD_RE = re.compile(r"^(S|M|W\+|W|P|T|C|D|X)\s+(.*)$")
 CONTINUATION_RE = re.compile(r"^  (.*)$")
+
+_CODE_TOKEN_CACHE: dict[str, re.Pattern] = {}
+
+
+def code_token_re(symbol: str) -> re.Pattern:
+    pat = _CODE_TOKEN_CACHE.get(symbol)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(symbol) + r"\b")
+        _CODE_TOKEN_CACHE[symbol] = pat
+    return pat
+
+
+def flatten_keys(d: dict, prefix: str = "") -> set[str]:
+    keys = set()
+    for k, v in d.items():
+        full = f"{prefix}.{k}" if prefix else k
+        keys.add(full)
+        if isinstance(v, dict):
+            keys |= flatten_keys(v, full)
+    return keys
+
+
+def resolve_mechanism(anchor: str, root: Path, transactions: dict) -> tuple[bool, str]:
+    """Referential integrity for a mechanism anchor. The compiler asserts the
+    anchor still exists; it does NOT assert the code is correct."""
+    if "::" not in anchor:
+        return False, "anchor missing ::symbol"
+    path, symbol = anchor.split("::", 1)
+    p = root / path
+    if not p.exists():
+        return False, f"file missing: {path}"
+    if path == "architecture/transactions.yaml":
+        flat = flatten_keys(transactions)
+        leaves = {k.rsplit(".", 1)[-1] for k in flat}
+        tops = set(transactions.keys())
+        if symbol not in flat and symbol not in leaves and symbol not in tops:
+            return False, f"transactions.yaml key missing: {symbol}"
+        return True, ""
+    if p.suffix in CODE_SUFFIXES:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return bool(code_token_re(symbol).search(text)), f"symbol missing: {path}::{symbol}"
+    if p.suffix == ".py":
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return bool(re.search(r"def\s+" + re.escape(symbol) + r"\b", text)), \
+            f"python symbol missing: {path}::{symbol}"
+    return False, f"unsupported mechanism file type: {path}"
+
+
+def resolve_witness(w: WitnessRef, root: Path, claim_id: str) -> tuple[bool, str]:
+    """A witness resolves when its file exists, its symbol exists, and the
+    file declares the claim via a [claim:<id>] marker (bidirectional link)."""
+    p = root / w.path
+    if not p.exists():
+        return False, f"witness file missing: {w.path}"
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if w.symbol:
+        if p.suffix == ".py":
+            if not re.search(r"def\s+" + re.escape(w.symbol) + r"\b", text):
+                return False, f"witness symbol missing: {w.path}::{w.symbol}"
+        elif p.suffix in CODE_SUFFIXES:
+            if not code_token_re(w.symbol).search(text):
+                return False, f"witness symbol missing: {w.path}::{w.symbol}"
+        else:
+            return False, f"unsupported witness file type: {w.path}"
+    if f"[claim:{claim_id}]" not in text:
+        return False, f"witness does not declare [claim:{claim_id}]: {w.path}"
+    return True, ""
+
+
+def claim_hash(c: "Claim") -> str:
+    """Per-claim normalized hash: the proposition being evidenced. Changes to
+    any other claim do not affect it; edits to THIS claim stale its evidence."""
+    rows = json.dumps({
+        "id": c.id, "kind": c.kind, "statement": c.statement,
+        "mechanisms": sorted(c.mechanisms),
+        "witnesses": sorted((w.strength, w.anchor) for w in c.witnesses),
+        "deps": sorted(c.deps),
+    }, sort_keys=True)
+    return hashlib.sha256(rows.encode("utf-8")).hexdigest()
 
 
 @dataclass

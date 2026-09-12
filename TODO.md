@@ -23,6 +23,19 @@ completed or its verification state changes.
 - [x] Add `AGENTS.md` (architecture delta protocol) and the concern registry
   (`architecture/documents.yaml`), machine contract (`machine.json`), and
   transaction/phase model (`transactions.yaml`).
+- [x] Close the PT attribution bug: effective-weight banks now move with the
+  organism through PT swaps (temp bank buffer + swap), the transaction
+  registry gained code-side `[crosses:pt=...]` annotations checked in both
+  directions, and `test_pt_swap_backward_correspondence` verifies post-swap
+  gradients equal the moved organism's pre-swap gradients (with a
+  sensitivity check that the missing swap is detectable).
+- [x] Evidence is now witness-attributed (`claim=witness:result`) and
+  staleness includes a per-claim proposition hash; the status surface renders
+  source-gate WARN states.
+- [ ] Implement the 16→5 task-embedding projection (or another explicit
+  conditioning path): `A201.task-conditioning-complete` is red with a failing
+  witness (`tests/task_conditioning.cu`) because task dims 5..15 do not reach
+  the NCA.
 - [ ] Shrink the `checked_cuda_calls` allowlist: convert
   `launch_grad_norm_reduce` / `launch_telemetry_kernels` / `propose_swaps` /
   `apply_sot_identity` to checked wrappers so `--strict` passes.
@@ -52,8 +65,12 @@ completed or its verification state changes.
 - [ ] Diagnose and stabilize the training dynamics: telemetry shows the 64-step
   forward saturates ~50% of FP16 state values at ±65504 with logits ~1e5,
   mean CE ~69, and per-bank gradient norms ~1e16–1e17 at generation 0. Follow
-  the Gate 3 order: gradient clipping / residual scaling / initialization
-  redesign only after the finite-difference suite stays green.
+  the Gate 3 order: first measure per-timestep distributions of
+  ‖F_θ(x_t)‖, ‖x_t‖, and ‖F_θ(x_t)‖/(‖x_t‖+ε) across the 64 recurrent
+  steps (residual-magnitude telemetry), then decide between initialization
+  scaling and an explicit residual timestep x_{t+1} = x_t + α·F_θ(x_t);
+  gradient clipping / residual scaling / initialization redesign only after
+  the finite-difference suite stays green.
 - [ ] Repair archive semantics before Wave 4+: inverse-variance metric update
   and use, exact RFF-mean adjustment on replacement, capacity enforcement on
   PCA rebin, robust PCA initialization, and an archive invariant checker.

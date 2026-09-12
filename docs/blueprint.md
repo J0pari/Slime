@@ -256,6 +256,17 @@ W tests/wave1_autodiff.cu::test_forward_match_and_backward
 T provisional
 C observed
 
+@claim A201.task-conditioning-complete contract
+S every task embedding dimension the configuration advertises reaches the
+  NCA forward; perturbing any single task dimension while holding all else
+  fixed changes the executed output
+M curriculum/problem_generator.cu::assemble_classifier_batch
+M nca/engine.cu::seed_classifier_grid
+M integration/host_main.cu::step_generation
+W+ tests/task_conditioning.cu::check_task_conditioning
+T provisional
+C unobserved
+
 
 Grid: 16-channel 64×64. CA steps: 64. The substrate carries perception,
 interaction, flow, bmap-projection, and reaction-diffusion machinery, all
@@ -800,12 +811,16 @@ runaway detector are role-aware:
 S-004: Parallel Tempering Ladders
 @claim S004.pt-swap-transaction invariant
 S an accepted PT swap moves every organism-associated rollout state together:
-  device state, checkpoints, genome, delta, role, lineage, batch assignment,
-  and seed gradients
+  device state, checkpoints, gradients, effective weights, genome, delta,
+  role, lineage, parentage, spawn generation, fitness, batch assignment, and
+  seed gradients, so backward differentiates each trajectory with the
+  phenotype and objective that produced it
 M safety/parallel_tempering.cu::propose_swaps
 M safety/parallel_tempering.cu::swap_host_organism
+M safety/parallel_tempering.cu::swap_device_organism
 M architecture/transactions.yaml::pt_swap
 W+ tests/wave2_evolution.cu::test_forced_pt_swap
+W+ tests/wave2_evolution.cu::test_pt_swap_backward_correspondence
 T established
 C observed
 
