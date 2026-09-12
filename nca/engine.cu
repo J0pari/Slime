@@ -128,7 +128,8 @@ __device__ inline void seed_predictor_grid(__half* grid,
     constexpr int CENTER = GRID_SIZE / 2;
     constexpr int LO = CENTER - 2;       // 30
     constexpr int HI = CENTER + 2;       // 34 (exclusive)
-    if (threadIdx.y < 4 && threadIdx.x < 4) {
+    if (threadIdx.y < PREDICTOR_SEED_REGION &&
+        threadIdx.x < PREDICTOR_SEED_REGION) {
         int local = threadIdx.y * 4 + threadIdx.x;   // 0..15
         int y = LO + threadIdx.y;
         int x = LO + threadIdx.x;
@@ -147,7 +148,6 @@ __device__ inline void seed_predictor_grid(__half* grid,
 // a 16-channel delta added to the state. Reaction-diffusion (A-202) then adds
 // spatial diffusion + decay to the chemical channels 0-5 on top of that delta.
 constexpr int PERC_DIM    = N_PERC_FILTERS * CA_CHANNELS;   // 48
-constexpr int HIDDEN_DIM  = 32;
 
 // Learned depthwise perception: perc_out[f*CA_CHANNELS + c] is filter f convolved
 // over channel c's 3x3 toroidal neighborhood. W_perc layout: [N_PERC_FILTERS][3][3]
@@ -180,7 +180,7 @@ __device__ inline void sample_neighborhood(const __half* state,
 
 __device__ inline float gelu_approx(float x) {
     // Hendrycks-Gimpel approximation.
-    const float k = 0.7978845608f;          // sqrt(2/pi)
+    const float k = GELU_K;                  // sqrt(2/pi)
     return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 
@@ -235,8 +235,8 @@ __device__ inline void ca_step(const __half* state_curr,
                 float prev = __half2float(state_curr[grid_idx(y, x, c)]);
                 float next = prev + alpha * acc;
                 // Clamp to the FP16 representable range before narrowing.
-                if (next > 65504.f)  next = 65504.f;
-                if (next < -65504.f) next = -65504.f;
+                if (next >  FP16_MAX_VALUE) next =  FP16_MAX_VALUE;
+                if (next < -FP16_MAX_VALUE) next = -FP16_MAX_VALUE;
                 state_next[grid_idx(y, x, c)] = __float2half(next);
             }
         }

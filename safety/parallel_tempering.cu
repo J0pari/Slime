@@ -81,6 +81,7 @@ struct SwapContext {
     // objective (A-501 transaction invariant).
     float*                seed_grad;        // [pool_size * BMAP_DIM] host rows
     int*                  batch_sample_idx; // [pool_size] host
+    float*                predictor_error_ema; // [pool_size] host
     // Stream for device memcpy.
     cudaStream_t stream;
 };
@@ -173,6 +174,14 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
         std::memcpy(tmp_sg, sa, sizeof(tmp_sg));
         std::memcpy(sa, sb, sizeof(tmp_sg));
         std::memcpy(sb, tmp_sg, sizeof(tmp_sg));
+    }
+
+    // Predictor curriculum error estimate: it describes the organism as a
+    // target, so it moves with the organism.
+    {
+        float t = ctx.predictor_error_ema[slot_a];
+        ctx.predictor_error_ema[slot_a] = ctx.predictor_error_ema[slot_b];
+        ctx.predictor_error_ema[slot_b] = t;
     }
 }
 

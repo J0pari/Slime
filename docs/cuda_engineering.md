@@ -734,6 +734,19 @@ W+ tests/architecture/test_architecture.py::test_gate_checked_cuda_calls_catches
 T established
 C observed
 
+@claim S001.checkpoint-roundtrip invariant
+S a saved checkpoint restores the exact run state: every serialized host
+  field and the device weights and CAME moments are byte-identical after a
+  load, the archive satisfies its invariants, and a resumed run continues
+  from the saved generation
+M integration/checkpointing.cu::save_checkpoint
+M integration/checkpointing.cu::load_checkpoint
+M archive/soft_qd_archive.cu::archive_read_file
+W+ tests/checkpoint_state.cu::main
+W+ tests/host_unit_tests.cpp::test_archive_file_roundtrip
+T established
+C observed
+
 
 ### apply_sot_identity
 Host function. For SOT-marked task images, computes f_sot as cosine

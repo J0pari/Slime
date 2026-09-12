@@ -136,6 +136,22 @@ struct World {
     curriculum::ProbeSet probe_set;
     float probe_fitness[PROBE_BATCH];  // ground-truth fitness for probe evaluation
 
+    // Predictor role (A-601/A-701): task batch, device mirror of the target
+    // bmap_32 rows, and the per-organism ensemble prediction error EMA used
+    // to weight the predictor curriculum.
+    curriculum::PredictorBatch predictor_batch;
+    float* d_predictor_bmap32;         // [PREDICTOR_BATCH * BMAP_DIM]
+    float predictor_error_ema[POOL_SIZE];  // [identity:organism] [lifetime:rollout] [crosses:pt=predictor_error_ema]
+
+    // Surprise history and calibration (A-601): rolling blended surprise for
+    // rho = s_avg / s_target, and the calibration window samples that freeze
+    // s_target and the CUSUM parameters after bootstrap.
+    float s_blended_history[HYBRID_R_WINDOW];
+    int   s_hist_head;
+    int   s_hist_filled;
+    float calibration_samples[CALIBRATION_GEN_HI - CALIBRATION_GEN_LO + 1];
+    int   n_calibration_samples;
+
     // Durable operator state (S-002): pause gating and pruned lineages are
     // owned by the run loop and applied there, not as transient locals.
     safety::alignment::OperatorState operator_state;
@@ -151,6 +167,7 @@ struct World {
     int               grad_health_warn_count;   // consecutive low-norm generations
     float             last_mean_ce;       // mean CE over evaluated classifiers
     float             last_max_abs_logit;// max |logit| over evaluated classifiers
+    const char*       checkpoint_path;    // S-001 checkpoint file (set by run)
 
     cudaStream_t      stream;
 };
@@ -158,8 +175,9 @@ struct World {
 // ---- Function declarations (defined in host_main.cu) -----------------------
 bool initialize_world(World* w);
 bool step_generation(World* w);
-void run(int n_generations);
+void run(int n_generations, bool resume, const char* checkpoint_path);
 
 }  // namespace slime::integration
 
 #endif  // COEVO_INTEGRATION_MAIN_LOOP_CU
+

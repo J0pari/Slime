@@ -175,9 +175,6 @@ __host__ inline void replace_rff_mean(float* mu, uint32_t count,
 //   sigma2_d <- (1 - alpha) * sigma2_d + alpha * (x_d - mu_d)^2
 //   w_d       = 1 / (sigma2_d + eps), bounded.
 // The descriptor running mean mu_desc_ema is maintained alongside it.
-constexpr float INV_VAR_EMA_ALPHA = 0.01f;
-constexpr float INV_VAR_EMA_EPS    = 1e-4f;
-
 __host__ inline void update_inv_var_ema(Archive* a, const float* descriptor) {
     for (int d = 0; d < BMAP_DIM; ++d) {
         float x = descriptor[d];
@@ -223,8 +220,6 @@ __host__ inline float weighted_dist2(const float* a,
 // The novelty term lets a less-fit but more-novel candidate displace a crowded
 // incumbent. Lambda_novelty = 0.5 balances the two terms; the RFF novelty is
 // normalized by RFF_DIM to keep it scale-comparable with fitness in [0,1].
-constexpr float LAMBDA_NOVELTY = 0.5f;
-
 __host__ inline float qd_score(float fitness, float novelty) {
     return fitness + LAMBDA_NOVELTY * novelty / static_cast<float>(RFF_DIM);
 }
@@ -242,7 +237,7 @@ __host__ inline void assign_bin(const Archive& a, const float* descriptor,
         }
         for (int axis = 0; axis < 2; ++axis) {
             float range = a.pc_max[axis] - a.pc_min[axis];
-            if (range < 1e-12f) range = 1.0f;
+            if (range < EPS_DENOM) range = 1.0f;
             int bins_n = (axis == 0) ? ARCHIVE_BINS_X : ARCHIVE_BINS_Y;
             int b = static_cast<int>((p[axis] - a.pc_min[axis]) / range
                                      * (bins_n - 1) + 0.5f);
@@ -428,7 +423,7 @@ __host__ inline bool archive_check_invariants(const Archive& a,
         float inv = 1.0f / static_cast<float>(n_cls);
         for (int j = 0; j < RFF_DIM; ++j) {
             float want = mu_cls[j] * inv;
-            if (std::fabs(want - a.mu_rff_classifier[j]) > 1e-4f * (1.0f + std::fabs(want)))
+            if (std::fabs(want - a.mu_rff_classifier[j]) > EPS_REL * (1.0f + std::fabs(want)))
                 return fail("mu_rff_classifier mismatch");
         }
     }
@@ -436,11 +431,25 @@ __host__ inline bool archive_check_invariants(const Archive& a,
         float inv = 1.0f / static_cast<float>(n_prd);
         for (int j = 0; j < RFF_DIM; ++j) {
             float want = mu_prd[j] * inv;
-            if (std::fabs(want - a.mu_rff_predictor[j]) > 1e-4f * (1.0f + std::fabs(want)))
+            if (std::fabs(want - a.mu_rff_predictor[j]) > EPS_REL * (1.0f + std::fabs(want)))
                 return fail("mu_rff_predictor mismatch");
         }
     }
     return true;
+}
+
+// ---- File roundtrip (S-001 checkpoint payload) -----------------------------
+// The Archive is a POD struct (no pointers); a raw byte dump is the
+// serialized form. Reads verify the archive invariants before the caller
+// may use it, so a corrupt or truncated payload is rejected loudly.
+__host__ inline bool archive_write_file(const Archive& a, FILE* f) {
+    return std::fwrite(&a, 1, sizeof(Archive), f) == sizeof(Archive);
+}
+
+__host__ inline bool archive_read_file(Archive& a, FILE* f) {
+    if (std::fread(&a, 1, sizeof(Archive), f) != sizeof(Archive)) return false;
+    char err[256];
+    return archive_check_invariants(a, err, sizeof(err));
 }
 
 #if SLIME_DEBUG_CHECKS
@@ -559,10 +568,11 @@ __host__ inline float compose_fitness(float f_raw,
     return f_raw * role_mult * audit_mult * variance_mult;
 }
 
-// Surprise ratio rho = s_avg / s_target. Guards against an uncalibrated
-// s_target (returns 1, which makes both role multipliers idle at 1.0).
+// Surprise ratio rho = s_avg / s_target. Precondition: s_target > 0; callers
+// gate on the calibration flag (s_target_calibrated) before applying role
+// multipliers. There is deliberately no substituted ratio for an
+// uncalibrated target — an inactive mechanism must read as inactive.
 __host__ inline float surprise_ratio(float s_avg, float s_target) {
-    if (s_target <= 1e-12f) return 1.0f;
     return s_avg / s_target;
 }
 
@@ -615,7 +625,6 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
 
     // Step 2: power iteration for top-2 PCs on the BMAP_DIM x BMAP_DIM covariance.
     // We never form the covariance explicitly; instead compute C*v = sum_i (x_i^T v) x_i.
-    constexpr int POWER_ITERS = 20;
     float pc[2][BMAP_DIM];
 
     // Dense deterministic starting vectors: a uniform vector has nonzero
@@ -648,7 +657,7 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
             }
             float norm = 0.f;
             for (int d = 0; d < BMAP_DIM; ++d) norm += new_v[d] * new_v[d];
-            if (norm < 1e-24f) {
+            if (norm < EPS_NORM) {
                 // Degenerate covariance in this direction: fall back to the
                 // canonical axis so the binning stays well-defined.
                 for (int d = 0; d < BMAP_DIM; ++d)
@@ -686,8 +695,8 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
     }
     float range0 = max0 - min0;
     float range1 = max1 - min1;
-    if (range0 < 1e-12f) range0 = 1.0f;
-    if (range1 < 1e-12f) range1 = 1.0f;
+    if (range0 < EPS_DENOM) range0 = 1.0f;
+    if (range1 < EPS_DENOM) range1 = 1.0f;
 
     // Store extents for assign_bin.
     a->pc_min[0] = min0; a->pc_max[0] = max0;
@@ -738,7 +747,7 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
 
             const float* mu_role = (role == Role::Classifier)
                 ? a->mu_rff_classifier : a->mu_rff_predictor;
-            int occupants[ARCHIVE_BINS_X * ARCHIVE_BINS_Y * 13 + 64];
+            int occupants[MAX_ARCHIVE];
             int n_occ = 0;
             for (int i = 0; i < MAX_ARCHIVE; ++i) {
                 const ArchiveEntry& e = a->entries[i];
@@ -831,7 +840,7 @@ __host__ inline void apply_lineage_brake(Archive* a,
                                                     float threshold) {
     if (share_fraction <= threshold) return;  // no braking needed
     float brake = threshold / share_fraction;
-    if (brake < 0.1f) brake = 0.1f;  // floor to prevent zeroing
+    if (brake < LAMBDA_AUDIT) brake = LAMBDA_AUDIT;  // floor to prevent zeroing
 
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
         ArchiveEntry& e = a->entries[i];

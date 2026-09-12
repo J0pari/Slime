@@ -141,6 +141,50 @@ class GateTests(unittest.TestCase):
                         "float x = pcg32_float(&rng);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_numeric_policy_catches_plant(self):
+        # [claim:G100.named-tunables]
+        # One planted violation per rule: N1..N5.
+        planted = files_from({"src/foo.cu": (
+            "constexpr float TAU = 0.123f;\n"
+            "if (x < 1e-12f) return;\n"
+            "float y = ok ? 1.0f : 0.25f;\n"
+            "void f(float a = 0.3f);\n"
+            "int z = n % 50;\n")})
+        report = source_gates.GateReport()
+        source_gates.gate_numeric_policy(planted, report)
+        self.assertGreaterEqual(len(report.errors), 5,
+                                f"expected 5 planted violations, got "
+                                f"{len(report.errors)}")
+
+        clean = files_from({"src/foo.cu": (
+            "if (x < EPS) return;\n"
+            "float y = ok ? ONE : HALF;\n"
+            "void f(float a = DEFAULT_RATE);\n"
+            "int z = n % PT_SWAP_INTERVAL;\n")})
+        report2 = source_gates.GateReport()
+        source_gates.gate_numeric_policy(clean, report2)
+        self.assertTrue(report2.ok, [str(f) for f in report2.errors])
+
+        # The schema home is where numbers live: it is never scanned.
+        schema = files_from({"config/constants.cuh":
+                             "constexpr float TAU = 0.123f;\n"})
+        report3 = source_gates.GateReport()
+        source_gates.gate_numeric_policy(schema, report3)
+        self.assertTrue(report3.ok)
+
+    def test_numeric_exemptions_live(self):
+        # [claim:G100.named-tunables]
+        # Every exemption must still name real code (LLM-Trader's liveness
+        # rule): a stale exemption is a lie about the codebase.
+        import re as _re
+        for (path, symbol), _reason in \
+                source_gates.NUMERIC_POLICY_EXEMPTIONS.items():
+            p = ROOT / path
+            self.assertTrue(p.is_file(), f"exemption names missing file {path}")
+            text = p.read_text(encoding="utf-8", errors="replace")
+            self.assertRegex(text, _re.escape(symbol) + r"\s*\(",
+                             f"exemption names {symbol!r} not defined in {path}")
+
 
 class CompilerTests(unittest.TestCase):
     def test_phase_model_rejects_seed_before_pt(self):

@@ -187,6 +187,15 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(prov["durationSec"], 12.5)
             self.assertEqual(prov["contractFingerprint"], CANONICAL_FP)
 
+    def test_wrapped_command_has_no_bare_double_dash(self):
+        # The owner's submit parser is nargs=REMAINDER: argparse terminates
+        # it at a bare "--", so a wrapped command must not contain one.
+        wrapped = gpu_client.wrap_progress_command(
+            "run10", 10, ["build/coevo.exe", "10"])
+        self.assertNotIn("--", wrapped)
+        self.assertIn("progress_wrap.py", wrapped[1])
+        self.assertEqual(wrapped[-2:], ["build/coevo.exe", "10"])
+
     def test_evidence_manifest_links_scheduler_ledger(self):
         with tempfile.TemporaryDirectory() as td:
             fake = FakeScheduler(td)

@@ -31,6 +31,7 @@ organism_buffers:
   - f_sot
   - batch_sample_idx
   - seed_grad
+  - predictor_error_ema
 
 transactions:
   pt_swap:
@@ -51,6 +52,7 @@ transactions:
       - f_sot
       - batch_sample_idx
       - seed_grad
+      - predictor_error_ema
     slot_identity:
       - replica_tag
 
@@ -98,3 +100,4 @@ generation_phases:
     - after: [pt, seed_transfer]
     - before: [seed_transfer, backward]
     - before: [pt, backward]
+

@@ -21,7 +21,7 @@
 
 namespace slime::genome {
 
-constexpr int GENOME_WORDS = GENOME_BITS / 32;  // 32 uint32_t words
+constexpr int GENOME_WORDS = GENOME_BITS / WORD_BITS;
 
 struct Genome {
     uint32_t bits[GENOME_WORDS];
@@ -156,8 +156,6 @@ __host__ inline void crossover(const Genome& a,
 // Delta-weight codec (sparse weight updates layered on the base init).
 // Each organism holds up to MAX_DELTA_FLOATS (index, value) pairs encoding a
 // low-rank perturbation initialised from bits 282..1023 of the genome.
-constexpr int MAX_DELTA_FLOATS = 4096;
-
 struct DeltaWeights {
     uint32_t indices[MAX_DELTA_FLOATS];
     float    values[MAX_DELTA_FLOATS];
@@ -174,8 +172,8 @@ constexpr int TOTAL_WEIGHT_SLOTS = W_PERC_SIZE
 // Offsets into the concatenated weight space.
 constexpr int DELTA_OFF_PERC  = 0;
 constexpr int DELTA_OFF_INTER = W_PERC_SIZE;
-constexpr int DELTA_OFF_FLOW  = DELTA_OFF_INTER + (N_PERC_FILTERS * CA_CHANNELS * 32);
-constexpr int DELTA_OFF_BMAP  = DELTA_OFF_FLOW + (32 * CA_CHANNELS);
+constexpr int DELTA_OFF_FLOW  = DELTA_OFF_INTER + (N_PERC_FILTERS * CA_CHANNELS * HIDDEN_DIM);
+constexpr int DELTA_OFF_BMAP  = DELTA_OFF_FLOW + (HIDDEN_DIM * CA_CHANNELS);
 
 // Scatter the sparse perturbation onto the learned weight buffers. The four
 // weight banks are addressed as one concatenated index space. O(count) scatter,
@@ -215,10 +213,10 @@ __host__ inline void init_delta_from_prior(const Genome& g,
     auto read_bits = [&](int start, int n) -> uint32_t {
         uint32_t lo_word = g.bits[start / 32];
         uint32_t hi_word = g.bits[(start + n - 1) / 32];
-        int shift = start % 32;
+        int shift = start % WORD_BITS;
         uint64_t combined = static_cast<uint64_t>(lo_word)
                           | (static_cast<uint64_t>(hi_word) << 32);
-        uint32_t mask = (n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+        uint32_t mask = (n == WORD_BITS) ? 0xFFFFFFFFu : ((1u << n) - 1u);
         return static_cast<uint32_t>(combined >> shift) & mask;
     };
     uint32_t raw_count = read_bits(GENOME_BIT_DELTA_PRIOR_LO, 10);
@@ -237,7 +235,7 @@ __host__ inline void init_delta_from_prior(const Genome& g,
     // Design note: with a 10-bit count, a genome can request up to 1023 deltas
     // scattered across 2587 weight slots — a sizeable initial perturbation.
     // If early organisms are born degenerate, reduce PRIOR_SCALE or clamp count.
-    constexpr float PRIOR_SCALE = 0.01f;
+    constexpr float PRIOR_SCALE = DELTA_PRIOR_SCALE;
     for (int k = 0; k < count; ++k) {
         delta->indices[k] = pcg32_random(&local_rng) % TOTAL_WEIGHT_SLOTS;
         float u = pcg32_float(&local_rng);

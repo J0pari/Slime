@@ -116,5 +116,13 @@ $(TASK_CONDITIONING): tests/task_conditioning.cu autodiff/warp_tape.cu nca/engin
 task-conditioning-test: $(TASK_CONDITIONING)
 	./$(TASK_CONDITIONING)
 
+# S-001 checkpoint state roundtrip (GPU component test).
+CHECKPOINT_STATE := $(BUILD_DIR)/checkpoint_state.exe
+$(CHECKPOINT_STATE): tests/checkpoint_state.cu integration/host_main.cu integration/checkpointing.cu integration/main_loop.cu autodiff/warp_tape.cu optimizer/came.cu nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu archive/soft_qd_archive.cu curriculum/problem_generator.cu safety/monitoring.cu safety/parallel_tempering.cu safety/pt_ladder.cuh safety/structural.cu safety/alignment.cu safety/operator_cmds.cuh predictor/hybrid_surprise.cu config/constants.cuh | $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/checkpoint_state.cu -o $@ -lcudadevrt
+
+checkpoint-state-test: $(CHECKPOINT_STATE)
+	./$(CHECKPOINT_STATE)
+
 clean:
 	rm -rf $(BUILD_DIR)

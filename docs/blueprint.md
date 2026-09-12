@@ -107,6 +107,20 @@ P reproducibility
 T established
 C observed
 
+@claim G100.named-tunables policy
+S every configurable number lives in the schema home
+  (config/constants.cuh); action code uses named constants, never bare
+  literals at live seams (comparisons, ternary fallbacks, default
+  arguments, modulo, or numeric const definitions outside the schema home)
+M architecture/source_gates.py::gate_numeric_policy
+M config/constants.cuh::EPS_DENOM
+M config/constants.cuh::FP16_MAX_VALUE
+W+ tests/architecture/test_architecture.py::test_gate_numeric_policy_catches_plant
+W+ tests/architecture/test_architecture.py::test_numeric_exemptions_live
+P maintainability
+T established
+C observed
+
 
 Conventions: FP16 forward, FP32 master weights, FP32 autodiff, captured-graph
 execution mode as primary.
@@ -784,16 +798,18 @@ C observed
 
 @claim S002.operator-command-effective contract
 S pause, resume, and prune commands cause durable state transitions that the
-  run loop applies: pause gates generation steps, and a pruned lineage is
-  zeroed in the pool and tombstoned in the archive; checkpoint reports
-  unsupported until serialization lands
+  run loop applies: pause gates generation steps, a pruned lineage is zeroed
+  in the pool and tombstoned in the archive, and checkpoint writes a full
+  resumable checkpoint immediately
 M safety/alignment.cu::apply_operator_command
 M safety/operator_cmds.cuh::parse_operator_line
 M archive/soft_qd_archive.cu::prune_lineage
+M integration/checkpointing.cu::save_checkpoint
 M architecture/source_gates.py::gate_operator_polling
 W+ tests/architecture/test_architecture.py::test_gate_operator_polling_catches_plant
 W+ tests/host_unit_tests.cpp::test_operator_command_parse
 W+ tests/host_unit_tests.cpp::test_archive_prune_lineage
+W+ tests/checkpoint_state.cu::main
 T established
 C observed
 

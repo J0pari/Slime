@@ -6,6 +6,7 @@
 
 #include "main_loop.cu"
 #include "../safety/alignment.cu"
+#include "checkpointing.cu"
 
 #include <chrono>
 #include <cstdio>
@@ -18,6 +19,11 @@ namespace slime::integration {
 
 using namespace slime;
 namespace cur = slime::curriculum;
+
+// Default checkpoint location (relative to the working directory). Every
+// completed generation is saved here; `--resume` continues from it.
+constexpr const char* CHECKPOINT_DEFAULT_PATH = "checkpoints/slime-ckpt.bin";
+
 
 // ---- Fail-fast CUDA policy (A-501) -----------------------------------------
 // A CUDA error invalidates the experiment: allocations, memsets, copies, and
@@ -57,32 +63,27 @@ namespace cur = slime::curriculum;
     } \
 } while (0)
 
-// ---- Probe set evaluation (Wave 3, A-601) -----------------------------------
-// Evaluate placeholder surprise on the probe set. Returns the mean surprise
-// across all 64 probe samples.
+// ---- Probe set evaluation (A-601) ------------------------------------------
+// Placeholder surprise on the signed held-out probe tuples: prediction error
+// of the placeholder regressor on real (bmap_64, task_embedding, fitness)
+// tuples snapshotted from the replay buffer at bootstrap.
 static float evaluate_probe_placeholder(
     const predictor::PlaceholderRegressor& reg,
     const cur::ProbeSet& ps,
-    const float* probe_fitness,
     uint64_t host_sot_key)
 {
     if (!cur::verify_probe_set(ps, host_sot_key)) return 0.f;
+    if (!ps.probe_tuples_signed) return 0.f;
 
     float total = 0.f;
-    int count = 0;
-    for (int b = 0; b < 4; ++b) {
-        const cur::ClassifierBatch& batch = ps.classifier_probes[b];
-        for (int s = 0; s < cur::CLASSIFIER_BATCH; ++s) {
-            float zero_bmap[BMAP_DIM] = {};
-            int probe_idx = b * cur::CLASSIFIER_BATCH + s;
-            float surprise = predictor::placeholder_surprise(
-                reg, zero_bmap, batch.task_embedding,
-                probe_fitness[probe_idx]);
-            total += surprise;
-            count++;
-        }
+    for (int i = 0; i < PROBE_BATCH; ++i) {
+        total += predictor::placeholder_surprise(
+            reg,
+            &ps.probe_bmap[i * BMAP_DIM],
+            &ps.probe_task_emb[i * TASK_EMBED_DIM],
+            ps.probe_fitness[i]);
     }
-    return (count > 0) ? total / static_cast<float>(count) : 0.f;
+    return total / static_cast<float>(PROBE_BATCH);
 }
 
 // ---- GPU buffer allocation/free (section 2) --------------------------------
@@ -108,6 +109,7 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_batch_image,  cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_batch_image");
     CUDA_ABORT(cudaMalloc(&w->d_batch_task_emb, TASK_EMBED_DIM * sizeof(float)), "alloc d_batch_task_emb");
     CUDA_ABORT(cudaMalloc(&w->d_btraj,        POOL_SIZE * BTRAJ_SAMPLES * BMAP_DIM * sizeof(float)), "alloc d_btraj");
+    CUDA_ABORT(cudaMalloc(&w->d_predictor_bmap32, cur::PREDICTOR_BATCH * BMAP_DIM * sizeof(float)), "alloc d_predictor_bmap32");
 
     // Gradient health: pinned host scalar (section 8).
     CUDA_ABORT(cudaMalloc(&w->d_grad_norm, sizeof(float)), "alloc d_grad_norm");
@@ -175,6 +177,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_batch_image), "free d_batch_image");
     CUDA_WARN(cudaFree(w->d_batch_task_emb), "free d_batch_task_emb");
     CUDA_WARN(cudaFree(w->d_btraj), "free d_btraj");
+    CUDA_WARN(cudaFree(w->d_predictor_bmap32), "free d_predictor_bmap32");
     CUDA_WARN(cudaFree(w->d_grad_norm), "free d_grad_norm");
     CUDA_WARN(cudaFree(w->d_tel), "free d_tel");
     CUDA_WARN(cudaFree(w->d_sot_temp_images), "free d_sot_temp_images");
@@ -207,7 +210,7 @@ static float box_muller_normal(Pcg32* rng) {
     float u1 = pcg32_float(rng);
     float u2 = pcg32_float(rng);
     // Avoid log(0).
-    if (u1 < 1e-30f) u1 = 1e-30f;
+    if (u1 < EPS_LOG) u1 = EPS_LOG;
     return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265358979323846f * u2);
 }
 
@@ -234,7 +237,7 @@ static void kaiming_he_init(float* weights, Pcg32* host_rng) {
 
     // W_flow: fan_in = HIDDEN_DIM (32), linear -> scale = sqrt(1/32).
     {
-        float scale = sqrtf(1.0f / static_cast<float>(nca::HIDDEN_DIM));
+        float scale = sqrtf(1.0f / static_cast<float>(HIDDEN_DIM));
         for (int i = 0; i < autodiff::W_FLOW_SIZE; ++i) {
             weights[autodiff::OFF_FLOW + i] = box_muller_normal(&init_rng) * scale;
         }
@@ -319,8 +322,8 @@ bool initialize_world(World* w) {
     // Section 9.1: Archive initialization.
     std::memset(&w->archive, 0, sizeof(w->archive));
     for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
-        w->archive.bins[b].cap_classifier = 13;
-        w->archive.bins[b].cap_predictor  = 13;
+        w->archive.bins[b].cap_classifier = ARCHIVE_BIN_CAP;
+        w->archive.bins[b].cap_predictor  = ARCHIVE_BIN_CAP;
     }
     std::memset(w->archive.inv_var_ema, 0, sizeof(w->archive.inv_var_ema));
     for (int d = 0; d < BMAP_DIM; ++d) w->archive.inv_var_ema[d] = 1.0f;
@@ -364,12 +367,14 @@ bool initialize_world(World* w) {
 
 // ---- Scoring (section 6) ---------------------------------------------------
 
-// Cross-entropy classification loss + seed gradient computation.
-// Uses first NUM_CLASSES dims of bmap_64 as logits (section 6).
-// The ENTIRE seed-gradient buffer is zeroed first: rows belonging to
-// inactive roles must carry no gradient into backward (cudaMallocHost does
-// not guarantee zeros).
-static void score_classifiers(World* w) {
+// ---- Scoring (section 6, A-601) --------------------------------------------
+// Classifiers: cross-entropy on the first NUM_CLASSES bmap_64 dims.
+// Predictors: MSE of bmap_64 against their assigned predictor-batch target
+// (ground truth), with the prediction-error EMA tracked per target organism
+// for the predictor curriculum. The ENTIRE seed-gradient buffer is zeroed
+// first: rows belonging to inactive roles must carry no gradient.
+static void score_organisms(World* w, float classifier_multiplier,
+                            float predictor_multiplier) {
     std::memset(w->h_seed_grad, 0, POOL_SIZE * BMAP_DIM * sizeof(float));
 
     float sum_loss = 0.f;
@@ -377,33 +382,51 @@ static void score_classifiers(World* w) {
     int n_evaluated = 0;
 
     for (int org = 0; org < POOL_SIZE; ++org) {
-        if (canonical_role(w->org_table.role[org]) != Role::Classifier) continue;
-        int sample_idx = w->org_table.batch_sample_idx[org];
-        int target = w->classifier_batch.label[sample_idx];
-
+        Role role = canonical_role(w->org_table.role[org]);
         const float* bmap = &w->h_descriptors[org * BMAP_DIM];
+        float* sg = &w->h_seed_grad[org * BMAP_DIM];
+        float loss = 0.f;
+        float task_proxy = 0.f;
+        float role_mult = 1.f;
 
-        float dlogits[NUM_CLASSES];
-        float loss;
-        autodiff::classifier_loss(bmap, target, NUM_CLASSES, dlogits, &loss);
+        if (role == Role::Classifier) {
+            int sample_idx = w->org_table.batch_sample_idx[org];
+            int target = w->classifier_batch.label[sample_idx];
+            float dlogits[NUM_CLASSES];
+            autodiff::classifier_loss(bmap, target, NUM_CLASSES, dlogits, &loss);
+            for (int d = 0; d < NUM_CLASSES; ++d) sg[d] = dlogits[d];
+            for (int d = 0; d < NUM_CLASSES; ++d) {
+                float a = fabsf(bmap[d]);
+                if (a > max_abs_logit) max_abs_logit = a;
+            }
+            task_proxy = expf(-loss);
+            role_mult = classifier_multiplier;
+        } else {
+            int slot = org % cur::PREDICTOR_BATCH;
+            const float* target = &w->predictor_batch.target_bmap_64[slot * BMAP_DIM];
+            float dpred[BMAP_DIM];
+            autodiff::predictor_mse_loss(bmap, target, dpred, &loss);
+            for (int d = 0; d < BMAP_DIM; ++d) sg[d] = dpred[d];
+            task_proxy = expf(-loss);
+            role_mult = predictor_multiplier;
 
-        for (int d = 0; d < NUM_CLASSES; ++d) {
-            float a = fabsf(bmap[d]);
-            if (a > max_abs_logit) max_abs_logit = a;
+            // Ensemble prediction error EMA per pool target organism: the
+            // predictor curriculum re-weights toward weak spots.
+            int target_org = static_cast<int>(w->predictor_batch.target_organism_id[slot]);
+            if (target_org >= 0 && target_org < POOL_SIZE) {
+                w->predictor_error_ema[target_org] =
+                    (1.f - PREDICTOR_ERROR_EMA_ALPHA) * w->predictor_error_ema[target_org] +
+                    PREDICTOR_ERROR_EMA_ALPHA * loss;
+            }
         }
+
         sum_loss += loss;
         n_evaluated++;
 
-        float task_fitness_proxy = expf(-loss);  // smooth (0,1] proxy, not accuracy
-        w->org_table.f_raw[org] = task_fitness_proxy * archive::sot_gate(w->org_table.f_sot[org]);
-
-        // Before Wave 5: audit_mult = 1.0, variance_mult = 1.0.
+        w->org_table.f_raw[org] =
+            task_proxy * archive::sot_gate(w->org_table.f_sot[org]);
         w->org_table.fitness[org] = archive::compose_fitness(
-            w->org_table.f_raw[org], 1.0f, 1.0f, 1.0f);
-
-        // Seed gradient: d(CE)/d(logits) in first NUM_CLASSES dims, 0 elsewhere.
-        float* sg = &w->h_seed_grad[org * BMAP_DIM];
-        for (int d = 0; d < NUM_CLASSES; ++d) sg[d] = dlogits[d];
+            w->org_table.f_raw[org], role_mult, 1.0f, 1.0f);
     }
 
     w->last_mean_ce = (n_evaluated > 0) ? sum_loss / static_cast<float>(n_evaluated) : 0.f;
@@ -437,28 +460,36 @@ static void insert_into_archive(World* w) {
     }
 }
 
-// ---- Spawn wave (section 9) ------------------------------------------------
+// ---- Spawn wave (section 9, A-401 role-proportional) -----------------------
 
-static void spawn_wave(World* w) {
-    int asize = archive::archive_size(w->archive);
-    if (asize == 0) return;
+// Spawn `n_spawns` children of `target_role`: unique worst-fitness victims of
+// that role, parents from the role's archive live list, mutation by the
+// victim slot's replica rate. `force_role` locks the child to target_role
+// (pre-bootstrap); otherwise a rare role-bit mutation may migrate the child.
+static void spawn_role_wave(World* w, Role target_role, int n_spawns,
+                            bool force_role, bool allow_role_conversion = false) {
+    if (n_spawns <= 0) return;
+    if (target_role == Role::Predictor && w->archive.n_alive_predictor <= 0) return;
 
-    // Before bootstrap, all spawns are classifiers.
-    Role target_role = Role::Classifier;
-
-    // Select all WAVE_SIZE victims up front, without replacement. Selecting
-    // them one at a time while zeroing the freshly installed child's fitness
-    // would repeatedly pick the same newborn slot and overwrite it.
     int victims[WAVE_SIZE];
     int n_victims = genome::select_spawn_victims(
         w->org_table.role, w->org_table.fitness, POOL_SIZE,
-        target_role, WAVE_SIZE, victims);
+        target_role, n_spawns, victims);
+
+    // Anti-extinction (A-401 minimum-2 per role): when the pool holds no
+    // victim of the target role but the archive can parent that role,
+    // convert the worst classifier slots instead of letting the role drain.
+    if (n_victims == 0 && allow_role_conversion && target_role == Role::Predictor) {
+        n_victims = genome::select_spawn_victims(
+            w->org_table.role, w->org_table.fitness, POOL_SIZE,
+            Role::Classifier, n_spawns, victims);
+        force_role = true;
+    }
     if (n_victims <= 0) return;
 
     for (int spawn = 0; spawn < n_victims; ++spawn) {
-        int worst_idx = victims[spawn];
+        int slot = victims[spawn];
 
-        // Select parent from per-role live index list (section 9).
         int parent_archive_idx = -1;
         if (target_role == Role::Classifier && w->archive.n_alive_classifier > 0) {
             int list_idx = static_cast<int>(pcg32_random(&w->rng) % w->archive.n_alive_classifier);
@@ -469,33 +500,132 @@ static void spawn_wave(World* w) {
         }
         if (parent_archive_idx < 0) continue;
 
-        // Copy genome from archive parent.
-        genome::Genome child_genome = w->archive.entries[parent_archive_idx].genome;
-
-        // Mutation rate from the replaced organism's replica (section 9).
-        uint8_t replica = w->org_table.replica_tag[worst_idx];
+        genome::Genome child = w->archive.entries[parent_archive_idx].genome;
+        uint8_t replica = w->org_table.replica_tag[slot];
         float mut_rate = PT_MUTATION_RATES[replica];
-        genome::mutate(&child_genome, mut_rate, MUTATION_RATE_ROLE, &w->rng);
+        genome::mutate(&child, mut_rate, MUTATION_RATE_ROLE, &w->rng);
+        if (force_role) genome::force_role(child, target_role);
 
-        // Pre-bootstrap role lock: predictor inputs, loss, seed gradients, and
-        // archive behavior do not exist yet, so every spawn is forced back to
-        // the classifier role regardless of what the role-bit mutation drew.
-        genome::force_role(child_genome, Role::Classifier);
-
-        // Install child into the pool slot.
-        w->org_table.genomes[worst_idx] = child_genome;
-        w->org_table.role[worst_idx] = genome::runtime_role(child_genome);
-        w->org_table.lineage_id[worst_idx] = w->archive.entries[parent_archive_idx].lineage_id;
-        w->org_table.parent_id[worst_idx] = static_cast<uint32_t>(parent_archive_idx);
-        w->org_table.spawn_gen[worst_idx] = w->generation;
-        w->org_table.fitness[worst_idx] = 0.f;
-        w->org_table.f_raw[worst_idx] = 0.f;
-        w->org_table.f_sot[worst_idx] = 1.f;
-
-        // Re-initialize delta from genome prior.
-        genome::init_delta_from_prior(child_genome,
-                                      &w->org_table.deltas[worst_idx]);
+        w->org_table.genomes[slot] = child;
+        w->org_table.role[slot] = genome::runtime_role(child);
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id;
+        w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive_idx);
+        w->org_table.spawn_gen[slot] = w->generation;
+        w->org_table.fitness[slot] = 0.f;
+        w->org_table.f_raw[slot] = 0.f;
+        w->org_table.f_sot[slot] = 1.f;
+        genome::init_delta_from_prior(child, &w->org_table.deltas[slot]);
     }
+}
+
+static void spawn_wave(World* w) {
+    int asize = archive::archive_size(w->archive);
+    if (asize == 0) return;
+
+    if (!w->bootstrap_fired) {
+        // Pre-bootstrap: every spawn is a classifier, role-locked.
+        spawn_role_wave(w, Role::Classifier, WAVE_SIZE, /*force_role=*/true);
+        return;
+    }
+
+    // Role-proportional wave: the predictor share tracks the archive role
+    // fraction with a minimum of 2 per role to prevent extinction.
+    int n_pred = 0;
+    if (w->archive.n_alive_predictor > 0) {
+        n_pred = static_cast<int>(lroundf(
+            static_cast<float>(WAVE_SIZE) *
+            static_cast<float>(w->archive.n_alive_predictor) /
+            static_cast<float>(asize)));
+        if (n_pred < 2) n_pred = 2;
+        if (n_pred > WAVE_SIZE - 2) n_pred = WAVE_SIZE - 2;
+    }
+    spawn_role_wave(w, Role::Predictor, n_pred, /*force_role=*/false,
+                    /*allow_role_conversion=*/true);
+    spawn_role_wave(w, Role::Classifier, WAVE_SIZE - n_pred, /*force_role=*/false);
+}
+
+// ---- Predictor bootstrap (A-601) -------------------------------------------
+// One-shot at the archive half-occupancy crossing: sign the stationary
+// predictor probe references from current pool trajectories, then inject
+// PREDICTOR_FOUNDERS role-flipped copies of the highest-novelty classifier
+// genomes into the worst-fitness classifier pool slots.
+static void inject_predictor_founders(World* w) {
+    // Sign predictor probes from a deterministic spread of pool organisms.
+    uint32_t target_ids[cur::PREDICTOR_BATCH];
+    float b32[cur::PREDICTOR_BATCH * BMAP_DIM];
+    float b64[cur::PREDICTOR_BATCH * BMAP_DIM];
+    for (int i = 0; i < cur::PREDICTOR_BATCH; ++i) {
+        int org = (i * 7 + 3) % POOL_SIZE;
+        target_ids[i] = w->org_table.lineage_id[org];
+        // BTRAJ samples: index 1 is bmap_32 (step 32), index 3 is bmap_64.
+        std::memcpy(&b32[i * BMAP_DIM],
+                    &w->intent_registry.btraj[org][1 * BMAP_DIM],
+                    BMAP_DIM * sizeof(float));
+        std::memcpy(&b64[i * BMAP_DIM],
+                    &w->intent_registry.btraj[org][3 * BMAP_DIM],
+                    BMAP_DIM * sizeof(float));
+    }
+    cur::sign_predictor_probes(&w->probe_set, target_ids, b32, b64,
+                               w->host_sot_key);
+
+    // Sign the held-out placeholder probe tuples from the replay buffer
+    // (real evaluated tuples; the placeholder never trains on them — the
+    // snapshotted ring positions are marked held out below).
+    if (!w->probe_set.probe_tuples_signed &&
+        w->replay_buffer.filled >= PROBE_BATCH) {
+        cur::sign_probe_tuples(&w->probe_set,
+                               w->replay_buffer.bmap,
+                               w->replay_buffer.task_emb,
+                               w->replay_buffer.fitness,
+                               w->host_sot_key);
+        for (int i = 0; i < PROBE_BATCH; ++i) {
+            w->replay_buffer.held_out[i] = true;
+        }
+    }
+
+    // Highest-novelty classifier parents.
+    static float novelty[MAX_ARCHIVE];
+    static int idx_map[MAX_ARCHIVE];
+    int n = 0;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        const archive::ArchiveEntry& e = w->archive.entries[i];
+        if (!e.alive || e.role != Role::Classifier) continue;
+        novelty[n] = archive::rff_novelty(e.rff_proj, w->archive.mu_rff_classifier);
+        idx_map[n] = i;
+        n++;
+    }
+    if (n == 0) return;
+
+    int founders[PREDICTOR_FOUNDERS];
+    predictor::select_predictor_founders(novelty, n, founders);
+
+    // Victims: the worst-fitness classifier slots, without replacement.
+    int victims[WAVE_SIZE];
+    int n_victims = genome::select_spawn_victims(
+        w->org_table.role, w->org_table.fitness, POOL_SIZE,
+        Role::Classifier, PREDICTOR_FOUNDERS, victims);
+
+    int injected = 0;
+    for (int k = 0; k < PREDICTOR_FOUNDERS && k < n_victims; ++k) {
+        int slot = victims[k];
+        int parent_archive = idx_map[founders[k]];
+        genome::Genome child = w->archive.entries[parent_archive].genome;
+        genome::write_role(child, Role::Predictor);
+
+        w->org_table.genomes[slot] = child;
+        w->org_table.role[slot] = Role::Predictor;
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id;
+        w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive);
+        w->org_table.spawn_gen[slot] = w->generation;
+        w->org_table.fitness[slot] = 0.f;
+        w->org_table.f_raw[slot] = 0.f;
+        w->org_table.f_sot[slot] = 1.f;
+        genome::init_delta_from_prior(child, &w->org_table.deltas[slot]);
+        injected++;
+    }
+    std::printf("[BOOTSTRAP] gen %d: %d predictor founders injected; "
+                "probe references signed\n", w->generation, injected);
+    std::fflush(stdout);
 }
 
 // ---- Build SwapContext from World ------------------------------------------
@@ -521,6 +651,7 @@ static safety::pt::SwapContext make_swap_context(World* w) {
     ctx.role         = w->org_table.role;
     ctx.seed_grad    = w->h_seed_grad;
     ctx.batch_sample_idx = w->org_table.batch_sample_idx;
+    ctx.predictor_error_ema = w->predictor_error_ema;
     ctx.stream       = w->stream;
     return ctx;
 }
@@ -564,7 +695,7 @@ static bool phase_trace(const char* tag, int gen, cudaStream_t stream) {
 // nonfinite numerical state); run() then aborts the experiment.
 bool step_generation(World* w) {
     int gen = w->generation;
-    const bool log_this_gen = (gen % TELEMETRY_INTERVAL == 0 || gen < 5);
+    const bool log_this_gen = (gen % TELEMETRY_INTERVAL == 0 || gen < FIRST_GENS_TELEMETRY);
     std::printf("step_generation(%d) begin\n", gen);
     std::fflush(stdout);
 
@@ -573,6 +704,28 @@ bool step_generation(World* w) {
         cur::assemble_classifier_batch(&w->classifier_batch,
                                        MAIN_SOT_DENSITY,
                                        w->host_sot_key, &w->rng);
+    }
+
+    // Predictor batch (A-701): assembled from the previous generation's
+    // Intent Registry. Stationary probe slots are used once signed.
+    if (w->bootstrap_fired) {
+        static float bmap32_rows[POOL_SIZE * BMAP_DIM];
+        static float bmap64_rows[POOL_SIZE * BMAP_DIM];
+        static uint32_t pool_ids[POOL_SIZE];
+        for (int i = 0; i < POOL_SIZE; ++i) {
+            std::memcpy(&bmap32_rows[i * BMAP_DIM],
+                        &w->intent_registry.btraj[i][1 * BMAP_DIM],
+                        BMAP_DIM * sizeof(float));
+            std::memcpy(&bmap64_rows[i * BMAP_DIM],
+                        &w->intent_registry.btraj[i][3 * BMAP_DIM],
+                        BMAP_DIM * sizeof(float));
+            pool_ids[i] = static_cast<uint32_t>(i);
+        }
+        cur::assemble_predictor_batch(&w->predictor_batch, w->probe_set,
+                                      pool_ids, w->predictor_error_ema,
+                                      bmap32_rows, bmap64_rows,
+                                      w->classifier_batch.task_embedding,
+                                      &w->rng);
     }
 
     // Organism-to-batch assignment: deterministic round-robin (A-401).
@@ -584,10 +737,17 @@ bool step_generation(World* w) {
     for (int i = 0; i < POOL_SIZE; ++i) {
         int s = w->org_table.batch_sample_idx[i];
         ForwardInputs& fi = w->h_fwd_inputs[i];
-        fi.role = w->org_table.role[i];
-        fi.image_rgb = w->d_batch_image + s * GRID_SIZE * GRID_SIZE * 3;
+        Role role = canonical_role(w->org_table.role[i]);
+        fi.role = role;
         fi.task_embedding = w->d_batch_task_emb;
-        fi.target_bmap_32 = nullptr;
+        if (role == Role::Classifier) {
+            fi.image_rgb = w->d_batch_image + s * GRID_SIZE * GRID_SIZE * 3;
+            fi.target_bmap_32 = nullptr;
+        } else {
+            fi.image_rgb = nullptr;
+            fi.target_bmap_32 = w->d_predictor_bmap32 +
+                                (i % cur::PREDICTOR_BATCH) * BMAP_DIM;
+        }
     }
 
     // ---- T1: H→D transfers ----
@@ -604,6 +764,11 @@ bool step_generation(World* w) {
     TRANSFER_ABORT(cudaMemcpyAsync(w->d_deltas, w->org_table.deltas,
                     POOL_SIZE * sizeof(genome::DeltaWeights),
                     cudaMemcpyHostToDevice, w->stream), "T1 deltas");
+    // Upload the predictor target bmap_32 rows (used by predictor forwards).
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_predictor_bmap32,
+                    w->predictor_batch.target_bmap_32,
+                    cur::PREDICTOR_BATCH * BMAP_DIM * sizeof(float),
+                    cudaMemcpyHostToDevice, w->stream), "T1 predictor targets");
     if (!phase_trace("T1_H2D", gen, w->stream)) return false;
 
     // ---- GPU: materialize W_eff = W_shared + delta per organism ----
@@ -658,11 +823,43 @@ bool step_generation(World* w) {
     }
     if (!phase_trace("SOT", gen, w->stream)) return false;
 
-    // ---- Score organisms (section 6) ----
-    score_classifiers(w);
+    // ---- Score organisms (section 6, A-601) ----
+    // Role-balance multipliers from the surprise history: rho = s_avg /
+    // s_target. The mechanism is INACTIVE until the calibration window
+    // freezes s_target (spec: calibrated, not declared); the inactive state
+    // is explicit and logged once, never a silent substitute ratio.
+    float s_avg = 0.f;
+    if (w->s_hist_filled > 0) {
+        float sum = 0.f;
+        for (int i = 0; i < w->s_hist_filled; ++i) sum += w->s_blended_history[i];
+        s_avg = sum / static_cast<float>(w->s_hist_filled);
+    }
+    float classifier_mult = 1.f;
+    float predictor_mult = 1.f;
+    if (w->s_target_calibrated && w->s_target > 0.f) {
+        float rho = archive::surprise_ratio(s_avg, w->s_target);
+        classifier_mult = archive::classifier_mult(rho);
+        predictor_mult = archive::predictor_mult(rho);
+    } else {
+        static bool logged_inactive = false;
+        if (!logged_inactive) {
+            std::printf("[ROLE BALANCE] inactive: s_target uncalibrated "
+                        "(multipliers idle until the calibration window closes)\n");
+            std::fflush(stdout);
+            logged_inactive = true;
+        }
+    }
+    score_organisms(w, classifier_mult, predictor_mult);
 
     // ---- Archive insertion (section 9.1) ----
     insert_into_archive(w);
+
+    // ---- Predictor bootstrap (A-601): one-shot at half occupancy ----
+    if (!w->bootstrap_fired && archive::bootstrap_trigger(w->archive)) {
+        inject_predictor_founders(w);
+        w->bootstrap_fired = true;
+        w->bootstrap_gen = gen;
+    }
 
     // ---- PT swaps BEFORE backward (section 13, section 5) ----
     // Transactional: swaps OrganismState, CheckpointBuffer, GradBuffers, and
@@ -846,18 +1043,112 @@ bool step_generation(World* w) {
     predictor::placeholder_train_step(&w->placeholder_reg,
                                       &w->replay_buffer, &w->rng);
 
-    // ---- Surprise + CUSUM (A-601, Wave 3) ----
-    // Compute s_placeholder on the probe set.
+    // ---- Surprise + CUSUM (A-601) ----
+    // Placeholder surprise on the signed probe set (ground truth probe
+    // fitness is populated by the probe evaluation below).
     float s_placeholder = evaluate_probe_placeholder(
-        w->placeholder_reg, w->probe_set,
-        w->probe_fitness, w->host_sot_key);
-    // Before bootstrap, s_predictor = 0 and r = 0 (placeholder dominates).
+        w->placeholder_reg, w->probe_set, w->host_sot_key);
+
+    // Predictor ensemble surprise: variance across the top-K predictors (by
+    // fitness) assigned to each stationary probe slot, on the frozen target.
     float s_predictor = 0.f;
+    if (w->bootstrap_fired) {
+        int n_probe_slots = 0;
+        float slot_var_sum = 0.f;
+        for (int slot = 0; slot < cur::PREDICTOR_PROBE_SLOTS; ++slot) {
+            // Collect assigned predictors with their fitness.
+            int assigned[POOL_SIZE];
+            float assigned_fit[POOL_SIZE];
+            int k = 0;
+            for (int org = 0; org < POOL_SIZE; ++org) {
+                if (canonical_role(w->org_table.role[org]) != Role::Predictor) continue;
+                if (org % cur::PREDICTOR_BATCH != slot) continue;
+                assigned[k] = org;
+                assigned_fit[k] = w->org_table.fitness[org];
+                k++;
+            }
+            // Top-K by fitness (insertion sort, K small).
+            for (int i = 1; i < k; ++i) {
+                int org_key = assigned[i];
+                float fit_key = assigned_fit[i];
+                int j = i - 1;
+                while (j >= 0 && assigned_fit[j] < fit_key) {
+                    assigned[j + 1] = assigned[j];
+                    assigned_fit[j + 1] = assigned_fit[j];
+                    j--;
+                }
+                assigned[j + 1] = org_key;
+                assigned_fit[j + 1] = fit_key;
+            }
+            int top_k = (k < PREDICTOR_ENSEMBLE_TOP_K) ? k : PREDICTOR_ENSEMBLE_TOP_K;
+            if (top_k >= 2) {
+                static float preds[POOL_SIZE * BMAP_DIM];
+                for (int i = 0; i < top_k; ++i) {
+                    std::memcpy(&preds[i * BMAP_DIM],
+                                &w->h_descriptors[assigned[i] * BMAP_DIM],
+                                BMAP_DIM * sizeof(float));
+                }
+                slot_var_sum += predictor::ensemble_surprise(preds, top_k);
+                n_probe_slots++;
+            }
+        }
+        if (n_probe_slots > 0) {
+            s_predictor = slot_var_sum / static_cast<float>(n_probe_slots);
+        }
+    }
+
     float r = predictor::pearson_r_clipped(w->corr_window);
     float s_blended = predictor::blend_surprise(s_placeholder, s_predictor, r);
     predictor::push_correlation(&w->corr_window, s_placeholder, s_predictor);
     safety::cusum_update(&w->cusum_surprise, s_blended);
     safety::cusum_update(&w->cusum_r, r);
+
+    // Rolling blended-surprise history for rho = s_avg / s_target.
+    w->s_blended_history[w->s_hist_head] = s_blended;
+    w->s_hist_head = (w->s_hist_head + 1) % HYBRID_R_WINDOW;
+    if (w->s_hist_filled < HYBRID_R_WINDOW) w->s_hist_filled++;
+
+    // CUSUM calibration (A-601): collect during the calibration window after
+    // bootstrap, then freeze s_target (median) and set k = 0.5 sigma,
+    // h = 5 sigma for the surprise CUSUM.
+    if (w->bootstrap_fired && !w->s_target_calibrated) {
+        int rel = gen - w->bootstrap_gen;
+        if (rel >= CALIBRATION_GEN_LO && rel <= CALIBRATION_GEN_HI &&
+            w->n_calibration_samples <
+                static_cast<int>(sizeof(w->calibration_samples) / sizeof(float))) {
+            w->calibration_samples[w->n_calibration_samples++] = s_blended;
+        }
+        if (rel >= CALIBRATION_GEN_HI && w->n_calibration_samples > 0) {
+            static float sorted[CALIBRATION_GEN_HI - CALIBRATION_GEN_LO + 1];
+            int n = w->n_calibration_samples;
+            std::memcpy(sorted, w->calibration_samples, n * sizeof(float));
+            for (int i = 1; i < n; ++i) {
+                float key = sorted[i];
+                int j = i - 1;
+                while (j >= 0 && sorted[j] > key) { sorted[j + 1] = sorted[j]; j--; }
+                sorted[j + 1] = key;
+            }
+            float median = sorted[n / 2];
+            float mean = 0.f;
+            for (int i = 0; i < n; ++i) mean += sorted[i];
+            mean /= static_cast<float>(n);
+            float var = 0.f;
+            for (int i = 0; i < n; ++i) {
+                float d = sorted[i] - mean;
+                var += d * d;
+            }
+            var /= static_cast<float>(n);
+            float sigma = sqrtf(var);
+            w->s_target = median;
+            w->s_target_calibrated = true;
+            w->cusum_surprise.reference = median;
+            w->cusum_surprise.allowance = 0.5f * sigma;
+            w->cusum_surprise.threshold = 5.0f * sigma;
+            std::printf("[CALIBRATION] gen %d: s_target=%.6f sigma=%.6f "
+                        "(n=%d)\n", gen, median, sigma, n);
+            std::fflush(stdout);
+        }
+    }
 
     // ---- Periodic: PCA rebin ----
     if (w->generation > 0 && w->generation % AUDIT_INTERVAL == 0) {
@@ -870,6 +1161,21 @@ bool step_generation(World* w) {
         POOL_SIZE, &w->operator_state);
 
     w->generation++;
+
+    // ---- Checkpoint (S-001): every completed generation is saved, so a
+    // killed run resumes at the last generation instead of losing the run.
+    {
+        bool requested = w->operator_state.checkpoint_requested;
+        if (!save_checkpoint(w, w->checkpoint_path)) {
+            return false;
+        }
+        if (requested) {
+            std::printf("[OPERATOR] checkpoint written at generation %d\n",
+                        w->generation);
+            std::fflush(stdout);
+            w->operator_state.checkpoint_requested = false;
+        }
+    }
     return true;
 }
 
@@ -889,7 +1195,7 @@ static void poll_operator_commands(World* w) {
     }
 }
 
-void run(int n_generations) {
+void run(int n_generations, bool resume, const char* checkpoint_path) {
     World* w = new World;
     if (!initialize_world(w)) {
         delete w;
@@ -897,9 +1203,30 @@ void run(int n_generations) {
         std::fflush(stdout);
         return;
     }
+    w->checkpoint_path = checkpoint_path ? checkpoint_path
+                                         : CHECKPOINT_DEFAULT_PATH;
+
+    if (resume) {
+        if (!load_checkpoint(w, w->checkpoint_path)) {
+            std::printf("=== RUN INVALIDATED: resume failed (no usable "
+                        "checkpoint at %s) ===\n", w->checkpoint_path);
+            std::fflush(stdout);
+            free_gpu_buffers(w);
+            delete w;
+            return;
+        }
+        std::printf("Resumed from %s at generation %d (archive size %d)\n",
+                    w->checkpoint_path, w->generation,
+                    archive::archive_size(w->archive));
+        std::fflush(stdout);
+    } else {
+        std::printf("Fresh run; checkpoints will be written to %s\n",
+                    w->checkpoint_path);
+        std::fflush(stdout);
+    }
 
     bool valid = true;
-    for (int g = 0; g < n_generations; ++g) {
+    for (int g = w->generation; g < n_generations; ++g) {
         if (safety::alignment::poll_off_switch()) {
             std::printf("Shutdown flag detected at generation %d\n", g);
             std::fflush(stdout);
@@ -945,6 +1272,8 @@ void run(int n_generations) {
         }
     }
     std::printf("Occupied PCA bins: %d / %d\n", occupied_bins, ARCHIVE_BINS_X * ARCHIVE_BINS_Y);
+    std::printf("Checkpoint: %s (generation %d)\n",
+                w->checkpoint_path, w->generation);
     std::fflush(stdout);
 
     free_gpu_buffers(w);
@@ -955,16 +1284,35 @@ void run(int n_generations) {
 
 // ---- Entry point -----------------------------------------------------------
 
+#ifndef COEVO_NO_MAIN
 int main(int argc, char** argv) {
     int n_gen = 100;
-    if (argc > 1) n_gen = std::atoi(argv[1]);
-    if (n_gen <= 0) n_gen = 100;
+    bool resume = false;
+    const char* ckpt_path = nullptr;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--resume") == 0) {
+            resume = true;
+        } else if (std::strcmp(argv[i], "--ckpt") == 0 && i + 1 < argc) {
+            ckpt_path = argv[++i];
+        } else {
+            int parsed = std::atoi(argv[i]);
+            if (parsed > 0) n_gen = parsed;
+        }
+    }
 
     std::printf("Slime Evolution — co-evolving NCA system\n");
-    std::printf("Running %d generations\n", n_gen);
+    std::printf("%s run: %d generations%s\n",
+                resume ? "Resuming" : "Fresh", n_gen,
+                ckpt_path ? ckpt_path : "");
     std::fflush(stdout);
 
-    slime::integration::run(n_gen);
+    slime::integration::run(n_gen, resume, ckpt_path);
     return 0;
 }
+#endif  // COEVO_NO_MAIN
+
+
+
+
 

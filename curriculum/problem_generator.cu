@@ -24,8 +24,8 @@
 
 namespace slime::curriculum {
 
-constexpr int CLASSIFIER_BATCH = 16;
-constexpr int SOT_SUBBATCH     = 4;
+constexpr int CLASSIFIER_BATCH = CLASSIFIER_BATCH_SIZE;
+constexpr int SOT_SUBBATCH     = SOT_SUBBATCH_SIZE;
 constexpr int PREDICTOR_BATCH  = PREDICTOR_EVAL_K;  // 8
 // Upper bound on SOT reference roll-outs needed when every pool organism
 // assigned to an SOT sample gets its own reference forward (per-organism
@@ -61,7 +61,7 @@ __host__ __device__ inline uint32_t sot_feistel(uint32_t idx,
     // 12-bit index split into two 6-bit halves.
     uint32_t l = (idx >> 6) & 0x3Fu;
     uint32_t r = idx & 0x3Fu;
-    const int ROUNDS = 4;
+    const int ROUNDS = FEISTEL_ROUNDS;
     for (int round = 0; round < ROUNDS; ++round) {
         int ri = invert ? (ROUNDS - 1 - round) : round;
         uint32_t rk = static_cast<uint32_t>((key >> (8 * ri)) & 0xFFu);
@@ -164,6 +164,25 @@ inline void assemble_classifier_batch(ClassifierBatch* out,
 struct ProbeSet {
     ClassifierBatch classifier_probes[4];        // 64-batch total (4*16)
     uint32_t        predictor_probe_targets[PREDICTOR_BATCH];
+
+    // Predictor probe references (A-601/A-701): a fixed pool of archived
+    // classifiers signed at bootstrap. Their bmap_32 and ground-truth
+    // bmap_64 are frozen at signing time, so predictor quality is measured
+    // against a stationary reference. Signed=false until bootstrap fires.
+    // These fields precede `signature` so the keyed checksum covers them.
+    bool  predictor_probes_signed;
+    float predictor_probe_bmap32[PREDICTOR_BATCH * BMAP_DIM];
+    float predictor_probe_bmap64[PREDICTOR_BATCH * BMAP_DIM];
+
+    // Held-out probe tuples for the placeholder regressor (A-601): signed
+    // classifier (bmap_64, task_embedding, fitness) tuples snapshotted from
+    // the replay buffer at bootstrap, never trained on afterwards. This is
+    // the placeholder's ground-truth held-out signal (previously zeros).
+    bool  probe_tuples_signed;
+    float probe_bmap[PROBE_BATCH * BMAP_DIM];
+    float probe_task_emb[PROBE_BATCH * TASK_EMBED_DIM];
+    float probe_fitness[PROBE_BATCH];
+
     uint64_t        signature;                   // host-verified
 };
 
@@ -197,7 +216,8 @@ __host__ __device__ inline bool verify_probe_set(const ProbeSet& set,
 
 // Initialize the probe set: generate 4 classifier probe batches (64 total
 // samples) and sign with host_sot_key. Per A-601/Q-001: signed at run start,
-// host-held, applies to both populations.
+// host-held, applies to both populations. The predictor probe references are
+// signed later, at the bootstrap crossing (see sign_predictor_probes).
 inline void init_probe_set(ProbeSet* ps, uint64_t host_sot_key, Pcg32* rng) {
     for (int b = 0; b < 4; ++b) {
         assemble_classifier_batch(&ps->classifier_probes[b],
@@ -207,7 +227,117 @@ inline void init_probe_set(ProbeSet* ps, uint64_t host_sot_key, Pcg32* rng) {
     for (int i = 0; i < PREDICTOR_BATCH; ++i) {
         ps->predictor_probe_targets[i] = 0;
     }
+    ps->predictor_probes_signed = false;
+    std::memset(ps->predictor_probe_bmap32, 0, sizeof(ps->predictor_probe_bmap32));
+    std::memset(ps->predictor_probe_bmap64, 0, sizeof(ps->predictor_probe_bmap64));
+    ps->probe_tuples_signed = false;
+    std::memset(ps->probe_bmap, 0, sizeof(ps->probe_bmap));
+    std::memset(ps->probe_task_emb, 0, sizeof(ps->probe_task_emb));
+    std::memset(ps->probe_fitness, 0, sizeof(ps->probe_fitness));
     ps->signature = probe_set_signature(*ps, host_sot_key);
+}
+
+// Sign the held-out probe tuples at bootstrap: snapshot PROBE_BATCH real
+// (bmap_64, task_embedding, fitness) tuples from the replay buffer and
+// re-sign the probe set. After this the tuples never change, so the
+// placeholder's held-out error is a stationary signal.
+inline void sign_probe_tuples(ProbeSet* ps,
+                              const float* bmap_rows,      // [PROBE_BATCH][BMAP_DIM]
+                              const float* task_rows,      // [PROBE_BATCH][TASK_EMBED_DIM]
+                              const float* fitness_rows,   // [PROBE_BATCH]
+                              uint64_t host_sot_key) {
+    std::memcpy(ps->probe_bmap, bmap_rows,
+                PROBE_BATCH * BMAP_DIM * sizeof(float));
+    std::memcpy(ps->probe_task_emb, task_rows,
+                PROBE_BATCH * TASK_EMBED_DIM * sizeof(float));
+    std::memcpy(ps->probe_fitness, fitness_rows,
+                PROBE_BATCH * sizeof(float));
+    ps->probe_tuples_signed = true;
+    ps->signature = probe_set_signature(*ps, host_sot_key);
+}
+
+// Sign the predictor probe references at the bootstrap crossing: freeze the
+// bmap_32 / bmap_64 of the chosen archived classifiers (their trajectories
+// come from the Intent Registry) and re-sign the probe set. After this the
+// references never change: predictor quality is measured against a
+// stationary evaluation pool.
+inline void sign_predictor_probes(ProbeSet* ps,
+                                  const uint32_t* target_ids,
+                                  const float* bmap32_rows,   // [K][BMAP_DIM]
+                                  const float* bmap64_rows,   // [K][BMAP_DIM]
+                                  uint64_t host_sot_key) {
+    for (int i = 0; i < PREDICTOR_BATCH; ++i) {
+        ps->predictor_probe_targets[i] = target_ids[i];
+        std::memcpy(&ps->predictor_probe_bmap32[i * BMAP_DIM],
+                    &bmap32_rows[i * BMAP_DIM], BMAP_DIM * sizeof(float));
+        std::memcpy(&ps->predictor_probe_bmap64[i * BMAP_DIM],
+                    &bmap64_rows[i * BMAP_DIM], BMAP_DIM * sizeof(float));
+    }
+    ps->predictor_probes_signed = true;
+    ps->signature = probe_set_signature(*ps, host_sot_key);
+}
+
+// Assemble a predictor batch (A-701). Slots 0..PREDICTOR_PROBE_SLOTS-1 carry
+// the signed stationary probe references; the remaining slots carry pool
+// targets sampled weighted by the ensemble prediction error tracked per
+// organism (error_ema), so the predictor curriculum targets weak spots.
+// task_embedding is the current classifier batch embedding.
+constexpr int PREDICTOR_PROBE_SLOTS = PREDICTOR_PROBE_SLOT_COUNT;
+constexpr int PREDICTOR_POOL_SLOTS = PREDICTOR_POOL_SLOT_COUNT;
+
+inline void assemble_predictor_batch(PredictorBatch* out,
+                                     const ProbeSet& probes,
+                                     const uint32_t* pool_lineage_ids,
+                                     const float* error_ema,     // [POOL_SIZE]
+                                     const float* bmap32_rows,   // [POOL_SIZE][BMAP_DIM]
+                                     const float* bmap64_rows,   // [POOL_SIZE][BMAP_DIM]
+                                     const float* task_embedding,
+                                     Pcg32* rng) {
+    std::memset(out, 0, sizeof(*out));
+
+    // Stationary probe slots.
+    int slot = 0;
+    if (probes.predictor_probes_signed) {
+        for (; slot < PREDICTOR_PROBE_SLOTS && slot < PREDICTOR_BATCH; ++slot) {
+            out->target_organism_id[slot] = probes.predictor_probe_targets[slot];
+            std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
+                        &probes.predictor_probe_bmap32[slot * BMAP_DIM],
+                        BMAP_DIM * sizeof(float));
+            std::memcpy(&out->target_bmap_64[slot * BMAP_DIM],
+                        &probes.predictor_probe_bmap64[slot * BMAP_DIM],
+                        BMAP_DIM * sizeof(float));
+            out->target_was_sot[slot] = false;
+        }
+    }
+
+    // Pool slots weighted by the error EMA (roulette selection with a small
+    // floor so every organism stays reachable).
+    for (; slot < PREDICTOR_BATCH; ++slot) {
+        float total = 0.f;
+        for (int i = 0; i < POOL_SIZE; ++i) {
+            total += error_ema[i] + PREDICTOR_CURRICULUM_ERROR_FLOOR;
+        }
+        int chosen = -1;
+        if (total > 0.f) {
+            float r = pcg32_float(rng) * total;
+            float acc = 0.f;
+            for (int i = 0; i < POOL_SIZE; ++i) {
+                acc += error_ema[i] + PREDICTOR_CURRICULUM_ERROR_FLOOR;
+                if (r <= acc) { chosen = i; break; }
+            }
+        }
+        if (chosen < 0) chosen = static_cast<int>(pcg32_random(rng) % POOL_SIZE);
+        out->target_organism_id[slot] = pool_lineage_ids[chosen];
+        std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
+                    &bmap32_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));
+        std::memcpy(&out->target_bmap_64[slot * BMAP_DIM],
+                    &bmap64_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));
+        out->target_was_sot[slot] = false;
+    }
+
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) {
+        out->task_embedding[d] = task_embedding[d];
+    }
 }
 
 // Escalation logic triggers on blended surprise (S-001 CUSUM). It is a
@@ -216,3 +346,4 @@ inline void init_probe_set(ProbeSet* ps, uint64_t host_sot_key, Pcg32* rng) {
 }  // namespace slime::curriculum
 
 #endif  // COEVO_CURRICULUM_PROBLEM_GENERATOR_CU
+

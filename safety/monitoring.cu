@@ -122,9 +122,9 @@ inline bool collect_cuda_diagnostics(CudaDiagnostics* out) {
 }
 
 inline bool benchmark_cuda_transfers(CudaDiagnostics* out, cudaStream_t stream) {
-    constexpr size_t MAX_PROBE_BYTES = 64u * 1024u * 1024u;
-    constexpr size_t MIN_PROBE_BYTES = 8u * 1024u * 1024u;
-    constexpr int TRANSFER_ITERATIONS = 16;
+    constexpr size_t MAX_PROBE_BYTES = DIAG_MAX_PROBE_BYTES;
+    constexpr size_t MIN_PROBE_BYTES = DIAG_MIN_PROBE_BYTES;
+    constexpr int TRANSFER_ITERATIONS = DIAG_TRANSFER_ITERATIONS;
 
     size_t probe_bytes = MAX_PROBE_BYTES;
     size_t memory_budget = out->free_memory_bytes / 16u;
@@ -191,8 +191,7 @@ inline bool emit_cuda_diagnostics(cudaStream_t stream) {
     if (!collect_cuda_diagnostics(&diagnostics)) return false;
     if (!benchmark_cuda_transfers(&diagnostics, stream)) return false;
 
-    constexpr double BYTES_PER_GIB = 1024.0 * 1024.0 * 1024.0;
-    std::printf("CUDA device: %s (device %d, sm_%d%d, %d SMs, %.2f GiB global, %.2f GiB free)\n",
+        std::printf("CUDA device: %s (device %d, sm_%d%d, %d SMs, %.2f GiB global, %.2f GiB free)\n",
                 diagnostics.device_name, diagnostics.device_ordinal,
                 diagnostics.compute_major, diagnostics.compute_minor,
                 diagnostics.multiprocessor_count,
@@ -239,8 +238,8 @@ __host__ __device__ inline void cusum_update(CusumState* s, float x) {
 //
 // write_checkpoint and load_checkpoint are host-side and operate on a single
 // open() call. Atomic-replace via temp-file + rename.
-constexpr uint32_t CHECKPOINT_MAGIC   = 0x53323143u;  // 'S' '2' '1' 'C'
-constexpr uint32_t CHECKPOINT_VERSION = 1;
+constexpr uint32_t CHECKPOINT_MAGIC   = CHECKPOINT_MAGIC_VALUE;
+constexpr uint32_t CHECKPOINT_VERSION = CHECKPOINT_VERSION_VALUE;
 
 // Schema hash combines the sizes of the structures that flow through the
 // checkpoint. Bump CHECKPOINT_VERSION if any of these change so old files
@@ -299,11 +298,12 @@ __host__ inline bool load_checkpoint_header(CheckpointHeader* hdr_out,
     return true;
 }
 
-// DECLARED ONLY — blueprint-in-place.
-// write_checkpoint / load_checkpoint move the FULL run state, not just the
-// header above. The header path is done; the payload is not, and a header-only
-// checkpoint does not survive a restart. What the full payload must serialize,
-// in order, after the header:
+// Full checkpoint serialization is implemented in
+// integration/checkpointing.cu (save_checkpoint / load_checkpoint): the
+// payload below, the schema hash, and the atomic write. The header-only
+// path above remains for schema-hash stability tests.
+//
+// What the full payload serializes, in order, after the header:
 //   1. Organism table: for each of POOL_SIZE + STRESS_POOL_SIZE slots —
 //      genome bits, delta weights (count + indices + values), role, lineage_id,
 //      parent_id, spawn_gen, replica_tag. The CA grid is NOT serialized (it is
@@ -315,12 +315,10 @@ __host__ inline bool load_checkpoint_header(CheckpointHeader* hdr_out,
 //   4. Correlation window, both CUSUM states, calibrated s_target + its frozen
 //      flag, mutation-ladder replica assignments + beta + accept EMA, stress
 //      ladder state, sentinel ensemble + history, generation counter, RNG seeds.
-// Pointers in CameState (m/v/c/prev_u) must be flattened to inline arrays on
-// write and re-pointed on load — a raw fwrite(World) is wrong because of them.
-// Write to a temp path then rename() for atomic replacement. load_checkpoint
-// must re-decode every genome to rebuild CA grids before the first forward.
-void write_checkpoint(const CheckpointHeader& hdr, const char* path);
-bool load_checkpoint(CheckpointHeader* hdr_out,  const char* path);
+// Pointers in CameState (m/v/c/prev_u) are flattened to host mirrors on
+// write and re-pointed on load. Writes go to a temp path then replace the
+// target. load_checkpoint re-decodes every genome to rebuild CA grids before
+// the first forward.
 
 }  // namespace slime::safety
 

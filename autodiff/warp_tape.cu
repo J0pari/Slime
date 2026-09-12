@@ -15,7 +15,6 @@ namespace slime::autodiff {
 using nca::OrganismState;
 using nca::ForwardInputs;
 using nca::PERC_DIM;
-using nca::HIDDEN_DIM;
 using nca::grid_idx;
 using ::canonical_role;
 
@@ -39,11 +38,8 @@ constexpr int OFF_FLOW  = OFF_INTER + W_INTER_SIZE;
 constexpr int OFF_BMAP  = OFF_FLOW + W_FLOW_SIZE;
 
 // Backward sub-kernel config.
-constexpr int BWD_THREADS = 256;  // threads per block (one block per organism)
 
 // Checkpoint indices: steps 0, 16, 32, 48.
-constexpr int NUM_CHECKPOINTS = 4;
-constexpr int CHECKPOINT_INTERVAL = 16;
 
 // ---- Structs -------------------------------------------------------------
 
@@ -125,7 +121,7 @@ inline void predictor_mse_loss(const float* prediction, const float* target,
 
 __device__ inline float gelu_derivative(float x) {
     // d/dx GELU(x) using the Hendrycks-Gimpel tanh approximation.
-    const float k = 0.7978845608f;     // sqrt(2/pi)
+    const float k = GELU_K;             // sqrt(2/pi)
     float x3 = x * x * x;
     float inner = k * (x + 0.044715f * x3);
     float t = tanhf(inner);
@@ -203,7 +199,7 @@ __global__ void forward_with_checkpoints_kernel(
 
         // Save checkpoints at steps 16, 32, 48 (indices 1, 2, 3).
         if (step == CHECKPOINT_INTERVAL || step == 2 * CHECKPOINT_INTERVAL ||
-            step == 3 * CHECKPOINT_INTERVAL) {
+            step == (NUM_CHECKPOINTS - 1) * CHECKPOINT_INTERVAL) {
             int ckpt_idx = step / CHECKPOINT_INTERVAL; // 1, 2, or 3
             for (int i = tid; i < GRID_ELEMS; i += nthreads) {
                 ckpt.data[ckpt_idx][i] = curr[i];
@@ -402,8 +398,8 @@ __global__ void bwd_reforward_step_kernel(
             float prev = __half2float(rc[cell * CA_CHANNELS + c]);
             // Residual timestep must mirror the forward (A-201).
             float nxt = prev + alpha * acc;
-            if (nxt >  65504.f) nxt =  65504.f;
-            if (nxt < -65504.f) nxt = -65504.f;
+            if (nxt >  FP16_MAX_VALUE) nxt =  FP16_MAX_VALUE;
+            if (nxt < -FP16_MAX_VALUE) nxt = -FP16_MAX_VALUE;
             rn[cell * CA_CHANNELS + c] = __float2half(nxt);
         }
     }
@@ -507,7 +503,7 @@ __global__ void bwd_weight_grad_kernel(
         for (int f = 0; f < N_PERC_FILTERS; ++f) {
             for (int k = 0; k < 9; ++k) {
                 int ky = (k / 3) - 1;
-                int kx = (k % 3) - 1;
+                int kx = (k % STENCIL_W) - 1;
                 int ny = (y + ky + GRID_SIZE) % GRID_SIZE;
                 int nx = (x + kx + GRID_SIZE) % GRID_SIZE;
                 float acc = 0.f;
@@ -640,7 +636,7 @@ __global__ void state_saturation_kernel(
         for (int i = tid; i < GRID_ELEMS; i += blockDim.x) {
             float v = fabsf(__half2float(ck[i]));
             mx = fmaxf(mx, v);
-            if (v > 60000.f) cnt++;
+            if (v > STATE_NEAR_MAX_VALUE) cnt++;
         }
     }
     // Final grid (step 64).
@@ -648,7 +644,7 @@ __global__ void state_saturation_kernel(
     for (int i = tid; i < GRID_ELEMS; i += blockDim.x) {
         float v = fabsf(__half2float(grid[i]));
         mx = fmaxf(mx, v);
-        if (v > 60000.f) cnt++;
+        if (v > STATE_NEAR_MAX_VALUE) cnt++;
     }
 
     s_max[tid] = mx;
@@ -976,3 +972,4 @@ inline void launch_btraj_gather(
 }  // namespace slime::autodiff
 
 #endif  // COEVO_AUTODIFF_WARP_TAPE_CU
+

@@ -316,6 +316,213 @@ def gate_schedule_host_only(files: dict[str, list[str]], report: GateReport) -> 
                 Finding("schedule_host_only", path, i, line))
 
 
+# ---- Gate: numeric policy (schema home = config/constants.cuh) -------------
+# The LLM-Trader pattern adapted to C++/CUDA: the schema home is the ONLY
+# place for numbers; action code uses named constants. The declared-constant
+# registry is DERIVED from the schema home, so adding a constant there
+# automatically makes bare uses of its value suspect elsewhere. Rules:
+#   N1  numeric constexpr/const definitions outside the schema home
+#   N2  comparisons against a non-structural numeric literal
+#   N3  ternary fallback to a non-structural numeric literal
+#   N4  default-argument numeric literals
+#   N5  modulo against a numeric literal (named tunables only)
+# Exemptions are review decisions with reasons; the liveness test fails when
+# an exemption no longer names real code.
+SCHEMA_HOME = "config/constants.cuh"
+NUMERIC_STRUCTURAL = {0.0, 1.0, -1.0, 2.0}
+
+# Review-decision exemptions: (path, enclosing-symbol) -> reason.
+# Adding one is a review decision, never an allowance for a configurable
+# number; tests/architecture/test_architecture.py::test_numeric_exemptions_live
+# fails when an exemption no longer names real code.
+NUMERIC_POLICY_EXEMPTIONS: dict[tuple[str, str], str] = {
+    ("genome/codec.cu", "read_bits"): (
+        "the bit-layout helper indexes a 32-bit word: 32 is the word width, "
+        "structural to the codec's own representation"),
+    ("nca/reaction_diffusion.cu", "read_bits"): (
+        "the bit-layout helper indexes a 32-bit word: 32 is the word width, "
+        "structural to the codec's own representation"),
+    ("nca/engine.cu", "project_bmap"): (
+        "the deterministic tree reduction's NTHREADS and the unrolled "
+        "16-channel loops are kernel-shape constants tied to the 16x16 "
+        "block, checked by static_assert"),
+    ("autodiff/warp_tape.cu", "cell_yx"): (
+        "flat-cell indexing by the grid width: structural to the layout"),
+}
+
+_CONST_DEF_RE = re.compile(
+    r"\b(?:constexpr|const)\s+[\w:<>]+\s+([A-Za-z_]\w*)\s*=\s*([^;]+);")
+_NUMBER_TOKEN_RE = re.compile(
+    r"(?<![\w.])(?:0[xX][0-9A-Fa-f]+|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?)")
+_CMP_LITERAL_RE = re.compile(
+    r"(?:==|!=|<=|>=|<|>)\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
+_MOD_LITERAL_RE = re.compile(
+    r"%\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
+_TERNARY_ELSE_RE = re.compile(
+    r"\?\s*[^;:]*:\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
+_TERNARY_THEN_RE = re.compile(
+    r"\?\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)\s*:")
+_DEFAULT_ARG_RE = re.compile(
+    r"\([^)]*\b[A-Za-z_]\w*\s*=\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
+
+
+def strip_code_line(line: str) -> str:
+    """Remove comments and string/char literal contents for scanning."""
+    out = []
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if ch == '"' or ch == "'":
+            quote = ch
+            i += 1
+            while i < n and line[i] != quote:
+                if line[i] == "\\":
+                    i += 1
+                i += 1
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "/":
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _number_value(token: str) -> float | None:
+    t = token.rstrip("fFuUlL")
+    try:
+        if t.lower().startswith("0x"):
+            return float(int(t, 16))
+        return float(t)
+    except ValueError:
+        return None
+
+
+def parse_schema_constants(text: str) -> dict[str, float]:
+    """{NAME: value} for numeric constants declared in the schema home."""
+    out: dict[str, float] = {}
+    for m in _CONST_DEF_RE.finditer(text):
+        name, expr = m.group(1), m.group(2)
+        tok = _NUMBER_TOKEN_RE.search(expr)
+        if not tok:
+            continue
+        value = _number_value(tok.group(0))
+        if value is not None:
+            out[name] = value
+    return out
+
+
+def enclosing_symbol(lines: list[str], lineno: int) -> str:
+    """Best-effort enclosing function name for an exemption key."""
+    for i in range(lineno - 2, max(-1, lineno - 120), -1):
+        line = lines[i].strip()
+        if not line or line.startswith(("//", "*", "/*", "#", "}")):
+            continue
+        m = re.match(r"^[\w:<>\*&\s]+?\b([A-Za-z_]\w*)\s*\(", line)
+        if m and not line.endswith(";"):
+            return m.group(1)
+    return ""
+
+
+def gate_numeric_policy(files: dict[str, list[str]], report: GateReport) -> None:
+    schema_text = "\n".join(files.get(SCHEMA_HOME, []))
+    declared = parse_schema_constants(schema_text)
+    declared_names_by_value: dict[float, list[str]] = {}
+    for name, value in declared.items():
+        declared_names_by_value.setdefault(value, []).append(name)
+
+    def is_structural(value: float) -> bool:
+        return value in NUMERIC_STRUCTURAL
+
+    def hint(value: float) -> str:
+        names = declared_names_by_value.get(value)
+        if names:
+            return f" (equals declared {names[0]})"
+        return ""
+
+    def exempt(path: str, lines: list[str], lineno: int) -> bool:
+        symbol = enclosing_symbol(lines, lineno)
+        return (path, symbol) in NUMERIC_POLICY_EXEMPTIONS
+
+    for path, lines in files.items():
+        if path == SCHEMA_HOME:
+            continue
+        for i, raw in enumerate(lines, 1):
+            code = strip_code_line(raw)
+            if not code.strip():
+                continue
+            if exempt(path, lines, i):
+                continue
+            # Shift operators are not comparisons: neutralise them before the
+            # comparison rule (>> 6 and << 2 are layout arithmetic).
+            code_noshift = code.replace("<<", " ").replace(">>", " ")
+            # Iteration bounds in `for` headers are structural shape, not
+            # live seams (the C++ analogue of allowed subscript arithmetic).
+            is_for = re.match(r"\s*for\s*\(", code) is not None
+            # N1: numeric const definitions outside the schema home.
+            m = _CONST_DEF_RE.search(code)
+            if m:
+                tok = _NUMBER_TOKEN_RE.search(m.group(2))
+                if tok:
+                    value = _number_value(tok.group(0))
+                    if value is not None and not is_structural(value):
+                        report.findings.append(Finding(
+                            "numeric_policy", path, i,
+                            f"{m.group(1)} = {tok.group(0)}: numeric constants "
+                            f"live in {SCHEMA_HOME}{hint(value)}"))
+                        continue
+            if is_for:
+                continue
+            # N2: comparisons against a non-structural literal.
+            fired = False
+            for cm in _CMP_LITERAL_RE.finditer(code_noshift):
+                value = _number_value(cm.group(1))
+                if value is None or is_structural(value):
+                    continue
+                report.findings.append(Finding(
+                    "numeric_policy", path, i,
+                    f"comparison against literal {cm.group(1)}{hint(value)}"))
+                fired = True
+                break
+            if fired:
+                continue
+            # N3: ternary fallback to a non-structural literal.
+            for tm in list(_TERNARY_ELSE_RE.finditer(code)) + \
+                    list(_TERNARY_THEN_RE.finditer(code)):
+                value = _number_value(tm.group(1))
+                if value is None or is_structural(value):
+                    continue
+                report.findings.append(Finding(
+                    "numeric_policy", path, i,
+                    f"ternary fallback literal {tm.group(1)}{hint(value)}"))
+                fired = True
+                break
+            if fired:
+                continue
+            # N4: default-argument literals.
+            for dm in _DEFAULT_ARG_RE.finditer(code):
+                value = _number_value(dm.group(1))
+                if value is None or is_structural(value):
+                    continue
+                report.findings.append(Finding(
+                    "numeric_policy", path, i,
+                    f"default-argument literal {dm.group(1)}{hint(value)}"))
+                fired = True
+                break
+            if fired:
+                continue
+            # N5: modulo literals.
+            for mm in _MOD_LITERAL_RE.finditer(code):
+                value = _number_value(mm.group(1))
+                if value is None or is_structural(value):
+                    continue
+                report.findings.append(Finding(
+                    "numeric_policy", path, i,
+                    f"modulo literal {mm.group(1)}{hint(value)}"))
+                break
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -326,6 +533,7 @@ ALL_GATES = [
     gate_operator_polling,
     gate_replay_before_spawn,
     gate_schedule_host_only,
+    gate_numeric_policy,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

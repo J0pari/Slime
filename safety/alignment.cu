@@ -34,7 +34,7 @@ inline float cosine_similarity(const float* a, const float* b) {
         nb  += b[d] * b[d];
     }
     float denom = sqrtf(na) * sqrtf(nb);
-    if (denom < 1e-12f) return 0.f;
+    if (denom < EPS_DENOM) return 0.f;
     return dot / denom;
 }
 

@@ -70,7 +70,7 @@ __host__ __device__ inline float swap_accept_probability(float beta,
 // Adaptive beta EMA: nudge beta so the accept rate tracks PT_TARGET_ACCEPT.
 // Called once per swap round after propose_swaps tallies that round's
 // attempts/accepts. Resets per-round counters.
-__host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 0.2f) {
+__host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = PT_BETA_EMA_RATE) {
     int attempted = l->swaps_attempted;
     if (attempted <= 0) return;
     float round_rate = static_cast<float>(l->swaps_accepted)
@@ -78,8 +78,8 @@ __host__ __device__ inline void update_beta(MutationLadder* l, float ema_rate = 
     l->accept_ema = (1.0f - ema_rate) * l->accept_ema + ema_rate * round_rate;
     float err = l->accept_ema - PT_TARGET_ACCEPT;
     l->beta *= expf(0.5f * err);
-    if (l->beta < 1e-3f) l->beta = 1e-3f;
-    if (l->beta > 1e3f)  l->beta = 1e3f;
+    if (l->beta < PT_BETA_MIN) l->beta = PT_BETA_MIN;
+    if (l->beta > PT_BETA_MAX) l->beta = PT_BETA_MAX;
     l->swaps_attempted = 0;
     l->swaps_accepted  = 0;
 }

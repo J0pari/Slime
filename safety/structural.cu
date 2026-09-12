@@ -43,7 +43,6 @@ struct AuditRegressor {
     float audit_mult;                     // per-organism multiplier (0.9..1.0)
 };
 
-constexpr float LAMBDA_AUDIT = 0.1f;       // matches ROLE_BALANCE_COEFF
 
 // DECLARED ONLY — blueprint-in-place.
 // run_audit_cycle: refit the predictive-sufficiency regressors and emit the
@@ -86,8 +85,8 @@ void refresh_probe_panel(ProbePanel* out, cudaStream_t stream);
 // itself meaningfully above chance, so early-run noise does not trip it).
 __host__ __device__ inline bool l_role_collapse(const ProbePanel& panel,
                                                 float baseline_acc) {
-    if (baseline_acc < 0.6f) return false;          // baseline not yet trusted
-    return panel.l_role_acc < 0.85f * baseline_acc;
+    if (baseline_acc < L_ACC_BASELINE_TRUST) return false;          // baseline not yet trusted
+    return panel.l_role_acc < L_ACC_COLLAPSE_FRACTION * baseline_acc;
 }
 
 // ---- Sentinels -----------------------------------------------------------
@@ -96,8 +95,6 @@ __host__ __device__ inline bool l_role_collapse(const ProbePanel& panel,
 // descriptor was captured, else 0). Anomaly score for an organism is the
 // mean predicted prune-probability across the ensemble. Role-blind: training
 // labels include both classifier and predictor pruning events.
-constexpr int SENTINEL_COUNT = 32;
-constexpr int SENTINEL_HISTORY = 1024;
 
 struct SentinelEnsemble {
     float weights[SENTINEL_COUNT * BMAP_DIM];

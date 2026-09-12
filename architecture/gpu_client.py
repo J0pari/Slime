@@ -272,6 +272,16 @@ def release_gpu_lock(env: dict | None = None) -> None:
 
 
 # ---- CLI -----------------------------------------------------------------
+def wrap_progress_command(name: str, total: int,
+                          command: list[str]) -> list[str]:
+    """Wrap a command in progress_wrap.py. Deliberately NO "--" separator:
+    the owner's submit parser uses nargs=REMAINDER, which argparse
+    terminates at a bare "--" (the job would fail submission)."""
+    wrapper = Path(__file__).resolve().parent / "progress_wrap.py"
+    return [sys.executable, str(wrapper), "--name", name,
+            "--total", str(total), *command]
+
+
 def _cmd_run(args) -> int:
     """Submit a job through the scheduler, wait, and report the result.
     --direct is the explicit escape hatch for machines without the
@@ -287,9 +297,7 @@ def _cmd_run(args) -> int:
     try:
         check_contract()
         if args.total > 0:
-            wrapper = Path(__file__).resolve().parent / "progress_wrap.py"
-            command = [sys.executable, str(wrapper), "--name", args.name,
-                       "--total", str(args.total), "--", *command]
+            command = wrap_progress_command(args.name, args.total, command)
         ack = submit(args.name, command, args.vram, priority=args.priority,
                      max_minutes=args.max_minutes, cwd=args.cwd,
                      telemetry_log=args.telemetry_log)

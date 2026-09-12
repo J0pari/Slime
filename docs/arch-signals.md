@@ -7,6 +7,27 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Numeric policy adopted from the LLM-Trader pattern
+  (`tests/test_no_magic_numbers.py`): the schema home is
+  `config/constants.cuh`, the declared-constant registry is derived from it,
+  exemptions are review decisions with reasons and a liveness test, and the
+  gate is proven by planted violations. Slime's previous gate only caught
+  `% <literal>`; the new `gate_numeric_policy` found 102 real findings
+  (FP16 clamp bounds, epsilons, kernel-shape constants, hyperparameters all
+  living outside the schema home). All are fixed; `config/constants.cuh`
+  gained the canonical block, and four structural exemptions remain
+  (bit-layout helpers, kernel-shape loops) each with a reason.
+- 2026-09-12: Paranoid audit of the checkpoint/predictor work found and
+  fixed: the atomic replace had a remove-then-rename window (now direct
+  replace), the payload had no checksum (now FNV-1a 64), new run state was
+  unserialized (surprise history, calibration samples, predictor error EMA,
+  predictor batch, telemetry scalars — all now in the payload),
+  `predictor_error_ema` did not move through PT (now swapped, annotated,
+  and registry-checked), probe tuples were not held out from placeholder
+  training (now flagged and skipped), `surprise_ratio` silently returned 1.0
+  when uncalibrated (now an explicit gated state logged once), and the
+  archive bin cap/occupants sizing and predictor EMA rates were bare
+  literals (now named constants).
 - 2026-09-12: Slime adopted the training-architecture GPU scheduler
   (`gpu-scheduler/v1`). `contracts/gpu-scheduler-pin.json` pins the contract
   fingerprint; `architecture/gpu_client.py` validates the schema major and

@@ -53,9 +53,9 @@ struct Coefficients {
 __device__ inline void rd_step(__half* grid,
                                __half* scratch,
                                const Coefficients& coeffs) {
-    constexpr int CHEM_N = 6;
-    constexpr float DT = 0.1f;
-    constexpr float DECAY = 0.05f;
+    constexpr int CHEM_N = CH_CHEM_LAST + 1;
+    constexpr float DT = RD_DT;
+    constexpr float DECAY = RD_DECAY;
     for (int by = 0; by < GRID_SIZE; by += blockDim.y) {
         for (int bx = 0; bx < GRID_SIZE; bx += blockDim.x) {
             int y = by + threadIdx.y;
@@ -88,8 +88,8 @@ __device__ inline void rd_step(__half* grid,
                 float base = __half2float(scratch[idx(y, x, c)]);  // cellwise update
                 float updated = base
                     + DT * (coeffs.diffusion[c] * lap + react - DECAY * here[c]);
-                if (updated >  65504.f) updated =  65504.f;
-                if (updated < -65504.f) updated = -65504.f;
+                if (updated >  FP16_MAX_VALUE) updated =  FP16_MAX_VALUE;
+                if (updated < -FP16_MAX_VALUE) updated = -FP16_MAX_VALUE;
                 scratch[idx(y, x, c)] = __float2half(updated);
             }
         }
@@ -108,10 +108,10 @@ __device__ inline void decode_coefficients(const uint32_t* genome_bits,
         // Up to 8 contiguous bits across word boundaries.
         uint32_t lo_word = genome_bits[start / 32];
         uint32_t hi_word = genome_bits[(start + n - 1) / 32];
-        int shift = start % 32;
+        int shift = start % WORD_BITS;
         uint64_t combined = static_cast<uint64_t>(lo_word)
                           | (static_cast<uint64_t>(hi_word) << 32);
-        uint32_t mask = (n == 32) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+        uint32_t mask = (n == WORD_BITS) ? 0xFFFFFFFFu : ((1u << n) - 1u);
         return static_cast<uint32_t>(combined >> shift) & mask;
     };
     // Reaction: 5 bits per entry, 36 entries = 180 bits (uses 180 of 200).

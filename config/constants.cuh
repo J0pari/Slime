@@ -181,6 +181,15 @@ constexpr int  CALIBRATION_GEN_HI        = 700;
 // Fitness scaling (A-401). Coefficient matches λ_audit.
 constexpr float ROLE_BALANCE_COEFF       = 0.1f;
 
+// Archive per-role per-bin capacity (A-401). Named because the capacity
+// repair, the initialization, and the test fixtures must agree.
+constexpr int   ARCHIVE_BIN_CAP          = 13;
+
+// Predictor curriculum (A-701): per-target prediction-error EMA rate and the
+// sampling floor that keeps every organism reachable.
+constexpr float PREDICTOR_ERROR_EMA_ALPHA = 0.1f;
+constexpr float PREDICTOR_CURRICULUM_ERROR_FLOOR = 1e-3f;
+
 // SOT gate (A-401): sigmoid(20·(x − 0.7)).
 constexpr float SOT_GATE_SLOPE           = 20.0f;
 constexpr float SOT_GATE_MIDPOINT        = 0.7f;
@@ -227,6 +236,90 @@ constexpr int   GRAD_HEALTH_WINDOW   = 10;
 #ifndef SLIME_DEBUG_CHECKS
 #define SLIME_DEBUG_CHECKS 1
 #endif
+
+// ---- Numeric policy constants (N1..N5 schema home) ------------------------
+// FP16 clamp bounds (forward, checkpoint re-forward, RD) and the saturation
+// telemetry threshold.
+constexpr float FP16_MAX_VALUE       = 65504.f;
+constexpr float STATE_NEAR_MAX_VALUE = 60000.f;
+
+// Epsilons at live seams.
+constexpr float EPS_DENOM = 1e-12f;   // denominator guards (cosine, ranges)
+constexpr float EPS_NORM  = 1e-24f;   // power-iteration degenerate direction
+constexpr float EPS_LOG   = 1e-30f;   // log / Box-Muller guards
+constexpr float EPS_REL   = 1e-4f;    // relative comparison tolerance
+
+// GELU tanh approximation.
+constexpr float GELU_K     = 0.7978845608f;
+constexpr float GELU_CUBIC = 0.044715f;
+
+// Bit / kernel-shape constants.
+constexpr int WORD_BITS           = 32;   // uint32_t word width (codec)
+constexpr int STENCIL_W           = 3;    // 3x3 perception taps
+constexpr int HIDDEN_DIM          = 32;   // W_inter output width
+constexpr int BWD_THREADS         = 256;  // backward sub-kernel block size
+constexpr int NUM_CHECKPOINTS     = 4;
+constexpr int CHECKPOINT_INTERVAL = 16;
+constexpr int FEISTEL_ROUNDS      = 4;    // SOT permutation rounds
+constexpr int PREDICTOR_SEED_REGION = 4;  // centered 4x4 predictor seed
+
+// Reaction-diffusion explicit-step parameters (A-202).
+constexpr float RD_DT    = 0.1f;
+constexpr float RD_DECAY = 0.05f;
+
+// Genome delta codec.
+constexpr int   MAX_DELTA_FLOATS   = 4096;
+constexpr float DELTA_PRIOR_SCALE  = 0.01f;
+
+// Archive (A-401).
+constexpr float LAMBDA_NOVELTY    = 0.5f;
+constexpr float INV_VAR_EMA_ALPHA = 0.01f;
+constexpr float INV_VAR_EMA_EPS   = 1e-4f;
+constexpr int   POWER_ITERS       = 20;
+
+// Curriculum (A-701).
+constexpr int CLASSIFIER_BATCH_SIZE = 16;
+constexpr int SOT_SUBBATCH_SIZE     = 4;
+constexpr int PREDICTOR_PROBE_SLOT_COUNT = 4;
+constexpr int PREDICTOR_POOL_SLOT_COUNT  = PREDICTOR_EVAL_K - PREDICTOR_PROBE_SLOT_COUNT;
+// First generations always logged, independent of TELEMETRY_INTERVAL.
+constexpr int FIRST_GENS_TELEMETRY  = 5;
+
+// Placeholder regressor (A-601): layer sizes and AdamW hyperparameters.
+constexpr int   PH_H1               = 128;
+constexpr int   PH_H2               = 64;
+constexpr int   PH_REPLAY_CAPACITY  = MAX_ARCHIVE;
+constexpr float PH_LR               = 1e-4f;
+constexpr float PH_BETA1            = 0.9f;
+constexpr float PH_BETA2            = 0.999f;
+constexpr float PH_EPS              = 1e-8f;
+constexpr float PH_WD               = 0.01f;
+constexpr int   PH_TRAIN_MINIBATCH  = 8;
+
+// PT ladder adaptation bounds.
+constexpr float PT_BETA_MIN      = 1e-3f;
+constexpr float PT_BETA_MAX      = 1e3f;
+constexpr float PT_BETA_EMA_RATE = 0.2f;
+
+// Structural pressures (S-003).
+constexpr float LAMBDA_AUDIT            = 0.1f;
+constexpr float L_ACC_BASELINE_TRUST    = 0.6f;
+constexpr float L_ACC_COLLAPSE_FRACTION = 0.85f;
+constexpr int   SENTINEL_COUNT          = 32;
+constexpr int   SENTINEL_HISTORY        = 1024;
+
+// CUDA startup diagnostics probe.
+constexpr size_t DIAG_MAX_PROBE_BYTES     = 64u * 1024u * 1024u;
+constexpr size_t DIAG_MIN_PROBE_BYTES     = 8u * 1024u * 1024u;
+constexpr int    DIAG_TRANSFER_ITERATIONS = 16;
+constexpr double BYTES_PER_GIB            = 1024.0 * 1024.0 * 1024.0;
+
+// Checkpoint format (S-001).
+constexpr uint32_t CHECKPOINT_MAGIC_VALUE   = 0x53323143u;  // 'S' '2' '1' 'C'
+constexpr uint32_t CHECKPOINT_VERSION_VALUE = 1;
+// FNV-1a 64 checksum: standard algorithm constants.
+constexpr uint64_t FNV1A64_OFFSET = 1469598103934665603ull;
+constexpr uint64_t FNV1A64_PRIME  = 1099511628211ull;
 
 #if SLIME_DEBUG_CHECKS
 #define CUDA_LAUNCH_CHECK() \

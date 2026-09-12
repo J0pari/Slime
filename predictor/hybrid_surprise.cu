@@ -30,8 +30,6 @@ namespace slime::predictor {
 // Layer sizes: (BMAP_DIM + TASK_EMBED_DIM = 48) -> 128 -> 64 -> 2.
 // Output: (fitness_hat, log_uncertainty).
 constexpr int PH_INPUT = BMAP_DIM + TASK_EMBED_DIM;
-constexpr int PH_H1    = 128;
-constexpr int PH_H2    = 64;
 constexpr int PH_OUT   = 2;
 
 struct PlaceholderRegressor {
@@ -55,24 +53,23 @@ struct PlaceholderRegressor {
 
 // Rolling buffer of (bmap_64, task_emb, fitness) tuples from the classifier
 // archive. Capacity 5000 per I-001 shared structures.
-constexpr int PH_REPLAY_CAPACITY = 5000;
-
 struct PlaceholderReplayBuffer {
     float bmap[PH_REPLAY_CAPACITY * BMAP_DIM];
     float task_emb[PH_REPLAY_CAPACITY * TASK_EMBED_DIM];
     float fitness[PH_REPLAY_CAPACITY];
+    bool  held_out[PH_REPLAY_CAPACITY];  // probe tuples: never trained on
     int   head;       // ring head
     int   filled;     // entries actually populated
 };
 
 // GELU approximation (Hendrycks-Gimpel) for host-side placeholder MLP.
 __host__ inline float ph_gelu(float x) {
-    const float k = 0.7978845608f;
+    const float k = GELU_K;
     return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 
 __host__ inline float ph_gelu_derivative(float x) {
-    const float k = 0.7978845608f;
+    const float k = GELU_K;
     float x3 = x * x * x;
     float inner = k * (x + 0.044715f * x3);
     float t = tanhf(inner);
@@ -87,7 +84,7 @@ __host__ inline void init_placeholder_regressor(PlaceholderRegressor* r,
     auto box_muller = [](Pcg32* rng) -> float {
         float u1 = pcg32_float(rng);
         float u2 = pcg32_float(rng);
-        if (u1 < 1e-30f) u1 = 1e-30f;
+        if (u1 < EPS_LOG) u1 = EPS_LOG;
         return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
     };
 
@@ -191,11 +188,6 @@ __host__ inline void replay_buffer_push(PlaceholderReplayBuffer* buf,
 
 // AdamW update for a single parameter array.
 // Per A-601: lr = 1e-4 fixed by spec.
-constexpr float PH_LR = 1e-4f;
-constexpr float PH_BETA1 = 0.9f;
-constexpr float PH_BETA2 = 0.999f;
-constexpr float PH_EPS = 1e-8f;
-constexpr float PH_WD = 0.01f;
 
 __host__ inline void adamw_update(float* param, float* grad,
                                   float* m, float* v,
@@ -215,8 +207,6 @@ __host__ inline void adamw_update(float* param, float* grad,
 // Loss = Gaussian NLL: 0.5 * (exp(-s) * (y - mu)^2 + s)
 // where (mu, s) = placeholder_forward outputs, y = fitness.
 // Per A-601 gradient policy: isolated from organism weights.
-constexpr int PH_TRAIN_MINIBATCH = 8;
-
 __host__ inline void placeholder_train_step(PlaceholderRegressor* r,
                                             const PlaceholderReplayBuffer* buf,
                                             Pcg32* rng) {
@@ -234,8 +224,15 @@ __host__ inline void placeholder_train_step(PlaceholderRegressor* r,
     float total_loss = 0.f;
 
     for (int mb = 0; mb < PH_TRAIN_MINIBATCH; ++mb) {
-        // Sample a random entry from the replay buffer.
-        int idx = static_cast<int>(pcg32_random(rng) % static_cast<uint32_t>(buf->filled));
+        // Sample a random entry from the replay buffer. Held-out probe
+        // tuples are never trained on: resample past them (bounded retries).
+        int idx = -1;
+        for (int tries = 0; tries < 16; ++tries) {
+            int cand = static_cast<int>(pcg32_random(rng) %
+                                        static_cast<uint32_t>(buf->filled));
+            if (!buf->held_out[cand]) { idx = cand; break; }
+        }
+        if (idx < 0) continue;
         const float* bmap = &buf->bmap[idx * BMAP_DIM];
         const float* temb = &buf->task_emb[idx * TASK_EMBED_DIM];
         float y = buf->fitness[idx];
@@ -428,7 +425,7 @@ __host__ __device__ inline float pearson_r_clipped(const CorrelationWindow& w) {
         den_y += dy * dy;
     }
     float den = sqrtf(den_x * den_y);
-    if (den <= 1e-12f) return 0.f;
+    if (den <= EPS_DENOM) return 0.f;
     float r = num / den;
     if (r < 0.f) return 0.f;
     if (r > 1.f) return 1.f;

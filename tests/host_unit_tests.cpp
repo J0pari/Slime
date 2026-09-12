@@ -563,8 +563,8 @@ namespace arch = slime::archive;
 static void init_test_archive(arch::Archive* a) {
     std::memset(a, 0, sizeof(*a));
     for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
-        a->bins[b].cap_classifier = 13;
-        a->bins[b].cap_predictor  = 13;
+        a->bins[b].cap_classifier = ARCHIVE_BIN_CAP;
+        a->bins[b].cap_predictor  = ARCHIVE_BIN_CAP;
     }
     for (int d = 0; d < BMAP_DIM; ++d) a->inv_var_ema[d] = 1.0f;
     arch::init_rff(&a->rff, 42u);
@@ -816,6 +816,37 @@ static void test_archive_randomized_property() {
     delete a;
 }
 
+static void test_archive_file_roundtrip() {
+    // [claim:S001.checkpoint-roundtrip]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+    for (int i = 0; i < 20; ++i) {
+        Role role = (i % 3 == 0) ? Role::Predictor : Role::Classifier;
+        EXPECT_TRUE(insert_test_entry(a, 0.3f + 0.01f * i, 0.4f + 0.005f * i,
+                                      0.1f + 0.02f * i, role,
+                                      100u + i) >= 0);
+    }
+    arch::recompute_bins(a, nullptr);
+
+    FILE* f = std::tmpfile();
+    EXPECT_TRUE(f != nullptr);
+    EXPECT_TRUE(arch::archive_write_file(*a, f));
+    std::rewind(f);
+    arch::Archive* b = new arch::Archive;
+    EXPECT_TRUE(arch::archive_read_file(*b, f));
+    EXPECT_TRUE(std::memcmp(a, b, sizeof(arch::Archive)) == 0);
+
+    char err[256];
+    EXPECT_TRUE(arch::archive_check_invariants(*b, err, sizeof(err)));
+    // A loaded archive accepts further mutations with exact statistics.
+    EXPECT_TRUE(insert_test_entry(b, 0.9f, 0.9f, 0.5f,
+                                  Role::Classifier, 999u) >= 0);
+    EXPECT_TRUE(arch::archive_check_invariants(*b, err, sizeof(err)));
+    std::fclose(f);
+    delete a;
+    delete b;
+}
+
 // ---- Operator commands + SOT schedule (S-002, A-101) ---------------------
 // Production parsing (safety/operator_cmds.cuh), durable archive pruning
 // (archive::prune_lineage), and the host-side SOT schedule determinism.
@@ -1007,7 +1038,9 @@ int main() {
     test_operator_command_parse();
     test_archive_prune_lineage();
     test_sot_batch_determinism();
+    test_archive_file_roundtrip();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
+
 
