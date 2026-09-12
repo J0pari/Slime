@@ -18,6 +18,7 @@
 #include "../config/constants.cuh"
 #include "../nca/engine.cu"
 #include "../curriculum/problem_generator.cu"
+#include "operator_cmds.cuh"
 
 #include <cstdio>
 #include <cstring>
@@ -243,19 +244,19 @@ inline bool poll_off_switch() {
     return false;
 }
 
-// Read operator_cmd.txt and parse commands. Returns true if a command was
-// processed. Commands:
-//   prune <lineage_id>  - mark lineage for removal (sets fitness to 0)
-//   pause               - sets *paused = true
-//   resume              - sets *paused = false
-//   checkpoint          - sets *force_checkpoint = true
+// Read operator_cmd.txt and apply commands to the durable OperatorState
+// owned by the run loop. Returns true if a command was processed. Commands:
+//   prune <lineage_id>  - mark lineage for durable removal (recorded in state)
+//   pause               - state.paused = true
+//   resume              - state.paused = false
+//   checkpoint          - state.checkpoint_requested = true (the run loop
+//                         reports honestly; serialization lands in Wave 7)
 //
 // After processing, the file is deleted to prevent re-execution.
 inline bool apply_operator_command(float* organism_fitness,
                                    uint32_t* lineage_ids,
                                    int n_organisms,
-                                   bool* paused,
-                                   bool* force_checkpoint) {
+                                   OperatorState* state) {
     FILE* f = std::fopen("operator_cmd.txt", "r");
     if (!f) return false;
 
@@ -264,28 +265,40 @@ inline bool apply_operator_command(float* organism_fitness,
     while (std::fgets(line, sizeof(line), f)) {
         char* nl = std::strchr(line, '\n');
         if (nl) *nl = '\0';
+        if (line[0] == '\0') continue;
 
-        if (std::strncmp(line, "prune ", 6) == 0) {
-            uint32_t target_lineage = static_cast<uint32_t>(std::atol(line + 6));
-            for (int i = 0; i < n_organisms; ++i) {
-                if (lineage_ids[i] == target_lineage) {
-                    organism_fitness[i] = 0.f;
+        ParsedCommand cmd = parse_operator_line(line);
+        switch (cmd.command) {
+            case OperatorCommand::Prune: {
+                state->add_pruned(cmd.lineage);
+                for (int i = 0; i < n_organisms; ++i) {
+                    if (lineage_ids[i] == cmd.lineage) {
+                        organism_fitness[i] = 0.f;
+                    }
                 }
+                std::printf("[OPERATOR] Pruned lineage %u\n", cmd.lineage);
+                processed = true;
+                break;
             }
-            std::printf("[OPERATOR] Pruned lineage %u\n", target_lineage);
-            processed = true;
-        } else if (std::strcmp(line, "pause") == 0) {
-            *paused = true;
-            std::printf("[OPERATOR] Paused\n");
-            processed = true;
-        } else if (std::strcmp(line, "resume") == 0) {
-            *paused = false;
-            std::printf("[OPERATOR] Resumed\n");
-            processed = true;
-        } else if (std::strcmp(line, "checkpoint") == 0) {
-            *force_checkpoint = true;
-            std::printf("[OPERATOR] Forced checkpoint\n");
-            processed = true;
+            case OperatorCommand::Pause:
+                state->paused = true;
+                std::printf("[OPERATOR] Paused\n");
+                processed = true;
+                break;
+            case OperatorCommand::Resume:
+                state->paused = false;
+                std::printf("[OPERATOR] Resumed\n");
+                processed = true;
+                break;
+            case OperatorCommand::Checkpoint:
+                state->checkpoint_requested = true;
+                std::printf("[OPERATOR] Forced checkpoint requested (full "
+                            "serialization unsupported in this build)\n");
+                processed = true;
+                break;
+            case OperatorCommand::None:
+            default:
+                break;
         }
     }
     std::fclose(f);

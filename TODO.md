@@ -47,10 +47,20 @@ completed or its verification state changes.
   displaces the nearest same-role same-bin neighbor by weighted distance).
   PCA power iteration now uses dense deterministic starting vectors with a
   degenerate-covariance fallback; RFF means adjust exactly on replacement.
-- [ ] Give the remaining red claims witnesses: `S002.operator-command-effective`
-  (durable operator state), `A101.sot-schedule-independent` (schedule-host-side
-  test), and `I001.replay-evaluation-identity` (evaluation-record snapshot
-  test).
+- [x] Give the remaining red claims witnesses and make operator commands
+  durable: `S002.operator-command-effective` (parse extracted to
+  safety/operator_cmds.cuh; pause gates the run loop; prune zeroes pool
+  members AND tombstones archive entries via archive::prune_lineage with
+  exact statistics; checkpoint reports unsupported until Wave 7),
+  `I001.replay-evaluation-identity` (replay-before-spawn source gate with a
+  planted-violation test), `A101.sot-schedule-independent`
+  (schedule-host-only source gate + batch determinism host test). All three
+  established with passing evidence; only `A201.task-conditioning-complete`
+  remains red.
+- [ ] Implement the 16→5 task-embedding projection (or another explicit
+  conditioning path): `A201.task-conditioning-complete` is red with a failing
+  witness (`tests/task_conditioning.cu`) because task dims 5..15 do not reach
+  the NCA.
 
 ## P0 — Restore a trustworthy baseline
 

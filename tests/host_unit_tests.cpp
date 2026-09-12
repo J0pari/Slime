@@ -30,7 +30,9 @@
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
+#include "../safety/operator_cmds.cuh"
 #include "../archive/soft_qd_archive.cu"
+#include "../curriculum/problem_generator.cu"
 
 // Math kept locally only where the production definition is CUDA-dependent
 // (safety/alignment.cu pulls in the engine) or where the test deliberately
@@ -555,10 +557,6 @@ static void test_pt_ring_endpoints() {
     }
 }
 
-// ---- Archive invariants (A-401) ------------------------------------------
-// Production archive logic exercised directly (soft_qd_archive.cu included
-// above): capacity enforcement on rebin, exact live statistics, the weighted
-// descriptor metric, and the invariant checker.
 
 namespace arch = slime::archive;
 
@@ -818,6 +816,94 @@ static void test_archive_randomized_property() {
     delete a;
 }
 
+// ---- Operator commands + SOT schedule (S-002, A-101) ---------------------
+// Production parsing (safety/operator_cmds.cuh), durable archive pruning
+// (archive::prune_lineage), and the host-side SOT schedule determinism.
+
+namespace ops = slime::safety::alignment;
+
+static void test_operator_command_parse() {
+    // [claim:S002.operator-command-effective]
+    EXPECT_TRUE(ops::parse_operator_line("pause").command == ops::OperatorCommand::Pause);
+    EXPECT_TRUE(ops::parse_operator_line("resume").command == ops::OperatorCommand::Resume);
+    EXPECT_TRUE(ops::parse_operator_line("checkpoint").command == ops::OperatorCommand::Checkpoint);
+    ops::ParsedCommand prune = ops::parse_operator_line("prune 4242");
+    EXPECT_TRUE(prune.command == ops::OperatorCommand::Prune);
+    EXPECT_TRUE(prune.lineage == 4242u);
+    EXPECT_TRUE(ops::parse_operator_line("garbage").command == ops::OperatorCommand::None);
+    EXPECT_TRUE(ops::parse_operator_line("").command == ops::OperatorCommand::None);
+
+    ops::OperatorState st;
+    EXPECT_TRUE(!st.paused);
+    st.add_pruned(7u);
+    st.add_pruned(7u);   // duplicate is deduplicated
+    st.add_pruned(9u);
+    EXPECT_TRUE(st.n_pruned == 2);
+    EXPECT_TRUE(st.lineage_pruned(7u));
+    EXPECT_TRUE(!st.lineage_pruned(8u));
+}
+
+static void test_archive_prune_lineage() {
+    // [claim:S002.operator-command-effective]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_TRUE(insert_test_entry(a, 0.5f + 0.001f * i, 0.5f,
+                                      0.5f, Role::Classifier, 1u) >= 0);
+    }
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_TRUE(insert_test_entry(a, 0.6f + 0.001f * i, 0.5f,
+                                      0.5f, Role::Classifier, 2u) >= 0);
+    }
+    EXPECT_TRUE(a->count_classifier == 9);
+
+    arch::prune_lineage(a, 2u);
+
+    char err[256];
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+    EXPECT_TRUE(a->count_classifier == 5);
+    int lineage2_alive = 0;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (a->entries[i].alive && a->entries[i].lineage_id == 2u) {
+            lineage2_alive++;
+        }
+    }
+    EXPECT_TRUE(lineage2_alive == 0);
+    delete a;
+}
+
+static void test_sot_batch_determinism() {
+    // [claim:A101.sot-schedule-independent]
+    slime::curriculum::ClassifierBatch b1, b2;
+    Pcg32 rng1, rng2;
+    pcg32_seed(&rng1, PCG32_DEFAULT_STATE, PCG32_DEFAULT_STREAM);
+    pcg32_seed(&rng2, PCG32_DEFAULT_STATE, PCG32_DEFAULT_STREAM);
+    slime::curriculum::assemble_classifier_batch(&b1, MAIN_SOT_DENSITY,
+                                                 0xDEADCAFE42ULL, &rng1);
+    slime::curriculum::assemble_classifier_batch(&b2, MAIN_SOT_DENSITY,
+                                                 0xDEADCAFE42ULL, &rng2);
+    bool same = true;
+    for (int s = 0; s < slime::curriculum::CLASSIFIER_BATCH; ++s) {
+        if (b1.label[s] != b2.label[s]) same = false;
+        if (b1.is_sot[s] != b2.is_sot[s]) same = false;
+    }
+    for (int i = 0; i < slime::curriculum::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3; ++i) {
+        // Under the CUDA stub __half values are all-zero, so the image-pixel
+        // comparison is structural here; the real pixel determinism runs in
+        // the GPU builds. Labels, SOT marks, and the task embedding are
+        // full-fidelity host state.
+        if (b1.image[i].bits != b2.image[i].bits) same = false;
+    }
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) {
+        if (b1.task_embedding[d] != b2.task_embedding[d]) same = false;
+    }
+    EXPECT_TRUE(same);
+}
+
+// ---- Archive invariants (A-401) ------------------------------------------
+// Production archive logic exercised directly (soft_qd_archive.cu included
+// above): capacity enforcement on rebin, exact live statistics, the weighted
+// descriptor metric, and the invariant checker.
 // ---- SOT reversible permutation (Feistel) --------------------------------
 // Re-pasted from curriculum/problem_generator.cu; the round structure must
 // stay in sync. The property under test is the one that matters for SOT:
@@ -918,6 +1004,9 @@ int main() {
     test_archive_weighted_metric_active();
     test_archive_rff_mean_exact_after_replacement();
     test_archive_randomized_property();
+    test_operator_command_parse();
+    test_archive_prune_lineage();
+    test_sot_batch_determinism();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

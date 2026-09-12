@@ -5,7 +5,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 <!-- architecture-status:start -->
 | Claim | Kind | Lifecycle | Mechanisms | Strong witness | Latest evidence |
 | :---- | :--- | :-------- | :--------- | :------------- | :-------------- |
-| A101.sot-schedule-independent | invariant | provisional | ✅ | ❌ | never |
+| A101.sot-schedule-independent | invariant | established | ✅ | ✅ | pass/current |
 | A103.checkpoint-replay-equivalence | invariant | established | ✅ | ✅ | pass/current |
 | A103.gradient-correctness | acceptance | established | ✅ | ✅ | pass/current |
 | A201.bounded-residual-dynamics | empirical | established | ✅ | ✅ | pass/current |
@@ -23,14 +23,14 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | G100.deterministic-seed | contract | established | ✅ | ✅ | pass/current |
 | G100.single-prng | invariant | established | ✅ | ✅ | pass/current |
 | I001.phase-order | contract | established | ✅ | ✅ | pass/current |
-| I001.replay-evaluation-identity | invariant | provisional | ✅ | ❌ | pass/current |
+| I001.replay-evaluation-identity | invariant | established | ✅ | ✅ | pass/current |
 | I001.spawn-wave-unique | invariant | established | ✅ | ✅ | pass/current |
 | S001.cuda-errors-fatal | contract | established | ✅ | ✅ | pass/current |
 | S002.host-authority | invariant | established | ✅ | ✅ | pass/current |
-| S002.operator-command-effective | contract | provisional | ✅ | ❌ | never |
+| S002.operator-command-effective | contract | established | ✅ | ✅ | pass/current |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/current |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS
 
-Claims: 24 total, 18 established, 6 provisional, 0 planned.
+Claims: 24 total, 21 established, 3 provisional, 0 planned.
 <!-- architecture-status:end -->

@@ -7,10 +7,12 @@
 #include "main_loop.cu"
 #include "../safety/alignment.cu"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <thread>
 
 namespace slime::integration {
 
@@ -844,17 +846,29 @@ bool step_generation(World* w) {
     }
 
     // ---- Operator checks ----
-    bool paused = false;
-    bool force_checkpoint = false;
     safety::alignment::apply_operator_command(
         w->org_table.fitness, w->org_table.lineage_id,
-        POOL_SIZE, &paused, &force_checkpoint);
+        POOL_SIZE, &w->operator_state);
 
     w->generation++;
     return true;
 }
 
 // ---- Run -------------------------------------------------------------------
+
+// Poll the operator command file, apply durable effects (pause state, pruned
+// lineages zeroed in the pool AND tombstoned in the archive), and return.
+static void poll_operator_commands(World* w) {
+    if (!safety::alignment::apply_operator_command(
+            w->org_table.fitness, w->org_table.lineage_id,
+            POOL_SIZE, &w->operator_state)) {
+        return;
+    }
+    for (int p = 0; p < w->operator_state.n_pruned; ++p) {
+        archive::prune_lineage(&w->archive,
+                               w->operator_state.pruned_lineages[p]);
+    }
+}
 
 void run(int n_generations) {
     World* w = new World;
@@ -872,6 +886,22 @@ void run(int n_generations) {
             std::fflush(stdout);
             break;
         }
+
+        poll_operator_commands(w);
+
+        // Pause gating: while paused, do not advance generations or mutate
+        // state; keep polling for resume/shutdown/operator commands.
+        while (w->operator_state.paused) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (safety::alignment::poll_off_switch()) {
+                std::printf("Shutdown flag detected while paused\n");
+                std::fflush(stdout);
+                break;
+            }
+            poll_operator_commands(w);
+        }
+        if (w->operator_state.paused) break;  // shutdown while paused
+
         if (!step_generation(w)) {
             valid = false;
             break;

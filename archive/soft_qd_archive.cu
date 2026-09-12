@@ -291,6 +291,56 @@ __host__ inline void live_list_remove(Archive* a, int idx, Role role) {
     }
 }
 
+// ---- Durable lineage pruning (S-002 operator command) ---------------------
+// Tombstones every alive archive entry of the given lineage and rebuilds all
+// declared statistics (live lists, counts, bin occupancies, RFF means) so
+// the archive remains exactly consistent afterwards. Pruned lineages cannot
+// become parents: parent selection draws from the live lists only.
+inline void prune_lineage(Archive* a, uint32_t lineage) {
+    bool changed = false;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        ArchiveEntry& e = a->entries[i];
+        if (!e.alive || e.lineage_id != lineage) continue;
+        int b = static_cast<int>(e.bin_x) * ARCHIVE_BINS_Y
+              + static_cast<int>(e.bin_y);
+        live_list_remove(a, i, e.role);
+        if (e.role == Role::Classifier) {
+            a->bins[b].count_classifier--;
+            a->count_classifier--;
+        } else {
+            a->bins[b].count_predictor--;
+            a->count_predictor--;
+        }
+        e.alive = false;
+        changed = true;
+    }
+    if (!changed) return;
+
+    // Rebuild per-role RFF means from the surviving entries.
+    for (int j = 0; j < RFF_DIM; ++j) {
+        a->mu_rff_classifier[j] = 0.f;
+        a->mu_rff_predictor[j] = 0.f;
+    }
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a->entries[i].alive) continue;
+        if (a->entries[i].role == Role::Classifier) {
+            for (int j = 0; j < RFF_DIM; ++j)
+                a->mu_rff_classifier[j] += a->entries[i].rff_proj[j];
+        } else {
+            for (int j = 0; j < RFF_DIM; ++j)
+                a->mu_rff_predictor[j] += a->entries[i].rff_proj[j];
+        }
+    }
+    if (a->count_classifier > 0) {
+        float inv = 1.0f / static_cast<float>(a->count_classifier);
+        for (int j = 0; j < RFF_DIM; ++j) a->mu_rff_classifier[j] *= inv;
+    }
+    if (a->count_predictor > 0) {
+        float inv = 1.0f / static_cast<float>(a->count_predictor);
+        for (int j = 0; j < RFF_DIM; ++j) a->mu_rff_predictor[j] *= inv;
+    }
+}
+
 // ---- Invariant checker (A401.live-statistics-exact, A401.bin-capacity) ----
 // Verifies that every declared archive statistic EXACTLY describes the alive
 // entries: per-role counts, live index lists (each alive entry exactly once,

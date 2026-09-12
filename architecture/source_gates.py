@@ -277,6 +277,69 @@ def gate_host_authority(files: dict[str, list[str]], report: GateReport) -> None
                     "run() no longer polls poll_off_switch()"))
 
 
+# ---- Gate: operator commands are polled and applied durably in run() ------
+def gate_operator_polling(files: dict[str, list[str]], report: GateReport) -> None:
+    text = "\n".join(files.get("integration/host_main.cu", []))
+    if "poll_operator_commands(w)" not in text:
+        report.findings.append(
+            Finding("operator_polling", "integration/host_main.cu", 0,
+                    "run() no longer polls the operator command file"))
+    if "operator_state.paused" not in text:
+        report.findings.append(
+            Finding("operator_polling", "integration/host_main.cu", 0,
+                    "run() no longer applies the durable paused state"))
+
+
+# ---- Gate: replay tuples are recorded BEFORE the spawn wave ---------------
+def gate_replay_before_spawn(files: dict[str, list[str]], report: GateReport) -> None:
+    lines = files.get("integration/host_main.cu", [])
+    replay_line = -1
+    spawn_line = -1
+    for i, line in enumerate(lines, 1):
+        if "replay_buffer_push(" in line and "//" not in line.split("replay_buffer_push(")[0]:
+            if replay_line < 0:
+                replay_line = i
+        if "spawn_wave(w);" in line and spawn_line < 0:
+            spawn_line = i
+    if replay_line < 0:
+        report.findings.append(
+            Finding("replay_before_spawn", "integration/host_main.cu", 0,
+                    "replay buffer push call missing"))
+    elif spawn_line < 0:
+        report.findings.append(
+            Finding("replay_before_spawn", "integration/host_main.cu", 0,
+                    "spawn_wave call missing"))
+    elif replay_line > spawn_line:
+        report.findings.append(
+            Finding("replay_before_spawn", "integration/host_main.cu", replay_line,
+                    "replay tuples are recorded after the spawn wave (pre-spawn "
+                    "evaluation identity violated)"))
+
+
+# ---- Gate: the SOT/probe schedule is computed host-side only --------------
+# Flags device-memory access or device-execution tokens in the schedule file.
+# __host__ __device__ annotations on pure helpers (e.g. the Feistel
+# permutation) are permitted: they do not touch device state.
+SCHEDULE_DEVICE_TOKENS = re.compile(
+    r"cudaMalloc|cudaMemcpy|cudaMemset|cudaFree|cudaStream|<<<|__global__"
+    r"|atomicAdd|__shared__|cudaDeviceSynchronize|cudaGetLastError")
+SCHEDULE_EXEMPT_LINE = re.compile(r"#include\s+[<\"]cuda_runtime\.h")
+
+
+def gate_schedule_host_only(files: dict[str, list[str]], report: GateReport) -> None:
+    path = "curriculum/problem_generator.cu"
+    lines = files.get(path, [])
+    for i, line in enumerate(lines, 1):
+        if SCHEDULE_EXEMPT_LINE.search(line):
+            continue
+        stripped = line.strip()
+        if stripped.startswith("//") or stripped.startswith("*"):
+            continue
+        if SCHEDULE_DEVICE_TOKENS.search(line):
+            report.findings.append(
+                Finding("schedule_host_only", path, i, line))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -284,6 +347,9 @@ ALL_GATES = [
     gate_named_tunables,
     gate_rd_disabled,
     gate_host_authority,
+    gate_operator_polling,
+    gate_replay_before_spawn,
+    gate_schedule_host_only,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

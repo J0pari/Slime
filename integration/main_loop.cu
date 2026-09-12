@@ -16,6 +16,7 @@
 #include "../safety/monitoring.cu"
 #include "../safety/parallel_tempering.cu"
 #include "../safety/structural.cu"
+#include "../safety/operator_cmds.cuh"
 #include "../predictor/hybrid_surprise.cu"
 
 namespace slime::integration {
@@ -134,6 +135,10 @@ struct World {
     predictor::CorrelationWindow corr_window;
     curriculum::ProbeSet probe_set;
     float probe_fitness[PROBE_BATCH];  // ground-truth fitness for probe evaluation
+
+    // Durable operator state (S-002): pause gating and pruned lineages are
+    // owned by the run loop and applied there, not as transient locals.
+    safety::alignment::OperatorState operator_state;
 
     // Scalars
     int               generation;

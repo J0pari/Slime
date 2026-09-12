@@ -7,6 +7,17 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Operator commands are durable now. Parsing lives in the pure
+  `safety/operator_cmds.cuh`; the run loop owns `OperatorState` and applies
+  pause gating (no generation steps while paused) and durable prunes
+  (`archive::prune_lineage` tombstones entries with exact statistics under
+  the invariant checker). Checkpoint reports unsupported honestly until the
+  Wave 7 serialization exists. Three source gates joined the layer —
+  `operator_polling`, `replay_before_spawn`, `schedule_host_only` — each
+  with a planted-violation negative test. The remaining red claim is
+  `A201.task-conditioning-complete`; `A201.shared-substrate` and
+  `A401.archive-genotype-attribution` stay provisional until the predictor
+  role exists (Wave 4) and their strong witnesses are writable.
 - 2026-09-12: Gate 4 archive repairs landed. `recompute_bins` is now
   transactional: after reassigning bins it evicts QD-ranked occupants from
   any over-capacity (bin, role) and rebuilds every statistic from the

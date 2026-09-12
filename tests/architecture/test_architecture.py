@@ -99,6 +99,48 @@ class GateTests(unittest.TestCase):
             report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_operator_polling_catches_plant(self):
+        # [claim:S002.operator-command-effective]
+        report = source_gates.GateReport()
+        source_gates.gate_operator_polling(
+            files_from({"integration/host_main.cu":
+                        "void run() { step_generation(w); }"}), report)
+        self.assertFalse(report.ok, "missing operator polling was not caught")
+        self.assertTrue(any("paused" in f.text for f in report.findings))
+        report2 = source_gates.GateReport()
+        source_gates.gate_operator_polling(
+            files_from({"integration/host_main.cu":
+                        "void run() { poll_operator_commands(w);"
+                        " while (w->operator_state.paused) {} }"}), report2)
+        self.assertTrue(report2.ok)
+
+    def test_gate_replay_before_spawn_catches_plant(self):
+        # [claim:I001.replay-evaluation-identity]
+        report = source_gates.GateReport()
+        source_gates.gate_replay_before_spawn(
+            files_from({"integration/host_main.cu":
+                        "spawn_wave(w);\nreplay_buffer_push(&b, d);"}), report)
+        self.assertFalse(report.ok, "post-spawn replay push was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_replay_before_spawn(
+            files_from({"integration/host_main.cu":
+                        "replay_buffer_push(&b, d);\nspawn_wave(w);"}), report2)
+        self.assertTrue(report2.ok)
+
+    def test_gate_schedule_host_only_catches_plant(self):
+        # [claim:A101.sot-schedule-independent]
+        report = source_gates.GateReport()
+        source_gates.gate_schedule_host_only(
+            files_from({"curriculum/problem_generator.cu":
+                        "cudaMemcpy(dst, src, n, cudaMemcpyDeviceToHost);"}),
+            report)
+        self.assertFalse(report.ok, "device access in the schedule was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_schedule_host_only(
+            files_from({"curriculum/problem_generator.cu":
+                        "float x = pcg32_float(&rng);"}), report2)
+        self.assertTrue(report2.ok)
+
 
 class CompilerTests(unittest.TestCase):
     def test_phase_model_rejects_seed_before_pt(self):

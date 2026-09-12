@@ -141,9 +141,12 @@ S GPU-resident state does not influence the SOT/probe schedule or pruning
   commands; the schedule is host-side, seeded, and reproducible
 M curriculum/problem_generator.cu::assemble_classifier_batch
 M integration/host_main.cu::step_generation
+M architecture/source_gates.py::gate_schedule_host_only
+W+ tests/architecture/test_architecture.py::test_gate_schedule_host_only_catches_plant
+W+ tests/host_unit_tests.cpp::test_sot_batch_determinism
 P safety
-T provisional
-C inferred
+T established
+C observed
 
 
 A single co-evolving population occupies one substrate. Every organism is a
@@ -779,11 +782,19 @@ T established
 C observed
 
 @claim S002.operator-command-effective contract
-S pause, resume, prune, and checkpoint commands cause durable state
-  transitions that the run loop actually applies
+S pause, resume, and prune commands cause durable state transitions that the
+  run loop applies: pause gates generation steps, and a pruned lineage is
+  zeroed in the pool and tombstoned in the archive; checkpoint reports
+  unsupported until serialization lands
 M safety/alignment.cu::apply_operator_command
-T provisional
-C unobserved
+M safety/operator_cmds.cuh::parse_operator_line
+M archive/soft_qd_archive.cu::prune_lineage
+M architecture/source_gates.py::gate_operator_polling
+W+ tests/architecture/test_architecture.py::test_gate_operator_polling_catches_plant
+W+ tests/host_unit_tests.cpp::test_operator_command_parse
+W+ tests/host_unit_tests.cpp::test_archive_prune_lineage
+T established
+C observed
 
 
 - SOT applies uniformly to both roles. A classifier's SOT fidelity is identity
@@ -935,8 +946,10 @@ C observed
 S replay tuples and generation telemetry are recorded from the evaluated
   population state before spawning replaces pool members
 M integration/host_main.cu::step_generation
-T provisional
-C inferred
+M architecture/source_gates.py::gate_replay_before_spawn
+W+ tests/architecture/test_architecture.py::test_gate_replay_before_spawn_catches_plant
+T established
+C observed
 
 @claim I001.phase-order contract
 S the generation loop follows the executable phase order with the seed-
