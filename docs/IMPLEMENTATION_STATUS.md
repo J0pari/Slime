@@ -15,8 +15,9 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/current |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/current |
 | A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/current |
-| A401.bin-capacity | invariant | provisional | ✅ | ❌ | never |
-| A401.live-statistics-exact | invariant | provisional | ✅ | ❌ | never |
+| A401.bin-capacity | invariant | established | ✅ | ✅ | pass/current |
+| A401.live-statistics-exact | invariant | established | ✅ | ✅ | pass/current |
+| A401.weighted-metric-active | contract | established | ✅ | ✅ | pass/current |
 | A501.came-production-equation | contract | established | ✅ | ✅ | pass/current |
 | C001.acceptance-evidence-current | acceptance | established | ✅ | ✅ | pass/current |
 | G100.deterministic-seed | contract | established | ✅ | ✅ | pass/current |
@@ -31,5 +32,5 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: WARN, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS
 
-Claims: 23 total, 15 established, 8 provisional, 0 planned.
+Claims: 24 total, 18 established, 6 provisional, 0 planned.
 <!-- architecture-status:end -->

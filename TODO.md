@@ -39,11 +39,18 @@ completed or its verification state changes.
 - [ ] Shrink the `checked_cuda_calls` allowlist: convert
   `launch_grad_norm_reduce` / `launch_telemetry_kernels` / `propose_swaps` /
   `apply_sot_identity` to checked wrappers so `--strict` passes.
-- [ ] Give the four red claims witnesses: `A401.bin-capacity`,
-  `A401.live-statistics-exact` (archive invariant repairs),
-  `S002.operator-command-effective` (durable operator state),
-  `A101.sot-schedule-independent` (schedule-host-side test), and
-  `I001.replay-evaluation-identity` (evaluation-record snapshot test).
+- [x] Give the archive claims witnesses and repair their semantics:
+  `A401.bin-capacity` (transactional rebin with QD-ranked eviction),
+  `A401.live-statistics-exact` (invariant checker on every insert/rebin +
+  1500-op randomized property test), and the new `A401.weighted-metric-active`
+  (inverse-variance EMA updated on every insert/replacement; replacement
+  displaces the nearest same-role same-bin neighbor by weighted distance).
+  PCA power iteration now uses dense deterministic starting vectors with a
+  degenerate-covariance fallback; RFF means adjust exactly on replacement.
+- [ ] Give the remaining red claims witnesses: `S002.operator-command-effective`
+  (durable operator state), `A101.sot-schedule-independent` (schedule-host-side
+  test), and `I001.replay-evaluation-identity` (evaluation-record snapshot
+  test).
 
 ## P0 — Restore a trustworthy baseline
 

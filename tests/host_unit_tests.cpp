@@ -30,6 +30,7 @@
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
+#include "../archive/soft_qd_archive.cu"
 
 // Math kept locally only where the production definition is CUDA-dependent
 // (safety/alignment.cu pulls in the engine) or where the test deliberately
@@ -554,6 +555,269 @@ static void test_pt_ring_endpoints() {
     }
 }
 
+// ---- Archive invariants (A-401) ------------------------------------------
+// Production archive logic exercised directly (soft_qd_archive.cu included
+// above): capacity enforcement on rebin, exact live statistics, the weighted
+// descriptor metric, and the invariant checker.
+
+namespace arch = slime::archive;
+
+static void init_test_archive(arch::Archive* a) {
+    std::memset(a, 0, sizeof(*a));
+    for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
+        a->bins[b].cap_classifier = 13;
+        a->bins[b].cap_predictor  = 13;
+    }
+    for (int d = 0; d < BMAP_DIM; ++d) a->inv_var_ema[d] = 1.0f;
+    arch::init_rff(&a->rff, 42u);
+    a->pca_valid = false;
+}
+
+static int insert_test_entry(arch::Archive* a, float d0, float d1,
+                             float fitness, Role role, uint32_t lineage) {
+    arch::ArchiveEntry cand;
+    std::memset(&cand, 0, sizeof(cand));
+    cand.descriptor[0] = d0;
+    cand.descriptor[1] = d1;
+    for (int d = 2; d < BMAP_DIM; ++d) cand.descriptor[d] = 0.01f * d;
+    arch::rff_project(a->rff, cand.descriptor, cand.rff_proj);
+    cand.fitness = fitness;
+    cand.f_raw = fitness;
+    cand.f_sot = 1.0f;
+    cand.lineage_id = lineage;
+    cand.role = role;
+    cand.alive = true;
+    arch::assign_bin(*a, cand.descriptor, cand.bin_x, cand.bin_y);
+    return arch::insert(a, cand);
+}
+
+static void test_archive_bin_capacity_after_rebin() {
+    // [claim:A401.bin-capacity]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+
+    // Fixed pre-rebin binning: pc = (e0, e1) with the mean set at the data
+    // centroid (0.5, 0.5) and extents [0, 0.0002] on PC0, so the A groups
+    // (d0 ~ 0.5 + tiny offsets) land at bins (bx, 0) with bx = 0..11, and
+    // the B group (d0 = 0.51 + 0.001*k) clamps into bin (19, 0).
+    // Deterministic, no hash-fallback float truncation.
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        a->pc[0][d] = (d == 0) ? 1.0f : 0.0f;
+        a->pc[1][d] = (d == 1) ? 1.0f : 0.0f;
+        a->pc_mean[d] = 0.f;
+    }
+    a->pc_mean[0] = 0.5f;
+    a->pc_mean[1] = 0.5f;
+    a->pc_min[0] = 0.f; a->pc_max[0] = 0.0002f;
+    a->pc_min[1] = 0.f; a->pc_max[1] = 0.f;
+    a->pca_valid = true;
+
+    // A1: d0 = 0.5 + 0.00002*k (7 entries); A2: d0 = 0.500001 + 0.00002*k
+    // (7 entries). B: d0 = 0.51 + 0.001*k (13 entries). All descriptors vary
+    // only in dimension 0, so the rebin PCA puts PC0 on dimension 0 with
+    // extent ~0.022; the A cluster spans only ~0.00012 (about 0.1 of a bin
+    // width) and merges into ONE rebin bin: 14 > cap 13, which the capacity
+    // repair must trim back to 13.
+    uint32_t lineage = 1;
+    for (int k = 0; k < 7; ++k) {
+        EXPECT_TRUE(insert_test_entry(a, 0.5f + 0.00002f * k, 0.5f,
+                                      0.10f + 0.001f * k, Role::Classifier,
+                                      lineage++) >= 0);
+    }
+    for (int k = 0; k < 7; ++k) {
+        EXPECT_TRUE(insert_test_entry(a, 0.500001f + 0.00002f * k, 0.5f,
+                                      0.20f + 0.001f * k, Role::Classifier,
+                                      lineage++) >= 0);
+    }
+    for (int k = 0; k < 13; ++k) {
+        EXPECT_TRUE(insert_test_entry(a, 0.51f + 0.001f * k, 0.5f,
+                                      0.50f + 0.001f * k, Role::Classifier,
+                                      lineage++) >= 0);
+    }
+    EXPECT_TRUE(a->count_classifier == 27);
+    EXPECT_TRUE(a->bins[19 * ARCHIVE_BINS_Y + 0].count_classifier == 13);
+
+    arch::recompute_bins(a, nullptr);
+
+    // The A groups merged into one rebin bin and were trimmed to capacity;
+    // the 13 B entries remain spread over the higher bins.
+    EXPECT_TRUE(a->bins[0 * ARCHIVE_BINS_Y + 0].count_classifier == 13);
+    {
+        int b_survivors = 0;
+        for (int bx = 1; bx < ARCHIVE_BINS_X; ++bx) {
+            b_survivors += a->bins[bx * ARCHIVE_BINS_Y + 0].count_classifier;
+        }
+        EXPECT_TRUE(b_survivors == 13);
+    }
+    EXPECT_TRUE(a->count_classifier == 26);
+    int n_alive = 0;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (a->entries[i].alive) n_alive++;
+    }
+    EXPECT_TRUE(n_alive == 26);
+    char err[256];
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+
+    delete a;
+}
+
+static void test_archive_invariant_checker() {
+    // [claim:A401.live-statistics-exact]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+    EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.5f, 0.4f, Role::Classifier, 1) >= 0);
+    EXPECT_TRUE(insert_test_entry(a, 0.9f, 0.9f, 0.6f, Role::Classifier, 2) >= 0);
+    char err[256];
+
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+
+    // Corrupt: global count disagrees with reality.
+    a->count_classifier++;
+    EXPECT_TRUE(!arch::archive_check_invariants(*a, err, sizeof(err)));
+    a->count_classifier--;
+
+    // Corrupt: bin count disagrees with reality.
+    a->bins[0].count_classifier++;
+    EXPECT_TRUE(!arch::archive_check_invariants(*a, err, sizeof(err)));
+    a->bins[0].count_classifier--;
+
+    // Corrupt: live list loses an entry.
+    a->n_alive_classifier--;
+    EXPECT_TRUE(!arch::archive_check_invariants(*a, err, sizeof(err)));
+    a->n_alive_classifier++;
+
+    // Corrupt: an alive entry not present in any live list.
+    int idx = a->alive_classifier_idx[0];
+    a->alive_classifier_idx[0] = a->alive_classifier_idx[1];
+    EXPECT_TRUE(!arch::archive_check_invariants(*a, err, sizeof(err)));
+    a->alive_classifier_idx[0] = idx;
+
+    // Corrupt: RFF mean drifts from the brute-force mean.
+    a->mu_rff_classifier[0] += 0.5f;
+    EXPECT_TRUE(!arch::archive_check_invariants(*a, err, sizeof(err)));
+    a->mu_rff_classifier[0] -= 0.5f;
+
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+    delete a;
+}
+
+static void test_archive_weighted_metric_active() {
+    // [claim:A401.weighted-metric-active]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+
+    // Two distinguished occupants in bin (0,0): A at (0.5,0.5), B at (0.9,0.9).
+    EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.5f, 0.5f, Role::Classifier, 11) >= 0);
+    EXPECT_TRUE(insert_test_entry(a, 0.9f, 0.9f, 0.9f, Role::Classifier, 22) >= 0);
+    // Eleven fillers in the same bin (d1 = 0.6 + 0.001*k keeps
+    // (uint32)(1e6*d1) % 20 == 0 and stays far from the candidate)
+    // bring bin (0,0) up to its capacity of 13.
+    for (int k = 1; k <= 11; ++k) {
+        EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.6f + 0.001f * k,
+                                      0.1f, Role::Classifier,
+                                      1001u + k) >= 0);
+    }
+    EXPECT_TRUE(a->bins[0].count_classifier == 13);
+
+    // The inverse-variance EMA must have moved off its init value.
+    EXPECT_TRUE(std::fabs(a->inv_var_ema[0] - 1.0f) > 1e-7f);
+
+    // Candidate C sits near A in descriptor space and beats A's QD score:
+    // with the bin full, the nearest-neighbor rule must evict A, not B or a
+    // filler.
+    int rc = insert_test_entry(a, 0.5f + 1e-3f, 0.5f + 1e-3f,
+                               0.7f, Role::Classifier, 33);
+    EXPECT_TRUE(rc >= 0);
+
+    bool a_alive = false, b_alive = false, c_alive = false;
+    int n_fillers_alive = 0;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a->entries[i].alive) continue;
+        if (a->entries[i].lineage_id == 11) a_alive = true;
+        if (a->entries[i].lineage_id == 22) b_alive = true;
+        if (a->entries[i].lineage_id == 33) c_alive = true;
+        if (a->entries[i].lineage_id >= 1002 &&
+            a->entries[i].lineage_id <= 1012) n_fillers_alive++;
+    }
+    EXPECT_TRUE(!a_alive);
+    EXPECT_TRUE(b_alive);
+    EXPECT_TRUE(c_alive);
+    EXPECT_TRUE(n_fillers_alive == 11);
+
+    char err[256];
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+    delete a;
+}
+
+static void test_archive_rff_mean_exact_after_replacement() {
+    // [claim:A401.live-statistics-exact]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+    EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.5f, 0.5f, Role::Classifier, 1) >= 0);
+    EXPECT_TRUE(insert_test_entry(a, 0.9f, 0.9f, 0.9f, Role::Classifier, 2) >= 0);
+    EXPECT_TRUE(insert_test_entry(a, 0.501f, 0.501f, 0.7f, Role::Classifier, 3) >= 0);
+
+    // Brute-force the classifier RFF mean over alive entries.
+    float mu[arch::RFF_DIM] = {};
+    int n = 0;
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a->entries[i].alive) continue;
+        if (a->entries[i].role != Role::Classifier) continue;
+        n++;
+        for (int j = 0; j < arch::RFF_DIM; ++j) mu[j] += a->entries[i].rff_proj[j];
+    }
+    EXPECT_TRUE(n == static_cast<int>(a->count_classifier));
+    for (int j = 0; j < arch::RFF_DIM; ++j) {
+        float want = mu[j] / static_cast<float>(n);
+        EXPECT_NEAR(a->mu_rff_classifier[j], want, 1e-5f * (1.0f + std::fabs(want)));
+    }
+    delete a;
+}
+
+static void test_archive_randomized_property() {
+    // [claim:A401.live-statistics-exact]
+    // [claim:A401.bin-capacity]
+    arch::Archive* a = new arch::Archive;
+    init_test_archive(a);
+
+    Pcg32 rng;
+    pcg32_seed(&rng, 0xC0FFEEu, 7u);
+    char err[256];
+
+    for (int op = 0; op < 1500; ++op) {
+        if (op % 100 == 0 && a->count_classifier + a->count_predictor >= 2) {
+            // Random degenerate PCA state: random unit PCs, random extents.
+            for (int k = 0; k < 2; ++k) {
+                float norm = 0.f;
+                for (int d = 0; d < BMAP_DIM; ++d) {
+                    a->pc[k][d] = pcg32_float(&rng) - 0.5f;
+                    norm += a->pc[k][d] * a->pc[k][d];
+                }
+                norm = sqrtf(norm);
+                for (int d = 0; d < BMAP_DIM; ++d) a->pc[k][d] /= norm;
+            }
+            a->pc_min[0] = -1.f; a->pc_max[0] = 1.f;
+            a->pc_min[1] = -1.f; a->pc_max[1] = 1.f;
+            a->pca_valid = true;
+            arch::recompute_bins(a, nullptr);
+        } else {
+            float d0 = 0.3f + 0.4f * pcg32_float(&rng);
+            float d1 = 0.3f + 0.4f * pcg32_float(&rng);
+            float fit = pcg32_float(&rng);
+            Role role = (pcg32_float(&rng) < 0.8f) ? Role::Classifier
+                                                   : Role::Predictor;
+            insert_test_entry(a, d0, d1, fit, role,
+                              1u + static_cast<uint32_t>(pcg32_random(&rng) % 100000u));
+        }
+        if (!arch::archive_check_invariants(*a, err, sizeof(err))) {
+            EXPECT_TRUE(false);
+            break;
+        }
+    }
+    EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
+    delete a;
+}
+
 // ---- SOT reversible permutation (Feistel) --------------------------------
 // Re-pasted from curriculum/problem_generator.cu; the round structure must
 // stay in sync. The property under test is the one that matters for SOT:
@@ -649,6 +913,12 @@ int main() {
     test_came_production_equation();
     test_pt_ring_endpoints();
     test_pcg32_determinism();
+    test_archive_bin_capacity_after_rebin();
+    test_archive_invariant_checker();
+    test_archive_weighted_metric_active();
+    test_archive_rff_mean_exact_after_replacement();
+    test_archive_randomized_property();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
+

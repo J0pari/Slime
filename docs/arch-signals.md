@@ -7,6 +7,20 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Gate 4 archive repairs landed. `recompute_bins` is now
+  transactional: after reassigning bins it evicts QD-ranked occupants from
+  any over-capacity (bin, role) and rebuilds every statistic from the
+  survivors. `insert` replacement now displaces the candidate's nearest
+  same-role same-bin neighbor by the weighted Euclidean metric (the A-401
+  descriptor metric), updates the inverse-variance EMA on every mutation,
+  and adjusts the role RFF mean exactly on eviction. PCA power iteration
+  starts from dense deterministic vectors with a degenerate-covariance
+  fallback. An invariant checker (counts, live lists, bin occupancies, caps,
+  RFF means) runs after every insertion, replacement, and rebin under
+  SLIME_DEBUG_CHECKS; a 1500-operation randomized property test plus a
+  forced 14-into-one-bin collapse test exercise it. Three new/upgraded
+  claims (A401.bin-capacity, A401.live-statistics-exact,
+  A401.weighted-metric-active) are established with passing witnesses.
 - 2026-09-12: Residual-magnitude telemetry (‖F_θ(x_t)‖, ‖x_t‖, per-cell
   ratio at steps 0/16/32/48/64) diagnosed the FP16 saturation: at step 0 the
   residual was already ~0.94× the state norm (per-cell max 1.36), so the

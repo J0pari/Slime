@@ -71,8 +71,11 @@ struct Archive {
     float mu_rff_classifier[RFF_DIM];
     float mu_rff_predictor[RFF_DIM];
 
-    // Per-dimension inverse-variance EMA used for weighted Euclidean distance.
+    // Per-dimension inverse-variance EMA used for weighted Euclidean distance
+    // (A-401 descriptor metric), plus the running descriptor mean it is
+    // computed against. Updated on every insertion and replacement.
     float inv_var_ema[BMAP_DIM];
+    float mu_desc_ema[BMAP_DIM];
 
     // Per-role lineage runaway tracking (S-003).
     // Hooks in via lineage stats elsewhere; archive reports per-role share.
@@ -151,6 +154,45 @@ __host__ inline void update_rff_mean(float* mu, uint32_t count,
     for (int j = 0; j < RFF_DIM; ++j) {
         mu[j] += alpha * (rff_features[j] - mu[j]);
     }
+}
+
+// Exact per-role RFF mean adjustment on replacement: remove the evicted
+// entry's contribution and add the candidate's, in O(RFF_DIM).
+__host__ inline void replace_rff_mean(float* mu, uint32_t count,
+                                      const float* old_features,
+                                      const float* new_features) {
+    if (count == 0) {
+        for (int j = 0; j < RFF_DIM; ++j) mu[j] = new_features[j];
+        return;
+    }
+    float inv_n = 1.0f / static_cast<float>(count);
+    for (int j = 0; j < RFF_DIM; ++j) {
+        mu[j] += inv_n * (new_features[j] - old_features[j]);
+    }
+}
+
+// Inverse-variance EMA update (A-401 descriptor metric):
+//   sigma2_d <- (1 - alpha) * sigma2_d + alpha * (x_d - mu_d)^2
+//   w_d       = 1 / (sigma2_d + eps), bounded.
+// The descriptor running mean mu_desc_ema is maintained alongside it.
+constexpr float INV_VAR_EMA_ALPHA = 0.01f;
+constexpr float INV_VAR_EMA_EPS    = 1e-4f;
+
+__host__ inline void update_inv_var_ema(Archive* a, const float* descriptor) {
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        float x = descriptor[d];
+        float mu = a->mu_desc_ema[d];
+        float dev = x - mu;
+        a->mu_desc_ema[d] += INV_VAR_EMA_ALPHA * dev;
+        float var = a->inv_var_ema[d];
+        var = (1.0f - INV_VAR_EMA_ALPHA) * var + INV_VAR_EMA_ALPHA * dev * dev;
+        if (var < INV_VAR_EMA_EPS) var = INV_VAR_EMA_EPS;
+        a->inv_var_ema[d] = var;
+    }
+}
+
+__host__ inline float inv_var_weight(const Archive& a, int d) {
+    return 1.0f / (a.inv_var_ema[d] + INV_VAR_EMA_EPS);
 }
 
 // ---- Public archive ops --------------------------------------------------
@@ -249,6 +291,121 @@ __host__ inline void live_list_remove(Archive* a, int idx, Role role) {
     }
 }
 
+// ---- Invariant checker (A401.live-statistics-exact, A401.bin-capacity) ----
+// Verifies that every declared archive statistic EXACTLY describes the alive
+// entries: per-role counts, live index lists (each alive entry exactly once,
+// no dead entries), per-bin per-role occupancy counts, per-role capacity
+// caps, and per-role RFF means. Returns false with a message on the first
+// violation. Runs on the host after every insertion, replacement, and rebin
+// under SLIME_DEBUG_CHECKS.
+__host__ inline bool archive_check_invariants(const Archive& a,
+                                              char* err, int err_sz) {
+    auto fail = [&](const char* msg) -> bool {
+        if (err && err_sz > 0) {
+            std::snprintf(err, static_cast<size_t>(err_sz), "%s", msg);
+        }
+        return false;
+    };
+
+    constexpr int NBINS = ARCHIVE_BINS_X * ARCHIVE_BINS_Y;
+    int bin_cls[NBINS] = {};
+    int bin_prd[NBINS] = {};
+    bool listed[MAX_ARCHIVE] = {};
+    float mu_cls[RFF_DIM] = {};
+    float mu_prd[RFF_DIM] = {};
+    int n_cls = 0, n_prd = 0;
+
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a.entries[i].alive) continue;
+        int b = static_cast<int>(a.entries[i].bin_x) * ARCHIVE_BINS_Y
+              + static_cast<int>(a.entries[i].bin_y);
+        if (b < 0 || b >= NBINS) return fail("alive entry bin out of range");
+        if (a.entries[i].role == Role::Classifier) {
+            n_cls++;
+            bin_cls[b]++;
+            for (int j = 0; j < RFF_DIM; ++j) mu_cls[j] += a.entries[i].rff_proj[j];
+        } else if (a.entries[i].role == Role::Predictor) {
+            n_prd++;
+            bin_prd[b]++;
+            for (int j = 0; j < RFF_DIM; ++j) mu_prd[j] += a.entries[i].rff_proj[j];
+        } else {
+            return fail("alive entry with invalid role");
+        }
+    }
+
+    if (n_cls != static_cast<int>(a.count_classifier))
+        return fail("count_classifier mismatch");
+    if (n_prd != static_cast<int>(a.count_predictor))
+        return fail("count_predictor mismatch");
+    if (a.n_alive_classifier != n_cls)
+        return fail("n_alive_classifier mismatch");
+    if (a.n_alive_predictor != n_prd)
+        return fail("n_alive_predictor mismatch");
+
+    for (int k = 0; k < a.n_alive_classifier; ++k) {
+        int idx = a.alive_classifier_idx[k];
+        if (idx < 0 || idx >= MAX_ARCHIVE) return fail("classifier live list index out of range");
+        if (!a.entries[idx].alive) return fail("classifier live list contains a dead entry");
+        if (a.entries[idx].role != Role::Classifier) return fail("classifier live list contains non-classifier");
+        if (listed[idx]) return fail("classifier live list contains a duplicate");
+        listed[idx] = true;
+    }
+    for (int k = 0; k < a.n_alive_predictor; ++k) {
+        int idx = a.alive_predictor_idx[k];
+        if (idx < 0 || idx >= MAX_ARCHIVE) return fail("predictor live list index out of range");
+        if (!a.entries[idx].alive) return fail("predictor live list contains a dead entry");
+        if (a.entries[idx].role != Role::Predictor) return fail("predictor live list contains non-predictor");
+        if (listed[idx]) return fail("predictor live list contains a duplicate");
+        listed[idx] = true;
+    }
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a.entries[i].alive) continue;
+        if (!listed[i]) return fail("alive entry missing from its live list");
+    }
+
+    for (int b = 0; b < NBINS; ++b) {
+        if (static_cast<int>(a.bins[b].count_classifier) != bin_cls[b])
+            return fail("bin count_classifier mismatch");
+        if (static_cast<int>(a.bins[b].count_predictor) != bin_prd[b])
+            return fail("bin count_predictor mismatch");
+        if (bin_cls[b] > static_cast<int>(a.bins[b].cap_classifier))
+            return fail("bin exceeds classifier capacity");
+        if (bin_prd[b] > static_cast<int>(a.bins[b].cap_predictor))
+            return fail("bin exceeds predictor capacity");
+    }
+
+    if (n_cls > 0) {
+        float inv = 1.0f / static_cast<float>(n_cls);
+        for (int j = 0; j < RFF_DIM; ++j) {
+            float want = mu_cls[j] * inv;
+            if (std::fabs(want - a.mu_rff_classifier[j]) > 1e-4f * (1.0f + std::fabs(want)))
+                return fail("mu_rff_classifier mismatch");
+        }
+    }
+    if (n_prd > 0) {
+        float inv = 1.0f / static_cast<float>(n_prd);
+        for (int j = 0; j < RFF_DIM; ++j) {
+            float want = mu_prd[j] * inv;
+            if (std::fabs(want - a.mu_rff_predictor[j]) > 1e-4f * (1.0f + std::fabs(want)))
+                return fail("mu_rff_predictor mismatch");
+        }
+    }
+    return true;
+}
+
+#if SLIME_DEBUG_CHECKS
+#define ARCHIVE_CHECK_RETURN(a, ret) do { \
+    char _aer[256]; \
+    if (!archive_check_invariants(*(a), _aer, static_cast<int>(sizeof(_aer)))) { \
+        std::printf("[ARCHIVE INVARIANT] %s\n", _aer); \
+        std::fflush(stdout); \
+    } \
+    return (ret); \
+} while (0)
+#else
+#define ARCHIVE_CHECK_RETURN(a, ret) return (ret)
+#endif
+
 // Soft-QD insertion with novelty-weighted replacement. Returns the index of
 // the slot that received the candidate, or -1 if rejected.
 //
@@ -287,36 +444,57 @@ __host__ inline int insert(Archive* a, const ArchiveEntry& cand) {
                                     cand.rff_proj);
                     a->count_predictor++;
                 }
-                return i;
+                update_inv_var_ema(a, cand.descriptor);
+                ARCHIVE_CHECK_RETURN(a, i);
             }
         }
     }
 
-    // Replace the weakest same-role same-bin occupant by QD score.
-    int worst_idx  = -1;
-    float worst_qd = cand_qd;
+    // Replace the nearest same-role same-bin neighbor by weighted Euclidean
+    // distance (the A-401 descriptor metric): the candidate competes against
+    // its role-internal local neighbors, and displaces the nearest one whose
+    // QD score it beats.
+    int victim_idx = -1;
+    float victim_dist2 = 1e30f;
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
         const ArchiveEntry& e = a->entries[i];
         if (!e.alive) continue;
         if (e.role != cand.role) continue;
         if (e.bin_x != cand.bin_x || e.bin_y != cand.bin_y) continue;
-        float e_novelty = rff_novelty(e.rff_proj, mu_role);
-        float e_qd = qd_score(e.fitness, e_novelty);
-        if (e_qd < worst_qd) {
-            worst_qd = e_qd;
-            worst_idx = i;
+        float d2 = 0.f;
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            float diff = cand.descriptor[d] - e.descriptor[d];
+            d2 += diff * diff * inv_var_weight(*a, d);
+        }
+        if (d2 < victim_dist2) {
+            victim_dist2 = d2;
+            victim_idx = i;
         }
     }
-    if (worst_idx >= 0) {
-        // Evict incumbent from live list, replace with candidate.
-        live_list_remove(a, worst_idx, cand.role);
-        a->entries[worst_idx] = cand;
-        a->entries[worst_idx].alive = true;
-        live_list_add(a, worst_idx, cand.role);
-        // RFF mean is not adjusted per-eviction (would require removing the
-        // evicted entry's contribution). recompute_bins rebuilds all means,
-        // global counts, and live lists from scratch every AUDIT_INTERVAL gens.
-        return worst_idx;
+    if (victim_idx >= 0) {
+        float e_novelty = rff_novelty(a->entries[victim_idx].rff_proj, mu_role);
+        float e_qd = qd_score(a->entries[victim_idx].fitness, e_novelty);
+        if (cand_qd <= e_qd) {
+            return -1;
+        }
+        // Evict the nearest neighbor from the live list, replace with the
+        // candidate, and adjust every declared sufficient statistic exactly:
+        // role RFF mean (online removal + addition) and the descriptor
+        // inverse-variance EMA (online update with the new descriptor).
+        live_list_remove(a, victim_idx, cand.role);
+        const ArchiveEntry evicted = a->entries[victim_idx];
+        a->entries[victim_idx] = cand;
+        a->entries[victim_idx].alive = true;
+        live_list_add(a, victim_idx, cand.role);
+        if (cand.role == Role::Classifier) {
+            replace_rff_mean(a->mu_rff_classifier, a->count_classifier,
+                             evicted.rff_proj, cand.rff_proj);
+        } else {
+            replace_rff_mean(a->mu_rff_predictor, a->count_predictor,
+                             evicted.rff_proj, cand.rff_proj);
+        }
+        update_inv_var_ema(a, cand.descriptor);
+        ARCHIVE_CHECK_RETURN(a, victim_idx);
     }
     return -1;
 }
@@ -390,46 +568,49 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
     constexpr int POWER_ITERS = 20;
     float pc[2][BMAP_DIM];
 
-    // Initialize PC0 to (1,0,0,...).
-    for (int d = 0; d < BMAP_DIM; ++d) pc[0][d] = (d == 0) ? 1.0f : 0.0f;
-
-    for (int iter = 0; iter < POWER_ITERS; ++iter) {
-        float new_v[BMAP_DIM] = {};
-        for (int i = 0; i < MAX_ARCHIVE; ++i) {
-            if (!a->entries[i].alive) continue;
-            float dot = 0.f;
-            for (int d = 0; d < BMAP_DIM; ++d)
-                dot += (a->entries[i].descriptor[d] - mean[d]) * pc[0][d];
-            for (int d = 0; d < BMAP_DIM; ++d)
-                new_v[d] += dot * (a->entries[i].descriptor[d] - mean[d]);
+    // Dense deterministic starting vectors: a uniform vector has nonzero
+    // projection on every non-null direction, so the iteration cannot lock
+    // onto a null axis the way the old (1,0,0,...) start could.
+    {
+        float inv_sqrt = 1.0f / sqrtf(static_cast<float>(BMAP_DIM));
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            pc[0][d] = inv_sqrt;
+            pc[1][d] = ((d % 2) == 0) ? inv_sqrt : -inv_sqrt;
         }
-        float norm = 0.f;
-        for (int d = 0; d < BMAP_DIM; ++d) norm += new_v[d] * new_v[d];
-        norm = sqrtf(norm + 1e-30f);
-        for (int d = 0; d < BMAP_DIM; ++d) pc[0][d] = new_v[d] / norm;
     }
 
-    // PC1: deflate and power iterate.
-    for (int d = 0; d < BMAP_DIM; ++d) pc[1][d] = (d == 1) ? 1.0f : 0.0f;
-    for (int iter = 0; iter < POWER_ITERS; ++iter) {
-        float new_v[BMAP_DIM] = {};
-        for (int i = 0; i < MAX_ARCHIVE; ++i) {
-            if (!a->entries[i].alive) continue;
-            float dot = 0.f;
-            for (int d = 0; d < BMAP_DIM; ++d)
-                dot += (a->entries[i].descriptor[d] - mean[d]) * pc[1][d];
-            for (int d = 0; d < BMAP_DIM; ++d)
-                new_v[d] += dot * (a->entries[i].descriptor[d] - mean[d]);
+    auto power_iterate = [&](int k) {
+        for (int iter = 0; iter < POWER_ITERS; ++iter) {
+            float new_v[BMAP_DIM] = {};
+            for (int i = 0; i < MAX_ARCHIVE; ++i) {
+                if (!a->entries[i].alive) continue;
+                float dot = 0.f;
+                for (int d = 0; d < BMAP_DIM; ++d)
+                    dot += (a->entries[i].descriptor[d] - mean[d]) * pc[k][d];
+                for (int d = 0; d < BMAP_DIM; ++d)
+                    new_v[d] += dot * (a->entries[i].descriptor[d] - mean[d]);
+            }
+            if (k == 1) {
+                // Gram-Schmidt: remove the PC0 component.
+                float proj0 = 0.f;
+                for (int d = 0; d < BMAP_DIM; ++d) proj0 += new_v[d] * pc[0][d];
+                for (int d = 0; d < BMAP_DIM; ++d) new_v[d] -= proj0 * pc[0][d];
+            }
+            float norm = 0.f;
+            for (int d = 0; d < BMAP_DIM; ++d) norm += new_v[d] * new_v[d];
+            if (norm < 1e-24f) {
+                // Degenerate covariance in this direction: fall back to the
+                // canonical axis so the binning stays well-defined.
+                for (int d = 0; d < BMAP_DIM; ++d)
+                    pc[k][d] = (d == k) ? 1.0f : 0.0f;
+                return;
+            }
+            norm = sqrtf(norm);
+            for (int d = 0; d < BMAP_DIM; ++d) pc[k][d] = new_v[d] / norm;
         }
-        // Gram-Schmidt: remove PC0 component.
-        float proj0 = 0.f;
-        for (int d = 0; d < BMAP_DIM; ++d) proj0 += new_v[d] * pc[0][d];
-        for (int d = 0; d < BMAP_DIM; ++d) new_v[d] -= proj0 * pc[0][d];
-        float norm = 0.f;
-        for (int d = 0; d < BMAP_DIM; ++d) norm += new_v[d] * new_v[d];
-        norm = sqrtf(norm + 1e-30f);
-        for (int d = 0; d < BMAP_DIM; ++d) pc[1][d] = new_v[d] / norm;
-    }
+    };
+    power_iterate(0);
+    power_iterate(1);
 
     // Store PCA state for assign_bin between rebins (section 9.1).
     for (int d = 0; d < BMAP_DIM; ++d) {
@@ -469,17 +650,7 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
         a->bins[b].count_predictor  = 0;
     }
 
-    // Rebuild live index lists, global counts, and per-role RFF means from scratch.
-    a->n_alive_classifier = 0;
-    a->n_alive_predictor = 0;
-    a->count_classifier = 0;
-    a->count_predictor = 0;
-    for (int j = 0; j < RFF_DIM; ++j) {
-        a->mu_rff_classifier[j] = 0.f;
-        a->mu_rff_predictor[j] = 0.f;
-    }
-
-    // Assign bins, recount, and accumulate RFF sums for mean rebuild.
+    // Assign every alive entry to its new PCA bin (bin_x/bin_y only).
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
         if (!a->entries[i].alive) continue;
         float p0 = 0.f, p1 = 0.f;
@@ -497,14 +668,75 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
         a->entries[i].bin_x = static_cast<uint32_t>(bx);
         a->entries[i].bin_y = static_cast<uint32_t>(by);
         int b = bx * ARCHIVE_BINS_Y + by;
+        if (a->entries[i].role == Role::Classifier) a->bins[b].count_classifier++;
+        else a->bins[b].count_predictor++;
+    }
+
+    // Capacity repair: a rebin may collapse several populated bins into one.
+    // Rank the occupants of every over-capacity (bin, role) under the QD rule
+    // (fitness + lambda * role-internal novelty) and tombstone the excess.
+    // The pre-rebin role RFF mean ranks the occupants; it is rebuilt exactly
+    // from the survivors afterwards.
+    for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
+        for (int role_pass = 0; role_pass < 2; ++role_pass) {
+            Role role = (role_pass == 0) ? Role::Classifier : Role::Predictor;
+            uint16_t cap = (role == Role::Classifier) ? a->bins[b].cap_classifier
+                                                      : a->bins[b].cap_predictor;
+            uint16_t cnt = (role == Role::Classifier) ? a->bins[b].count_classifier
+                                                      : a->bins[b].count_predictor;
+            if (cnt <= cap) continue;
+
+            const float* mu_role = (role == Role::Classifier)
+                ? a->mu_rff_classifier : a->mu_rff_predictor;
+            int occupants[ARCHIVE_BINS_X * ARCHIVE_BINS_Y * 13 + 64];
+            int n_occ = 0;
+            for (int i = 0; i < MAX_ARCHIVE; ++i) {
+                const ArchiveEntry& e = a->entries[i];
+                if (!e.alive || e.role != role) continue;
+                if (e.bin_x != (b / ARCHIVE_BINS_Y) || e.bin_y != (b % ARCHIVE_BINS_Y)) continue;
+                occupants[n_occ++] = i;
+            }
+            // Keep the top-cap by QD score; tombstone the rest.
+            for (int slot = 0; slot < n_occ; ++slot) {
+                int best = slot;
+                float best_qd = -1e30f;
+                for (int j = slot; j < n_occ; ++j) {
+                    const ArchiveEntry& e = a->entries[occupants[j]];
+                    float qd = qd_score(e.fitness,
+                                        rff_novelty(e.rff_proj, mu_role));
+                    if (qd > best_qd) {
+                        best_qd = qd;
+                        best = j;
+                    }
+                }
+                int tmp = occupants[slot]; occupants[slot] = occupants[best]; occupants[best] = tmp;
+            }
+            for (int k = cap; k < n_occ; ++k) {
+                a->entries[occupants[k]].alive = false;
+            }
+            if (role == Role::Classifier) a->bins[b].count_classifier = cap;
+            else a->bins[b].count_predictor = cap;
+        }
+    }
+
+    // Rebuild live index lists, global counts, and per-role RFF means from
+    // the surviving entries.
+    a->n_alive_classifier = 0;
+    a->n_alive_predictor = 0;
+    a->count_classifier = 0;
+    a->count_predictor = 0;
+    for (int j = 0; j < RFF_DIM; ++j) {
+        a->mu_rff_classifier[j] = 0.f;
+        a->mu_rff_predictor[j] = 0.f;
+    }
+    for (int i = 0; i < MAX_ARCHIVE; ++i) {
+        if (!a->entries[i].alive) continue;
         if (a->entries[i].role == Role::Classifier) {
-            a->bins[b].count_classifier++;
             a->alive_classifier_idx[a->n_alive_classifier++] = i;
             a->count_classifier++;
             for (int j = 0; j < RFF_DIM; ++j)
                 a->mu_rff_classifier[j] += a->entries[i].rff_proj[j];
         } else {
-            a->bins[b].count_predictor++;
             a->alive_predictor_idx[a->n_alive_predictor++] = i;
             a->count_predictor++;
             for (int j = 0; j < RFF_DIM; ++j)
@@ -521,6 +753,16 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
         float inv = 1.0f / static_cast<float>(a->count_predictor);
         for (int j = 0; j < RFF_DIM; ++j) a->mu_rff_predictor[j] *= inv;
     }
+
+#if SLIME_DEBUG_CHECKS
+    {
+        char err[256];
+        if (!archive_check_invariants(*a, err, static_cast<int>(sizeof(err)))) {
+            std::printf("[ARCHIVE INVARIANT] rebin: %s\n", err);
+            std::fflush(stdout);
+        }
+    }
+#endif
 }
 
 // Apply lineage brake: scale the effective fitness of entries belonging to a
@@ -553,3 +795,4 @@ __host__ inline void apply_lineage_brake(Archive* a,
 }  // namespace slime::archive
 
 #endif  // COEVO_ARCHIVE_SOFT_QD_ARCHIVE_CU
+

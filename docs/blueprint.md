@@ -485,16 +485,32 @@ S no archive bin holds more than its per-role capacity after any insertion
   or PCA rebin
 M archive/soft_qd_archive.cu::insert
 M archive/soft_qd_archive.cu::recompute_bins
-T provisional
-C unobserved
+W+ tests/host_unit_tests.cpp::test_archive_bin_capacity_after_rebin
+T established
+C observed
 
 @claim A401.live-statistics-exact invariant
 S per-role counts, live lists, and RFF means exactly describe the alive
   archive after every insertion, replacement, and rebin
 M archive/soft_qd_archive.cu::insert
 M archive/soft_qd_archive.cu::recompute_bins
-T provisional
-C unobserved
+M archive/soft_qd_archive.cu::archive_check_invariants
+W+ tests/host_unit_tests.cpp::test_archive_invariant_checker
+W+ tests/host_unit_tests.cpp::test_archive_rff_mean_exact_after_replacement
+W+ tests/host_unit_tests.cpp::test_archive_randomized_property
+T established
+C observed
+
+@claim A401.weighted-metric-active contract
+S the per-dimension inverse-variance EMA updates on every insertion and
+  replacement, and replacement displaces the candidate's nearest same-role
+  same-bin neighbor by weighted Euclidean distance when the candidate's QD
+  score beats it
+M archive/soft_qd_archive.cu::update_inv_var_ema
+M archive/soft_qd_archive.cu::insert
+W+ tests/host_unit_tests.cpp::test_archive_weighted_metric_active
+T established
+C observed
 
 
 Descriptor and metric. Final bmap_64 is the descriptor. Weighted Euclidean
