@@ -98,7 +98,8 @@ def witness_file_hashes(claims, root: Path) -> dict[str, str]:
 
 
 def new_manifest(*, name: str, root: Path, binary: str, cuda: str, gpu: str,
-                 seed: str, results: dict[str, dict], claims, machine: dict) -> dict:
+                 seed: str, results: dict[str, dict], claims, machine: dict,
+                 scheduler_job: str = "") -> dict:
     now = datetime.now(timezone.utc).isoformat()
     manifest = {
         "schema": SCHEMA,
@@ -118,7 +119,24 @@ def new_manifest(*, name: str, root: Path, binary: str, cuda: str, gpu: str,
         "mechanismHashes": mechanism_file_hashes(claims, root),
         "witnessHashes": witness_file_hashes(claims, root),
     }
+    if scheduler_job:
+        manifest["scheduler"] = scheduler_provenance(scheduler_job)
     return manifest
+
+
+def scheduler_provenance(job_id: str) -> dict:
+    """Link this manifest to the training-architecture scheduler's result
+    ledger. Imported lazily so the evidence layer stays usable without the
+    scheduler; an unreachable scheduler records the jobId and the reason
+    instead of silently dropping the provenance."""
+    block = {"jobId": job_id}
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import gpu_client  # type: ignore
+        block.update(gpu_client.scheduler_provenance(job_id))
+    except Exception as exc:
+        block["unavailable"] = str(exc)[:300]
+    return block
 
 
 def save_manifest(evidence_dir: Path, manifest: dict) -> Path:
@@ -240,7 +258,8 @@ def record(args) -> int:
     machine = json.loads((root / "architecture/machine.json").read_text(encoding="utf-8"))
     manifest = new_manifest(name=args.name, root=root, binary=args.binary,
                             cuda=args.cuda, gpu=args.gpu, seed=args.seed,
-                            results=results, claims=claims, machine=machine)
+                            results=results, claims=claims, machine=machine,
+                            scheduler_job=getattr(args, "scheduler_job", "") or "")
     path = save_manifest(root / "evidence", manifest)
     print(f"recorded {path}")
     return 0
@@ -258,6 +277,9 @@ def main() -> int:
     rec.add_argument("--cuda", default="unknown")
     rec.add_argument("--gpu", default="unknown")
     rec.add_argument("--seed", default="default")
+    rec.add_argument("--scheduler-job", default="", dest="scheduler_job",
+                     help="training-architecture scheduler jobId; records the "
+                          "result-ledger provenance in the manifest")
     rec.add_argument("--result", action="append", default=[],
                      help="claim:pass|fail (repeatable)")
 

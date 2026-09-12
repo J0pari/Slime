@@ -7,6 +7,25 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Slime adopted the training-architecture GPU scheduler
+  (`gpu-scheduler/v1`). `contracts/gpu-scheduler-pin.json` pins the contract
+  fingerprint; `architecture/gpu_client.py` validates the schema major and
+  fingerprint before every submission (loud refusal on drift), submits,
+  waits, and reads the scheduler's result ledger;
+  `architecture/progress_wrap.py` wraps scheduled commands and emits
+  `progress/v1` envelopes for the daemon's estimator. Evidence manifests
+  recorded with `--scheduler-job <id>` link claim evidence to the scheduler
+  result ledger. All paths come from the environment (`TRAINING_ARCH_ROOT`,
+  `SLIME_EVOLUTION_ROOT`, optional `KF_GPU_SCHED_DIR`); nothing is
+  hardcoded. Slime is registered as a consumer in the owner's
+  `src/integration.py` `_ENV_ROOTS` so the doctor observes the pin.
+- 2026-09-12: The shared-atomic weight-gradient experiment was measured and
+  rejected: replacing the global atomicAdds with per-block shared-memory
+  accumulation ran wave1 in 166-171s versus 34-40s for the global-atomic
+  kernel (same-address shared-atomic replay serializes; L2 handles the
+  global atomics at high throughput). The kernel was reverted; the finding
+  means the backward bottleneck is launch structure/occupancy, not atomic
+  traffic — profiling (Nsight) and CUDA graph capture are the next levers.
 - 2026-09-12: The `checked_cuda_calls` allowlist is empty. Every production
   raw CUDA call is in a checked context: `CUDA_ABORT`/`TRANSFER_ABORT` for
   the generation loop, `CUDA_WARN` for shutdown frees, `cuda_diagnostics_ok`

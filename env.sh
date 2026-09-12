@@ -45,6 +45,16 @@ export LIB="${_W_MSVC}\\lib\\x64;${_W_SDK}\\Lib\\${WINSDK_VER}\\ucrt\\x64;${_W_S
 
 unset _W_MSVC _W_SDK
 
+# ---- GPU scheduler (training-architecture, gpu-scheduler/v1) ---------------
+# All GPU work is submitted through the cross-repo scheduler. Set these in
+# your environment (not committed): TRAINING_ARCH_ROOT locates the scheduler
+# for this repo's client; SLIME_EVOLUTION_ROOT lets the owner's doctor find
+# this repo's contract pin. KF_GPU_SCHED_DIR optionally overrides the
+# scheduler state directory.
+# export TRAINING_ARCH_ROOT="/path/to/training-architecture"
+# export SLIME_EVOLUTION_ROOT="/path/to/Slime Evolution"
+# export KF_GPU_SCHED_DIR="/path/to/gpu-scheduler-state"
+
 # ---- Sanity check -----------------------------------------------------------
 echo "env.sh: cl    -> $(which cl.exe 2>/dev/null || echo 'NOT FOUND')"
 echo "env.sh: nvcc  -> $(which nvcc 2>/dev/null || echo 'NOT FOUND')"

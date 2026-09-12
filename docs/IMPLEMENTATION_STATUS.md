@@ -6,13 +6,13 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | Claim | Kind | Lifecycle | Mechanisms | Strong witness | Latest evidence |
 | :---- | :--- | :-------- | :--------- | :------------- | :-------------- |
 | A101.sot-schedule-independent | invariant | established | ✅ | ✅ | pass/current |
-| A103.checkpoint-replay-equivalence | invariant | established | ✅ | ✅ | pass/current |
+| A103.checkpoint-replay-equivalence | invariant | established | ✅ | ✅ | pass/stale |
 | A103.gradient-correctness | acceptance | established | ✅ | ✅ | pass/current |
 | A201.bounded-residual-dynamics | empirical | established | ✅ | ✅ | pass/current |
 | A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/current |
 | A201.shared-substrate | invariant | provisional | ✅ | ❌ | pass/current |
 | A201.task-conditioning-complete | contract | established | ✅ | ✅ | pass/current |
-| A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/current |
+| A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/stale |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/current |
 | A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/current |
 | A401.bin-capacity | invariant | established | ✅ | ✅ | pass/current |

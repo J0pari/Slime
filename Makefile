@@ -22,7 +22,8 @@ HOST_CXX      ?= g++
 HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Wall -Wextra
 
 .PHONY: all run run-10 clean host-tests check forward-smoke wave1-test wave2-test \
-	task-conditioning-test architecture-check architecture-test architecture-status architecture-report
+	task-conditioning-test architecture-check architecture-test architecture-status architecture-report \
+	gpu-status gpu-contract gpu-wave2 gpu-run10
 
 all: $(BIN)
 
@@ -47,6 +48,25 @@ architecture-status:
 
 architecture-report:
 	python architecture/compiler.py report
+
+# ---- GPU scheduler (training-architecture, gpu-scheduler/v1) --------------
+# All GPU work goes through the cross-repo scheduler. Requires
+# TRAINING_ARCH_ROOT (the training-architecture repo root); the client
+# refuses loudly when it is unset. Scheduled jobs are covered by the
+# scheduler's GPU lock; use --direct only for an explicit manual launch.
+gpu-status:
+	python architecture/gpu_client.py status
+
+gpu-contract:
+	python architecture/gpu_client.py contract
+
+gpu-wave2:
+	python architecture/gpu_client.py run --name slime-wave2 --vram 2048 \
+		-- build/wave2_test.exe
+
+gpu-run10:
+	python architecture/gpu_client.py run --name slime-run10 --vram 2048 \
+		--total 10 -- build/coevo.exe 10
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

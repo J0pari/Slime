@@ -118,6 +118,22 @@ reads manifests — prose status claims have no effect. Editing a claim's
 statement, mechanisms, or witnesses — or any mechanism/witness file — makes
 prior evidence STALE until the witness reruns.
 
+When a run executed through the training-architecture scheduler, add
+`--scheduler-job <jobId>`; the manifest then links to the scheduler's result
+ledger (status, exit code, duration, log file, pinned contract fingerprint).
+
+## GPU scheduling
+
+GPU work goes through the training-architecture scheduler
+(`gpu-scheduler/v1`), never ad hoc. `TRAINING_ARCH_ROOT` locates the
+scheduler (environment only — no path is hardcoded); the client validates
+the pinned contract fingerprint before submission and refuses loudly on
+drift. Scheduled jobs are covered by the scheduler's GPU lock; manual
+launches must go through `python architecture/gpu_client.py run --direct`,
+which acquires the lock. Scheduled commands are wrapped by
+`architecture/progress_wrap.py`, which emits `progress/v1` envelopes for
+the daemon. See README.md for the commands.
+
 ## What not to do
 
 - Do not hand-edit `docs/IMPLEMENTATION_STATUS.md`.

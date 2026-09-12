@@ -1,0 +1,133 @@
+{
+  "binary": "build/wave2_test.exe",
+  "binarySha256": "69bae4277e109d01341328db62e7f8044d0a6fe3008ca92adf8ad738ead5eba5",
+  "claimHashes": {
+    "A101.sot-schedule-independent": "8ead548dd109e7bd06f50129e8681e5d84f4797829c637e3fc74677e97dcdbce",
+    "A103.checkpoint-replay-equivalence": "5c693f0ab209338acba64acd488663550c950c48aaa9b580f8beb331307f07fc",
+    "A103.gradient-correctness": "e9939d2bd7d504890eb56019f5ee731ec69b7de78905055c8c6cb7675af4ce1d",
+    "A201.bounded-residual-dynamics": "945ade1a981c85ad6aaa602c50200bb1e674ca75577acfb96929884ae2b95004",
+    "A201.role-canonicalization": "6060315935f1a35fd538daf3b6eeceecb66f71995f3c2fbc74075530292ad159",
+    "A201.shared-substrate": "56a93e39fe23fcacd293609b41ddb19060a30ec53197c09ca24199ded0050221",
+    "A201.task-conditioning-complete": "2b67c2027d10e5d87746c15653f71e1b1c91f3bb0656146b6e977cb803cc7643",
+    "A202.rd-disabled-until-adjoint": "07558226013abd8a11cb3a46041ac30bc0da2874ae044d77de3927dde4eb6ef9",
+    "A301.genotype-causes-phenotype": "9b8026577ddeab269f232502c91402ce9fb1dfd53d1188dc7790901b1c998ecb",
+    "A401.archive-genotype-attribution": "bcaf76a6d7bed529addabc72a6242a55c644acd6529ea742468599f749e1c89b",
+    "A401.bin-capacity": "ac2e9f34c629a5ea51db85a564ca02e650d97567bbdc742ca95fee24b8c13954",
+    "A401.live-statistics-exact": "77a583d26f695cc0e899c92686fb7c453b550b784f4799f946146c35e9f2abe1",
+    "A401.weighted-metric-active": "0393fd33c7623aad067efc079466d8ee83df787b22e2c43f58e5920295d76c17",
+    "A501.came-production-equation": "bb8571ba276dcb19c30baef35b6cd6c8b6c310b7c87f87dbdc32576d4506b13f",
+    "C001.acceptance-evidence-current": "87089b5ee6d2b045d4863f76ed175f8a26155667d80c8ccc58d3edca445dff1a",
+    "G100.deterministic-seed": "ad1a90837be155ca6a0ff94cbe01867a3f4bb5e7d1acd0504b0aa0deb699e4e8",
+    "G100.single-prng": "ff358fa2f511dcf5336543cb74def6b36da9863d766554d93a9d901eaaf27a1b",
+    "I001.phase-order": "49ca5943d1c208026bceb3063f4d7bf75587d04030432031027704e109248144",
+    "I001.replay-evaluation-identity": "5649452888ad7a5a784507279b34d020f6614d2fa880718978e945465b3df9b4",
+    "I001.spawn-wave-unique": "f8a16ce8ca01939ceb57ad72968fb71c2cd258d7a6d5d9cb09ece00ebc6465ac",
+    "S001.cuda-errors-fatal": "8ae99de6dd89596f041edd40e22e8a6e947bf7778a16caff1a5ce94763580c5b",
+    "S002.host-authority": "1cba08a01b4bae45e40eec1c0e7a23ffe75f557e14031ceb369352f95cb90b01",
+    "S002.operator-command-effective": "57de5cc7ac3926cc86b03282a96e66faa8739ca3f10cc6a027d3232edd628912",
+    "S004.pt-swap-transaction": "920c4a779c91429011f578cf868f6228e2f7076fade69b640e2dc176fccb3ade"
+  },
+  "claims": {
+    "A103.gradient-correctness": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_finite_difference_gradient"
+    },
+    "A201.bounded-residual-dynamics": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_residual_dynamics_bounded"
+    },
+    "A301.genotype-causes-phenotype": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_genotype_causality"
+    },
+    "A401.archive-genotype-attribution": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_genotype_causality"
+    },
+    "S004.pt-swap-transaction": {
+      "result": "pass",
+      "witness": "tests/wave2_evolution.cu::test_pt_swap_backward_correspondence"
+    }
+  },
+  "cuda": "13.0.48",
+  "generatedAt": "2026-09-12T21:34:47.430982+00:00",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "machineContract": {
+    "cudaMajor": 13,
+    "cudaMinor": 0,
+    "minComputeCapability": "8.6",
+    "minVramMiB": 6000,
+    "notes": "Startup diagnostics (safety/monitoring.cu::emit_cuda_diagnostics) must match this envelope; evidence manifests record the observed machine contract so a GPU result from a materially different configuration cannot silently count as evidence.",
+    "required": {
+      "cudaMallocManagedForbidden": true,
+      "fp16": true
+    },
+    "schema": "slime-machine/v1"
+  },
+  "mechanismHashes": {
+    "A101.sot-schedule-independent": "bab1478387cfa94fb419837d0b14f28abc18e1a6e1c1a05d1f8fc3852d06b151",
+    "A103.checkpoint-replay-equivalence": "5a15b3fc1f3fd1c1f1cb8d59e53fa7fef8e4155396b464dd6a0a76bc5d053f02",
+    "A103.gradient-correctness": "605dbccc8b53a2c49c82a6c2f0c986008a9976959ae85de9cb000e7f6def2c14",
+    "A201.bounded-residual-dynamics": "78d7c40cd7712ca90f766227867cd7e786a63f8127033e3967fc0239d6f0d5b8",
+    "A201.role-canonicalization": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
+    "A201.shared-substrate": "0fdc5252c292e0c007735959cd46d58beac675e81d4f9eaaf158568aaace19e9",
+    "A201.task-conditioning-complete": "0c247758dc98cd53aa01f3ebaccdb0067babdca30519c2c75d6782a077f2fd9b",
+    "A202.rd-disabled-until-adjoint": "605dbccc8b53a2c49c82a6c2f0c986008a9976959ae85de9cb000e7f6def2c14",
+    "A301.genotype-causes-phenotype": "0a4e0e1b0b57e0405a524d6c759e31a3dc89776e02813cff0ff68ba741b016f9",
+    "A401.archive-genotype-attribution": "7af6356c0cd76d457ebde6065c44eed8fe4911beed9ac3b01d187276ae22e722",
+    "A401.bin-capacity": "2b63192536bcc3eea66105dbe1261fb7bc41dc3dbd2fef3fd4a6b257ce9359b3",
+    "A401.live-statistics-exact": "0dbce7b5a5b74c3ca4d490c49e25a66437b032a228babf31cce301c7311b5d67",
+    "A401.weighted-metric-active": "2b63192536bcc3eea66105dbe1261fb7bc41dc3dbd2fef3fd4a6b257ce9359b3",
+    "A501.came-production-equation": "13649409a16fc0433132801f0d294caa1273ea3012d0b691380a725abb0f7dc9",
+    "C001.acceptance-evidence-current": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "G100.deterministic-seed": "4304a1180b1aaab252c4a95141bb5809599081f2d03f9d2ee1f6effe4aef2abf",
+    "G100.single-prng": "4239811d1956aad7a89a731676000a4b933b4f8b7d0140a49ec98d6123cfcb23",
+    "I001.phase-order": "6817cb244ba764dc90bb4ad4e46def139caabf825bc87448a705b5456aa35f4e",
+    "I001.replay-evaluation-identity": "6817cb244ba764dc90bb4ad4e46def139caabf825bc87448a705b5456aa35f4e",
+    "I001.spawn-wave-unique": "1b6fb0542ec4f8bacc6ec2f98495784051572bbcd1af027db279a6f0286e4301",
+    "S001.cuda-errors-fatal": "7af6356c0cd76d457ebde6065c44eed8fe4911beed9ac3b01d187276ae22e722",
+    "S002.host-authority": "83d35b1683b1248fffcfba79bf1b6f3c2d2d25fc91529458fad5cca7fc0c044d",
+    "S002.operator-command-effective": "c3b9e8400e805d8a21155578ff9c63d35cc58b16634b4a5364e5c62efe4a3d0d",
+    "S004.pt-swap-transaction": "8fd90661d366632f5c603233c0815e305da531788f09fdfa35eb5596a6fb2ee8"
+  },
+  "name": "wave2-scheduled-20260912",
+  "runId": "wave2-scheduled-20260912-2026-09-12T213447",
+  "scheduler": {
+    "contractFingerprint": "f0cd8ac689bc2ed65d40f2ff4fece1377c401a03754202b6d8e65d078df88ed6",
+    "contractSchema": "gpu-scheduler/v1",
+    "durationSec": 68.0,
+    "exitCode": 0,
+    "jobId": "f16dd4675b9e1722",
+    "logFile": "C:\\Users\\tmdru\\Desktop\\Coding\\training-architecture\\artifacts\\gpu-scheduler\\logs\\f16dd4675b9e1722.log",
+    "status": "done"
+  },
+  "schema": "slime-evidence/v1",
+  "seed": "default",
+  "specHash": "a96a6e4de68d0597d20f6d138a02b279afde5278091b083f3eea490f28549055",
+  "witnessHashes": {
+    "A101.sot-schedule-independent": "c1d72c4b16938f1508a8d8aa64a5d96130b8788c8ade6bb33a1b17bc1730636d",
+    "A103.checkpoint-replay-equivalence": "4e887778c89e6f560bf1989ed537c5caeefb5b851f651a19a234bdaa5524217f",
+    "A103.gradient-correctness": "828271e6d6035ae921bc5f0c6650ac3ba27e37c6edb6411c495b88d4ff36ee42",
+    "A201.bounded-residual-dynamics": "828271e6d6035ae921bc5f0c6650ac3ba27e37c6edb6411c495b88d4ff36ee42",
+    "A201.role-canonicalization": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "A201.shared-substrate": "4e887778c89e6f560bf1989ed537c5caeefb5b851f651a19a234bdaa5524217f",
+    "A201.task-conditioning-complete": "f904af4a607e810a2a0f26e6801f0b01d265596717c444ccb07c610637491a76",
+    "A202.rd-disabled-until-adjoint": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "A301.genotype-causes-phenotype": "828271e6d6035ae921bc5f0c6650ac3ba27e37c6edb6411c495b88d4ff36ee42",
+    "A401.archive-genotype-attribution": "828271e6d6035ae921bc5f0c6650ac3ba27e37c6edb6411c495b88d4ff36ee42",
+    "A401.bin-capacity": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "A401.live-statistics-exact": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "A401.weighted-metric-active": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "A501.came-production-equation": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "C001.acceptance-evidence-current": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "G100.deterministic-seed": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "G100.single-prng": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "I001.phase-order": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "I001.replay-evaluation-identity": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "I001.spawn-wave-unique": "8d697b9293d89e4ded7ccfbeaa78994dead514441621ba94c12fd5d277fdfc7b",
+    "S001.cuda-errors-fatal": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "S002.host-authority": "47057ea5ca4b5d8c6a2d1e202625d7521f0f481b696d9d4eb0030fb45639686c",
+    "S002.operator-command-effective": "c1d72c4b16938f1508a8d8aa64a5d96130b8788c8ade6bb33a1b17bc1730636d",
+    "S004.pt-swap-transaction": "828271e6d6035ae921bc5f0c6650ac3ba27e37c6edb6411c495b88d4ff36ee42"
+  }
+}

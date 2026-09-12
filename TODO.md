@@ -103,13 +103,23 @@ completed or its verification state changes.
 - [ ] Repair archive semantics before Wave 4+: inverse-variance metric update
   and use, exact RFF-mean adjustment on replacement, capacity enforcement on
   PCA rebin, robust PCA initialization, and an archive invariant checker.
-- [ ] Redesign the backward weight-gradient accumulation (shared-memory
-  reductions instead of ~34.8B global atomicAdds/generation) and remove the
-  per-phase stream synchronizations before CUDA graph capture.
+- [x] Test the shared-memory weight-gradient hypothesis and record the
+  result: per-block shared-atomic accumulation was measured 4.5x SLOWER
+  (wave1 166-171s vs 34-40s for the global-atomic kernel; same-address
+  shared-atomic replay serializes). Reverted. The backward bottleneck is
+  launch structure/occupancy, not atomic traffic — profile (Nsight) and
+  pursue CUDA graph capture / kernel fusion next.
+- [ ] Profile the backward with Nsight and attack launch structure
+  (graph capture, fused re-forward+grad kernels) toward the 10-gen/60s gate.
+- [x] Adopt the cross-repo GPU scheduler (training-architecture
+  gpu-scheduler/v1): pinned contract + fingerprint check, submit/wait via
+  `architecture/gpu_client.py`, progress/v1 wrapping, scheduler-ledger
+  provenance in evidence manifests, Slime registered as a consumer.
 - [ ] Resolve any current-source failures before starting a later wave.
 - [ ] Make every per-generation transfer conform to the four-point asynchronous
   transfer schedule, including the post-CAME gradient scalar read.
-- [ ] Apply `pause` and forced `checkpoint` operator commands in the run loop.
+- [x] Apply `pause` and `prune` operator commands durably in the run loop
+  (checkpoint reports unsupported until Wave 7 serialization exists).
 - [ ] Add the missing BOM document or remove the stale `bom.md` reference from
   the blueprint.
 - [x] Refresh README navigation after the documentation structure settles: link
