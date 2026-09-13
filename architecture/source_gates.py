@@ -1,7 +1,7 @@
 """Static source gates for Slime (architecture-control layer).
 
 Each gate scans production source (everything except tests/, build/,
-architecture/, evidence/, .claude/, .vscode/, .continue/) for a forbidden
+architecture/, evidence/, and hidden tool directories) for a forbidden
 pattern and reports findings. A finding is an ERROR unless it is explicitly
 allowlisted (reported as WARNING). `--strict` promotes allowlist warnings to
 errors so the remaining allowlist shrinks over time.
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SRC_SUFFIXES = {".cu", ".cuh", ".cpp", ".h", ".hpp"}
-EXCLUDED_DIRS = {"tests", "build", "architecture", "evidence", ".claude", ".vscode", ".continue", ".git"}
+EXCLUDED_DIRS = {"tests", "build", "architecture", "evidence", ".git"}
 EXCLUDED_FILES = {"env.sh"}
 
 # Approved wrappers around raw CUDA calls. Every production call site routes
@@ -78,7 +78,8 @@ def iter_production_sources(root: Path):
         if path.suffix not in SRC_SUFFIXES:
             continue
         rel = path.relative_to(root)
-        if rel.parts[0] in EXCLUDED_DIRS or rel.name in EXCLUDED_FILES:
+        if (rel.parts[0] in EXCLUDED_DIRS or rel.parts[0].startswith(".")
+                or rel.name in EXCLUDED_FILES):
             continue
         yield rel
 

@@ -83,7 +83,7 @@ def reverse_witness_index(root: Path) -> tuple[dict[str, list[str]], list[str]]:
         if not p.is_file():
             continue
         rel = p.relative_to(root)
-        if rel.parts[0] in gates.EXCLUDED_DIRS:
+        if rel.parts[0] in gates.EXCLUDED_DIRS or rel.parts[0].startswith("."):
             continue
         if p.suffix not in CODE_SUFFIXES and p.suffix != ".py":
             continue
@@ -264,6 +264,11 @@ def check_documents(root: Path, documents: dict, errors: list[str]) -> None:
         rel = f"docs/{p.name}"
         if rel not in declared_files:
             errors.append(f"undeclared document: {rel} (add it to architecture/documents.yaml)")
+    for p in sorted(root.glob("*.md")):
+        if p.name not in declared_files:
+            errors.append(
+                f"undeclared document: {p.name} (add it to "
+                f"architecture/documents.yaml)")
     for f in declared_files:
         if not (root / f).exists():
             errors.append(f"declared document missing: {f}")

@@ -1,10 +1,34 @@
+<!-- agent-authority: AGENTS.md -->
+
 # AGENTS.md — Architecture Delta Protocol
+
+This file is the single authority for agent instructions in this repository.
+Any other instruction file must delegate here and carry no independent
+rules; the compiler rejects undeclared root-level documents, so a second
+authority cannot be introduced silently.
 
 The three binding specifications are `docs/blueprint.md`,
 `docs/cuda_engineering.md`, and `docs/construction_plan.md`. Normative
 statements inside them are `@claim` blocks. `docs/IMPLEMENTATION_STATUS.md`
 is generated output (`python architecture/compiler.py status`) — never edit
 it by hand. `docs/arch-signals.md` is the friction log.
+
+## Non-negotiables
+
+- The specs are the build target: implement what they say, not a subset, not
+  a simpler version, not a placeholder for later. If a dependency is not
+  ready, the dependent feature is not built yet.
+- No stubs, husks, empty wrappers, or dead code. If a function exists, it
+  has a complete body doing what the spec says; if it cannot exist yet, it
+  is removed rather than declared.
+- Witnesses must fail unless the real implementation works. A test that
+  passes against an empty or zero-initialized state is not a witness.
+- Compile with zero warnings; fix broken tooling instead of working around
+  it; never claim a result that was not executed.
+- The repository is the memory: canonical specs, generated status, claims,
+  TODO queue, arch-signals, evidence manifests, source annotations, and
+  tests must let a fresh session reconstruct state without conversation
+  history.
 
 ## Before changing behavior, classify the change
 

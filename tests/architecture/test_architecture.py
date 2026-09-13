@@ -337,6 +337,23 @@ class CompilerTests(unittest.TestCase):
             self.assertTrue(any("docs/undeclared.md" in e for e in errors),
                             "undeclared document mention not caught")
 
+    def test_undeclared_root_document_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "docs").mkdir()
+            (root / "AGENTS.md").write_text("authority", encoding="utf-8")
+            documents = {"documents": {
+                "a": {"kind": "operational", "files": ["AGENTS.md"]}}}
+            errors: list[str] = []
+            compiler.check_documents(root, documents, errors)
+            self.assertFalse(errors, errors)
+            (root / "NOTES.md").write_text("second authority",
+                                           encoding="utf-8")
+            errors = []
+            compiler.check_documents(root, documents, errors)
+            self.assertTrue(any("NOTES.md" in e for e in errors),
+                            "undeclared root document not rejected")
+
     def test_crosses_annotation_completeness_both_directions(self):
         # A code field annotated [crosses:pt=rogue] that is missing from the
         # transaction registry must be caught — this is exactly how
