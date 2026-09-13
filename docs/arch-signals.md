@@ -7,6 +7,39 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Cross-repo bridge admission assessment (non-normative; no code,
+  no claims, no inventory change). An external `adaptive-ecology/v1` handoff
+  from the LLM-Trader side was evaluated against the binding extension gate
+  in construction_plan.md. Gate state: CLOSED — I8 and I9 are `missing`, and
+  the experimental program (E1-E5) has produced no evidence, so no extension
+  axis may begin. Correct outcome: refusal with a precondition report, not
+  bridge code.
+  Coherence questions to resolve upstream before admission: (1) the join key
+  is named `proposal_id` in sample_identity but `sample_id` in outcome_join
+  and the consumer brief — either an alias must be declared or the field
+  defined; (2) two literal feature names contain spaces
+  (`sentiment_strongly bullish`, `sentiment_strongly bearish`) inside the
+  fingerprinted ordered list; (3) the contract descriptor lives in Trader, so
+  the content-recomputed fingerprint check is an admission precondition that
+  cannot be satisfied from this repository; (4) the "three percentile-rank
+  intermediates" are not enumerated, so the normalization-refusal check has
+  no exact set.
+  Narrowest future architecture if and when the gate opens: one host-side
+  external task source that validates and packs the pinned contract into a
+  Slime-owned typed form (no Trader code, no JSON in the CUDA core, no
+  runtime fetch); the 15-d context vector consumed as global conditioning
+  only, with no topology claim (v1 persists no spatial or temporal view);
+  descriptor separation (z_state / y_task / d_behavior) as the prerequisite
+  architectural item because bmap_64 is already overloaded; the raw external
+  vector never becomes the archive descriptor; new roles only via input
+  wiring and objective semantics on the shared substrate; external surprise
+  stays telemetry under competence gating; frozen effective-phenotype
+  sentinels as a host-owned, checkpoint-covered evaluation population for
+  learner-drift versus environment-drift decomposition; checkpoint coverage
+  for stream cursor, partition state, contract fingerprint, task-family
+  identity, sentinel identities, and adaptation windows; PT registration for
+  any organism-bound buffer; shadow-only, with the reverse contract
+  deferred.
 - 2026-09-12: I7 notes. Capture boundary rule: a phase graph contains only
   device launches/transfers with stable arguments, so the forward phase's
   three launches are captured together and the phase trace runs after the
