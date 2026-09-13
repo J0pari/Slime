@@ -27,6 +27,7 @@
 #include <cstring>
 
 #include "../config/constants.cuh"
+#include "../nca/context_adjoint.cuh"
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
@@ -1320,6 +1321,75 @@ static void test_predictor_target_rotation() {
     EXPECT_TRUE(std::fabs(ema - 0.25f) < 1e-3f);
 }
 
+// ---- C/I5: global context broadcast adjoint --------------------------------
+// Finite differences over both W_ctx and the pre-broadcast state must match
+// the adjoint, including the mean adjoint's contribution to the overwritten
+// aux channels.
+static void test_context_broadcast_adjoint() {
+    const int NC = 4;  // cells
+    const int K = slime::nca::CTX_K;
+    static float state_pre[NC * CA_CHANNELS];
+    static float state_post[NC * CA_CHANNELS];
+    static float d_state_post[NC * CA_CHANNELS];
+    static float d_state_pre[NC * CA_CHANNELS];
+    static float W_ctx[CA_CHANNELS * K];
+    static float dW_ctx[CA_CHANNELS * K];
+    uint32_t s = 0x1A2B3Cu;
+    for (int i = 0; i < NC * CA_CHANNELS; ++i) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        state_pre[i] = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        d_state_post[i] = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+    }
+    for (int i = 0; i < CA_CHANNELS * K; ++i) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        W_ctx[i] = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+        dW_ctx[i] = 0.f;
+    }
+    for (int i = 0; i < NC * CA_CHANNELS; ++i) d_state_pre[i] = 0.f;
+
+    auto loss = [&]() {
+        slime::nca::context_broadcast(state_pre, NC, W_ctx, state_post);
+        float L = 0.f;
+        for (int i = 0; i < NC * CA_CHANNELS; ++i) {
+            L += d_state_post[i] * state_post[i];
+        }
+        return L;
+    };
+
+    slime::nca::context_backward(state_pre, NC, W_ctx, d_state_post,
+                                 dW_ctx, d_state_pre);
+
+    const float eps = 1e-3f;
+    float worst_w = 0.f;
+    for (int i = 0; i < CA_CHANNELS * K; ++i) {
+        float save = W_ctx[i];
+        W_ctx[i] = save + eps; float Lp = loss();
+        W_ctx[i] = save - eps; float Lm = loss();
+        W_ctx[i] = save;
+        float numeric = (Lp - Lm) / (2.f * eps);
+        float err = std::fabs(numeric - dW_ctx[i])
+                  / std::fmax(std::fabs(numeric), 1e-3f);
+        if (err > worst_w) worst_w = err;
+    }
+    EXPECT_TRUE(worst_w < 1e-2f);
+
+    float worst_s = 0.f;
+    for (int i = 0; i < NC * CA_CHANNELS; ++i) {
+        float save = state_pre[i];
+        state_pre[i] = save + eps; float Lp = loss();
+        state_pre[i] = save - eps; float Lm = loss();
+        state_pre[i] = save;
+        float numeric = (Lp - Lm) / (2.f * eps);
+        float err = std::fabs(numeric - d_state_pre[i])
+                  / std::fmax(std::fabs(numeric), 1e-3f);
+        if (err > worst_s) worst_s = err;
+    }
+    EXPECT_TRUE(worst_s < 1e-2f);
+    std::printf("  context adjoint worst rel err: W_ctx=%.2e state=%.2e\n",
+                worst_w, worst_s);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1366,6 +1436,7 @@ int main() {
     test_stress_failure_flagging();
     test_predictor_batch_contract();
     test_predictor_target_rotation();
+    test_context_broadcast_adjoint();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
