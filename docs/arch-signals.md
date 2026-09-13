@@ -10,13 +10,12 @@ cuda_engineering.md, and construction_plan.md.
 - 2026-09-12: C1a fixed the predictor-target contract: `assemble_predictor_batch`
   now draws classifier-only targets, carries real lineage ids (the host passed
   pool indices), and propagates the target's SOT status; the typed witness
-  `test_predictor_batch_contract` pins all of it. C1b remains open: the
-  blueprint's "each predictor evaluated on K=8 targets per generation" versus
-  the current one-slot-per-predictor scoring. Options: true per-generation K
-  forwards (8x forward cost, backward changes), generation-rotated temporal
-  aggregation with a per-predictor loss EMA, or population-level aggregation
-  (each predictor scores its assigned target; the ensemble aggregates). The
-  decision gates I5.
+  `test_predictor_batch_contract` pins all of it. C1b chose generation-rotated
+  temporal aggregation: the target slot rotates with the generation, a
+  per-predictor loss EMA feeds fitness, and the EMA is organism-identity state
+  (annotated, PT-swapped, and serialized). True per-generation K forwards were
+  rejected for 8x forward cost; population-level aggregation for not giving an
+  individual predictor the aggregate the spec describes.
 - 2026-09-12: A semantic-coverage review distilled into the construction
   plan's semantic correctness stream: C1 predictor-target contract (classifier
   targets, real lineage ids, SOT status, K-target aggregation), C2 surprise

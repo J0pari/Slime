@@ -14,10 +14,10 @@ or explicitly deferred with a recorded decision.
 
 - [x] C1a Predictor-target identity: classifier-only targets, real lineage
   ids, target SOT status, descriptor rows, and a typed contract witness.
-- [ ] C1b Predictor K-target aggregation: decide and implement how a
-  predictor's score aggregates over K=8 targets (true per-generation K
-  forwards, generation-rotated temporal aggregation, or population-level
-  aggregation); see arch-signals.
+- [x] C1b Predictor K-target aggregation: generation-rotated target slots
+  (a predictor covers all K targets across K generations) with a
+  per-predictor loss EMA feeding fitness; the EMA travels with organism
+  identity through PT and checkpoints.
 - [ ] C2 Surprise population identity: compute surprise and the predictor
   ensemble from the evaluated pre-spawn snapshot.
 - [ ] C3 Role-gradient PT identity: forced cross-role swap witness.

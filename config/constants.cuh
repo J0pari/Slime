@@ -217,6 +217,11 @@ constexpr int   ARCHIVE_BIN_CAP          = 13;
 // sampling floor that keeps every organism reachable.
 constexpr float PREDICTOR_ERROR_EMA_ALPHA = 0.1f;
 constexpr float PREDICTOR_CURRICULUM_ERROR_FLOOR = 1e-3f;
+// Per-predictor loss EMA over the generation-rotated target slots (a
+// predictor covers all K targets across K generations; its fitness uses the
+// aggregate). The init value is a neutral proxy before the first update.
+constexpr float PREDICTOR_LOSS_EMA_ALPHA = 0.2f;
+constexpr float PREDICTOR_LOSS_EMA_INIT  = 1.0f;
 
 // SOT gate (A-401): sigmoid(20·(x − 0.7)).
 constexpr float SOT_GATE_SLOPE           = 20.0f;

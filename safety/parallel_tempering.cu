@@ -83,6 +83,7 @@ struct SwapContext {
     float*                seed_grad;        // [pool_size * BMAP_DIM] host rows
     int*                  batch_sample_idx; // [pool_size] host
     float*                predictor_error_ema; // [pool_size] host
+    float*                predictor_loss_ema;  // [pool_size] host
     // Stream for device memcpy.
     cudaStream_t stream;
 };
@@ -183,6 +184,11 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
         float t = ctx.predictor_error_ema[slot_a];
         ctx.predictor_error_ema[slot_a] = ctx.predictor_error_ema[slot_b];
         ctx.predictor_error_ema[slot_b] = t;
+    }
+    {
+        float t = ctx.predictor_loss_ema[slot_a];
+        ctx.predictor_loss_ema[slot_a] = ctx.predictor_loss_ema[slot_b];
+        ctx.predictor_loss_ema[slot_b] = t;
     }
 }
 

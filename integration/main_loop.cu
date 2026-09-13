@@ -181,6 +181,7 @@ struct World {
     curriculum::PredictorBatch predictor_batch;
     float* d_predictor_bmap32;         // [PREDICTOR_BATCH * BMAP_DIM]
     float predictor_error_ema[POOL_SIZE];  // [identity:organism] [lifetime:rollout] [crosses:pt=predictor_error_ema]
+    float predictor_loss_ema[POOL_SIZE];   // [identity:organism] [lifetime:rollout] [crosses:pt=predictor_loss_ema]
 
     // Surprise history and calibration (A-601): rolling blended surprise for
     // rho = s_avg / s_target, and the calibration window samples that freeze

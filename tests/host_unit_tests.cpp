@@ -1294,6 +1294,32 @@ static void test_predictor_batch_contract() {
     }
 }
 
+// ---- C1b: predictor K-target aggregation -----------------------------------
+// The target slot rotates with the generation so a predictor covers every
+// target over K generations, and the per-predictor loss EMA converges to a
+// repeated loss.
+static void test_predictor_target_rotation() {
+    const int K = slime::curriculum::PREDICTOR_BATCH;
+    bool seen[64] = {};
+    int org = 5;
+    for (int gen = 0; gen < K; ++gen) {
+        int slot = slime::curriculum::predictor_target_slot(org, gen);
+        EXPECT_TRUE(slot >= 0 && slot < K);
+        EXPECT_TRUE(!seen[slot]);
+        seen[slot] = true;
+    }
+    bool all = true;
+    for (int s = 0; s < K; ++s) all = all && seen[s];
+    EXPECT_TRUE(all);
+
+    float ema = PREDICTOR_LOSS_EMA_INIT;
+    for (int i = 0; i < 100; ++i) {
+        ema = (1.f - PREDICTOR_LOSS_EMA_ALPHA) * ema
+            + PREDICTOR_LOSS_EMA_ALPHA * 0.25f;
+    }
+    EXPECT_TRUE(std::fabs(ema - 0.25f) < 1e-3f);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1339,6 +1365,7 @@ int main() {
     test_stress_refresh_role_balance();
     test_stress_failure_flagging();
     test_predictor_batch_contract();
+    test_predictor_target_rotation();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

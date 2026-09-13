@@ -140,6 +140,7 @@ inline void write_run_state(Buffer& b, const World* w) {
     b.put_arr(w->calibration_samples,
               CALIBRATION_GEN_HI - CALIBRATION_GEN_LO + 1);
     b.put_arr(w->predictor_error_ema, POOL_SIZE);
+    b.put_arr(w->predictor_loss_ema, POOL_SIZE);
 
     b.put_pod(w->classifier_batch);
     b.put_pod(w->predictor_batch);
@@ -217,6 +218,7 @@ inline bool read_run_state(Buffer& b, World* w) {
     }
     b.get_arr(w->calibration_samples, CALIBRATION_GEN_HI - CALIBRATION_GEN_LO + 1);
     b.get_arr(w->predictor_error_ema, POOL_SIZE);
+    b.get_arr(w->predictor_loss_ema, POOL_SIZE);
 
     b.get_pod(w->classifier_batch);
     b.get_pod(w->predictor_batch);

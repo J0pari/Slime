@@ -399,6 +399,10 @@ bool initialize_world(World* w) {
     std::memset(w->sentinel_anomaly, 0, sizeof(w->sentinel_anomaly));
     safety::pt::init_stress_ladder(&w->stress_ladder);
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) w->h_stress_f_sot[s] = 1.f;
+    for (int i = 0; i < POOL_SIZE; ++i) {
+        w->predictor_error_ema[i] = 0.f;
+        w->predictor_loss_ema[i] = PREDICTOR_LOSS_EMA_INIT;
+    }
 
     // Section 9.1: Archive initialization.
     std::memset(&w->archive, 0, sizeof(w->archive));
@@ -488,12 +492,17 @@ static void score_organisms(World* w, float classifier_multiplier,
             role_mult = classifier_multiplier;
             audit_mult = w->audit_reg.audit_mult_classifier;
         } else {
-            int slot = org % cur::PREDICTOR_BATCH;
+            int slot = cur::predictor_target_slot(org, w->generation);
             const float* target = &w->predictor_batch.target_bmap_64[slot * BMAP_DIM];
             float dpred[BMAP_DIM];
             autodiff::predictor_mse_loss(bmap, target, dpred, &loss);
             for (int d = 0; d < BMAP_DIM; ++d) sg[d] = dpred[d];
-            task_proxy = expf(-loss);
+            // Fitness aggregates the rotated K-target losses; the seed
+            // gradient above remains the current target's training signal.
+            w->predictor_loss_ema[org] =
+                (1.f - PREDICTOR_LOSS_EMA_ALPHA) * w->predictor_loss_ema[org]
+                + PREDICTOR_LOSS_EMA_ALPHA * loss;
+            task_proxy = expf(-w->predictor_loss_ema[org]);
             role_mult = predictor_multiplier;
             audit_mult = w->audit_reg.audit_mult_predictor;
 
@@ -706,6 +715,7 @@ static void spawn_role_wave(World* w, Role target_role, int n_spawns,
         w->org_table.fitness[slot] = 0.f;
         w->org_table.f_raw[slot] = 0.f;
         w->org_table.f_sot[slot] = 1.f;
+        w->predictor_loss_ema[slot] = PREDICTOR_LOSS_EMA_INIT;
         genome::init_delta_from_prior(child, &w->org_table.deltas[slot]);
     }
 }
@@ -813,6 +823,7 @@ static bool inject_predictor_founders(World* w) {
         w->org_table.fitness[slot] = 0.f;
         w->org_table.f_raw[slot] = 0.f;
         w->org_table.f_sot[slot] = 1.f;
+        w->predictor_loss_ema[slot] = PREDICTOR_LOSS_EMA_INIT;
         genome::init_delta_from_prior(child, &w->org_table.deltas[slot]);
         injected++;
     }
@@ -846,6 +857,7 @@ static safety::pt::SwapContext make_swap_context(World* w) {
     ctx.seed_grad    = w->h_seed_grad;
     ctx.batch_sample_idx = w->org_table.batch_sample_idx;
     ctx.predictor_error_ema = w->predictor_error_ema;
+    ctx.predictor_loss_ema  = w->predictor_loss_ema;
     ctx.stream       = w->stream;
     return ctx;
 }

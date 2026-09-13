@@ -289,6 +289,13 @@ inline void sign_predictor_probes(ProbeSet* ps,
 constexpr int PREDICTOR_PROBE_SLOTS = PREDICTOR_PROBE_SLOT_COUNT;
 constexpr int PREDICTOR_POOL_SLOTS = PREDICTOR_POOL_SLOT_COUNT;
 
+// A predictor is scored against one target per generation; the slot rotates
+// with the generation so that over PREDICTOR_BATCH generations it covers
+// every target, and its fitness uses the per-predictor loss EMA.
+__host__ __device__ inline int predictor_target_slot(int org, int gen) {
+    return (org + gen) % PREDICTOR_BATCH;
+}
+
 inline void assemble_predictor_batch(PredictorBatch* out,
                                      const ProbeSet& probes,
                                      const uint32_t* pool_lineage_ids,
