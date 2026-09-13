@@ -175,9 +175,10 @@ def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
     if gate == "CLOSED":
         if not bridge.get("gate_reasons"):
             errors.append(f"{BRIDGE_FILE}: CLOSED gate must list reasons")
-        if not bridge.get("coherence_questions"):
-            errors.append(f"{BRIDGE_FILE}: CLOSED gate must list the open "
-                          f"coherence questions")
+        if not (bridge.get("coherence_questions")
+                or bridge.get("coherence_questions_resolved")):
+            errors.append(f"{BRIDGE_FILE}: CLOSED gate must record the open or "
+                          f"resolved coherence questions")
     record = bridge.get("handoff_record")
     if not record or not (root / record).exists():
         errors.append(f"{BRIDGE_FILE}: handoff_record {record!r} missing")

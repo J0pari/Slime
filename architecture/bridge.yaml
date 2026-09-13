@@ -32,18 +32,18 @@ rules_exercised:
   - "no stubs or dormant wrappers (AGENTS.md non-negotiables)"
   - "pin-don't-trust: content-recomputed fingerprint; the gpu-scheduler pin is the precedent"
 
-coherence_questions:
-  - "the join key is named proposal_id in sample_identity but sample_id in outcome_join and the consumer brief; an alias must be declared or the field defined"
-  - "two literal feature names contain spaces inside the fingerprinted ordered list; confirm they are identity, not display names"
-  - "the three percentile-rank intermediates are not enumerated; the normalization-refusal check needs the exact set"
-  - "the contract descriptor lives in LLM-Trader, so the content-recomputed fingerprint check cannot be performed from this repository"
-  - "the evaluation record's fields (world, planted, labels) should be confirmed as fields, not record types"
+coherence_questions_resolved:
+  - "join key: sample_id is the wire field and IS proposal_id (episode_id|model|attempt); exact string equality; both ids opaque (answered)"
+  - "feature names: the spaced names are literal fingerprinted members, positions 13-14 of 15 (answered)"
+  - "normalization: the three ranks are volatility_rank, cycle_period_rank, inst_freq_rank; acceptance is feature_view + fingerprint; a machine enum is an optional descriptor addition with a fingerprint bump (answered)"
+  - "evaluation record: world/planted/labels are fields, not record types (answered)"
+  - "fingerprint: sha256 of canonical JSON (sorted keys, ensure_ascii, no trailing newline) of the descriptor minus its fingerprint key; descriptor delivery still needed for Slime to recompute it (recipe answered, content pending)"
 
 preconditions:
   - "the extension gate opens (I1-I9 implemented and E1-E5 evidence recorded)"
-  - "the upstream coherence questions are answered and the handoff revised"
-  - "the descriptor content (or its canonical hash) is delivered so Slime can recompute the fingerprint"
+  - "the descriptor content (or its canonical JSON) is delivered so Slime can recompute the fingerprint per the provided recipe"
   - "a new inventory item is admitted spec-first with claims, witnesses, and a build_status entry"
+  - "optional: a normalization enum in the descriptor (fingerprint bump and deliberate re-pin) if Slime wants a machine-checkable acceptance rule"
 
 future_architecture:
   task_source: "one host-side external task source that validates and packs the pinned contract into a Slime-owned typed form; no Trader code, no JSON in the CUDA core, no runtime fetch, no second protocol"
