@@ -75,9 +75,16 @@ I8
 - [x] Profile first (per-phase timing table under --profile; cached-segment
   backward removed the quadratic re-forward: total 102 -> 81.5 s for 3 gens).
 - [ ] Meet the 10-generation / 60-second gate with per-generation
-  checkpoint writes included. Remaining hotspot: the backward's per-step
-  weight-grad + stencil-gather d_perc round-trip (~500 MB/call); fuse or
-  tile, then launch-level work.
+  checkpoint writes included. Measured 2026-09-12 at ~7.6 s/gen: backward
+  5.6 (weight-grad 3.6 [main 2.34, reduce_inter 0.93, reduce_flow 0.29],
+  stencil 1.15, reforward 0.75, rd 0.08), stress 0.84, forward 0.70.
+  Measured rejections: shared-memory atomic accumulation (4.7x slower),
+  launch bounds (no-op), tiled one-block-per-organism reduce (6x slower:
+  64 blocks, 4096-FMA dependent chains). The systemic limit is that the
+  backward runs one block per organism everywhere (64 blocks, ~27%
+  occupancy); the next lever is cell-split parallelism for the weight-grad
+  main kernel with per-split partials and a fixed-order merge kernel (not
+  atomics), then the same for the stencil gather.
 
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
