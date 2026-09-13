@@ -160,7 +160,12 @@ I9
   required: declared 4096 + margin; ollama/other load was transient) and
   56a6b1511c6bfcd0 was cancelled by the operator floor again. Neither
   auto-retried (retryAfter null). Current submissions: 409c95bfe907ac33
-  (5000-gen) and 9880b19caf880a75 (run55), both --ram 2048 --retries 3. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  (5000-gen) and 9880b19caf880a75 (run55), both --ram 2048 --retries 3.
+  Queue state: both queued, feasible; dispatch is held by the daemon's
+  global RAM floor (6144 MiB free required, ~2.1 GiB free with OpenCode and
+  system processes resident). OLLAMA_KEEP_ALIVE=0 is now set persistently
+  for future ollama starts (the daemon was idle); the jobs dispatch when
+  free RAM clears the floor. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
   17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
