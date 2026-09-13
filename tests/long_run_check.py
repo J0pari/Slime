@@ -20,7 +20,10 @@ R_RE = re.compile(r"\br=([0-9.]+)")
 def run_chunk(binary: str, gens: int, ckpt: str, resume: bool) -> str:
     """Run one chunk, streaming the child's output through so the
     progress/v1 wrapper sees the binary's per-generation `gen N` lines."""
-    cmd = [binary, str(gens), "--ckpt", ckpt]
+    # --profile makes the binary emit its per-generation phase trace
+    # ("gen N: ..."), which is the progress signal the daemon's watchdog
+    # needs; without it a long chunk looks stalled and gets killed.
+    cmd = [binary, str(gens), "--profile", "--ckpt", ckpt]
     if resume:
         cmd.append("--resume")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
