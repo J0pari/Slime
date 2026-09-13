@@ -54,6 +54,7 @@ transactions:
       - batch_sample_idx
       - seed_grad
       - predictor_error_ema
+      - predictor_loss_ema
     slot_identity:
       - replica_tag
 
