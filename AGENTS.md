@@ -29,6 +29,12 @@ it by hand. `docs/arch-signals.md` is the friction log.
   TODO queue, arch-signals, evidence manifests, source annotations, and
   tests must let a fresh session reconstruct state without conversation
   history.
+- Context budget is never a reason to defer, decline, or leave unstarted
+  any task the work requires. A session works until forced compaction;
+  partial iterations are normal and are completed by the next session from
+  the repository state. Never cite context budget as a reason to stop or to
+  avoid beginning work. The only valid reasons to stop are: the work is
+  done, or a genuine blocker that is recorded in the repository.
 
 ## Before changing behavior, classify the change
 
