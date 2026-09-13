@@ -1180,6 +1180,51 @@ static void test_strong_ids_distinct() {
                     arch, Role::Classifier, slime::LineageId(12)) == 1.f);
 }
 
+// [claim:S003.red-team-coverage]
+// Red-team injection for the host-verifiable attack classes: each detector
+// must fire on the injected condition and stay quiet on a clean state.
+static void test_red_team_host_detectors() {
+    // Class A: fitness gaming. A lineage holding 7 of 8 archive slots trips
+    // the runaway detector; a 4/4 split does not.
+    static slime::safety::LineageStats stats[LINEAGE_STATS_MAX];
+    slime::LineageId ids[8];
+    Role roles[8];
+    for (int i = 0; i < 8; ++i) {
+        ids[i] = slime::LineageId(7u);
+        roles[i] = Role::Classifier;
+    }
+    int n_stats = 0;
+    slime::safety::update_lineage_stats(ids, roles, 8, stats, &n_stats, 1);
+    EXPECT_TRUE(slime::safety::runaway_detected(
+        stats[0], LINEAGE_RUNAWAY_THRESHOLD));
+
+    n_stats = 0;
+    for (int i = 0; i < 8; ++i) {
+        ids[i] = slime::LineageId(100u + static_cast<uint32_t>(i));
+    }
+    slime::safety::update_lineage_stats(ids, roles, 8, stats, &n_stats, 1);
+    bool any_runaway = false;
+    for (int s = 0; s < n_stats; ++s) {
+        if (slime::safety::runaway_detected(stats[s],
+                                            LINEAGE_RUNAWAY_THRESHOLD)) {
+            any_runaway = true;
+        }
+    }
+    EXPECT_TRUE(!any_runaway);
+
+    // Class B: archive poisoning. A tampered occupancy count must fail the
+    // invariant checker that a clean archive passes.
+    static slime::archive::Archive a;
+    std::memset(&a, 0, sizeof(a));
+    init_test_archive(&a);
+    EXPECT_TRUE(insert_test_entry(&a, 0.5f, 0.5f, 0.5f, Role::Classifier,
+                                  1u) >= 0);
+    char err[256];
+    EXPECT_TRUE(slime::archive::archive_check_invariants(a, err, sizeof(err)));
+    a.count_classifier += 1;
+    EXPECT_TRUE(!slime::archive::archive_check_invariants(a, err, sizeof(err)));
+}
+
 // The L_role probe separates a linearly shifted role encoding.
 static void test_probe_panel_role_separable() {
     static float X[64 * BMAP_DIM];
@@ -1630,6 +1675,7 @@ int main() {
     test_operator_command_parse();
     test_archive_prune_lineage();
     test_strong_ids_distinct();
+    test_red_team_host_detectors();
     test_sot_batch_determinism();
     test_archive_file_roundtrip();
     test_audit_r2_and_multiplier();

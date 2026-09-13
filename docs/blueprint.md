@@ -962,9 +962,10 @@ M archive/soft_qd_archive.cu::archive_check_invariants
 M architecture/source_gates.py::gate_schedule_host_only
 M safety/parallel_tempering.cu::swap_host_organism
 M safety/structural.cu::sentinel_score_one
+W+ tests/host_unit_tests.cpp::test_red_team_host_detectors
 P safety
-T planned
-C unobserved
+T provisional
+C observed
 
 S-004: Parallel Tempering Ladders
 @claim S004.pt-swap-transaction invariant
