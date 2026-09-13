@@ -409,7 +409,7 @@ bool initialize_world(World* w) {
         genome::write_role(g, Role::Classifier);
 
         // Draw 32-bit seed from PCG32.
-        genome::write_seed(g, pcg32_random(&w->rng));
+        genome::write_seed(g, GenomeSeed(pcg32_random(&w->rng)));
 
         genome::init_delta_from_prior(g, &w->org_table.deltas[i]);
 

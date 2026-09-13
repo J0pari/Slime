@@ -368,7 +368,7 @@ static void test_role_lock_forces_classifier() {
     slime::genome::Genome g;
     std::memset(&g.bits, 0, sizeof(g.bits));
     slime::genome::write_role(g, Role::Classifier);
-    slime::genome::write_seed(g, 0x12345678u);
+    slime::genome::write_seed(g, slime::GenomeSeed(0x12345678u));
 
     Pcg32 rng;
     pcg32_seed(&rng, 42u, 1u);

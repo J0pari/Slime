@@ -15,6 +15,7 @@
 #define COEVO_GENOME_CODEC_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -88,17 +89,18 @@ __host__ inline int select_spawn_victims(const Role* roles,
     return n_selected;
 }
 
-__host__ inline uint32_t read_seed(const Genome& g) {
+__host__ inline GenomeSeed read_seed(const Genome& g) {
     // Bits 2..33 span words[0] (bits 2..31) and words[1] (bits 0..1).
     uint32_t lo = (g.bits[0] >> 2) & 0x3FFFFFFFu;          // 30 bits
     uint32_t hi = (g.bits[1] & 0x3u) << 30;                // 2 bits
-    return lo | hi;
+    return GenomeSeed(lo | hi);
 }
 
-__host__ inline void write_seed(Genome& g, uint32_t seed) {
+__host__ inline void write_seed(Genome& g, GenomeSeed seed) {
     // Bits 2..33: 30 low bits in words[0], 2 high bits in words[1].
-    g.bits[0] = (g.bits[0] & 0x3u) | (seed << 2);
-    g.bits[1] = (g.bits[1] & ~0x3u) | ((seed >> 30) & 0x3u);
+    uint32_t v = seed.value();
+    g.bits[0] = (g.bits[0] & 0x3u) | (v << 2);
+    g.bits[1] = (g.bits[1] & ~0x3u) | ((v >> 30) & 0x3u);
 }
 
 
@@ -227,7 +229,7 @@ __host__ inline void init_delta_from_prior(const Genome& g,
 
     // Seed a local PCG32 from the genome's weight init seed.
     Pcg32 local_rng;
-    pcg32_seed(&local_rng, static_cast<uint64_t>(read_seed(g)), 0x5A17E001u);
+    pcg32_seed(&local_rng, static_cast<uint64_t>(read_seed(g).value()), 0x5A17E001u);
 
     // Generate (index, value) pairs. Index is uniform in [0, TOTAL_WEIGHT_SLOTS).
     // Value is a small perturbation scaled by 0.01 (so initial perturbations
