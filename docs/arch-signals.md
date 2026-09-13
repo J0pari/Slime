@@ -7,6 +7,17 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 measured rejection (second of its kind). The backward
+  weight-grad kernel issues ~2,075 global atomicAdds per cell (~35 billion
+  per generation); a shared-memory accumulation with one flush per block was
+  expected to help and measured 4.7x SLOWER (backward 65.5 -> 307.1 s for 3
+  generations): 256 threads in a block serialize on the same shared
+  addresses, while global atomics are aggregated by L2. Reverted with data,
+  like the forward's shared-atomic experiment. The next attempt must remove
+  the atomic accumulation structurally (e.g. a tiled scheme where each
+  thread owns bank entries and accumulates over shared-staged per-cell
+  perc/d_pre_hidden tiles in registers), which is a deliberate kernel
+  rewrite rather than a loop change.
 - 2026-09-12: I8 profile (3 generations, RTX 3060 Laptop, --profile). Before
   the cached-segment backward: backward 85.4 s (83.6%), score+archive+PT
   13.2 s (13.0%), forward+descriptor+btraj 2.2 s (2.1%), SOT 1.1 s, total
