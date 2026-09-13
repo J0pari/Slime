@@ -12,8 +12,12 @@ Mechanism presence is not contract fulfillment. C1-C3 close defects in
 implemented items; no inventory item after I4 starts until they are closed
 or explicitly deferred with a recorded decision.
 
-- [ ] C1 Predictor-target contract: classifier-only targets, real lineage
-  ids, SOT status, K-target aggregation, and a typed transaction witness.
+- [x] C1a Predictor-target identity: classifier-only targets, real lineage
+  ids, target SOT status, descriptor rows, and a typed contract witness.
+- [ ] C1b Predictor K-target aggregation: decide and implement how a
+  predictor's score aggregates over K=8 targets (true per-generation K
+  forwards, generation-rotated temporal aggregation, or population-level
+  aggregation); see arch-signals.
 - [ ] C2 Surprise population identity: compute surprise and the predictor
   ensemble from the evaluated pre-spawn snapshot.
 - [ ] C3 Role-gradient PT identity: forced cross-role swap witness.

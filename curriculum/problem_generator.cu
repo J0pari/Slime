@@ -296,6 +296,8 @@ inline void assemble_predictor_batch(PredictorBatch* out,
                                      const float* bmap32_rows,   // [POOL_SIZE][BMAP_DIM]
                                      const float* bmap64_rows,   // [POOL_SIZE][BMAP_DIM]
                                      const float* task_embedding,
+                                     const Role* pool_roles,     // [POOL_SIZE]
+                                     const bool* pool_was_sot,   // [POOL_SIZE]
                                      Pcg32* rng) {
     std::memset(out, 0, sizeof(*out));
 
@@ -316,10 +318,12 @@ inline void assemble_predictor_batch(PredictorBatch* out,
     }
 
     // Pool slots weighted by the error EMA (roulette selection with a small
-    // floor so every organism stays reachable).
+    // floor so every organism stays reachable). Only classifier organisms
+    // are eligible targets: a predictor models classifier behavior.
     for (; slot < PREDICTOR_BATCH; ++slot) {
         float total = 0.f;
         for (int i = 0; i < POOL_SIZE; ++i) {
+            if (canonical_role(pool_roles[i]) != Role::Classifier) continue;
             total += error_ema[i] + PREDICTOR_CURRICULUM_ERROR_FLOOR;
         }
         int chosen = -1;
@@ -327,18 +331,29 @@ inline void assemble_predictor_batch(PredictorBatch* out,
             float r = pcg32_float(rng) * total;
             float acc = 0.f;
             for (int i = 0; i < POOL_SIZE; ++i) {
+                if (canonical_role(pool_roles[i]) != Role::Classifier) continue;
                 acc += error_ema[i] + PREDICTOR_CURRICULUM_ERROR_FLOOR;
                 if (r <= acc) { chosen = i; break; }
             }
         }
-        if (chosen < 0) chosen = static_cast<int>(pcg32_random(rng) % POOL_SIZE);
+        if (chosen < 0) {
+            int count = 0;
+            for (int i = 0; i < POOL_SIZE; ++i) {
+                if (canonical_role(pool_roles[i]) != Role::Classifier) continue;
+                count++;
+                if (pcg32_random(rng) % static_cast<uint32_t>(count) == 0u) {
+                    chosen = i;
+                }
+            }
+        }
+        if (chosen < 0) continue;  // no classifier targets available
         out->target_pool_slot[slot] = chosen;
         out->target_lineage_id[slot] = pool_lineage_ids[chosen];
         std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
                     &bmap32_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));
         std::memcpy(&out->target_bmap_64[slot * BMAP_DIM],
                     &bmap64_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));
-        out->target_was_sot[slot] = false;
+        out->target_was_sot[slot] = pool_was_sot[chosen];
     }
 
     for (int d = 0; d < TASK_EMBED_DIM; ++d) {

@@ -906,6 +906,7 @@ bool step_generation(World* w) {
         static float bmap32_rows[POOL_SIZE * BMAP_DIM];
         static float bmap64_rows[POOL_SIZE * BMAP_DIM];
         static uint32_t pool_ids[POOL_SIZE];
+        static bool pool_was_sot[POOL_SIZE];
         for (int i = 0; i < POOL_SIZE; ++i) {
             std::memcpy(&bmap32_rows[i * BMAP_DIM],
                         &w->intent_registry.btraj[i][1 * BMAP_DIM],
@@ -913,12 +914,15 @@ bool step_generation(World* w) {
             std::memcpy(&bmap64_rows[i * BMAP_DIM],
                         &w->intent_registry.btraj[i][3 * BMAP_DIM],
                         BMAP_DIM * sizeof(float));
-            pool_ids[i] = static_cast<uint32_t>(i);
+            pool_ids[i] = w->org_table.lineage_id[i];
+            int sample = w->org_table.batch_sample_idx[i];
+            pool_was_sot[i] = w->classifier_batch.is_sot[sample];
         }
         cur::assemble_predictor_batch(&w->predictor_batch, w->probe_set,
                                       pool_ids, w->predictor_error_ema,
                                       bmap32_rows, bmap64_rows,
                                       w->classifier_batch.task_embedding,
+                                      w->org_table.role, pool_was_sot,
                                       &w->rng);
     }
 

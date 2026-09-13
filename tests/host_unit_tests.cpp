@@ -1242,6 +1242,58 @@ static void test_stress_failure_flagging() {
     EXPECT_TRUE(ladder.flagged_lineage_count == 1);
 }
 
+// ---- C1: predictor-target contract -----------------------------------------
+// Targets are classifier-only; lineage ids are real lineage ids (not pool
+// indices); the target's SOT status and both descriptor rows travel with the
+// target.
+static void test_predictor_batch_contract() {
+    static slime::curriculum::ProbeSet probes;
+    std::memset(&probes, 0, sizeof(probes));
+    probes.predictor_probes_signed = false;
+
+    const int N = POOL_SIZE;
+    static uint32_t lineage_ids[N];
+    static Role roles[N];
+    static float error_ema[N];
+    static float b32[N * BMAP_DIM];
+    static float b64[N * BMAP_DIM];
+    static bool was_sot[N];
+    for (int i = 0; i < N; ++i) {
+        lineage_ids[i] = static_cast<uint32_t>(100 + i);
+        roles[i] = (i % 3 == 0) ? Role::Predictor : Role::Classifier;
+        error_ema[i] = 1.f;
+        was_sot[i] = (i % 5 == 0);
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            b32[i * BMAP_DIM + d] = static_cast<float>(i * 100 + d);
+            b64[i * BMAP_DIM + d] = static_cast<float>(i * 1000 + d);
+        }
+    }
+    float task[TASK_EMBED_DIM];
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) task[d] = 0.25f * d;
+
+    Pcg32 rng;
+    pcg32_seed(&rng, 0xC1C1ULL, 3u);
+    slime::curriculum::PredictorBatch batch;
+    slime::curriculum::assemble_predictor_batch(
+        &batch, probes, lineage_ids, error_ema, b32, b64, task, roles,
+        was_sot, &rng);
+
+    for (int slot = 0; slot < slime::curriculum::PREDICTOR_BATCH; ++slot) {
+        int org = batch.target_pool_slot[slot];
+        EXPECT_TRUE(org >= 0 && org < N);
+        EXPECT_TRUE(canonical_role(roles[org]) == Role::Classifier);
+        EXPECT_TRUE(batch.target_lineage_id[slot] == lineage_ids[org]);
+        EXPECT_TRUE(batch.target_was_sot[slot] == was_sot[org]);
+        EXPECT_TRUE(batch.target_bmap_32[slot * BMAP_DIM] ==
+                    b32[org * BMAP_DIM]);
+        EXPECT_TRUE(batch.target_bmap_64[slot * BMAP_DIM + BMAP_DIM - 1] ==
+                    b64[org * BMAP_DIM + BMAP_DIM - 1]);
+    }
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) {
+        EXPECT_TRUE(batch.task_embedding[d] == task[d]);
+    }
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1286,6 +1338,7 @@ int main() {
     test_sentinel_score_and_prune_labels();
     test_stress_refresh_role_balance();
     test_stress_failure_flagging();
+    test_predictor_batch_contract();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
