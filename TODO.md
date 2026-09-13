@@ -113,6 +113,9 @@ I9
   production path runs on hardware); the claim stays provisional until
   F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
+  -- RUN IN FLIGHT: scheduler job 233fc0ed8322d3ee (slime-5000gen,
+  50-generation chunks, ~10 h); on completion check the harness exit and
+  record the manifest after I9 flips implemented
   byte-equivalence, no spontaneous class A-F conditions): the chunked
   harness exists (`make stability-run`, `tests/long_run_check.py`,
   default 20 generations in 5-generation chunks) and fails on any
