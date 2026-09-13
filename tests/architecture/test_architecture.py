@@ -200,9 +200,12 @@ class GateTests(unittest.TestCase):
                    "WorldPredict": "fg_world_predict",
                    "WorldTrain": "fg_world_train", "StressEval": "fg_stress"}
         for n in names:
-            surface = stress if n == "StressEval" else host
-            self.assertIn(f"phase_run(&w->{members[n]}", surface,
-                          f"{n} phase graph is declared but never run")
+            if n == "StressEval":
+                self.assertIn("&w->fg_stress", host,
+                              "StressEval phase graph is declared but never run")
+            else:
+                self.assertIn(f"phase_run(&w->{members[n]}", host,
+                              f"{n} phase graph is declared but never run")
         order = [host.index(f"phase_run(&w->{members[n]}")
                  for n in ("Forward", "Backward", "Optimizer", "WorldTrain")]
         self.assertEqual(order, sorted(order),
