@@ -66,10 +66,10 @@ I6
 
 I7
 - [x] Capture/replay of the capturable phases per cuda_engineering §11
-  (Forward, Backward, Optimizer, WorldPredict, WorldTrain) with a debug
-  mode and an equivalence witness.
-- [ ] StressEval capture: restructure the per-reference host readbacks out
-  of the device sequence (capture boundary rule).
+  (Forward, Backward, Optimizer, WorldPredict, WorldTrain, StressEval) with
+  a debug mode and an equivalence witness.
+- [x] StressEval captured after restructuring the readbacks into stable host
+  staging; the SOT reference stays host-interleaved by design.
 
 I8
 - [ ] Profile first (per-phase timing, then Nsight where available); the

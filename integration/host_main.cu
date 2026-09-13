@@ -654,7 +654,8 @@ static bool stress_cycle(World* w, int gen) {
                 w->stress_batch, w->d_stress_batch_image, w->host_sot_key,
                 p, w->h_stress_f_sot, w->d_sot_temp_images, w->d_sot_task_emb,
                 w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
-                w->d_sot_ref_organisms, TOTAL_WEIGHTS, w->stream)) {
+                w->d_sot_ref_organisms, &w->fg_stress_cls[p],
+                TOTAL_WEIGHTS, w->stream)) {
             return false;
         }
     }
@@ -695,7 +696,8 @@ static bool stress_cycle(World* w, int gen) {
                 w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
                 inv, p, w->h_stress_f_sot, w->d_sot_task_emb,
                 w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
-                w->d_sot_ref_organisms, TOTAL_WEIGHTS, w->stream)) {
+                w->d_sot_ref_organisms, &w->fg_stress_pred[p],
+                TOTAL_WEIGHTS, w->stream)) {
             return false;
         }
     }

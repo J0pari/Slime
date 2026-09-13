@@ -223,6 +223,8 @@ struct World {
     PhaseGraph fg_optimizer;
     PhaseGraph fg_world_predict;
     PhaseGraph fg_world_train;
+    PhaseGraph fg_stress_cls[STRESS_SUBPOP_COUNT];
+    PhaseGraph fg_stress_pred[STRESS_SUBPOP_COUNT];
     int* d_ref_step;   // device step for the reference train kernel (graph-stable)
 
     cudaStream_t      stream;

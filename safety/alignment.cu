@@ -289,6 +289,17 @@ inline bool apply_sot_identity(nca::OrganismState* d_organisms,
     return true;
 }
 
+// Checked copy for phase-graph sequences: a failure here invalidates the
+// capture and surfaces at cudaStreamEndCapture, which reports it loudly.
+inline void checked_copy_async(void* dst, const void* src, size_t n,
+                               cudaMemcpyKind kind, cudaStream_t stream) {
+    cudaError_t e = cudaMemcpyAsync(dst, src, n, kind, stream);
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA phase copy failed: %s\n",
+                    cudaGetErrorString(e));
+    }
+}
+
 // ---- Stress-ladder evaluation (S-003) -------------------------------------
 // Evaluates the stress slots of one sub-population with per-organism
 // effective weights. Classifier slots compare the response to an elevated
@@ -311,6 +322,7 @@ inline bool evaluate_stress_classifiers(
     float* d_sot_descriptors,
     int* d_sot_bank_of,
     nca::OrganismState* d_sot_ref_organisms,
+    integration::PhaseGraph* fg,
     int weight_stride,
     cudaStream_t stream) {
     namespace cur = slime::curriculum;
@@ -326,98 +338,95 @@ inline bool evaluate_stress_classifiers(
     }
     if (n_sot_images == 0) return true;
 
-    __half unpermuted_images[cur::SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3];
+    // Stable host staging: the captured graph bakes addresses, so every copy
+    // source and destination must outlive the call.
+    static __half s_unpermuted[cur::SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3];
+    static __half s_task[TASK_EMBED_DIM];
+    static nca::ForwardInputs s_ref_inputs[STRESS_SUBPOP_SIZE / 2];
+    static nca::ForwardInputs s_stress_inputs[STRESS_SUBPOP_SIZE / 2];
+    static int s_bank_of[STRESS_SUBPOP_SIZE / 2];
+    static float s_ref_desc[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
+    static float s_stress_desc[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
+
     __half scratch_buf[GRID_SIZE * GRID_SIZE * 3];
     for (int i = 0; i < n_sot_images; ++i) {
         int s = sot_sample_indices[i];
-        const __half* src = &batch.image[s * GRID_SIZE * GRID_SIZE * 3];
-        __half* dst = &unpermuted_images[i * GRID_SIZE * GRID_SIZE * 3];
-        std::memcpy(dst, src, sizeof(__half) * GRID_SIZE * GRID_SIZE * 3);
+        __half* dst = &s_unpermuted[i * GRID_SIZE * GRID_SIZE * 3];
+        std::memcpy(dst, &batch.image[s * GRID_SIZE * GRID_SIZE * 3],
+                    sizeof(__half) * GRID_SIZE * GRID_SIZE * 3);
         cur::apply_sot_permutation(dst, host_sot_key, true, scratch_buf);
     }
-    cudaError_t _ce = cudaMemcpyAsync(d_sot_temp_images, unpermuted_images,
-                    n_sot_images * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half),
-                    cudaMemcpyHostToDevice, stream);
-    if (_ce == cudaSuccess) {
-        _ce = cudaMemcpyAsync(d_sot_task_emb, batch.task_embedding,
-                        TASK_EMBED_DIM * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
-    }
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress reference copy failed: %s\n",
-                    cudaGetErrorString(_ce));
-        return false;
-    }
-
-    // Reference rollout per stress slot on the un-marked image.
-    nca::ForwardInputs ref_inputs[STRESS_SUBPOP_SIZE / 2];
+    for (int d = 0; d < TASK_EMBED_DIM; ++d) s_task[d] = batch.task_embedding[d];
     for (int k = 0; k < n_slots; ++k) {
         int img = k % n_sot_images;
-        ref_inputs[k].role = Role::Classifier;
-        ref_inputs[k].task_embedding = d_sot_task_emb;
-        ref_inputs[k].image_rgb =
+        s_ref_inputs[k].role = Role::Classifier;
+        s_ref_inputs[k].task_embedding = d_sot_task_emb;
+        s_ref_inputs[k].image_rgb =
             d_sot_temp_images + img * GRID_SIZE * GRID_SIZE * 3;
-        ref_inputs[k].target_bmap_32 = nullptr;
-        d_sot_bank_of[k] = slot_lo + k;
-    }
-    _ce = cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
-                    n_slots * sizeof(nca::ForwardInputs),
-                    cudaMemcpyHostToDevice, stream);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress ref input copy failed: %s\n",
-                    cudaGetErrorString(_ce));
-        return false;
-    }
-    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs,
-                                  d_stress_coeffs,
-                                  d_stress_eff_weights, d_sot_bank_of,
-                                  weight_stride, RESIDUAL_ALPHA, n_slots, stream);
-    nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
-                            n_slots, stream);
-    float h_ref[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
-    _ce = cudaMemcpy(h_ref, d_sot_descriptors,
-                    n_slots * BMAP_DIM * sizeof(float),
-                    cudaMemcpyDeviceToHost);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress ref readback failed: %s\n",
-                    cudaGetErrorString(_ce));
-        return false;
+        s_ref_inputs[k].target_bmap_32 = nullptr;
+        s_stress_inputs[k].role = Role::Classifier;
+        s_stress_inputs[k].task_embedding = d_sot_task_emb;
+        s_stress_inputs[k].image_rgb =
+            d_stress_batch_image
+                + sot_sample_indices[img] * GRID_SIZE * GRID_SIZE * 3;
+        s_stress_inputs[k].target_bmap_32 = nullptr;
+        s_bank_of[k] = slot_lo + k;
     }
 
-    // Stress rollout on the marked image, same effective banks.
-    for (int k = 0; k < n_slots; ++k) {
-        int img = k % n_sot_images;
-        ref_inputs[k].image_rgb =
-            d_stress_batch_image + sot_sample_indices[img]
-                * GRID_SIZE * GRID_SIZE * 3;
-    }
-    _ce = cudaMemcpyAsync(d_sot_fwd_inputs, ref_inputs,
-                    n_slots * sizeof(nca::ForwardInputs),
-                    cudaMemcpyHostToDevice, stream);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress input copy failed: %s\n",
-                    cudaGetErrorString(_ce));
+    // One capturable device sequence (I7): uploads, the per-organism
+    // reference and stress rollouts, and both descriptor readbacks into
+    // stable host buffers, ordered so the reference readback completes
+    // before the stress extract overwrites the descriptor buffer.
+    if (!integration::phase_run(fg, stream, [&] {
+            checked_copy_async(d_sot_temp_images, s_unpermuted,
+                            n_sot_images * GRID_SIZE * GRID_SIZE * 3
+                                * sizeof(__half),
+                            cudaMemcpyHostToDevice, stream);
+            checked_copy_async(d_sot_task_emb, s_task,
+                            TASK_EMBED_DIM * sizeof(float),
+                            cudaMemcpyHostToDevice, stream);
+            checked_copy_async(d_sot_bank_of, s_bank_of,
+                            n_slots * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
+            checked_copy_async(d_sot_fwd_inputs, s_ref_inputs,
+                            n_slots * sizeof(nca::ForwardInputs),
+                            cudaMemcpyHostToDevice, stream);
+            nca::launch_forward_effective(d_sot_ref_organisms,
+                                          d_sot_fwd_inputs, d_stress_coeffs,
+                                          d_stress_eff_weights, d_sot_bank_of,
+                                          weight_stride, RESIDUAL_ALPHA,
+                                          n_slots, stream);
+            nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
+                                    n_slots, stream);
+            checked_copy_async(s_ref_desc, d_sot_descriptors,
+                            n_slots * BMAP_DIM * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream);
+            checked_copy_async(d_sot_fwd_inputs, s_stress_inputs,
+                            n_slots * sizeof(nca::ForwardInputs),
+                            cudaMemcpyHostToDevice, stream);
+            nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
+                                          d_sot_fwd_inputs, d_stress_coeffs,
+                                          d_stress_eff_weights, d_sot_bank_of,
+                                          weight_stride, RESIDUAL_ALPHA,
+                                          n_slots, stream);
+            nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,
+                                    d_sot_descriptors, n_slots, stream);
+            checked_copy_async(s_stress_desc, d_sot_descriptors,
+                            n_slots * BMAP_DIM * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream);
+        })) {
         return false;
     }
-    nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
-                                  d_sot_fwd_inputs, d_stress_coeffs,
-                                  d_stress_eff_weights, d_sot_bank_of,
-                                  weight_stride, RESIDUAL_ALPHA, n_slots, stream);
-    nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,
-                            d_sot_descriptors, n_slots, stream);
-    float h_stress[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
-    _ce = cudaMemcpy(h_stress, d_sot_descriptors,
-                    n_slots * BMAP_DIM * sizeof(float),
-                    cudaMemcpyDeviceToHost);
+    cudaError_t _ce = cudaStreamSynchronize(stream);
     if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress readback failed: %s\n",
+        std::printf("[FATAL] CUDA stress sync failed: %s\n",
                     cudaGetErrorString(_ce));
         return false;
     }
 
     for (int k = 0; k < n_slots; ++k) {
         f_sot_out[slot_lo + k] = cosine_similarity(
-            &h_stress[k * BMAP_DIM], &h_ref[k * BMAP_DIM]);
+            &s_stress_desc[k * BMAP_DIM], &s_ref_desc[k * BMAP_DIM]);
     }
     return true;
 }
@@ -440,80 +449,82 @@ inline bool evaluate_stress_predictors(
     float* d_sot_descriptors,
     int* d_sot_bank_of,
     nca::OrganismState* d_sot_ref_organisms,
+    integration::PhaseGraph* fg,
     int weight_stride,
     cudaStream_t stream) {
     const int slot_lo = subpop * STRESS_SUBPOP_SIZE + STRESS_SUBPOP_SIZE / 2;
     const int n_slots = STRESS_SUBPOP_SIZE / 2;  // predictor half
 
-    nca::ForwardInputs inputs[STRESS_SUBPOP_SIZE / 2];
-    for (int k = 0; k < n_slots; ++k) {
-        inputs[k].role = Role::Predictor;
-        inputs[k].task_embedding = d_sot_task_emb;
-        inputs[k].image_rgb = nullptr;
-        inputs[k].target_bmap_32 =
-            d_stress_target_nominal + (slot_lo + k) * BMAP_DIM;
-        d_sot_bank_of[k] = slot_lo + k;
-    }
-    cudaError_t _ce = cudaMemcpyAsync(d_sot_fwd_inputs, inputs,
-                    n_slots * sizeof(nca::ForwardInputs),
-                    cudaMemcpyHostToDevice, stream);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress predictor ref copy failed: %s\n",
-                    cudaGetErrorString(_ce));
-        return false;
-    }
-    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs,
-                                  d_stress_coeffs,
-                                  d_stress_eff_weights, d_sot_bank_of,
-                                  weight_stride, RESIDUAL_ALPHA, n_slots, stream);
-    nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
-                            n_slots, stream);
-    float h_ref[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
-    _ce = cudaMemcpy(h_ref, d_sot_descriptors,
-                    n_slots * BMAP_DIM * sizeof(float),
-                    cudaMemcpyDeviceToHost);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress predictor ref readback failed: %s\n",
-                    cudaGetErrorString(_ce));
-        return false;
-    }
+    // Stable host staging (see the classifier path): the captured graph
+    // bakes addresses.
+    static nca::ForwardInputs s_nominal[STRESS_SUBPOP_SIZE / 2];
+    static nca::ForwardInputs s_permuted[STRESS_SUBPOP_SIZE / 2];
+    static int s_bank_of[STRESS_SUBPOP_SIZE / 2];
+    static float s_ref_desc[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
+    static float s_perm_desc[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
 
     for (int k = 0; k < n_slots; ++k) {
-        inputs[k].target_bmap_32 =
+        s_nominal[k].role = Role::Predictor;
+        s_nominal[k].task_embedding = d_sot_task_emb;
+        s_nominal[k].image_rgb = nullptr;
+        s_nominal[k].target_bmap_32 =
+            d_stress_target_nominal + (slot_lo + k) * BMAP_DIM;
+        s_permuted[k].role = Role::Predictor;
+        s_permuted[k].task_embedding = d_sot_task_emb;
+        s_permuted[k].image_rgb = nullptr;
+        s_permuted[k].target_bmap_32 =
             d_stress_target_permuted + (slot_lo + k) * BMAP_DIM;
+        s_bank_of[k] = slot_lo + k;
     }
-    _ce = cudaMemcpyAsync(d_sot_fwd_inputs, inputs,
-                    n_slots * sizeof(nca::ForwardInputs),
-                    cudaMemcpyHostToDevice, stream);
-    if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress predictor input copy failed: %s\n",
-                    cudaGetErrorString(_ce));
+
+    if (!integration::phase_run(fg, stream, [&] {
+            checked_copy_async(d_sot_bank_of, s_bank_of,
+                            n_slots * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
+            checked_copy_async(d_sot_fwd_inputs, s_nominal,
+                            n_slots * sizeof(nca::ForwardInputs),
+                            cudaMemcpyHostToDevice, stream);
+            nca::launch_forward_effective(d_sot_ref_organisms,
+                                          d_sot_fwd_inputs, d_stress_coeffs,
+                                          d_stress_eff_weights, d_sot_bank_of,
+                                          weight_stride, RESIDUAL_ALPHA,
+                                          n_slots, stream);
+            nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
+                                    n_slots, stream);
+            checked_copy_async(s_ref_desc, d_sot_descriptors,
+                            n_slots * BMAP_DIM * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream);
+            checked_copy_async(d_sot_fwd_inputs, s_permuted,
+                            n_slots * sizeof(nca::ForwardInputs),
+                            cudaMemcpyHostToDevice, stream);
+            nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
+                                          d_sot_fwd_inputs, d_stress_coeffs,
+                                          d_stress_eff_weights, d_sot_bank_of,
+                                          weight_stride, RESIDUAL_ALPHA,
+                                          n_slots, stream);
+            nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,
+                                    d_sot_descriptors, n_slots, stream);
+            checked_copy_async(s_perm_desc, d_sot_descriptors,
+                            n_slots * BMAP_DIM * sizeof(float),
+                            cudaMemcpyDeviceToHost, stream);
+        })) {
         return false;
     }
-    nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
-                                  d_sot_fwd_inputs, d_stress_coeffs,
-                                  d_stress_eff_weights, d_sot_bank_of,
-                                  weight_stride, RESIDUAL_ALPHA, n_slots, stream);
-    nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,
-                            d_sot_descriptors, n_slots, stream);
-    float h_perm[STRESS_SUBPOP_SIZE / 2 * BMAP_DIM];
-    _ce = cudaMemcpy(h_perm, d_sot_descriptors,
-                    n_slots * BMAP_DIM * sizeof(float),
-                    cudaMemcpyDeviceToHost);
+    cudaError_t _ce = cudaStreamSynchronize(stream);
     if (_ce != cudaSuccess) {
-        std::printf("[FATAL] CUDA stress predictor readback failed: %s\n",
+        std::printf("[FATAL] CUDA stress predictor sync failed: %s\n",
                     cudaGetErrorString(_ce));
         return false;
     }
 
     float unpermuted[BMAP_DIM];
     for (int k = 0; k < n_slots; ++k) {
-        const float* permuted = &h_perm[k * BMAP_DIM];
+        const float* permuted = &s_perm_desc[k * BMAP_DIM];
         for (int d = 0; d < BMAP_DIM; ++d) {
             unpermuted[h_perm_inv[d]] = permuted[d];
         }
         f_sot_out[slot_lo + k] = cosine_similarity(
-            unpermuted, &h_ref[k * BMAP_DIM]);
+            unpermuted, &s_ref_desc[k * BMAP_DIM]);
     }
     return true;
 }

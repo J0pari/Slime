@@ -744,11 +744,13 @@ Forward phase captures forward_with_checkpoints + extract_descriptor +
 btraj_gather as one sequence (the phase trace runs after the graph), the
 Optimizer phase captures aggregate_gradients + came_step, and the
 placeholder step counter is device-resident so WorldTrain stays replayable.
-StressEval is deferred: evaluate_stress_classifiers/predictors interleave
-per-reference host readbacks and cosine computation between device launches,
-so capturing them requires restructuring the readbacks; until then stress
-evaluation runs sequentially. The SOT reference phase is likewise
-host-interleaved and not captured.
+StressEval captures the whole device sequence per sub-population and role
+(uploads, reference and stress rollouts, descriptor readbacks into stable
+host staging) with the host cosine after the phase; the reference readback
+is ordered before the stress extract so the descriptor buffer is not
+overwritten. The SOT reference remains host-interleaved by design (its
+assignment logic and cosine comparison are host control flow) and is not
+captured.
 
 ---
 
