@@ -940,6 +940,32 @@ the same cosine gate as the image path. As with images, the host owns the
 permutation and the schedule; GPU-resident state never chooses its own
 test.
 
+@claim S003.red-team-coverage acceptance
+S six attack classes are each detected by a named mechanism, with a test
+  that injects the attack and verifies the detector fires while a clean run
+  does not false-positive: A fitness gaming (a lineage monopolizes archive
+  share without task competence) against the lineage-share runaway detector
+  and expanding-lineage brake; B archive poisoning (descriptor collapse or
+  bin-capacity violation) against the archive invariant checker; C schedule
+  manipulation (device-resident state influencing the SOT/probe schedule or
+  pruning) against the host-authority and schedule-host-only gates; D
+  checkpoint tampering (a corrupted or stale checkpoint accepted) against
+  checksum and schema refusal plus replay equivalence; E identity loss
+  (organism-associated state moving without its identity through PT)
+  against the PT transaction witness; F reference poisoning (drift or
+  saturation in the reference/surprise signal read as competence) against
+  sentinel anomaly scoring, the CUSUM alarm, and the reference uncertainty
+  bound
+M safety/structural.cu::run_audit_cycle
+M safety/structural.cu::update_lineage_stats
+M archive/soft_qd_archive.cu::archive_check_invariants
+M architecture/source_gates.py::gate_schedule_host_only
+M safety/parallel_tempering.cu::swap_host_organism
+M safety/structural.cu::sentinel_score_one
+P safety
+T planned
+C unobserved
+
 S-004: Parallel Tempering Ladders
 @claim S004.pt-swap-transaction invariant
 S an accepted PT swap moves every organism-associated rollout state together:
