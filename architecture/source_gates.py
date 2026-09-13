@@ -394,6 +394,7 @@ _CMP_LITERAL_RE = re.compile(
     r"(?:==|!=|<=|>=|<|>)\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
 _MOD_LITERAL_RE = re.compile(
     r"%\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
+_DEFAULT_LABEL_RE = re.compile(r"^\s*default\s*:")
 _TERNARY_ELSE_RE = re.compile(
     r"\?\s*[^;:]*:\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?f?)")
 _TERNARY_THEN_RE = re.compile(
@@ -559,6 +560,35 @@ def gate_numeric_policy(files: dict[str, list[str]], report: GateReport) -> None
                 break
 
 
+# ---- Gate: no silent switch defaults ---------------------------------------
+# A `default:` arm turns a new enumerator into a silently-ignored value
+# instead of the compiler's missing-case diagnostic; an unreachable arm keeps
+# exhaustiveness live while still compiling. Every default label must lead
+# with an abort/unreachable marker.
+UNREACHABLE_MARKERS = (
+    "__builtin_unreachable",
+    "std::abort",
+    "SLIME_UNREACHABLE",
+    "abort(",
+)
+
+
+def gate_enum_no_silent_default(files: dict[str, list[str]],
+                                report: GateReport) -> None:
+    for path, lines in files.items():
+        if not path.endswith((".cu", ".cuh", ".cpp", ".h")):
+            continue
+        for i, line in enumerate(lines):
+            if not _DEFAULT_LABEL_RE.match(line):
+                continue
+            tail = " ".join(" ".join(lines[i + 1:i + 4]).split())
+            if any(marker in tail for marker in UNREACHABLE_MARKERS):
+                continue
+            report.findings.append(Finding(
+                "enum_no_silent_default", path, i + 1,
+                "switch default silently handles a value"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -572,6 +602,7 @@ ALL_GATES = [
     gate_surprise_before_spawn,
     gate_schedule_host_only,
     gate_numeric_policy,
+    gate_enum_no_silent_default,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

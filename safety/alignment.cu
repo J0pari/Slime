@@ -497,7 +497,6 @@ inline bool apply_operator_command(float* organism_fitness,
                 processed = true;
                 break;
             case OperatorCommand::None:
-            default:
                 break;
         }
     }

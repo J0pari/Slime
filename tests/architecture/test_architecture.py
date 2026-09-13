@@ -177,6 +177,25 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_enum_no_silent_default_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_enum_no_silent_default(
+            files_from({"safety/alignment.cu":
+                        "switch (cmd) {\n"
+                        "case OperatorCommand::None:\n"
+                        "default:\n"
+                        "    break;\n"
+                        "}"}), report)
+        self.assertFalse(report.ok, "silent switch default was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_enum_no_silent_default(
+            files_from({"safety/alignment.cu":
+                        "switch (cmd) {\n"
+                        "default:\n"
+                        "    std::abort();\n"
+                        "}"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_schedule_host_only_catches_plant(self):
         # [claim:A101.sot-schedule-independent]
         report = source_gates.GateReport()
