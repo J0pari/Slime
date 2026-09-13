@@ -11,11 +11,6 @@ not a history.
 No GPU integration, acceptance, or production run happens before this list
 is empty; `evidence.py record` refuses GPU manifests until then.
 
-I3
-- [ ] GPU placeholder forward/train kernels per cuda_engineering 4.5/4.6.
-- [ ] Bound the uncertainty parameterization before surprise is treated as
-  a robust signal.
-
 I4
 - [ ] Variance floor multiplier per organism.
 - [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
@@ -56,6 +51,11 @@ I9
   Regenerate the status until no claim reads `pass/stale`.
 - [ ] End-to-end predictor witnesses: bootstrap -> predictor evaluation ->
   predictor archive -> predictor parent -> predictor offspring.
+- [ ] Placeholder witness: device forward/train match a hand-computed
+  reference; probe surprise nonzero and varying; MSE decreases over
+  generations.
+- [ ] Bound the placeholder's uncertainty output before surprise is treated
+  as a robust signal (`A601.trust-weight-composition`).
 
 ## P2 — INTEGRATE (after VERIFY)
 

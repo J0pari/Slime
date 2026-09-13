@@ -136,6 +136,21 @@ struct World {
     curriculum::ProbeSet probe_set;
     float probe_fitness[PROBE_BATCH];  // ground-truth fitness for probe evaluation
 
+    // Device placeholder state (cuda_engineering 4.5-4.6). Parameters and
+    // AdamW state live on the device; the host mirror above is used at
+    // initialization and around checkpoint I/O. The replay buffer stays
+    // host-only and its sampled minibatch is uploaded per training step.
+    predictor::PlaceholderRegressor* d_placeholder_reg;
+    float* d_ph_batch_input;    // [PH_TRAIN_MINIBATCH * PH_INPUT]
+    float* d_ph_batch_target;   // [PH_TRAIN_MINIBATCH]
+    float* d_ph_probe_input;    // [PROBE_BATCH * PH_INPUT]
+    float* d_ph_probe_target;   // [PROBE_BATCH]
+    float* d_ph_surprise;       // [PROBE_BATCH]
+    float* h_ph_surprise;       // pinned host mirror
+    float  h_ph_batch_input[PH_TRAIN_MINIBATCH * predictor::PH_INPUT];
+    float  h_ph_batch_target[PH_TRAIN_MINIBATCH];
+    float  h_ph_probe_input[PROBE_BATCH * predictor::PH_INPUT];
+
     // Predictor role (A-601/A-701): task batch, device mirror of the target
     // bmap_32 rows, and the per-organism ensemble prediction error EMA used
     // to weight the predictor curriculum.

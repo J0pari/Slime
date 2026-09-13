@@ -9,7 +9,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | :--- | :------ | :----------- |
 | I1 | Checkpoint and resume (S-001, cuda_engineering §14) | implemented |
 | I2 | Predictor role activation (A-601, A-701) | implemented |
-| I3 | Probe and placeholder completion (A-601, cuda_engineering §4.5–4.6) | partial |
+| I3 | Probe and placeholder completion (A-601, cuda_engineering §4.5–4.6) | implemented |
 | I4 | Structural pressures (S-003) | partial |
 | I5 | Global context channel (A-203, cuda_engineering §16) | missing |
 | I6 | Reaction-diffusion activation (A-202, A-103) | missing |
@@ -17,7 +17,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | I8 | Performance completion (cuda_engineering, acceptance) | missing |
 | I9 | Long-run hardening (S-001, Q-001) | missing |
 
-BUILD phase incomplete: 7 of 9 inventory items are not implemented (I3, I4, I5, I6, I7, I8, I9). No GPU integration, acceptance, or production run is permitted, and `evidence.py record` refuses GPU manifests.
+BUILD phase incomplete: 6 of 9 inventory items are not implemented (I4, I5, I6, I7, I8, I9). No GPU integration, acceptance, or production run is permitted, and `evidence.py record` refuses GPU manifests.
 
 ## Claims
 

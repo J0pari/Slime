@@ -62,13 +62,14 @@ struct PlaceholderReplayBuffer {
     int   filled;     // entries actually populated
 };
 
-// GELU approximation (Hendrycks-Gimpel) for host-side placeholder MLP.
-__host__ inline float ph_gelu(float x) {
+// GELU approximation (Hendrycks-Gimpel), shared by the placeholder kernels
+// and the host-side code paths.
+__host__ __device__ inline float ph_gelu(float x) {
     const float k = GELU_K;
     return 0.5f * x * (1.f + tanhf(k * (x + 0.044715f * x * x * x)));
 }
 
-__host__ inline float ph_gelu_derivative(float x) {
+__host__ __device__ inline float ph_gelu_derivative(float x) {
     const float k = GELU_K;
     float x3 = x * x * x;
     float inner = k * (x + 0.044715f * x3);
@@ -113,64 +114,6 @@ __host__ inline void init_placeholder_regressor(PlaceholderRegressor* r,
     r->step = 0;
 }
 
-// Host-side placeholder forward pass. Produces (fitness_hat, log_uncertainty).
-// Per A-601: input = concat(bmap_64[32], task_emb[16]) = 48-d.
-// h1 = gelu(W1*x + b1) [128]; h2 = gelu(W2*h1 + b2) [64];
-// out = W3*h2 + b3 [2].
-__host__ inline void placeholder_forward(const PlaceholderRegressor& r,
-                                         const float* bmap,
-                                         const float* task_emb,
-                                         float* h1_out,    // [PH_H1] scratch
-                                         float* h2_out,    // [PH_H2] scratch
-                                         float* out2) {
-    // Concatenate input.
-    float input[PH_INPUT];
-    for (int i = 0; i < BMAP_DIM; ++i) input[i] = bmap[i];
-    for (int i = 0; i < TASK_EMBED_DIM; ++i) input[BMAP_DIM + i] = task_emb[i];
-
-    // Layer 1: h1 = gelu(W1 * input + b1)
-    for (int h = 0; h < PH_H1; ++h) {
-        float acc = r.b1[h];
-        for (int j = 0; j < PH_INPUT; ++j) {
-            acc += r.W1[j * PH_H1 + h] * input[j];
-        }
-        h1_out[h] = ph_gelu(acc);
-    }
-
-    // Layer 2: h2 = gelu(W2 * h1 + b2)
-    for (int h = 0; h < PH_H2; ++h) {
-        float acc = r.b2[h];
-        for (int j = 0; j < PH_H1; ++j) {
-            acc += r.W2[j * PH_H2 + h] * h1_out[j];
-        }
-        h2_out[h] = ph_gelu(acc);
-    }
-
-    // Layer 3: out = W3 * h2 + b3
-    for (int o = 0; o < PH_OUT; ++o) {
-        float acc = r.b3[o];
-        for (int j = 0; j < PH_H2; ++j) {
-            acc += r.W3[j * PH_OUT + o] * h2_out[j];
-        }
-        out2[o] = acc;
-    }
-}
-
-// Compute placeholder surprise for a single classifier organism.
-// Surprise = (fitness_actual - fitness_hat)^2, heteroscedastic weighting
-// by exp(-log_uncertainty) per A-601.
-__host__ inline float placeholder_surprise(const PlaceholderRegressor& r,
-                                           const float* bmap,
-                                           const float* task_emb,
-                                           float fitness_actual) {
-    float h1[PH_H1], h2[PH_H2], out[PH_OUT];
-    placeholder_forward(r, bmap, task_emb, h1, h2, out);
-    float mu = out[0];
-    float log_unc = out[1];
-    float diff = fitness_actual - mu;
-    return diff * diff * expf(-log_unc);
-}
-
 // Push a (bmap_64, task_emb, fitness) tuple into the replay buffer.
 __host__ inline void replay_buffer_push(PlaceholderReplayBuffer* buf,
                                         const float* bmap,
@@ -186,152 +129,226 @@ __host__ inline void replay_buffer_push(PlaceholderReplayBuffer* buf,
     if (buf->filled < PH_REPLAY_CAPACITY) buf->filled++;
 }
 
-// AdamW update for a single parameter array.
-// Per A-601: lr = 1e-4 fixed by spec.
+// ---- Device placeholder kernels (cuda_engineering 4.5-4.6) ----------------
 
-__host__ inline void adamw_update(float* param, float* grad,
-                                  float* m, float* v,
-                                  int size, int step) {
+// Single-parameter AdamW update with precomputed bias corrections.
+__device__ inline void ph_adamw_step_one(float* param, float* m, float* v,
+                                         float grad, int step) {
     float bc1 = 1.0f - powf(PH_BETA1, static_cast<float>(step));
     float bc2 = 1.0f - powf(PH_BETA2, static_cast<float>(step));
-    for (int i = 0; i < size; ++i) {
-        m[i] = PH_BETA1 * m[i] + (1.0f - PH_BETA1) * grad[i];
-        v[i] = PH_BETA2 * v[i] + (1.0f - PH_BETA2) * grad[i] * grad[i];
-        float m_hat = m[i] / bc1;
-        float v_hat = v[i] / bc2;
-        param[i] -= PH_LR * (m_hat / (sqrtf(v_hat) + PH_EPS) + PH_WD * param[i]);
+    m[0] = PH_BETA1 * m[0] + (1.0f - PH_BETA1) * grad;
+    v[0] = PH_BETA2 * v[0] + (1.0f - PH_BETA2) * grad * grad;
+    float m_hat = m[0] / bc1;
+    float v_hat = v[0] / bc2;
+    param[0] -= PH_LR * (m_hat / (sqrtf(v_hat) + PH_EPS) + PH_WD * param[0]);
+}
+
+// Grid <<<1, 256>>>. Samples are processed one at a time; threads cooperate
+// within each layer. Writes (fitness_hat, log_uncertainty) and, when target
+// and surprise are provided, the heteroscedastic surprise
+// (y - mu)^2 * exp(-log_uncertainty).
+__global__ void placeholder_forward_kernel(const PlaceholderRegressor* reg,
+                                           const float* input,  // [n][PH_INPUT]
+                                           int n,
+                                           float* out2,         // [n][PH_OUT]
+                                           const float* target, // [n]
+                                           float* surprise) {   // [n]
+    __shared__ float s_x[PH_INPUT];
+    __shared__ float s_h1[PH_H1];
+    __shared__ float s_h2[PH_H2];
+    for (int s = 0; s < n; ++s) {
+        if (threadIdx.x < PH_INPUT) {
+            s_x[threadIdx.x] = input[s * PH_INPUT + threadIdx.x];
+        }
+        __syncthreads();
+        if (threadIdx.x < PH_H1) {
+            float acc = reg->b1[threadIdx.x];
+            for (int j = 0; j < PH_INPUT; ++j) {
+                acc += reg->W1[j * PH_H1 + threadIdx.x] * s_x[j];
+            }
+            s_h1[threadIdx.x] = ph_gelu(acc);
+        }
+        __syncthreads();
+        if (threadIdx.x < PH_H2) {
+            float acc = reg->b2[threadIdx.x];
+            for (int j = 0; j < PH_H1; ++j) {
+                acc += reg->W2[j * PH_H2 + threadIdx.x] * s_h1[j];
+            }
+            s_h2[threadIdx.x] = ph_gelu(acc);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float mu = reg->b3[0];
+            float log_unc = reg->b3[1];
+            for (int j = 0; j < PH_H2; ++j) {
+                mu      += reg->W3[j * PH_OUT + 0] * s_h2[j];
+                log_unc += reg->W3[j * PH_OUT + 1] * s_h2[j];
+            }
+            if (out2 != nullptr) {
+                out2[s * PH_OUT + 0] = mu;
+                out2[s * PH_OUT + 1] = log_unc;
+            }
+            if (surprise != nullptr && target != nullptr) {
+                float diff = target[s] - mu;
+                surprise[s] = diff * diff * expf(-log_unc);
+            }
+        }
+        __syncthreads();
     }
 }
 
-// Placeholder training: one AdamW step on a single sample from the replay buffer.
-// Loss = Gaussian NLL: 0.5 * (exp(-s) * (y - mu)^2 + s)
-// where (mu, s) = placeholder_forward outputs, y = fitness.
-// Per A-601 gradient policy: isolated from organism weights.
-__host__ inline void placeholder_train_step(PlaceholderRegressor* r,
-                                            const PlaceholderReplayBuffer* buf,
-                                            Pcg32* rng) {
-    if (buf->filled < PH_TRAIN_MINIBATCH) return;
-    r->step++;
+// Grid <<<1, 256>>>. One AdamW step over PH_TRAIN_MINIBATCH samples.
+// Phase 1: one thread per sample computes forward activations and the
+// backward per-sample terms into shared memory. Phase 2: each thread owns a
+// strided slice of each parameter group and sums the per-sample terms in a
+// fixed order, so the update is deterministic (mean over the minibatch, then
+// AdamW).
+__global__ void placeholder_train_kernel(PlaceholderRegressor* reg,
+                                         const float* input,  // [MB][PH_INPUT]
+                                         const float* target, // [MB]
+                                         int step) {
+    constexpr int MB = PH_TRAIN_MINIBATCH;
+    __shared__ float s_x[MB][PH_INPUT];
+    __shared__ float s_h1[MB][PH_H1];
+    __shared__ float s_h2[MB][PH_H2];
+    __shared__ float s_pre1[MB][PH_H1];
+    __shared__ float s_pre2[MB][PH_H2];
+    __shared__ float s_dout[MB][PH_OUT];
+    __shared__ float s_dpre1[MB][PH_H1];
+    __shared__ float s_dpre2[MB][PH_H2];
 
-    // Gradient accumulators (zeroed).
-    float dW1[PH_INPUT * PH_H1] = {};
-    float db1[PH_H1] = {};
-    float dW2[PH_H1 * PH_H2] = {};
-    float db2[PH_H2] = {};
-    float dW3[PH_H2 * PH_OUT] = {};
-    float db3[PH_OUT] = {};
-
-    float total_loss = 0.f;
-
-    for (int mb = 0; mb < PH_TRAIN_MINIBATCH; ++mb) {
-        // Sample a random entry from the replay buffer. Held-out probe
-        // tuples are never trained on: resample past them (bounded retries).
-        int idx = -1;
-        for (int tries = 0; tries < 16; ++tries) {
-            int cand = static_cast<int>(pcg32_random(rng) %
-                                        static_cast<uint32_t>(buf->filled));
-            if (!buf->held_out[cand]) { idx = cand; break; }
-        }
-        if (idx < 0) continue;
-        const float* bmap = &buf->bmap[idx * BMAP_DIM];
-        const float* temb = &buf->task_emb[idx * TASK_EMBED_DIM];
-        float y = buf->fitness[idx];
-
-        // Forward pass with intermediates.
-        float input[PH_INPUT];
-        for (int i = 0; i < BMAP_DIM; ++i) input[i] = bmap[i];
-        for (int i = 0; i < TASK_EMBED_DIM; ++i) input[BMAP_DIM + i] = temb[i];
-
-        float pre_h1[PH_H1], h1[PH_H1];
-        for (int h = 0; h < PH_H1; ++h) {
-            float acc = r->b1[h];
-            for (int j = 0; j < PH_INPUT; ++j) acc += r->W1[j * PH_H1 + h] * input[j];
-            pre_h1[h] = acc;
-            h1[h] = ph_gelu(acc);
-        }
-
-        float pre_h2[PH_H2], h2[PH_H2];
-        for (int h = 0; h < PH_H2; ++h) {
-            float acc = r->b2[h];
-            for (int j = 0; j < PH_H1; ++j) acc += r->W2[j * PH_H2 + h] * h1[j];
-            pre_h2[h] = acc;
-            h2[h] = ph_gelu(acc);
-        }
-
-        float out[PH_OUT];
-        for (int o = 0; o < PH_OUT; ++o) {
-            float acc = r->b3[o];
-            for (int j = 0; j < PH_H2; ++j) acc += r->W3[j * PH_OUT + o] * h2[j];
-            out[o] = acc;
-        }
-
-        float mu = out[0];
-        float s = out[1];
-        float diff = y - mu;
-        float exp_neg_s = expf(-s);
-
-        // Gaussian NLL: L = 0.5 * (exp(-s) * (y - mu)^2 + s)
-        total_loss += 0.5f * (exp_neg_s * diff * diff + s);
-
-        // dL/d_mu = -exp(-s) * (y - mu)
-        // dL/d_s  = 0.5 * (-exp(-s) * (y - mu)^2 + 1)
-        float d_mu = -exp_neg_s * diff;
-        float d_s = 0.5f * (-exp_neg_s * diff * diff + 1.0f);
-        float d_out[PH_OUT] = { d_mu, d_s };
-
-        // Backprop layer 3: out = W3 * h2 + b3
-        float d_h2[PH_H2] = {};
-        for (int o = 0; o < PH_OUT; ++o) {
-            db3[o] += d_out[o];
-            for (int j = 0; j < PH_H2; ++j) {
-                dW3[j * PH_OUT + o] += h2[j] * d_out[o];
-                d_h2[j] += r->W3[j * PH_OUT + o] * d_out[o];
-            }
-        }
-
-        // Backprop layer 2: h2 = gelu(W2 * h1 + b2)
-        float d_pre_h2[PH_H2];
-        for (int h = 0; h < PH_H2; ++h) {
-            d_pre_h2[h] = d_h2[h] * ph_gelu_derivative(pre_h2[h]);
-        }
-        float d_h1[PH_H1] = {};
-        for (int h = 0; h < PH_H2; ++h) {
-            db2[h] += d_pre_h2[h];
-            for (int j = 0; j < PH_H1; ++j) {
-                dW2[j * PH_H2 + h] += h1[j] * d_pre_h2[h];
-                d_h1[j] += r->W2[j * PH_H2 + h] * d_pre_h2[h];
-            }
-        }
-
-        // Backprop layer 1: h1 = gelu(W1 * input + b1)
-        float d_pre_h1[PH_H1];
-        for (int h = 0; h < PH_H1; ++h) {
-            d_pre_h1[h] = d_h1[h] * ph_gelu_derivative(pre_h1[h]);
+    int s = threadIdx.x;
+    if (s < MB) {
+        for (int j = 0; j < PH_INPUT; ++j) {
+            s_x[s][j] = input[s * PH_INPUT + j];
         }
         for (int h = 0; h < PH_H1; ++h) {
-            db1[h] += d_pre_h1[h];
+            float acc = reg->b1[h];
             for (int j = 0; j < PH_INPUT; ++j) {
-                dW1[j * PH_H1 + h] += input[j] * d_pre_h1[h];
+                acc += reg->W1[j * PH_H1 + h] * s_x[s][j];
             }
+            s_pre1[s][h] = acc;
+            s_h1[s][h] = ph_gelu(acc);
+        }
+        for (int h = 0; h < PH_H2; ++h) {
+            float acc = reg->b2[h];
+            for (int j = 0; j < PH_H1; ++j) {
+                acc += reg->W2[j * PH_H2 + h] * s_h1[s][j];
+            }
+            s_pre2[s][h] = acc;
+            s_h2[s][h] = ph_gelu(acc);
+        }
+        float mu = reg->b3[0];
+        float log_unc = reg->b3[1];
+        for (int j = 0; j < PH_H2; ++j) {
+            mu      += reg->W3[j * PH_OUT + 0] * s_h2[s][j];
+            log_unc += reg->W3[j * PH_OUT + 1] * s_h2[s][j];
+        }
+        float diff = target[s] - mu;
+        float exp_neg_s = expf(-log_unc);
+        s_dout[s][0] = -exp_neg_s * diff;
+        s_dout[s][1] = 0.5f * (-exp_neg_s * diff * diff + 1.0f);
+
+        for (int j = 0; j < PH_H2; ++j) s_dpre2[s][j] = 0.f;
+        for (int o = 0; o < PH_OUT; ++o) {
+            for (int j = 0; j < PH_H2; ++j) {
+                s_dpre2[s][j] += reg->W3[j * PH_OUT + o] * s_dout[s][o];
+            }
+        }
+        for (int h = 0; h < PH_H2; ++h) {
+            s_dpre2[s][h] *= ph_gelu_derivative(s_pre2[s][h]);
+        }
+        for (int j = 0; j < PH_H1; ++j) s_dpre1[s][j] = 0.f;
+        for (int h = 0; h < PH_H2; ++h) {
+            for (int j = 0; j < PH_H1; ++j) {
+                s_dpre1[s][j] += reg->W2[j * PH_H2 + h] * s_dpre2[s][h];
+            }
+        }
+        for (int h = 0; h < PH_H1; ++h) {
+            s_dpre1[s][h] *= ph_gelu_derivative(s_pre1[s][h]);
         }
     }
+    __syncthreads();
 
-    // Average gradients over minibatch.
-    float inv_mb = 1.0f / static_cast<float>(PH_TRAIN_MINIBATCH);
-    for (int i = 0; i < PH_INPUT * PH_H1; ++i) dW1[i] *= inv_mb;
-    for (int i = 0; i < PH_H1; ++i) db1[i] *= inv_mb;
-    for (int i = 0; i < PH_H1 * PH_H2; ++i) dW2[i] *= inv_mb;
-    for (int i = 0; i < PH_H2; ++i) db2[i] *= inv_mb;
-    for (int i = 0; i < PH_H2 * PH_OUT; ++i) dW3[i] *= inv_mb;
-    for (int i = 0; i < PH_OUT; ++i) db3[i] *= inv_mb;
+    const float inv_mb = 1.0f / static_cast<float>(MB);
+    for (int i = threadIdx.x; i < PH_INPUT * PH_H1; i += blockDim.x) {
+        int j = i / PH_H1;
+        int h = i % PH_H1;
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_x[mb][j] * s_dpre1[mb][h];
+        ph_adamw_step_one(&reg->W1[i], &reg->m_W1[i], &reg->v_W1[i],
+                          g * inv_mb, step);
+    }
+    for (int i = threadIdx.x; i < PH_H1; i += blockDim.x) {
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_dpre1[mb][i];
+        ph_adamw_step_one(&reg->b1[i], &reg->m_b1[i], &reg->v_b1[i],
+                          g * inv_mb, step);
+    }
+    for (int i = threadIdx.x; i < PH_H1 * PH_H2; i += blockDim.x) {
+        int j = i / PH_H2;
+        int h = i % PH_H2;
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_h1[mb][j] * s_dpre2[mb][h];
+        ph_adamw_step_one(&reg->W2[i], &reg->m_W2[i], &reg->v_W2[i],
+                          g * inv_mb, step);
+    }
+    for (int i = threadIdx.x; i < PH_H2; i += blockDim.x) {
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_dpre2[mb][i];
+        ph_adamw_step_one(&reg->b2[i], &reg->m_b2[i], &reg->v_b2[i],
+                          g * inv_mb, step);
+    }
+    for (int i = threadIdx.x; i < PH_H2 * PH_OUT; i += blockDim.x) {
+        int j = i / PH_OUT;
+        int o = i % PH_OUT;
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_h2[mb][j] * s_dout[mb][o];
+        ph_adamw_step_one(&reg->W3[i], &reg->m_W3[i], &reg->v_W3[i],
+                          g * inv_mb, step);
+    }
+    for (int i = threadIdx.x; i < PH_OUT; i += blockDim.x) {
+        float g = 0.f;
+        for (int mb = 0; mb < MB; ++mb) g += s_dout[mb][i];
+        ph_adamw_step_one(&reg->b3[i], &reg->m_b3[i], &reg->v_b3[i],
+                          g * inv_mb, step);
+    }
+    if (threadIdx.x == 0) reg->step = step;
+}
 
-    // AdamW updates (lr = 1e-4, per A-601).
-    adamw_update(r->W1, dW1, r->m_W1, r->v_W1, PH_INPUT * PH_H1, r->step);
-    adamw_update(r->b1, db1, r->m_b1, r->v_b1, PH_H1, r->step);
-    adamw_update(r->W2, dW2, r->m_W2, r->v_W2, PH_H1 * PH_H2, r->step);
-    adamw_update(r->b2, db2, r->m_b2, r->v_b2, PH_H2, r->step);
-    adamw_update(r->W3, dW3, r->m_W3, r->v_W3, PH_H2 * PH_OUT, r->step);
-    adamw_update(r->b3, db3, r->m_b3, r->v_b3, PH_OUT, r->step);
+// ---- Device placeholder launchers -----------------------------------------
+
+inline bool launch_placeholder_forward(const PlaceholderRegressor* d_reg,
+                                       const float* d_input, int n,
+                                       float* d_out2,
+                                       const float* d_target,
+                                       float* d_surprise,
+                                       cudaStream_t stream) {
+    placeholder_forward_kernel<<<1, 256, 0, stream>>>(
+        d_reg, d_input, n, d_out2, d_target, d_surprise);
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA placeholder forward launch failed: %s\n",
+                    cudaGetErrorString(e));
+        return false;
+    }
+    return true;
+}
+
+inline bool launch_placeholder_train(PlaceholderRegressor* d_reg,
+                                     const float* d_input,
+                                     const float* d_target,
+                                     int step,
+                                     cudaStream_t stream) {
+    placeholder_train_kernel<<<1, 256, 0, stream>>>(
+        d_reg, d_input, d_target, step);
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA placeholder train launch failed: %s\n",
+                    cudaGetErrorString(e));
+        return false;
+    }
+    return true;
 }
 
 // ---- Predictor ensemble surprise ----------------------------------------

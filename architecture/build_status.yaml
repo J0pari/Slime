@@ -29,11 +29,13 @@ items:
       - integration/host_main.cu::step_generation
       - predictor/hybrid_surprise.cu::blend_surprise
   I3:
-    status: partial
+    status: implemented
     mechanisms:
-      - predictor/hybrid_surprise.cu::placeholder_train_step
-    missing:
-      - GPU placeholder forward/training kernels per cuda_engineering sections 4.5-4.6
+      - predictor/hybrid_surprise.cu::placeholder_forward_kernel
+      - predictor/hybrid_surprise.cu::placeholder_train_kernel
+      - curriculum/problem_generator.cu::sign_probe_tuples
+      - integration/host_main.cu::evaluate_probe_placeholder
+      - integration/host_main.cu::upload_probe_batch
   I4:
     status: partial
     mechanisms:

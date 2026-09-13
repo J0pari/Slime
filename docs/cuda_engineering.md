@@ -102,7 +102,10 @@ These never touch the GPU:
 - `OrganismTable` metadata: Genome[], DeltaWeights[], lineage_id[],
   parent_id[], spawn_gen[], replica_tag[] (host-side copies; genomes
   are not needed on device)
-- `PlaceholderRegressor` + `ReplayBuffer`
+- `PlaceholderRegressor` host mirror: the live parameters and AdamW state
+  are device-resident (§4.5-4.6); the host mirror exists only at
+  initialization and around checkpoint I/O
+- `ReplayBuffer` (host-only; the training minibatch is uploaded per step)
 - `ClassifierBatch` (host assembly, images copied to device)
 - Safety structs: CusumState, MutationLadder, StressLadder,
   SentinelEnsemble, SentinelHistory, AuditRegressor, ProbePanel,
@@ -153,6 +156,17 @@ cudaMemcpyAsync(h_weights, d_weights, ..., D2H, stream)
 ```
 Only needed when host code reads weights (e.g., for checkpoint writes).
 During normal generations this transfer is skipped.
+
+### T5: Placeholder (H→D and D→H, per generation)
+```
+cudaMemcpyAsync(d_ph_batch_input, h_ph_batch_input, ..., H2D, stream)
+cudaMemcpyAsync(d_ph_batch_target, h_ph_batch_target, ..., H2D, stream)
+cudaMemcpyAsync(h_ph_surprise, d_ph_surprise, ..., D2H, stream)
+```
+The replay buffer is host-only, so the sampled training minibatch is
+uploaded before `placeholder_train_kernel`. The probe batch is uploaded once
+at signing; each generation `placeholder_forward_kernel` recomputes the
+per-tuple surprises and the host reads back PROBE_BATCH floats.
 
 ---
 
@@ -824,7 +838,8 @@ Binary format. Write in order:
    parent_id, spawn_gen, replica_tag).
 5. OrganismState grids (D→H transfer of d_organisms grids, then write).
 6. Archive entries (all alive entries, host-resident).
-7. PlaceholderRegressor (host-resident).
+7. PlaceholderRegressor (D→H transfer into the host mirror first, then
+   write; on load, read then H→D transfer).
 8. ReplayBuffer (host-resident).
 9. CorrelationWindow (host-resident).
 10. CusumState × 2.

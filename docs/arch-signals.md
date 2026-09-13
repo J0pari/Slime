@@ -7,6 +7,14 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: `cuda_engineering.md` was internally inconsistent about the
+  placeholder regressor: §2.3 and §14 listed it host-only while §4.5-4.6,
+  §5, and the VRAM budget specified device kernels. Reconciled in favor of
+  the kernels (the construction plan's I3 requires them): parameters and
+  AdamW state are device-resident, the host struct is a checkpoint/init
+  mirror, the replay buffer stays host-only, and §3 gained T5 (minibatch
+  upload, probe surprise readback). The now-dead host-side forward/train
+  reference was removed rather than kept as a second implementation.
 - 2026-09-12: Numeric policy adopted from the LLM-Trader pattern
   (`tests/test_no_magic_numbers.py`): the schema home is
   `config/constants.cuh`, the declared-constant registry is derived from it,
