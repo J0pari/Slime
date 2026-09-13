@@ -5,7 +5,6 @@
 - `docs/blueprint.md` is the **binding specification**. Every function, every data flow, every architectural decision described there is what gets built. Not a subset. Not a "simpler version." Not "for now."
 - `docs/construction_plan.md` defines the **build order and acceptance criteria**. Each stage's acceptance check must pass before moving to the next. No skipping, no partial credit.
 - `docs/IMPLEMENTATION_STATUS.md` must be kept **honest and current**. If something is a stub, it says stub. If something works, it says works. No theatrical "smoke tests" that test nothing meaningful.
-- `docs/bom.md` defines hardware/toolchain requirements.
 
 ## Zero technical debt. Zero shortcuts.
 

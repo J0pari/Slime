@@ -27,27 +27,28 @@ BUILD phase incomplete: 7 of 9 inventory items are not implemented (I3, I4, I5, 
 | A103.checkpoint-replay-equivalence | invariant | established | ✅ | ✅ | pass/stale |
 | A103.gradient-correctness | acceptance | established | ✅ | ✅ | pass/stale |
 | A201.bounded-residual-dynamics | empirical | established | ✅ | ✅ | pass/stale |
-| A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/current |
+| A201.role-canonicalization | invariant | established | ✅ | ✅ | pass/stale |
 | A201.shared-substrate | invariant | provisional | ✅ | ❌ | pass/stale |
 | A201.task-conditioning-complete | contract | established | ✅ | ✅ | pass/stale |
 | A202.rd-disabled-until-adjoint | contract | established | ✅ | ✅ | pass/stale |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/stale |
 | A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/stale |
-| A401.bin-capacity | invariant | established | ✅ | ✅ | pass/current |
-| A401.live-statistics-exact | invariant | established | ✅ | ✅ | pass/current |
-| A401.weighted-metric-active | contract | established | ✅ | ✅ | pass/current |
-| A501.came-production-equation | contract | established | ✅ | ✅ | pass/current |
+| A401.bin-capacity | invariant | established | ✅ | ✅ | pass/stale |
+| A401.live-statistics-exact | invariant | established | ✅ | ✅ | pass/stale |
+| A401.weighted-metric-active | contract | established | ✅ | ✅ | pass/stale |
+| A501.came-production-equation | contract | established | ✅ | ✅ | pass/stale |
 | A501.role-gradient-alignment | empirical | provisional | ✅ | ✅ | never |
+| A601.competence-gated-novelty | policy | planned | ✅ | ❌ | never |
 | A601.ensemble-epistemic-uncertainty | empirical | provisional | ✅ | ❌ | never |
 | A601.trust-weight-composition | capability | planned | ✅ | ❌ | never |
 | C001.acceptance-evidence-current | acceptance | established | ✅ | ✅ | pass/stale |
-| G100.deterministic-seed | contract | established | ✅ | ✅ | pass/current |
+| G100.deterministic-seed | contract | established | ✅ | ✅ | pass/stale |
 | G100.named-tunables | policy | established | ✅ | ✅ | pass/stale |
 | G100.single-prng | invariant | established | ✅ | ✅ | pass/stale |
 | I001.phase-order | contract | established | ✅ | ✅ | pass/stale |
 | I001.replay-evaluation-identity | invariant | established | ✅ | ✅ | pass/stale |
-| I001.spawn-wave-unique | invariant | established | ✅ | ✅ | pass/current |
-| S001.checkpoint-roundtrip | invariant | established | ✅ | ✅ | pass/current |
+| I001.spawn-wave-unique | invariant | established | ✅ | ✅ | pass/stale |
+| S001.checkpoint-roundtrip | invariant | established | ✅ | ✅ | pass/stale |
 | S001.cuda-errors-fatal | contract | established | ✅ | ✅ | pass/stale |
 | S002.host-authority | invariant | established | ✅ | ✅ | pass/stale |
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/stale |
@@ -55,5 +56,5 @@ BUILD phase incomplete: 7 of 9 inventory items are not implemented (I3, I4, I5, 
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
 
-Claims: 29 total, 24 established, 4 provisional, 1 planned.
+Claims: 30 total, 24 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->

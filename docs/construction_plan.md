@@ -30,6 +30,21 @@ Rules:
   blueprint.md or cuda_engineering.md. If the architecture is wrong, change
   the specs first.
 
+## Scope discipline and extension gate
+
+The extension axes in blueprint.md are documented so the current seams stay
+general; they are not in scope. None may begin until every inventory item is
+implemented and the experimental program has produced evidence on the
+current system.
+
+Admission rules: an extension enters this plan as a new inventory item (with
+status and mechanisms in architecture/build_status.yaml) before any code;
+new roles are schema entries plus input wiring and objectives on the shared
+substrate, not new model classes; novelty pressure stays competence-gated;
+the host stays the authority that schedules tests. An extension that appears
+in code before it appears here is a build defect and is removed or rolled
+back.
+
 ---
 
 ## Feature inventory (build order)

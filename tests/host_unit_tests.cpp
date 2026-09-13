@@ -300,15 +300,36 @@ static void test_sentinel_sgd_decreases_loss() {
 
 // ---- Regression tests for review-pass fixes ------------------------------
 
-// canonical_role: reserved 2-bit codes (10, 11) map to the defined role by
-// their low bit. 00->Classifier, 01->Predictor, 10->Classifier, 11->Predictor.
-// Tests the PRODUCTION function from config/constants.cuh.
+// canonical_role: the role schema declares every 2-bit code and the defined
+// role it canonicalizes to; canonical_role agrees with the schema. Tests the
+// PRODUCTION schema and function from config/constants.cuh.
 static void test_canonical_role() {
     // [claim:A201.role-canonicalization]
     EXPECT_TRUE(canonical_role(Role::Classifier) == Role::Classifier);
     EXPECT_TRUE(canonical_role(Role::Predictor)  == Role::Predictor);
     EXPECT_TRUE(canonical_role(Role::Reserved10) == Role::Classifier);
     EXPECT_TRUE(canonical_role(Role::Reserved11) == Role::Predictor);
+
+    // The schema covers each 2-bit code exactly once, canonical targets are
+    // defined roles, names are non-empty and unique, and canonical_role
+    // matches the schema.
+    EXPECT_TRUE(ROLE_SCHEMA_COUNT == 4);
+    bool seen[4] = {false, false, false, false};
+    for (int i = 0; i < ROLE_SCHEMA_COUNT; ++i) {
+        const RoleSpec& s = ROLE_SCHEMA[i];
+        EXPECT_TRUE(s.code < 4 && !seen[s.code]);
+        if (s.code < 4) seen[s.code] = true;
+        EXPECT_TRUE(s.canonical == Role::Classifier
+                    || s.canonical == Role::Predictor);
+        EXPECT_TRUE(canonical_role(s.role) == s.canonical);
+    }
+    for (int a = 0; a < ROLE_SCHEMA_COUNT; ++a) {
+        EXPECT_TRUE(ROLE_NAMES[a] != nullptr && ROLE_NAMES[a][0] != '\0');
+        for (int b = a + 1; b < ROLE_SCHEMA_COUNT; ++b) {
+            EXPECT_TRUE(std::strcmp(ROLE_NAMES[a], ROLE_NAMES[b]) != 0);
+        }
+    }
+    EXPECT_TRUE(seen[0] && seen[1] && seen[2] && seen[3]);
 }
 
 // The same PCG32 seed and stream must reproduce the same draw sequence; a

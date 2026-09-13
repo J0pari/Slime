@@ -83,7 +83,6 @@ Sheet Index
 | S-004 | Parallel Tempering Ladders |
 | I-001 | Assembly & Integration |
 | C-001 | Construction Sequence |
-| M-001 | Bill of Materials |
 | Q-001 | Quality Assurance |
 
 G-100: General Notes & Conventions
@@ -255,8 +254,11 @@ flow through the same checkpointed backward.
 
 A-201: NCA Engine, Role-Switched Input, Behavioral Trajectory
 @claim A201.role-canonicalization invariant
-S reserved role codes canonicalize to a defined role everywhere host and
-  device role-switched logic runs, so pathway choice is total
+S every 2-bit role code is declared once in the role schema with its name and
+  canonical defined role; reserved codes canonicalize to a defined role
+  everywhere host and device role-switched logic runs, so pathway choice is
+  total and adding a role is a schema entry plus wiring
+M config/constants.cuh::ROLE_SCHEMA
 M config/constants.cuh::canonical_role
 W+ tests/host_unit_tests.cpp::test_canonical_role
 T established
@@ -431,11 +433,11 @@ The predictor retains its target input for the first 16 steps, after which
 global context takes over — this is intentional, as by step 16 the target
 information has propagated into other channels through the CA dynamics.
 
-Activation gate. The global context channel activates in Wave 8, after Waves
-1–7 have established baseline performance. Activation is a configuration
-constant (GLOBAL_CONTEXT_ENABLED), not a runtime toggle. When disabled, channels
-14–15 remain zero for classifiers (current behavior). This allows direct A/B
-comparison of runs with and without global context.
+Activation gate. The global context channel activates when inventory item I5
+is built, after the baseline phases have established performance. Activation
+is a configuration constant (GLOBAL_CONTEXT_ENABLED), not a runtime toggle.
+When disabled, channels 14-15 remain zero for classifiers (current behavior).
+This allows direct A/B comparison of runs with and without global context.
 
 Out of scope. Hierarchical multi-resolution grids and dynamic graph topologies
 (GNN-style non-local edges) are architecturally incompatible with the current
@@ -580,10 +582,10 @@ Fitness composition.
     f = f_raw · role_mult · audit_mult · variance_mult
 
     where role_mult is classifier_mult or predictor_mult
-    audit_mult is from S-003 (activates Wave 5)
-    variance_mult is from S-003 variance floor (activates Wave 5)
+    audit_mult is from S-003 (activates with I4)
+    variance_mult is from S-003 variance floor (activates with I4)
 
-    Before Wave 5, audit_mult = 1.0 and variance_mult = 1.0.
+    Before I4, audit_mult = 1.0 and variance_mult = 1.0.
 
 Insertion is bin-local; the Q comparison happens within bins and against
 role-internal nearest neighbors.
@@ -591,7 +593,7 @@ role-internal nearest neighbors.
 Lineage-aware insertion (expanding-lineage brake) operates per role: a runaway
 classifier lineage tightens classifier-side replacement bars; a runaway
 predictor lineage tightens predictor-side replacement bars. The lineage brake
-requires lineage-share statistics from S-003 and activates in Wave 5.
+requires lineage-share statistics from S-003 and activates with I4.
 
 Parent selection. Spawn parent-selection draws from a per-role live index list
 maintained in the Archive struct. The list contains the indices of all alive
@@ -1079,9 +1081,75 @@ C observed
 
 See construction_plan.md for the staged plan and acceptance checks.
 
-M-001: Bill of Materials
+Extension axes (forward-looking)
 
-See bom.md.
+The current sheets specify the classifier/predictor system. The architecture
+is intended to generalize to role-conditioned recurrent solvers whose
+behavior is the training data and curriculum for other members of the same
+ecology. The axes below are design constraints for that generalization.
+None is implemented; the construction plan gates every one of them behind
+the current inventory (I1-I9) and the experimental program.
+
+Descriptor separation. bmap_64 is deliberately overloaded here: task output,
+behavior descriptor, archive geometry, audit representation, and placeholder
+input are one vector. For richer tasks (control, planning, synthesis,
+system identification) those roles must separate into z_state, y_task, and
+d_behavior with related but distinct learned heads. The invariant that
+carries over: the behavioral state must remain compact, externally
+auditable, and the object on which prediction and diversity pressure
+operate. "Archive your output vector" is not the principle; "maintain an
+auditable behavioral state" is.
+
+@claim A601.competence-gated-novelty policy
+S ecological novelty pressure is gated by task competence and stability:
+  new competent behavior is rewarded, arbitrary unpredictability is not.
+  Until the composition s_useful = s_epistemic * q_competence * q_stability
+  is implemented, surprise influences selection only through the existing
+  task-fitness composition, stationary probes, placeholder comparison, and
+  calibration
+M integration/host_main.cu::score_organisms
+M archive/soft_qd_archive.cu::classifier_mult
+T planned
+C unobserved
+
+Role admission. A new role is admitted only when its distinction can be
+expressed through input wiring and objective semantics while retaining the
+shared substrate; otherwise roles degenerate into separate model classes and
+the shared-substrate hypothesis becomes unfalsifiable. Roles are declared in
+the schema (config/constants.cuh::ROLE_SCHEMA). The literal 2-bit categorical
+tag may become a role embedding only after experiments demonstrate genuine
+transfer; the binary distinction is what makes the hypothesis testable now.
+
+Predictor horizon ladder. The predictor generalizes from p(b_64 | b_32) to
+p(b_{t+k} | b_{<=t}, c), through multi-snapshot inputs and cross-task
+conditioning, and eventually to intervention prediction
+p(b_future | b_past, do(a)). Extrapolating trajectories is not the same as
+learning causal structure, and the ladder is explicit about which rung a
+result claims.
+
+Authority. The host owns probe schedules, transformations, operator
+commands, and pruning; GPU-resident adaptive state never decides when its
+own tests occur. The SOT mechanism generalizes to host-controlled
+counterfactual tests for richer domains: irrelevant observation
+perturbations for control, alpha-renaming for synthesis, representation
+changes for system identification.
+
+Nonlocal communication. The 3x3 stencil propagates one cell per step; the
+global context channel (A-203, I5) is the first nonlocal seam. Long-horizon
+domains may need local substrate + small global workspace + sparse nonlocal
+links. Replacing the NCA wholesale with an attention model is rejected, and
+forcing every problem onto a 64x64 torus is equally rejected.
+
+Motivating application classes (non-normative): continuous control (actor
+policy, predictor of policy behavior, descriptor = outcome/energy
+statistics), planning (plan constructor, predictor of completed-plan
+semantics, descriptor = plan topology), program synthesis (rewriter,
+predictor of execution traces, descriptor = semantic test vectors),
+scientific system identification (candidate model, predictor of experiment
+outcomes, descriptor = response curves), generative engineering (the NCA
+development itself is the object; descriptor = mechanics/material response),
+sequence reasoning, multi-agent interaction, cyber-physical anomaly
+modeling. The admission rules above apply to every one of them.
 
 Q-001: Quality Assurance
 

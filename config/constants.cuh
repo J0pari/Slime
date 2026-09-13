@@ -141,15 +141,43 @@ enum class Role : uint8_t {
     Reserved11 = 0b11,
 };
 
-// The 2-bit role tag has four codes but only two defined roles; 10/11 are
-// reserved (A-301). Until additional roles exist, canonicalize a reserved
-// code to its low bit so role-switched logic stays total: 10 -> Classifier,
-// 11 -> Predictor. read_role in the codec returns the raw 2-bit value; the
-// substrate and all host scoring use this canonical view to pick a pathway.
-// Single shared definition for host and device (engine.cu uses this one).
+// Role schema. The 2-bit genome tag has four codes; this table declares each
+// code and the defined role it canonicalizes to. Adding a role is a schema
+// entry plus input wiring and an objective that shares the substrate, not a
+// new model class (blueprint "Extension axes"). read_role in the codec
+// returns the raw 2-bit value; the substrate and all host scoring use the
+// canonical view to pick a pathway.
+struct RoleSpec {
+    Role    role;
+    uint8_t code;
+    Role    canonical;
+};
+
+constexpr RoleSpec ROLE_SCHEMA[] = {
+    { Role::Classifier, 0b00, Role::Classifier },
+    { Role::Predictor,  0b01, Role::Predictor  },
+    { Role::Reserved10, 0b10, Role::Classifier },
+    { Role::Reserved11, 0b11, Role::Predictor  },
+};
+constexpr int ROLE_SCHEMA_COUNT =
+    static_cast<int>(sizeof(ROLE_SCHEMA) / sizeof(ROLE_SCHEMA[0]));
+
+// Host-side names for logging and schema tests, indexed by 2-bit code.
+constexpr const char* ROLE_NAMES[ROLE_SCHEMA_COUNT] = {
+    "classifier", "predictor", "reserved10", "reserved11",
+};
+
 __host__ __device__ inline Role canonical_role(Role raw) {
-    return (static_cast<uint8_t>(raw) & 0x1u) ? Role::Predictor
-                                              : Role::Classifier;
+    // A switch rather than an index into ROLE_SCHEMA: nvcc does not allow
+    // device code to odr-use a host-side constexpr array. test_canonical_role
+    // pins every branch to the schema row it implements.
+    switch (static_cast<uint8_t>(raw) & 0b11u) {
+        case 0b00: return Role::Classifier;
+        case 0b01: return Role::Predictor;
+        case 0b10: return Role::Classifier;
+        case 0b11: return Role::Predictor;
+    }
+    return Role::Classifier;  // unreachable: every 2-bit code is declared
 }
 
 // ---- Genome (A-301) -------------------------------------------------------

@@ -913,7 +913,7 @@ the end-to-end timing acceptance test.
 
 ## 16. Global Context Channel (A-203)
 
-Wave 8 addition. Requires no changes to Waves 1–7 code when disabled.
+Inventory item I5. Requires no changes to existing kernel code when disabled.
 
 ### 16.1 W_ctx Weight Layer
 
@@ -961,10 +961,43 @@ per bmap step in the backward pass.
 ### 16.4 Configuration
 
 ```
-constexpr bool GLOBAL_CONTEXT_ENABLED = false;  // Wave 8 activates
+constexpr bool GLOBAL_CONTEXT_ENABLED = false;  // I5 activates
 constexpr int W_CTX_SIZE = CA_CHANNELS * (CH_AUX_LAST - CH_AUX_FIRST + 1);  // 32
 ```
 
 When `GLOBAL_CONTEXT_ENABLED` is false, W_ctx is not allocated, TOTAL_WEIGHTS
 remains 2587, and the forward/backward kernels skip the broadcast step. The
 flag is a compile-time constant — no runtime branching in the kernel.
+
+---
+
+## 17. Extensibility Seams (forward-looking)
+
+These seams exist so the extension axes in blueprint.md do not require
+rewriting the execution model. None of them is implemented beyond what the
+inventory already specifies.
+
+Role schema. Role codes, names, and canonical classes are declared once in
+`config/constants.cuh::ROLE_SCHEMA`. A new role reuses the shared weight
+banks, the shared optimizer, and the checkpointed backward; only its input
+wiring and objective are role-specific. The per-organism delta and the PT
+transaction registry are role-agnostic and need no change when a role is
+added.
+
+Descriptor heads. The bmap projection bank is the descriptor seam. Richer
+tasks add heads (z_state, y_task, d_behavior) as additional banks whose
+offsets and sizes are declared in the schema home; every flat offset
+(OFF_INTER, OFF_FLOW, OFF_BMAP, and any future OFF_*) derives from bank
+sizes so the weight layout, telemetry banks, and checkpoint schema follow
+from one declaration.
+
+Nonlocal communication. The global context channel (A-203) is the first
+nonlocal seam: a reduced summary broadcast to every cell inside the existing
+bmap step. Sparse nonlocal links, if ever warranted, extend that same
+summary-and-broadcast mechanism rather than adding a second execution
+backend.
+
+Counterfactual tests. Host authority is the seam for externally controlled
+tests (SOT and its domain generalizations): the host chooses the
+transformation, the GPU executes it, and the test outcome is evaluated on
+the host.

@@ -72,4 +72,3 @@ I9
 
 - [ ] Make every per-generation transfer conform to the four-point
   asynchronous transfer schedule.
-- [ ] Add the missing BOM document or remove the stale reference.
