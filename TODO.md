@@ -80,11 +80,16 @@ I8
   stencil 1.15, reforward 0.75, rd 0.08), stress 0.84, forward 0.70.
   Measured rejections: shared-memory atomic accumulation (4.7x slower),
   launch bounds (no-op), tiled one-block-per-organism reduce (6x slower:
-  64 blocks, 4096-FMA dependent chains). The systemic limit is that the
+  64 blocks, 4096-FMA dependent chains), cell-split weight-grad with
+  partials+merge (no mechanism for gain: the kernel is register-file
+  limited — 128 regs x 512 resident threads fills the 64K register file,
+  so extra blocks cannot raise resident threads; FD-clean but reverted as
+  unmeasurable under session drift). The systemic limit is that the
   backward runs one block per organism everywhere (64 blocks, ~27%
-  occupancy); the next lever is cell-split parallelism for the weight-grad
-  main kernel with per-split partials and a fixed-order merge kernel (not
-  atomics), then the same for the stencil gather.
+  occupancy) with 128 registers per thread; the next lever is reducing
+  register pressure (fewer live arrays per thread) or an explicit
+  3-blocks/SM launch bound with controlled spills, then the same analysis
+  for the stencil gather.
 
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
