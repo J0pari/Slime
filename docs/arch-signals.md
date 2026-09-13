@@ -23,12 +23,17 @@ cuda_engineering.md, and construction_plan.md.
   parsers now refuse missing structural keys (`_require_keys`: build_status
   `items`, documents, transactions + organism_buffers, bridge
   fingerprint/gate/contract, experiments) so a truncated registry can no
-  longer validate an empty surface and pass. Still open: null early-returns
-  that turn failure into a silent no-op (class 3); nested-field defaults
-  inside otherwise-valid registries (class 5 remainder); interchangeable
-  runtime id types (class 6, no strong typedefs yet). Until those have
-  failing witnesses of their own, the audit is incomplete; do not describe
-  them as closed.
+  longer validate an empty surface and pass. The null-early-return class was
+  scanned: eight `if (!x) return ...` guards exist and every one propagates
+  failure (`return false`/`nullptr`) or expresses a semantic no-change
+  (`soft_qd_archive.cu` insertion when nothing changed); no silent error
+  swallow was found. No gate was added for it: a line-local rule cannot
+  distinguish a legitimate guard from a swallow, so the honest state is
+  scanned-clean, not enforced. Still open: nested-field defaults inside
+  otherwise-valid registries (class 5 remainder); interchangeable runtime id
+  types (class 6, no strong typedefs yet). Until those have failing
+  witnesses of their own, the audit is incomplete; do not describe them as
+  closed.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register
