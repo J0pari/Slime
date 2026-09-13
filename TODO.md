@@ -19,8 +19,11 @@ I4
 - [x] Per-role lineage stats and the non-mutating expanding-lineage brake.
 - [x] SOT reference scratch separated from the stress slots (dedicated
   `d_sot_ref_organisms` buffer).
-- [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
-  failure flagging.
+- [x] Stress ladder host core: lineage-biased refresh policy (one classifier
+  and one predictor per sub-population per generation) and per-lineage
+  rolling-window failure flagging.
+- [ ] Stress ladder device evaluation: elevated-SOT forward on the stress
+  slots and per-slot f_sot readback into `update_stress_failures`.
 
 I5
 - [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all

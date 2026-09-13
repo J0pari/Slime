@@ -241,6 +241,9 @@ __device__ constexpr float d_STRESS_SOT_DENSITIES[STRESS_SUBPOP_COUNT] = { 0.10f
 constexpr float STRESS_REFRESH_FRACTION  = 0.25f;
 constexpr int   STRESS_HISTORY_WINDOW    = 10;
 constexpr float STRESS_FAILURE_THRESHOLD = 0.50f;
+constexpr int   STRESS_REFRESH_PER_SUBPOP = 1;   // 8 * 0.25 / 2 roles
+constexpr int   STRESS_LINEAGE_MAX        = 128;
+constexpr float STRESS_BIAS_PROBABILITY   = 0.5f;
 
 constexpr int   STRESS_POOL_SIZE = STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE;  // 24
 

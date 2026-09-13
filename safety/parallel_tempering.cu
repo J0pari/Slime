@@ -30,6 +30,7 @@
 #include "../autodiff/warp_tape.cu"
 #include "../genome/codec.cu"
 #include "pt_ladder.cuh"
+#include "stress_ladder.cuh"
 
 #include <cstdint>
 #include <cstring>
@@ -248,33 +249,6 @@ inline bool propose_swaps(MutationLadder* l,
     update_beta(l);
     return true;
 }
-
-// ---- SOT-density stress ladder ------------------------------------------
-struct StressLadder {
-    // STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE = 24 stress slots.
-    uint32_t lineage_id[STRESS_POOL_SIZE];
-    uint32_t source_pool_idx[STRESS_POOL_SIZE];   // back-pointer
-    Role     role[STRESS_POOL_SIZE];
-    uint8_t  subpop[STRESS_POOL_SIZE];            // 0,1,2 -> 10/20/40% SOT
-    bool     sot_gate_pass[STRESS_POOL_SIZE];
-    int      eval_count[STRESS_POOL_SIZE];
-    int      last_refresh_gen[STRESS_POOL_SIZE];
-
-    int      flagged_lineage_count;
-};
-
-// DECLARED ONLY — blueprint-in-place.
-void refresh_stress_slots(StressLadder* l,
-                          uint32_t* eligible_lineages,
-                          int n_eligible,
-                          int generation,
-                          cudaStream_t stream);
-
-// DECLARED ONLY — blueprint-in-place.
-void evaluate_stress(StressLadder* l, cudaStream_t stream);
-
-// DECLARED ONLY — blueprint-in-place.
-void flag_stress_failures(StressLadder* l, cudaStream_t stream);
 
 }  // namespace slime::safety::pt
 

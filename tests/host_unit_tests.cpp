@@ -30,6 +30,7 @@
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
+#include "../safety/stress_ladder.cuh"
 #include "../safety/structural.cu"
 #include "../safety/operator_cmds.cuh"
 #include "../archive/soft_qd_archive.cu"
@@ -1185,6 +1186,62 @@ static void test_sentinel_score_and_prune_labels() {
     EXPECT_TRUE(h.buf[2].label == 0.f);
 }
 
+// ---- Stress ladder (S-003) -------------------------------------------------
+
+// Each refresh touches one classifier and one predictor slot per sub-pop,
+// sourced from a main-pool organism of the matching role.
+static void test_stress_refresh_role_balance() {
+    static slime::safety::pt::StressLadder ladder;
+    slime::safety::pt::init_stress_ladder(&ladder);
+    uint32_t ids[64];
+    Role roles[64];
+    for (int i = 0; i < 64; ++i) {
+        ids[i] = static_cast<uint32_t>(i / 4);
+        roles[i] = (i % 2 == 0) ? Role::Classifier : Role::Predictor;
+    }
+    Pcg32 rng;
+    pcg32_seed(&rng, 0x571355ULL, 7u);
+    int refreshed = slime::safety::pt::refresh_stress_slots(
+        &ladder, ids, roles, 64, 1, &rng);
+    EXPECT_TRUE(refreshed == STRESS_SUBPOP_COUNT * 2);
+    int per_subpop_cls[STRESS_SUBPOP_COUNT] = {};
+    int per_subpop_pred[STRESS_SUBPOP_COUNT] = {};
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
+        if (ladder.last_refresh_gen[s] != 1) continue;
+        int p = ladder.subpop[s];
+        if (canonical_role(ladder.role[s]) == Role::Classifier) {
+            per_subpop_cls[p]++;
+        } else {
+            per_subpop_pred[p]++;
+        }
+        EXPECT_TRUE(ladder.source_pool_idx[s] < 64);
+        EXPECT_TRUE(canonical_role(roles[ladder.source_pool_idx[s]])
+                    == canonical_role(ladder.role[s]));
+        EXPECT_TRUE(ladder.lineage_id[s] == ids[ladder.source_pool_idx[s]]);
+    }
+    for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
+        EXPECT_TRUE(per_subpop_cls[p] == 1);
+        EXPECT_TRUE(per_subpop_pred[p] == 1);
+    }
+}
+
+// More than half failures over the rolling window flags the lineage once.
+static void test_stress_failure_flagging() {
+    static slime::safety::pt::StressLadder ladder;
+    slime::safety::pt::init_stress_ladder(&ladder);
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) ladder.lineage_id[s] = 77u;
+    float f_sot[STRESS_POOL_SIZE];
+    for (int e = 0; e < STRESS_HISTORY_WINDOW; ++e) {
+        float v = (e < 6) ? 0.1f : 0.9f;
+        for (int s = 0; s < STRESS_POOL_SIZE; ++s) f_sot[s] = v;
+        slime::safety::pt::update_stress_failures(&ladder, f_sot, e);
+    }
+    EXPECT_TRUE(ladder.flagged_lineage_count == 1);
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) f_sot[s] = 0.1f;
+    slime::safety::pt::update_stress_failures(&ladder, f_sot, 10);
+    EXPECT_TRUE(ladder.flagged_lineage_count == 1);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1227,6 +1284,8 @@ int main() {
     test_lineage_stats_and_brake();
     test_probe_panel_role_separable();
     test_sentinel_score_and_prune_labels();
+    test_stress_refresh_role_balance();
+    test_stress_failure_flagging();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

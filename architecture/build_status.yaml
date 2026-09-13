@@ -46,8 +46,11 @@ items:
       - safety/structural.cu::score_sentinels
       - archive/soft_qd_archive.cu::set_lineage_brake
       - integration/host_main.cu::score_organisms
+      - safety/stress_ladder.cuh::refresh_stress_slots
+      - safety/stress_ladder.cuh::update_stress_failures
     missing:
-      - SOT-density stress ladder (refresh, elevated-SOT evaluation, failure flagging)
+      - stress-ladder device evaluation (elevated-SOT forward on the stress
+        slots and per-slot f_sot readback)
   I5:
     status: missing
   I6:
