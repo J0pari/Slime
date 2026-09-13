@@ -155,7 +155,12 @@ I9
   floor. slime-run55 was killed at its declared 60-minute max and is
   resubmitted as job 56a6b1511c6bfcd0 (chunked, max 240 min, 3 retries).
   Resilience is enforced: the client refuses bare multi-generation runs,
-  the harness resumes on start and fails only on sustained flags. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  the harness resumes on start and fails only on sustained flags.
+  f0a2cf3602d1b74b then failed the dispatch RAM gate (464 MiB free vs 6144
+  required: declared 4096 + margin; ollama/other load was transient) and
+  56a6b1511c6bfcd0 was cancelled by the operator floor again. Neither
+  auto-retried (retryAfter null). Current submissions: 409c95bfe907ac33
+  (5000-gen) and 9880b19caf880a75 (run55), both --ram 2048 --retries 3. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
   17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
