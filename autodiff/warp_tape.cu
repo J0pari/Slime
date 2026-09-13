@@ -556,6 +556,12 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
     __shared__ float s_mean[CA_CHANNELS];
     if (tid < CA_CHANNELS) s_mean[tid] = 0.f;
     __syncthreads();
+    // dW_perc partials live in registers per thread and are tree-reduced
+    // once per block: the previous per-cell global atomics to 27 addresses
+    // serialized 4096 cells of every organism on the same lines.
+    float dW_perc_acc[N_PERC_FILTERS * 9];
+    #pragma unroll
+    for (int i = 0; i < N_PERC_FILTERS * 9; ++i) dW_perc_acc[i] = 0.f;
     if (GLOBAL_CONTEXT_ENABLED && sample_slot >= 0) {
         __shared__ float s_part[BWD_THREADS * CTX_K];
         for (int k = 0; k < CTX_K; ++k) s_part[tid * CTX_K + k] = 0.f;
@@ -727,7 +733,6 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
         }
 
         // dW_perc
-        float* dW_perc = &grads[org].dW[OFF_PERC];
         for (int f = 0; f < N_PERC_FILTERS; ++f) {
             for (int k = 0; k < 9; ++k) {
                 int ky = (k / 3) - 1;
@@ -739,13 +744,28 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
                     acc += d_perc_local[f * CA_CHANNELS + c] *
                            __half2float(rc[grid_idx(ny, nx, c)]);
                 }
-                atomicAdd(&dW_perc[f * 9 + k], acc);
+                dW_perc_acc[f * 9 + k] += acc;
             }
         }
 
         // Store d_perc for Phase B gather.
         for (int p = 0; p < PERC_DIM; ++p) {
             my_d_perc[cell * PERC_DIM + p] = d_perc_local[p];
+        }
+    }
+
+    // Deterministic tree reduction of the register partials, one output at a
+    // time; thread 0 accumulates into the gradient buffer.
+    {
+        __shared__ float s_red[BWD_THREADS];
+        for (int j = 0; j < N_PERC_FILTERS * 9; ++j) {
+            s_red[tid] = dW_perc_acc[j];
+            __syncthreads();
+            for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
+                if (tid < stride) s_red[tid] += s_red[tid + stride];
+                __syncthreads();
+            }
+            if (tid == 0) grads[org].dW[OFF_PERC + j] += s_red[0];
         }
     }
 }
@@ -1261,6 +1281,7 @@ inline void launch_backward_all(
     // bypass the backward phase graph so these synchronizations are legal.
     const bool bprof = std::getenv("COEVO_BACKWARD_PROFILE") != nullptr;
     double t_ref = 0.0, t_wg = 0.0, t_sg = 0.0, t_rd = 0.0;
+    double t_wgk = 0.0, t_ri = 0.0, t_rf = 0.0;
     auto mark = [] { return std::chrono::steady_clock::now(); };
     auto since = [](std::chrono::steady_clock::time_point a) {
         return std::chrono::duration<double, std::milli>(
@@ -1291,10 +1312,13 @@ inline void launch_backward_all(
                 ws.d_cell_stage, ws.d_seed_aux, d_organisms,
                 rc, dA, d_grads, ws.d_perc, alpha,
                 btraj_slot_for_step(abs_step), N);
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_wgk += since(m0); m0 = mark(); }
             bwd_reduce_inter_kernel<<<N * PERC_DIM, BWD_THREADS, 0, stream>>>(
                 ws.d_cell_stage, d_grads, N);
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_ri += since(m0); m0 = mark(); }
             bwd_reduce_flow_kernel<<<N * CA_CHANNELS, BWD_THREADS, 0, stream>>>(
                 ws.d_cell_stage, d_grads, N);
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_rf += since(m0); m0 = mark(); }
             if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_wg += since(m0); m0 = mark(); }
             // Phase B: stencil gather (CA d_curr) + RD gather (RD d_curr).
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
@@ -1314,6 +1338,8 @@ inline void launch_backward_all(
         std::printf("[BPROFILE] reforward=%.1f ms weight_grad=%.1f ms "
                     "stencil=%.1f ms rd=%.1f ms\n",
                     t_ref, t_wg, t_sg, t_rd);
+        std::printf("[BPROFILE]   wg_main=%.1f ms reduce_inter=%.1f ms "
+                    "reduce_flow=%.1f ms\n", t_wgk, t_ri, t_rf);
         std::fflush(stdout);
     }
 }
