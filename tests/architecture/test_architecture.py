@@ -213,6 +213,37 @@ class GateTests(unittest.TestCase):
             strict=False)
         self.assertFalse(report.ok, "unchecked cudaMalloc was not caught")
 
+    def test_bridge_gate_is_derived_not_declared(self):
+        # The gate is a function of the registries: unmet requirements close
+        # it, met requirements open it, and a declared value that disagrees
+        # with the derivation is caught by check_bridge.
+        bridge = {"requires_build": ["I9"], "requires_experiments": ["E1"]}
+        build = {"items": {"I9": {"status": "partial"}}}
+        exps = {"experiments": {"E1": {"status": "planned"}}}
+        expected, mb, me = compiler.derive_bridge(bridge, build, exps)
+        self.assertEqual(expected, "CLOSED")
+        self.assertTrue(mb and me)
+        build_ok = {"items": {"I9": {"status": "implemented"}}}
+        exps_ok = {"experiments": {"E1": {"status": "done"}}}
+        expected2, mb2, me2 = compiler.derive_bridge(bridge, build_ok, exps_ok)
+        self.assertEqual(expected2, "OPEN")
+        self.assertFalse(mb2 or me2)
+        # Unknown requirements are unmet, not ignored.
+        expected3, mb3, _ = compiler.derive_bridge(
+            {"requires_build": ["NOPE"], "requires_experiments": []},
+            build_ok, exps_ok)
+        self.assertEqual(expected3, "CLOSED")
+        self.assertIn("unknown", mb3[0])
+
+    def test_implemented_item_cannot_list_missing_reasons(self):
+        # The control-plane drift the review found: implemented + reasons.
+        build = {"items": {"I8": {"status": "implemented",
+                                  "mechanisms": ["x::y"],
+                                  "missing": ["stale text"]}}}
+        errors = []
+        compiler.check_build_status(ROOT, build, {}, errors)
+        self.assertTrue(any("implemented but" in e for e in errors))
+
     def test_gate_mutation_transaction_move(self):
         # Mutation testing: deleting one organism-identity move must make the
         # transaction check go red (the witnesses for S004 depend on it).

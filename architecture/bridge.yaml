@@ -12,12 +12,13 @@ contract_owner: "LLM-Trader"
 declared_fingerprint: "dc9130f4680f673ca16ce20687e6fe67fd72a55bbf78f6aca2002350c47a15db"
 fingerprint_recomputed: false
 handoff_record: "contracts/adaptive-ecology-v1.handoff.json"
+# The gate is derived, never declared as prose: the requirements below are
+# looked up in the build inventory and the experiment registry, and any unmet
+# entry becomes a reason. "implemented" and "blocking" therefore cannot drift
+# apart. The declared value is checked against the derivation.
 gate: "CLOSED"
-
-gate_reasons:
-  - "I8 (performance completion) is missing"
-  - "I9 (long-run hardening) is missing"
-  - "the experimental program (E1-E5) has produced no evidence"
+requires_build: [I9]
+requires_experiments: [E1, E2, E3, E4, E5]
 
 rules_exercised:
   - "extension gate: all inventory items implemented and experimental evidence produced before any extension begins"
@@ -77,8 +78,5 @@ forbidden_shortcuts:
   - "evaluation labels entering training"
   - "changing I1-I9 status or skipping the experimental program to make room"
 
-blockers:
-  - "I8 and I9 missing"
-  - "E1-E5 evidence absent"
-  - "C4-C7 VERIFY witnesses and the C8 archive-attribution decision outstanding"
-  - "the upstream coherence questions and the fingerprint-recomputation precondition"
+# The derived gate reasons are rendered from requires_build and
+# requires_experiments; only non-derivable preconditions remain above.

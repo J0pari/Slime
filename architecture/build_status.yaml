@@ -80,15 +80,11 @@ items:
     mechanisms:
       - integration/host_main.cu::phase_trace
       - autodiff/warp_tape.cu::launch_backward_all
-    missing:
-      - meet the 10-generations-in-60-seconds target (profile shows ~27 s/gen;
-        the backward's per-step weight-grad and stencil-gather kernels
-        dominate, see arch-signals)
   I9:
     status: partial
     mechanisms:
       - integration/host_main.cu::step_generation
     missing:
-      - red-team tests for classes A-F with detection verification
       - 5000-generation stability verification (checkpoint/restart
-        byte-equivalence, no spontaneous class A-F conditions)
+        byte-equivalence, no spontaneous class A-F conditions; the chunked
+        harness is queued, the acceptance run has not completed)

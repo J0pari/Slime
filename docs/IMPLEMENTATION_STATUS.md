@@ -31,12 +31,15 @@ BUILD phase incomplete: 1 of 9 inventory items are not implemented (I9). No GPU 
 
 ## Bridge admission
 
-- External contract: `adaptive-ecology/v1` (owner: LLM-Trader)
+- External contract: `adaptive-ecology/v1` (owner: `LLM-Trader`)
 - Declared fingerprint: `dc9130f4680f673ca16ce20687e6fe67fd72a55bbf78f6aca2002350c47a15db` (recomputed by Slime: no)
-- Admission gate: **CLOSED**
-  - I8 (performance completion) is missing
-  - I9 (long-run hardening) is missing
-  - the experimental program (E1-E5) has produced no evidence
+- Admission gate: **CLOSED** (derived)
+  - build: I9 (partial)
+  - experiment: E1 (planned)
+  - experiment: E2 (planned)
+  - experiment: E3 (planned)
+  - experiment: E4 (planned)
+  - experiment: E5 (planned)
 
 ## Claims
 

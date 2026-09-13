@@ -186,14 +186,13 @@ def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
     gate = bridge.get("gate")
     if gate not in BRIDGE_STATES:
         errors.append(f"{BRIDGE_FILE}: gate {gate!r} is not one of {BRIDGE_STATES}")
-    incomplete = [iid for iid, item in sorted(build.get("items", {}).items())
-                  if item.get("status") != "implemented"]
-    if gate == "OPEN" and incomplete:
-        errors.append(f"{BRIDGE_FILE}: gate is OPEN while build items "
-                      f"{', '.join(incomplete)} are not implemented")
+    expected, missing_build, missing_exp = derive_bridge(
+        bridge, build, load_experiments())
+    if gate != expected:
+        reasons = ", ".join(missing_build + missing_exp) or "none"
+        errors.append(f"{BRIDGE_FILE}: gate is {gate} but the requirements "
+                      f"derive {expected} (unmet: {reasons})")
     if gate == "CLOSED":
-        if not bridge.get("gate_reasons"):
-            errors.append(f"{BRIDGE_FILE}: CLOSED gate must list reasons")
         if not (bridge.get("coherence_questions")
                 or bridge.get("coherence_questions_resolved")):
             errors.append(f"{BRIDGE_FILE}: CLOSED gate must record the open or "
@@ -203,18 +202,49 @@ def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
         errors.append(f"{BRIDGE_FILE}: handoff_record {record!r} missing")
 
 
+def derive_bridge(bridge: dict, build: dict, experiments: dict):
+    """The gate is a function of the registries, never free text: the
+    requirements named in bridge.yaml are looked up and any unmet entry
+    becomes a reason. Returns (expected gate, unmet build, unmet
+    experiments)."""
+    items = build.get("items", {})
+    exps = experiments.get("experiments", {})
+    missing_build = []
+    for iid in bridge.get("requires_build", []):
+        item = items.get(iid)
+        if item is None:
+            missing_build.append(f"{iid} (unknown inventory item)")
+        elif item.get("status") != "implemented":
+            missing_build.append(f"{iid} ({item.get('status')})")
+    missing_exp = []
+    for eid in bridge.get("requires_experiments", []):
+        e = exps.get(eid)
+        if e is None:
+            missing_exp.append(f"{eid} (unknown experiment)")
+        elif e.get("status") != "done":
+            missing_exp.append(f"{eid} ({e.get('status')})")
+    expected = "CLOSED" if (missing_build or missing_exp) else "OPEN"
+    return expected, missing_build, missing_exp
+
+
 def render_bridge() -> str:
     bridge = load_bridge()
+    expected, missing_build, missing_exp = derive_bridge(
+        bridge, load_build_status(), load_experiments())
     lines = [
         f"- External contract: `{bridge.get('external_contract', '')}` "
-        f"(owner: {bridge.get('contract_owner', '')})",
+        f"(owner: `{bridge.get('contract_owner', '')}`)",
         f"- Declared fingerprint: `{bridge.get('declared_fingerprint', '')}` "
         f"(recomputed by Slime: "
         f"{'yes' if bridge.get('fingerprint_recomputed') else 'no'})",
-        f"- Admission gate: **{bridge.get('gate', '')}**",
+        f"- Admission gate: **{expected}** (derived)",
     ]
-    for reason in bridge.get("gate_reasons", []):
-        lines.append(f"  - {reason}")
+    for reason in missing_build:
+        lines.append(f"  - build: {reason}")
+    for reason in missing_exp:
+        lines.append(f"  - experiment: {reason}")
+    if not missing_build and not missing_exp:
+        lines.append("  - all requirements met")
     return "\n".join(lines)
 
 
@@ -253,6 +283,9 @@ def check_build_status(root: Path, build: dict, transactions: dict,
         if status == "missing" and mechanisms:
             errors.append(f"{BUILD_STATUS_FILE}: {iid} is missing but names "
                           f"mechanisms")
+        if status == "implemented" and item.get("missing"):
+            errors.append(f"{BUILD_STATUS_FILE}: {iid} is implemented but "
+                          f"lists missing reasons")
         for mechanism in mechanisms:
             ok, why = resolve_mechanism(mechanism, root, transactions)
             if not ok:

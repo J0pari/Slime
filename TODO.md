@@ -18,11 +18,13 @@ not a history.
 - [x] Cross-platform e2e fixture: the fake binary is a .cmd on Windows and
   an executable shell script on POSIX, so the architecture suite no longer
   fails on Linux.
-- [ ] Control-plane drift: bridge blockers are free text (gate_reasons);
-  represent them structurally as requires_build: [I9] and
-  requires_experiments: [E1..E5] in bridge.yaml, derive the gate and the
-  prose from that graph in check_bridge, and delete the stale ~27-second
-  I8 language from the inventory text.
+- [x] Control-plane drift: bridge.yaml now declares requires_build [I9]
+  and requires_experiments [E1..E5]; derive_bridge computes the gate and the
+  reasons from the registries, check_bridge fails on any declared/derived
+  mismatch, render_bridge emits the derived reasons, and the compiler now
+  rejects an implemented item that lists missing reasons (the exact drift).
+  The stale ~27-second I8 text and the stale red-team missing line are gone;
+  I9's missing list is the 5000-generation run only.
 - [x] Surprise blending reliability: the trust-weight composition
   (calibration, held-out, diversity, correlation) is implemented and
   provisional.
