@@ -41,12 +41,13 @@ items:
     mechanisms:
       - safety/structural.cu::run_audit_cycle
       - safety/structural.cu::refresh_probe_panel
-      - safety/structural.cu::launch_sentinel_score
       - safety/structural.cu::update_lineage_stats
+      - safety/structural.cu::variance_multiplier
+      - safety/structural.cu::score_sentinels
+      - archive/soft_qd_archive.cu::set_lineage_brake
+      - integration/host_main.cu::score_organisms
     missing:
-      - variance floor multiplier
-      - stress ladder
-      - wiring into fitness composition and archive insertion
+      - SOT-density stress ladder (refresh, elevated-SOT evaluation, failure flagging)
   I5:
     status: missing
   I6:

@@ -150,6 +150,9 @@ inline void write_run_state(Buffer& b, const World* w) {
     b.put_pod(w->cusum_surprise);
     b.put_pod(w->cusum_r);
     b.put_pod(w->mutation_ladder);
+    b.put_pod(w->stress_ladder);
+    b.put_pod(w->sentinel_ens);
+    b.put_pod(w->sentinel_history);
 
     const OrganismTable& t = w->org_table;
     b.put_arr(t.genomes, TOTAL_ORG);
@@ -161,6 +164,7 @@ inline void write_run_state(Buffer& b, const World* w) {
     b.put_arr(t.fitness, TOTAL_ORG);
     b.put_arr(t.f_raw, TOTAL_ORG);
     b.put_arr(t.f_sot, TOTAL_ORG);
+    b.put_arr(t.last_loss, TOTAL_ORG);
     b.put_arr(t.role, TOTAL_ORG);
     b.put_arr(t.batch_sample_idx, POOL_SIZE);
 
@@ -223,6 +227,9 @@ inline bool read_run_state(Buffer& b, World* w) {
     b.get_pod(w->cusum_surprise);
     b.get_pod(w->cusum_r);
     b.get_pod(w->mutation_ladder);
+    b.get_pod(w->stress_ladder);
+    b.get_pod(w->sentinel_ens);
+    b.get_pod(w->sentinel_history);
 
     OrganismTable& t = w->org_table;
     b.get_arr(t.genomes, TOTAL_ORG);
@@ -234,6 +241,7 @@ inline bool read_run_state(Buffer& b, World* w) {
     b.get_arr(t.fitness, TOTAL_ORG);
     b.get_arr(t.f_raw, TOTAL_ORG);
     b.get_arr(t.f_sot, TOTAL_ORG);
+    b.get_arr(t.last_loss, TOTAL_ORG);
     b.get_arr(t.role, TOTAL_ORG);
     b.get_arr(t.batch_sample_idx, POOL_SIZE);
 

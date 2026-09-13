@@ -7,6 +7,13 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: The SOT identity check uses the 24 tail organism slots
+  (`d_organisms + POOL_SIZE`) as reference-rollout scratch, but the blueprint
+  assigns the same slots to the SOT-density stress sub-populations. The
+  stress ladder (I4 remainder) therefore needs the conflict resolved first:
+  either dedicated SOT reference buffers or an explicit time-multiplex
+  ordering. Recorded before implementing so the next step starts with the
+  decision, not with a collision.
 - 2026-09-12: `cuda_engineering.md` was internally inconsistent about the
   placeholder regressor: §2.3 and §14 listed it host-only while §4.5-4.6,
   §5, and the VRAM budget specified device kernels. Reconciled in favor of

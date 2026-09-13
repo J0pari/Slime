@@ -62,6 +62,7 @@ struct OrganismTable {
     float                fitness[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=fitness]
     float                f_raw[TOTAL_ORG];     // [identity:organism] [lifetime:rollout] [crosses:pt=f_raw]
     float                f_sot[TOTAL_ORG];     // [identity:organism] [lifetime:rollout] [crosses:pt=f_sot]
+    float                last_loss[TOTAL_ORG]; // task loss at the last evaluation (audit target)
     Role                 role[TOTAL_ORG];      // [identity:organism] [lifetime:rollout] [crosses:pt=role]
     int                  batch_sample_idx[POOL_SIZE]; // [identity:organism] [lifetime:rollout] [crosses:pt=batch_sample_idx]
 };
@@ -128,6 +129,19 @@ struct World {
     safety::CusumState cusum_r;
     safety::pt::MutationLadder mutation_ladder;
     safety::pt::StressLadder   stress_ladder;
+
+    // Structural pressures (S-003, I4): audit regressors, interpretability
+    // probe panel, sentinel ensemble and pruning history, per-role lineage
+    // share tracking, and the per-organism sentinel anomaly scores.
+    safety::AuditRegressor audit_reg;
+    safety::ProbePanel     probe_panel;
+    float                  probe_panel_l_role_baseline;
+    bool                   probe_panel_baseline_set;
+    safety::SentinelEnsemble sentinel_ens;
+    safety::SentinelHistory  sentinel_history;
+    safety::LineageStats     lineage_stats[LINEAGE_STATS_MAX];
+    int                      n_lineage_stats;
+    float                    sentinel_anomaly[POOL_SIZE];
 
     // Placeholder regressor and probe set (A-601).
     predictor::PlaceholderRegressor placeholder_reg;

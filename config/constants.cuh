@@ -247,6 +247,32 @@ constexpr int   STRESS_POOL_SIZE = STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE;  //
 // Total organism slots: active pool + stress sub-populations.
 constexpr int   TOTAL_ORG = POOL_SIZE + STRESS_POOL_SIZE;  // 88
 
+// ---- Structural pressures (S-003, I4) ------------------------------------
+// Audit: ridge-stabilized least-squares fit of bmap_64 to the role target;
+// audit_mult = clamp(1 - LAMBDA_AUDIT*(1 - R^2), floor, 1).
+constexpr float AUDIT_RIDGE              = 1e-3f;
+constexpr int   AUDIT_MIN_SAMPLES        = 8;
+constexpr float AUDIT_MULT_FLOOR         = 0.9f;
+// Variance floor (Q-001 class A): descriptors below the floor are penalized
+// immediately in fitness composition.
+constexpr float VAR_FLOOR                = 1e-4f;
+constexpr float VAR_FLOOR_MULT           = 0.5f;
+// Interpretability probe panel: small linear probes trained by SGD on the
+// archive snapshot; held-out accuracy is reported.
+constexpr int   PROBE_PANEL_SAMPLES      = 256;
+constexpr int   PROBE_PANEL_SPLIT_MOD    = 2;   // even train / odd evaluate
+constexpr int   PROBE_PANEL_EPOCHS       = 40;
+constexpr float PROBE_PANEL_LR           = 0.1f;
+constexpr float PROBE_PANEL_TRAIN_FRACTION = 0.75f;
+// Lineage runaway: per-role share threshold and the tracked-lineage table.
+constexpr float LINEAGE_RUNAWAY_THRESHOLD = 0.20f;
+constexpr int   LINEAGE_STATS_MAX         = 256;
+constexpr int   LINEAGE_BRAKE_MAX         = 16;
+// Sentinel training: examples ingested per generation from the history.
+constexpr int   SENTINEL_TRAIN_PER_GEN    = 8;
+constexpr float SENTINEL_LR_BASE          = 1e-3f;
+constexpr float SENTINEL_LR_DECAY         = 0.05f;
+
 // ---- SOT density (A-701) -------------------------------------------------
 constexpr float MAIN_SOT_DENSITY     = 0.05f;  // 5% for main pool
 

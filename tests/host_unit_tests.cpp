@@ -30,6 +30,7 @@
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
+#include "../safety/structural.cu"
 #include "../safety/operator_cmds.cuh"
 #include "../archive/soft_qd_archive.cu"
 #include "../curriculum/problem_generator.cu"
@@ -1024,6 +1025,166 @@ static void test_l_role_collapse() {
     EXPECT_TRUE(l_role_collapse_ref(0.30f, 0.50f) == false);  // baseline untrusted
 }
 
+// ---- Structural pressures (S-003, I4) -------------------------------------
+
+// Least-squares audit: a linear target with enough samples explains almost
+// all variance; constant or random targets do not.
+static void test_audit_r2_and_multiplier() {
+    static float X[48 * BMAP_DIM];
+    static float y[48];
+    uint32_t s = 0x5EEDu;
+    for (int i = 0; i < 48; ++i) {
+        float acc = 0.3f;
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            float u = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+            X[i * BMAP_DIM + d] = u;
+            acc += 0.2f * u;
+        }
+        y[i] = acc;
+    }
+    float w[BMAP_DIM];
+    float b = 0.f;
+    float r2 = slime::safety::fit_linear_r2(X, y, 48, w, &b);
+    EXPECT_TRUE(r2 > 0.99f);
+
+    for (int i = 0; i < 48; ++i) y[i] = 1.f;
+    r2 = slime::safety::fit_linear_r2(X, y, 48, w, &b);
+    EXPECT_TRUE(r2 <= 0.f);
+
+    for (int i = 0; i < 48; ++i) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        y[i] = static_cast<float>(s) * (1.0f / 4294967296.0f);
+    }
+    r2 = slime::safety::fit_linear_r2(X, y, 48, w, &b);
+    EXPECT_TRUE(r2 < 0.95f);
+}
+
+// The audit cycle fits each role separately and floors the multiplier.
+static void test_audit_cycle_role_aware() {
+    static float X[64 * BMAP_DIM];
+    static float loss[64];
+    Role roles[64];
+    uint32_t s = 0xA0D17u;
+    for (int i = 0; i < 64; ++i) {
+        roles[i] = (i < 32) ? Role::Classifier : Role::Predictor;
+        float acc = 0.1f;
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            float u = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+            X[i * BMAP_DIM + d] = u;
+            acc += 0.15f * u;
+        }
+        loss[i] = acc;
+    }
+    slime::safety::AuditRegressor reg{};
+    reg.audit_mult_classifier = 1.f;
+    reg.audit_mult_predictor = 1.f;
+    slime::safety::run_audit_cycle(&reg, X, loss, roles, 64);
+    EXPECT_TRUE(reg.audit_mult_classifier > 0.99f);
+    EXPECT_TRUE(reg.audit_mult_predictor > 0.99f);
+
+    // Constant losses carry no signal: the multiplier floors.
+    for (int i = 0; i < 64; ++i) loss[i] = 0.5f;
+    slime::safety::run_audit_cycle(&reg, X, loss, roles, 64);
+    EXPECT_TRUE(reg.audit_mult_classifier == AUDIT_MULT_FLOOR);
+    EXPECT_TRUE(reg.audit_mult_predictor == AUDIT_MULT_FLOOR);
+}
+
+static void test_variance_multiplier() {
+    float constant_desc[BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) constant_desc[d] = 0.5f;
+    EXPECT_TRUE(slime::safety::variance_multiplier(constant_desc) == VAR_FLOOR_MULT);
+
+    float varied[BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        varied[d] = static_cast<float>(d) * 0.1f;
+    }
+    EXPECT_TRUE(slime::safety::variance_multiplier(varied) == 1.f);
+}
+
+// Per-role lineage shares and growth; the brake table is per-role and
+// non-mutating.
+static void test_lineage_stats_and_brake() {
+    uint32_t ids[8] = {7, 7, 7, 7, 7, 7, 9, 9};
+    Role roles[8] = {Role::Classifier, Role::Classifier, Role::Classifier,
+                     Role::Classifier, Role::Classifier, Role::Classifier,
+                     Role::Classifier, Role::Classifier};
+    static slime::safety::LineageStats stats[LINEAGE_STATS_MAX];
+    int n_stats = 0;
+    slime::safety::update_lineage_stats(ids, roles, 8, stats, &n_stats, 1);
+
+    int idx7 = -1;
+    for (int i = 0; i < n_stats; ++i) {
+        if (stats[i].lineage_id == 7) idx7 = i;
+    }
+    EXPECT_TRUE(idx7 >= 0);
+    EXPECT_TRUE(stats[idx7].archive_count == 6);
+    EXPECT_TRUE(stats[idx7].archive_share > 0.74f &&
+                stats[idx7].archive_share < 0.76f);
+    EXPECT_TRUE(slime::safety::runaway_detected(stats[idx7],
+                                         LINEAGE_RUNAWAY_THRESHOLD));
+
+    slime::safety::update_lineage_stats(ids, roles, 8, stats, &n_stats, 2);
+    EXPECT_TRUE(!slime::safety::runaway_detected(stats[idx7],
+                                          LINEAGE_RUNAWAY_THRESHOLD));
+
+    static slime::archive::Archive arch;
+    std::memset(&arch, 0, sizeof(arch));
+    slime::archive::set_lineage_brake(&arch, Role::Classifier, 7, 0.75f,
+                               LINEAGE_RUNAWAY_THRESHOLD);
+    float factor = slime::archive::lineage_brake_factor(arch, Role::Classifier, 7);
+    EXPECT_TRUE(factor < 1.f && factor >= LAMBDA_AUDIT);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(arch, Role::Predictor, 7) == 1.f);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(arch, Role::Classifier, 9) == 1.f);
+}
+
+// The L_role probe separates a linearly shifted role encoding.
+static void test_probe_panel_role_separable() {
+    static float X[64 * BMAP_DIM];
+    static float fit[64];
+    uint32_t ids[64];
+    Role roles[64];
+    for (int i = 0; i < 64; ++i) {
+        roles[i] = (i < 32) ? Role::Classifier : Role::Predictor;
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            X[i * BMAP_DIM + d] =
+                0.01f * static_cast<float>((i * 7 + d) % 13);
+        }
+        if (roles[i] == Role::Predictor) X[i * BMAP_DIM + 0] += 5.f;
+        fit[i] = static_cast<float>(i);
+        ids[i] = static_cast<uint32_t>(i % 4);
+    }
+    slime::safety::ProbePanel panel{};
+    slime::safety::refresh_probe_panel(&panel, X, fit, ids, roles, 64);
+    EXPECT_TRUE(panel.l_role_acc > 0.9f);
+    EXPECT_TRUE(panel.l_fit_acc >= 0.f && panel.l_fit_acc <= 1.f);
+    EXPECT_TRUE(panel.l_lineage_acc >= 0.f && panel.l_lineage_acc <= 1.f);
+}
+
+// Sentinel scoring stays in [0, 1] and pruning labels history entries inside
+// the window only.
+static void test_sentinel_score_and_prune_labels() {
+    slime::safety::SentinelEnsemble ens{};
+    float desc[BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        desc[d] = 0.1f * static_cast<float>(d);
+    }
+    float s = slime::safety::sentinel_score_one(ens, desc);
+    EXPECT_TRUE(s >= 0.f && s <= 1.f);
+
+    slime::safety::SentinelHistory h{};
+    slime::safety::sentinel_history_push(&h, desc, 0.f, 42u, 10);
+    slime::safety::sentinel_history_push(&h, desc, 0.f, 43u, 11);
+    slime::safety::sentinel_history_mark_pruned(&h, 42u, 12);
+    EXPECT_TRUE(h.buf[0].label == 1.f);
+    EXPECT_TRUE(h.buf[1].label == 0.f);
+
+    slime::safety::sentinel_history_push(&h, desc, 0.f, 42u, 0);
+    slime::safety::sentinel_history_mark_pruned(&h, 42u, 100);
+    EXPECT_TRUE(h.buf[2].label == 0.f);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1060,6 +1221,12 @@ int main() {
     test_archive_prune_lineage();
     test_sot_batch_determinism();
     test_archive_file_roundtrip();
+    test_audit_r2_and_multiplier();
+    test_audit_cycle_role_aware();
+    test_variance_multiplier();
+    test_lineage_stats_and_brake();
+    test_probe_panel_role_separable();
+    test_sentinel_score_and_prune_labels();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

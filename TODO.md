@@ -12,11 +12,13 @@ No GPU integration, acceptance, or production run happens before this list
 is empty; `evidence.py record` refuses GPU manifests until then.
 
 I4
-- [ ] Variance floor multiplier per organism.
+- [x] Variance floor multiplier per organism.
+- [x] Audit cycle (least-squares fit, R^2, audit_mult) wired into fitness.
+- [x] Probe panel (four probes, L_role collapse alarm).
+- [x] Sentinel scoring and pruning-history training.
+- [x] Per-role lineage stats and the non-mutating expanding-lineage brake.
 - [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
   failure flagging.
-- [ ] Wire audit_mult and variance_mult into fitness composition; activate
-  the expanding-lineage brake in archive insertion.
 
 I5
 - [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all

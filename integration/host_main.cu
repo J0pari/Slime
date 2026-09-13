@@ -376,6 +376,20 @@ bool initialize_world(World* w) {
     std::memset(w->mutation_ladder.best_fitness_history, 0,
                 sizeof(w->mutation_ladder.best_fitness_history));
 
+    // Structural pressures (S-003, I4): neutral audit multipliers, no probe
+    // baseline, empty sentinel ensemble/history and lineage table.
+    std::memset(&w->audit_reg, 0, sizeof(w->audit_reg));
+    w->audit_reg.audit_mult_classifier = 1.f;
+    w->audit_reg.audit_mult_predictor = 1.f;
+    std::memset(&w->probe_panel, 0, sizeof(w->probe_panel));
+    w->probe_panel_l_role_baseline = 0.f;
+    w->probe_panel_baseline_set = false;
+    std::memset(&w->sentinel_ens, 0, sizeof(w->sentinel_ens));
+    std::memset(&w->sentinel_history, 0, sizeof(w->sentinel_history));
+    std::memset(w->lineage_stats, 0, sizeof(w->lineage_stats));
+    w->n_lineage_stats = 0;
+    std::memset(w->sentinel_anomaly, 0, sizeof(w->sentinel_anomaly));
+
     // Section 9.1: Archive initialization.
     std::memset(&w->archive, 0, sizeof(w->archive));
     for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
@@ -448,6 +462,7 @@ static void score_organisms(World* w, float classifier_multiplier,
         float loss = 0.f;
         float task_proxy = 0.f;
         float role_mult = 1.f;
+        float audit_mult = 1.f;
 
         if (role == Role::Classifier) {
             int sample_idx = w->org_table.batch_sample_idx[org];
@@ -461,6 +476,7 @@ static void score_organisms(World* w, float classifier_multiplier,
             }
             task_proxy = expf(-loss);
             role_mult = classifier_multiplier;
+            audit_mult = w->audit_reg.audit_mult_classifier;
         } else {
             int slot = org % cur::PREDICTOR_BATCH;
             const float* target = &w->predictor_batch.target_bmap_64[slot * BMAP_DIM];
@@ -469,6 +485,7 @@ static void score_organisms(World* w, float classifier_multiplier,
             for (int d = 0; d < BMAP_DIM; ++d) sg[d] = dpred[d];
             task_proxy = expf(-loss);
             role_mult = predictor_multiplier;
+            audit_mult = w->audit_reg.audit_mult_predictor;
 
             // Ensemble prediction error EMA per pool target organism: the
             // predictor curriculum re-weights toward weak spots. Probe slots
@@ -483,11 +500,13 @@ static void score_organisms(World* w, float classifier_multiplier,
 
         sum_loss += loss;
         n_evaluated++;
+        w->org_table.last_loss[org] = loss;
 
+        float variance_mult = safety::variance_multiplier(bmap);
         w->org_table.f_raw[org] =
             task_proxy * archive::sot_gate(w->org_table.f_sot[org]);
         w->org_table.fitness[org] = archive::compose_fitness(
-            w->org_table.f_raw[org], role_mult, 1.0f, 1.0f);
+            w->org_table.f_raw[org], role_mult, audit_mult, variance_mult);
     }
 
     w->last_mean_ce = (n_evaluated > 0) ? sum_loss / static_cast<float>(n_evaluated) : 0.f;
@@ -912,8 +931,75 @@ bool step_generation(World* w) {
     }
     score_organisms(w, classifier_mult, predictor_mult);
 
+    // ---- Structural pressures (S-003, I4) ----
+    // Per-role lineage shares and runaway brakes are recomputed before
+    // insertion so the brake affects this generation's replacement decisions.
+    safety::update_lineage_stats(w->org_table.lineage_id, w->org_table.role,
+                                 POOL_SIZE, w->lineage_stats,
+                                 &w->n_lineage_stats, gen);
+    w->archive.n_lineage_brakes = 0;
+    for (Role role : { Role::Classifier, Role::Predictor }) {
+        int best = -1;
+        for (int s = 0; s < w->n_lineage_stats; ++s) {
+            if (w->lineage_stats[s].role != role) continue;
+            if (!safety::runaway_detected(w->lineage_stats[s],
+                                          LINEAGE_RUNAWAY_THRESHOLD)) {
+                continue;
+            }
+            if (best < 0 || w->lineage_stats[s].archive_share >
+                            w->lineage_stats[best].archive_share) {
+                best = s;
+            }
+        }
+        if (best >= 0) {
+            archive::set_lineage_brake(&w->archive, role,
+                                       w->lineage_stats[best].lineage_id,
+                                       w->lineage_stats[best].archive_share,
+                                       LINEAGE_RUNAWAY_THRESHOLD);
+        }
+    }
+
     // ---- Archive insertion (section 9.1) ----
     insert_into_archive(w);
+
+    // Audit cycle: refit the role-aware predictive-sufficiency regressors.
+    if (gen % AUDIT_INTERVAL == 0) {
+        safety::run_audit_cycle(&w->audit_reg, w->h_descriptors,
+                                w->org_table.last_loss, w->org_table.role,
+                                POOL_SIZE);
+    }
+
+    // Interpretability probe panel and the L_role collapse alarm.
+    if (gen % PROBE_PANEL_INTERVAL == 0) {
+        safety::refresh_probe_panel(&w->probe_panel, w->h_descriptors,
+                                    w->org_table.fitness,
+                                    w->org_table.lineage_id,
+                                    w->org_table.role, POOL_SIZE);
+        if (!w->probe_panel_baseline_set && w->probe_panel.l_role_acc > 0.f) {
+            w->probe_panel_l_role_baseline = w->probe_panel.l_role_acc;
+            w->probe_panel_baseline_set = true;
+        } else if (safety::l_role_collapse(w->probe_panel,
+                       w->probe_panel_l_role_baseline)) {
+            std::printf("[ALARM] L_role accuracy %.3f dropped below %.0f%% of "
+                        "baseline %.3f: representational collapse between "
+                        "roles\n", w->probe_panel.l_role_acc,
+                        L_ACC_COLLAPSE_FRACTION * 100.f,
+                        w->probe_panel_l_role_baseline);
+            std::fflush(stdout);
+        }
+    }
+
+    // Sentinels: score every organism, ingest sampled history examples, and
+    // record this generation's descriptors as survived-so-far observations.
+    safety::score_sentinels(w->sentinel_ens, w->h_descriptors, POOL_SIZE,
+                            w->sentinel_anomaly);
+    safety::train_sentinels_from_history(&w->sentinel_ens,
+                                         &w->sentinel_history, &w->rng);
+    for (int org = 0; org < POOL_SIZE; ++org) {
+        safety::sentinel_history_push(&w->sentinel_history,
+                                      &w->h_descriptors[org * BMAP_DIM],
+                                      0.f, w->org_table.lineage_id[org], gen);
+    }
 
     // ---- Predictor bootstrap (A-601): one-shot at half occupancy ----
     if (!w->bootstrap_fired && archive::bootstrap_trigger(w->archive)) {
@@ -1120,6 +1206,19 @@ bool step_generation(World* w) {
             std::printf("         role grad cos=n/a  n_C=%d n_P=%d\n",
                         count, n_pred);
         }
+        float sentinel_mean = 0.f;
+        for (int i = 0; i < POOL_SIZE; ++i) sentinel_mean += w->sentinel_anomaly[i];
+        sentinel_mean /= static_cast<float>(POOL_SIZE);
+        std::printf("         audit r2_C=%.3f mult_C=%.3f r2_P=%.3f mult_P=%.3f  "
+                    "L_role=%.3f L_fit=%.3f L_lineage=%.3f  "
+                    "lineages=%d sentinel_mean=%.3f\n",
+                    w->audit_reg.r2_classifier,
+                    w->audit_reg.audit_mult_classifier,
+                    w->audit_reg.r2_predictor,
+                    w->audit_reg.audit_mult_predictor,
+                    w->probe_panel.l_role_acc, w->probe_panel.l_fit_acc,
+                    w->probe_panel.l_lineage_acc, w->n_lineage_stats,
+                    sentinel_mean);
         std::fflush(stdout);
     }
 
@@ -1339,6 +1438,9 @@ static void poll_operator_commands(World* w) {
     for (int p = 0; p < w->operator_state.n_pruned; ++p) {
         archive::prune_lineage(&w->archive,
                                w->operator_state.pruned_lineages[p]);
+        safety::sentinel_history_mark_pruned(&w->sentinel_history,
+                                             w->operator_state.pruned_lineages[p],
+                                             w->generation);
     }
 }
 

@@ -77,8 +77,18 @@ struct Archive {
     float inv_var_ema[BMAP_DIM];
     float mu_desc_ema[BMAP_DIM];
 
-    // Per-role lineage runaway tracking (S-003).
-    // Hooks in via lineage stats elsewhere; archive reports per-role share.
+    // Per-role lineage runaway tracking (S-003). The host writes at most
+    // LINEAGE_BRAKE_MAX active brakes before insertion; `insert` consults
+    // them when comparing incumbent QD scores. Stored entry fitness is never
+    // mutated, so applying a brake is idempotent.
+    struct LineageBrake {
+        Role     role;
+        uint32_t lineage_id;
+        float    factor;
+    };
+    LineageBrake lineage_brakes[LINEAGE_BRAKE_MAX];
+    int n_lineage_brakes;
+
     uint32_t count_classifier;
     uint32_t count_predictor;
 
@@ -465,6 +475,45 @@ __host__ inline bool archive_read_file(Archive& a, FILE* f) {
 #define ARCHIVE_CHECK_RETURN(a, ret) return (ret)
 #endif
 
+// ---- Lineage brake (S-003) -----------------------------------------------
+// A runaway lineage's incumbents are easier to displace: their effective QD
+// fitness is scaled by factor = max(threshold / share, LAMBDA_AUDIT). The
+// brake is stored separately from entry fitness so repeated application is
+// idempotent and the stored values remain the organisms' real fitness.
+__host__ inline float lineage_brake_factor(const Archive& a, Role role,
+                                           uint32_t lineage_id) {
+    for (int i = 0; i < a.n_lineage_brakes; ++i) {
+        if (a.lineage_brakes[i].role == role &&
+            a.lineage_brakes[i].lineage_id == lineage_id) {
+            return a.lineage_brakes[i].factor;
+        }
+    }
+    return 1.0f;
+}
+
+__host__ inline void set_lineage_brake(Archive* a, Role role,
+                                       uint32_t lineage_id,
+                                       float share_fraction, float threshold) {
+    float factor = 1.0f;
+    if (share_fraction > threshold) {
+        factor = threshold / share_fraction;
+        if (factor < LAMBDA_AUDIT) factor = LAMBDA_AUDIT;
+    }
+    for (int i = 0; i < a->n_lineage_brakes; ++i) {
+        if (a->lineage_brakes[i].role == role &&
+            a->lineage_brakes[i].lineage_id == lineage_id) {
+            a->lineage_brakes[i].factor = factor;
+            return;
+        }
+    }
+    if (factor >= 1.0f) return;
+    if (a->n_lineage_brakes >= LINEAGE_BRAKE_MAX) return;
+    int slot = a->n_lineage_brakes++;
+    a->lineage_brakes[slot].role = role;
+    a->lineage_brakes[slot].lineage_id = lineage_id;
+    a->lineage_brakes[slot].factor = factor;
+}
+
 // Soft-QD insertion with novelty-weighted replacement. Returns the index of
 // the slot that received the candidate, or -1 if rejected.
 //
@@ -532,7 +581,10 @@ __host__ inline int insert(Archive* a, const ArchiveEntry& cand) {
     }
     if (victim_idx >= 0) {
         float e_novelty = rff_novelty(a->entries[victim_idx].rff_proj, mu_role);
-        float e_qd = qd_score(a->entries[victim_idx].fitness, e_novelty);
+        float e_factor = lineage_brake_factor(*a, a->entries[victim_idx].role,
+                                              a->entries[victim_idx].lineage_id);
+        float e_qd = qd_score(a->entries[victim_idx].fitness * e_factor,
+                              e_novelty);
         if (cand_qd <= e_qd) {
             return -1;
         }
@@ -822,33 +874,6 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
         }
     }
 #endif
-}
-
-// Apply lineage brake: scale the effective fitness of entries belonging to a
-// runaway lineage, making them easier to displace. The brake factor is
-// proportional to how far over threshold the lineage sits. Per-role and
-// independent. Idempotent: recomputes the factor from current share each call.
-//
-// share_fraction: the lineage's fraction of the role's archive slots (0..1).
-// threshold: the maximum acceptable share (e.g. 0.2 = 20%). Entries above
-// threshold get their fitness scaled by (threshold / share_fraction), so a
-// lineage at 2x the threshold has its fitness halved.
-__host__ inline void apply_lineage_brake(Archive* a,
-                                                    Role role,
-                                                    uint32_t runaway_lineage_id,
-                                                    float share_fraction,
-                                                    float threshold) {
-    if (share_fraction <= threshold) return;  // no braking needed
-    float brake = threshold / share_fraction;
-    if (brake < LAMBDA_AUDIT) brake = LAMBDA_AUDIT;  // floor to prevent zeroing
-
-    for (int i = 0; i < MAX_ARCHIVE; ++i) {
-        ArchiveEntry& e = a->entries[i];
-        if (!e.alive) continue;
-        if (e.role != role) continue;
-        if (e.lineage_id != runaway_lineage_id) continue;
-        e.fitness *= brake;
-    }
 }
 
 }  // namespace slime::archive
