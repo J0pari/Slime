@@ -177,6 +177,18 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_no_test_stub_includes_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_no_test_stub_includes(
+            files_from({"nca/engine.cu":
+                        '#include "tests/stubs/cuda_runtime.h"'}), report)
+        self.assertFalse(report.ok, "stub include in production not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_no_test_stub_includes(
+            files_from({"nca/engine.cu": '#include <cuda_runtime.h>'}),
+            report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_gpu_authorization_catches_plant(self):
         # A GPU binary that drops the startup guard must fail the gate.
         report = source_gates.GateReport()

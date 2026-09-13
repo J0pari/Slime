@@ -59,7 +59,7 @@ BUILD phase incomplete: 1 of 9 inventory items are not implemented (I9). No GPU 
 | A501.role-gradient-alignment | empirical | provisional | ✅ | ✅ | never |
 | A601.competence-gated-novelty | policy | planned | ✅ | ❌ | never |
 | A601.ensemble-epistemic-uncertainty | empirical | provisional | ✅ | ❌ | never |
-| A601.trust-weight-composition | capability | planned | ✅ | ❌ | never |
+| A601.trust-weight-composition | capability | provisional | ✅ | ✅ | never |
 | C001.acceptance-evidence-current | acceptance | established | ✅ | ✅ | pass/stale |
 | G100.deterministic-seed | contract | established | ✅ | ✅ | pass/stale |
 | G100.named-tunables | policy | established | ✅ | ✅ | pass/stale |
@@ -75,7 +75,7 @@ BUILD phase incomplete: 1 of 9 inventory items are not implemented (I9). No GPU 
 | S003.red-team-coverage | acceptance | provisional | ✅ | ✅ | never |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/stale |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS, strong_ids_identity_fields: PASS, gpu_authorization: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS, strong_ids_identity_fields: PASS, gpu_authorization: PASS, no_test_stub_includes: PASS
 
-Claims: 32 total, 26 established, 4 provisional, 2 planned.
+Claims: 32 total, 26 established, 5 provisional, 1 planned.
 <!-- architecture-status:end -->

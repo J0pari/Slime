@@ -283,6 +283,15 @@ constexpr float PROBE_PANEL_LR           = 0.1f;
 constexpr float PROBE_PANEL_TRAIN_FRACTION = 0.75f;
 // Lineage runaway: per-role share threshold and the tracked-lineage table.
 constexpr float LINEAGE_RUNAWAY_THRESHOLD = 0.20f;
+
+// Trust-weight composition (A601): calibration tolerance around the
+// heteroscedastic loss expectation of 1, held-out tolerance on the
+// over-bound probe fraction, ensemble-variance half-saturation, and the
+// over-bound threshold in bound units.
+constexpr float TRUST_CAL_TOL        = 0.5f;
+constexpr float TRUST_HELD_TOL       = 0.5f;
+constexpr float TRUST_DIVERSITY_VAR0 = 1e-6f;
+constexpr float TRUST_OVER_K         = 4.0f;
 constexpr int   LINEAGE_STATS_MAX         = 256;
 constexpr int   LINEAGE_BRAKE_MAX         = 16;
 // Sentinel training: examples ingested per generation from the history.

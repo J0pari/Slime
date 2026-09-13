@@ -219,6 +219,8 @@ struct World {
     uint64_t          host_sot_key;
     int               grad_health_warn_count;   // consecutive low-norm generations
     float             last_mean_ce;       // mean CE over evaluated classifiers
+    float             ref_surprise_mean;  // probe mean err^2*exp(-log_unc)
+    float             ref_tail_fraction;  // probe fraction over the bound
     float             last_max_abs_logit;// max |logit| over evaluated classifiers
     const char*       checkpoint_path;    // S-001 checkpoint file (set by run)
 

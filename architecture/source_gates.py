@@ -709,6 +709,23 @@ def gate_gpu_authorization(files: dict[str, list[str]],
                 "GPU binary does not require scheduler authorization"))
 
 
+# ---- Gate: production never includes the host test stubs -------------------
+# tests/stubs/cuda_runtime.h exists so the g++ host-test build can compile the
+# host/device inline math without CUDA. It is test scaffolding only: a
+# production include would shadow the real CUDA headers with no-ops.
+def gate_no_test_stub_includes(files: dict[str, list[str]],
+                               report: GateReport) -> None:
+    for path, lines in files.items():
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped.startswith("#include"):
+                continue
+            if "tests/stubs" in stripped or '"stubs/' in stripped:
+                report.findings.append(Finding(
+                    "no_test_stub_includes", path, i,
+                    "production source includes a host test stub"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -728,6 +745,7 @@ ALL_GATES = [
     gate_no_value_ternary_string_default,
     gate_strong_ids_identity_fields,
     gate_gpu_authorization,
+    gate_no_test_stub_includes,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

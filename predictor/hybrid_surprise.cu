@@ -20,6 +20,7 @@
 #define COEVO_PREDICTOR_HYBRID_SURPRISE_CU
 
 #include "../config/constants.cuh"
+#include "trust_weight.cuh"
 
 #include <cstdint>
 #include <cuda_runtime.h>

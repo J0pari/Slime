@@ -86,8 +86,15 @@ static float evaluate_probe_reference(World* w) {
     TRANSFER_ABORT(cudaStreamSynchronize(w->stream),
                    "reference surprise sync");
     float total = 0.f;
-    for (int i = 0; i < PROBE_BATCH; ++i) total += w->h_ref_surprise[i];
-    return total / static_cast<float>(PROBE_BATCH);
+    int over = 0;
+    for (int i = 0; i < PROBE_BATCH; ++i) {
+        total += w->h_ref_surprise[i];
+        if (w->h_ref_surprise[i] > TRUST_OVER_K) over++;
+    }
+    w->ref_surprise_mean = total / static_cast<float>(PROBE_BATCH);
+    w->ref_tail_fraction = static_cast<float>(over)
+        / static_cast<float>(PROBE_BATCH);
+    return w->ref_surprise_mean;
 }
 
 // Pack the signed probe tuples (bmap_64 + task embedding) into the device
@@ -1673,10 +1680,17 @@ bool step_generation(World* w) {
     // are live (post-bootstrap): before that r is undefined and only
     // reference surprise is used.
     float r = 0.f;
+    float w_trust = 0.f;
     float s_blended = s_reference;
     if (w->bootstrap_fired) {
         r = predictor::pearson_r_clipped(w->corr_window);
-        s_blended = predictor::blend_surprise(s_reference, s_predictor, r);
+        w_trust = predictor::trust_weight(
+            r,
+            predictor::calibration_factor(w->ref_surprise_mean),
+            predictor::held_factor(w->ref_tail_fraction),
+            predictor::diversity_factor(s_predictor));
+        s_blended = predictor::blend_surprise(s_reference, s_predictor,
+                                              w_trust);
         predictor::push_correlation(&w->corr_window, s_reference, s_predictor);
         safety::cusum_update(&w->cusum_r, r);
     }
@@ -1688,6 +1702,11 @@ bool step_generation(World* w) {
         std::printf("         surprise s_ph=%.4e s_pr=%.4e r=%.4f "
                     "s_blend=%.4e rho=%.4f\n",
                     s_reference, s_predictor, r, s_blended, rho);
+        std::printf("         trust cal=%.3f held=%.3f div=%.3f "
+                    "w=%.3f\n",
+                    predictor::calibration_factor(w->ref_surprise_mean),
+                    predictor::held_factor(w->ref_tail_fraction),
+                    predictor::diversity_factor(s_predictor), w_trust);
         // Dashboard surface (I9): role fraction, surprise ratio, ladder swap
         // statistics, and stress-failure flags in one periodic line.
         int n_c = 0;

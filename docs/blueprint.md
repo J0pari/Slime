@@ -734,8 +734,10 @@ M predictor/hybrid_surprise.cu::pearson_r_clipped
 M predictor/hybrid_surprise.cu::ReferenceRegressor
 M predictor/hybrid_surprise.cu::launch_reference_train
 M predictor/hybrid_surprise.cu::ensemble_surprise
-T planned
-C unobserved
+M predictor/trust_weight.cuh::trust_weight
+W+ tests/host_unit_tests.cpp::test_trust_weight_composition
+T provisional
+C observed
 
 @claim A601.ensemble-epistemic-uncertainty empirical
 S the predictor ensemble's per-descriptor variance is a crude epistemic

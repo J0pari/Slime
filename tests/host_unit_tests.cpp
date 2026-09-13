@@ -35,6 +35,7 @@
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
 #include "../safety/stress_ladder.cuh"
+#include "../predictor/trust_weight.cuh"
 #include "../safety/structural.cu"
 #include "../safety/operator_cmds.cuh"
 #include "../archive/soft_qd_archive.cu"
@@ -1286,6 +1287,27 @@ static void test_red_team_reference_poisoning() {
     EXPECT_TRUE(s.alerts > 0);
 }
 
+// [claim:A601.trust-weight-composition]
+// The composed weight is bounded, vetoes on any zero factor, and rewards
+// calibration, held-out support, and genuine diversity.
+static void test_trust_weight_composition() {
+    using namespace slime::predictor;
+    EXPECT_TRUE(trust_weight(1.f, 1.f, 1.f, 1.f) == 1.f);
+    EXPECT_TRUE(trust_weight(1.f, 0.f, 1.f, 1.f) == 0.f);
+    EXPECT_TRUE(trust_weight(1.f, 1.f, 0.f, 1.f) == 0.f);
+    EXPECT_TRUE(trust_weight(1.f, 1.f, 1.f, 0.f) == 0.f);
+    EXPECT_TRUE(trust_weight(2.f, 1.f, 1.f, 1.f) == 1.f);
+    EXPECT_TRUE(trust_weight(-1.f, 1.f, 1.f, 1.f) == 0.f);
+    EXPECT_TRUE(calibration_factor(1.f) == 1.f);
+    EXPECT_TRUE(calibration_factor(1.1f) > calibration_factor(1.4f));
+    EXPECT_TRUE(calibration_factor(5.f) == 0.f);
+    EXPECT_TRUE(held_factor(0.f) == 1.f);
+    EXPECT_TRUE(held_factor(0.1f) > held_factor(0.4f));
+    EXPECT_TRUE(held_factor(1.f) == 0.f);
+    EXPECT_TRUE(diversity_factor(0.f) == 0.f);
+    EXPECT_TRUE(diversity_factor(TRUST_DIVERSITY_VAR0) > 0.49f);
+}
+
 // The L_role probe separates a linearly shifted role encoding.
 static void test_probe_panel_role_separable() {
     static float X[64 * BMAP_DIM];
@@ -1740,6 +1762,7 @@ int main() {
     test_genome_fieldwise_perturbation();
     test_archive_historical_attribution();
     test_red_team_reference_poisoning();
+    test_trust_weight_composition();
     test_sot_batch_determinism();
     test_archive_file_roundtrip();
     test_audit_r2_and_multiplier();
