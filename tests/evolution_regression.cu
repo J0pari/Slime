@@ -520,6 +520,7 @@ static int test_forced_pt_swap() {
 // that logical organism B produced before the swap: checkpoint, effective
 // weights, and seed gradient moved together, so the gradient attribution is
 // unchanged by the exchange.
+// [claim:S003.red-team-coverage]
 static int test_pt_swap_backward_correspondence() {
     // [claim:S004.pt-swap-transaction]
     std::printf("--- Test: backward correspondence across a PT swap ---\n");

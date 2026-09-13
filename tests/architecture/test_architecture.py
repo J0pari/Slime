@@ -177,6 +177,23 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_red_team_schedule_manipulation_gates(self):
+        # [claim:S003.red-team-coverage]
+        # Class C injection: a device->host read inside the schedule, and a
+        # device value driving operator authority, must both be caught by the
+        # source gates that the clean tree passes.
+        report = source_gates.GateReport()
+        source_gates.gate_schedule_host_only(
+            files_from({"curriculum/problem_generator.cu":
+                        "cudaMemcpy(d, s, n, cudaMemcpyDeviceToHost);"}),
+            report)
+        self.assertFalse(report.ok, "schedule manipulation was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_schedule_host_only(
+            files_from({"curriculum/problem_generator.cu":
+                        "float x = pcg32_float(&rng);"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_strong_ids_identity_fields_catches_plant(self):
         # [claim:G100.strong-identifiers]
         report = source_gates.GateReport()

@@ -1225,6 +1225,67 @@ static void test_red_team_host_detectors() {
     EXPECT_TRUE(!slime::archive::archive_check_invariants(a, err, sizeof(err)));
 }
 
+// [claim:A301.genotype-causes-phenotype]
+// Fieldwise perturbation matrix: changing one genome field changes exactly
+// that field's readback and leaves the others untouched.
+static void test_genome_fieldwise_perturbation() {
+    slime::genome::Genome g;
+    std::memset(&g.bits, 0, sizeof(g.bits));
+    slime::genome::write_seed(g, slime::GenomeSeed(0xABCDEF12u));
+    slime::genome::write_role(g, Role::Classifier);
+    EXPECT_TRUE(slime::genome::read_seed(g).value() == 0xABCDEF12u);
+    slime::genome::write_role(g, Role::Predictor);
+    EXPECT_TRUE(slime::genome::read_seed(g).value() == 0xABCDEF12u);
+    EXPECT_TRUE(slime::genome::runtime_role(g) == Role::Predictor);
+    slime::genome::write_seed(g, slime::GenomeSeed(1u));
+    EXPECT_TRUE(slime::genome::runtime_role(g) == Role::Predictor);
+    EXPECT_TRUE(slime::genome::read_seed(g).value() == 1u);
+}
+
+// [claim:A401.archive-genotype-attribution]
+// Historical attribution: the archive keeps the genome that produced the
+// entry, even after the live source organism mutates.
+static void test_archive_historical_attribution() {
+    static slime::archive::Archive a;
+    std::memset(&a, 0, sizeof(a));
+    init_test_archive(&a);
+    slime::archive::ArchiveEntry cand;
+    std::memset(&cand, 0, sizeof(cand));
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        cand.descriptor[d] = 0.5f + 0.001f * static_cast<float>(d);
+    }
+    slime::archive::rff_project(a.rff, cand.descriptor, cand.rff_proj);
+    slime::genome::write_seed(cand.genome, slime::GenomeSeed(4242u));
+    cand.fitness = 0.5f;
+    cand.f_raw = 0.5f;
+    cand.f_sot = 1.0f;
+    cand.lineage_id = slime::LineageId(9u);
+    cand.role = Role::Classifier;
+    cand.alive = true;
+    slime::archive::assign_bin(a, cand.descriptor, cand.bin_x, cand.bin_y);
+    int idx = slime::archive::insert(&a, cand);
+    EXPECT_TRUE(idx >= 0);
+    slime::genome::Genome live = cand.genome;
+    slime::genome::write_seed(live, slime::GenomeSeed(9999u));
+    EXPECT_TRUE(slime::genome::read_seed(a.entries[idx].genome).value()
+                == 4242u);
+    EXPECT_TRUE(slime::genome::read_seed(live).value() == 9999u);
+}
+
+// [claim:S003.red-team-coverage]
+// Class F injection: a sustained drift in the monitored signal must trip
+// CUSUM; a stationary signal must not. monitoring.cu is not host-includable
+// (CUDA diagnostics), so this exercises the mirrored reference update the
+// file already uses for the reset-after-alarm test; the production path is
+// exercised on hardware.
+static void test_red_team_reference_poisoning() {
+    CusumRef s = {0.f, 0.f, /*ref=*/0.f, /*allow=*/0.1f, /*thresh=*/1.0f, 0};
+    for (int i = 0; i < 50; ++i) cusum_update_ref(&s, 0.05f);
+    EXPECT_TRUE(s.alerts == 0);
+    for (int i = 0; i < 50; ++i) cusum_update_ref(&s, 1.0f);
+    EXPECT_TRUE(s.alerts > 0);
+}
+
 // The L_role probe separates a linearly shifted role encoding.
 static void test_probe_panel_role_separable() {
     static float X[64 * BMAP_DIM];
@@ -1676,6 +1737,9 @@ int main() {
     test_archive_prune_lineage();
     test_strong_ids_distinct();
     test_red_team_host_detectors();
+    test_genome_fieldwise_perturbation();
+    test_archive_historical_attribution();
+    test_red_team_reference_poisoning();
     test_sot_batch_determinism();
     test_archive_file_roundtrip();
     test_audit_r2_and_multiplier();

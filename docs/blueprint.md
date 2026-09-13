@@ -483,6 +483,7 @@ M genome/codec.cu::apply_delta
 M autodiff/warp_tape.cu::materialize_effective_weights_kernel
 M integration/host_main.cu::step_generation
 W+ tests/evolution_regression.cu::test_genotype_causality
+W+ tests/host_unit_tests.cpp::test_genome_fieldwise_perturbation
 T established
 C observed
 
@@ -522,13 +523,18 @@ because it will be called from a device decode kernel in a future wave.
 A-401: Soft Quality-Diversity Archive (Role-Aware)
 @claim A401.archive-genotype-attribution contract
 S the archive stores the genome that produced the archived descriptor and
-  fitness, and parent selection draws from those stored genomes
+  fitness (historical attribution: the stored genome is the one that
+  produced the entry at insertion time, never a replay-equivalent
+  reconstruction from the live pool), parent selection draws from those
+  stored genomes, and a delta-encoded genome reconstructs against the
+  shared base captured with its entry
 M integration/host_main.cu::insert_into_archive
 M integration/host_main.cu::spawn_wave
+W+ tests/host_unit_tests.cpp::test_archive_historical_attribution
 W tests/evolution_regression.cu::test_genotype_causality
 D A301.genotype-causes-phenotype
-T provisional
-C inferred
+T established
+C observed
 
 @claim A401.bin-capacity invariant
 S no archive bin holds more than its per-role capacity after any insertion
@@ -963,6 +969,10 @@ M architecture/source_gates.py::gate_schedule_host_only
 M safety/parallel_tempering.cu::swap_host_organism
 M safety/structural.cu::sentinel_score_one
 W+ tests/host_unit_tests.cpp::test_red_team_host_detectors
+W+ tests/host_unit_tests.cpp::test_red_team_reference_poisoning
+W+ tests/architecture/test_architecture.py::test_red_team_schedule_manipulation_gates
+W+ tests/checkpoint_state.cu::main
+W+ tests/evolution_regression.cu::test_pt_swap_backward_correspondence
 P safety
 T provisional
 C observed

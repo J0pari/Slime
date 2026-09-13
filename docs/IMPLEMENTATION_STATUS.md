@@ -51,7 +51,7 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | A201.task-conditioning-complete | contract | established | ✅ | ✅ | pass/stale |
 | A202.rd-adjoint-present | contract | established | ✅ | ✅ | never |
 | A301.genotype-causes-phenotype | invariant | established | ✅ | ✅ | pass/stale |
-| A401.archive-genotype-attribution | contract | provisional | ✅ | ❌ | pass/stale |
+| A401.archive-genotype-attribution | contract | established | ✅ | ✅ | pass/stale |
 | A401.bin-capacity | invariant | established | ✅ | ✅ | pass/stale |
 | A401.live-statistics-exact | invariant | established | ✅ | ✅ | pass/stale |
 | A401.weighted-metric-active | contract | established | ✅ | ✅ | pass/stale |
@@ -77,5 +77,5 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS, strong_ids_identity_fields: PASS
 
-Claims: 32 total, 25 established, 5 provisional, 2 planned.
+Claims: 32 total, 26 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->
