@@ -52,14 +52,15 @@ items:
       - safety/alignment.cu::evaluate_stress_predictors
       - integration/host_main.cu::stress_cycle
   I5:
-    status: partial
+    status: implemented
     mechanisms:
       - config/constants.cuh::GLOBAL_CONTEXT_ENABLED
       - autodiff/warp_tape.cu::OFF_CTX
       - integration/host_main.cu::kaiming_he_init
-    missing:
-      - backward context adjoint (d_ctx, dW_ctx, summary gradient)
-      - activation of GLOBAL_CONTEXT_ENABLED and the resulting witness suite
+      - nca/context_adjoint.cuh::context_map
+      - nca/context_adjoint.cuh::context_backward
+      - nca/engine.cu::project_bmap
+      - autodiff/warp_tape.cu::bwd_weight_grad_kernel
   I6:
     status: missing
   I7:

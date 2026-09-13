@@ -19,6 +19,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include "context_adjoint.cuh"
+
 namespace slime::nca {
 
 // One organism's CA state in managed memory. Channels are the innermost layout
@@ -27,6 +29,7 @@ struct OrganismState {
     __half grid[GRID_SIZE * GRID_SIZE * CA_CHANNELS];  // current step
     __half scratch[GRID_SIZE * GRID_SIZE * CA_CHANNELS]; // double buffer
     float  bmap_traj[BTRAJ_SAMPLES * BMAP_DIM];        // BTRAJ output
+    float  sample_summary[BTRAJ_SAMPLES * CA_CHANNELS]; // pre-broadcast means (A-203)
     Role   role;
 };
 
@@ -51,7 +54,8 @@ __host__ __device__ inline int grid_idx(int y, int x, int c) {
 // after it (the definition needs no forward refs of its own).
 __device__ inline void project_bmap(__half* state,
                                     const float* W_bmap,
-                                    float* bmap_out_32);
+                                    float* bmap_out_32,
+                                    float* summary_out);
 
 // Fixed task-embedding projection (A-201): channel `ch` (0..4) of the task
 // field carries the DCT row `ch` of the 16-d embedding. Every embedding
@@ -298,7 +302,10 @@ __device__ inline void forward_one(OrganismState* o,
         if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
             project_bmap(curr,
                          W_bmap,
-                         &o->bmap_traj[sample_idx * BMAP_DIM]);
+                         &o->bmap_traj[sample_idx * BMAP_DIM],
+                         GLOBAL_CONTEXT_ENABLED
+                             ? &o->sample_summary[sample_idx * CA_CHANNELS]
+                             : nullptr);
             sample_idx++;
         }
     }
@@ -372,7 +379,8 @@ __global__ void forward_effective_kernel(OrganismState* organisms,
 // loss (see cuda_engineering.md section 4.1).
 __device__ inline void project_bmap(__half* state,
                                     const float* W_bmap,
-                                    float* bmap_out_32) {
+                                    float* bmap_out_32,
+                                    float* summary_out) {
     // 256 threads (16x16 block), CA_CHANNELS = 16.
     // Shared memory layout: [nthreads * CA_CHANNELS] for the tree reduction.
     // The reduction hard-codes 256 threads; if the forward block dims ever
@@ -427,6 +435,13 @@ __device__ inline void project_bmap(__half* state,
     }
     __syncthreads();
 
+    // The pre-broadcast summary is the backward's reference for the context
+    // adjoint (the aux channels are overwritten below, so it cannot be
+    // recovered from the post-broadcast state).
+    if (summary_out != nullptr && tid < CA_CHANNELS) {
+        summary_out[tid] = summary[tid];
+    }
+
     // Phase 3: Project: bmap_out_32[d] = sum_c W_bmap[c, d] * summary[c].
     for (int d = tid; d < BMAP_DIM; d += nthreads) {
         float acc = 0.f;
@@ -442,21 +457,18 @@ __device__ inline void project_bmap(__half* state,
     // bank pointer and needs no extra kernel argument.
     if (GLOBAL_CONTEXT_ENABLED) {
         const float* W_ctx = W_bmap + CA_CHANNELS * BMAP_DIM;
-        __shared__ float ctx[CH_AUX_LAST - CH_AUX_FIRST + 1];
-        if (tid < CH_AUX_LAST - CH_AUX_FIRST + 1) {
-            float acc = 0.f;
-            for (int c = 0; c < CA_CHANNELS; ++c) {
-                acc += W_ctx[c * (CH_AUX_LAST - CH_AUX_FIRST + 1) + tid]
-                     * summary[c];
-            }
-            ctx[tid] = acc;
+        __shared__ float ctx[CTX_K];
+        if (tid < CTX_K) {
+            float tmp[CTX_K];
+            context_map(summary, W_ctx, tmp);
+            ctx[tid] = tmp[tid];
         }
         __syncthreads();
         for (int idx = tid; idx < GRID_SIZE * GRID_SIZE; idx += nthreads) {
             int y = idx / GRID_SIZE;
             int x = idx % GRID_SIZE;
             #pragma unroll
-            for (int k = 0; k < CH_AUX_LAST - CH_AUX_FIRST + 1; ++k) {
+            for (int k = 0; k < CTX_K; ++k) {
                 state[grid_idx(y, x, CH_AUX_FIRST + k)] =
                     __float2half(ctx[k]);
             }

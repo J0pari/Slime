@@ -1088,6 +1088,103 @@ static int test_role_grad_alignment() {
     return 0;
 }
 
+// ---- I5: global context channel --------------------------------------------
+
+// Every checkpoint at a sample step is post-broadcast, and its aux channels
+// must equal context_map(stored pre-broadcast summary, W_ctx) exactly.
+static int test_context_channel_reference() {
+    std::printf("--- Test: context broadcast matches the stored summary ---\n");
+    std::fflush(stdout);
+    Rig r{};
+    if (rig_init(&r)) return 1;
+    launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                    r.d_weights, nullptr, r.d_ckpt,
+                                    RESIDUAL_ALPHA, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    OrganismState h_org;
+    CheckpointBuffer h_ck;
+    CUDA_CHECK(cudaMemcpy(&h_org, r.d_org, sizeof(OrganismState),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_ck, r.d_ckpt, sizeof(CheckpointBuffer),
+                          cudaMemcpyDeviceToHost));
+
+    float W_ctx[CA_CHANNELS * slime::nca::CTX_K];
+    for (int i = 0; i < CA_CHANNELS * slime::nca::CTX_K; ++i) {
+        W_ctx[i] = r.h_weights[OFF_CTX + i];
+    }
+    int mismatches = 0;
+    for (int ck = 1; ck <= 3; ++ck) {
+        float ctx[slime::nca::CTX_K];
+        slime::nca::context_map(
+            &h_org.sample_summary[(ck - 1) * CA_CHANNELS], W_ctx, ctx);
+        for (int cell = 0; cell < GRID_SIZE * GRID_SIZE; cell += 1021) {
+            for (int k = 0; k < slime::nca::CTX_K; ++k) {
+                __half want = __float2half(ctx[k]);
+                __half got = h_ck.data[ck][cell * CA_CHANNELS
+                                           + CH_AUX_FIRST + k];
+                if (__half_as_ushort(want) != __half_as_ushort(got)) {
+                    mismatches++;
+                }
+            }
+        }
+    }
+    {
+        float ctx[slime::nca::CTX_K];
+        slime::nca::context_map(&h_org.sample_summary[3 * CA_CHANNELS],
+                                W_ctx, ctx);
+        for (int cell = 0; cell < GRID_SIZE * GRID_SIZE; cell += 1021) {
+            for (int k = 0; k < slime::nca::CTX_K; ++k) {
+                __half want = __float2half(ctx[k]);
+                __half got = h_org.grid[cell * CA_CHANNELS
+                                        + CH_AUX_FIRST + k];
+                if (__half_as_ushort(want) != __half_as_ushort(got)) {
+                    mismatches++;
+                }
+            }
+        }
+    }
+    std::printf("  mismatches=%d\n", mismatches);
+    CHECK(mismatches == 0,
+          "checkpoint and final aux channels equal context_map(summary)");
+    rig_free(&r);
+    return 0;
+}
+
+// The backward must write W_ctx gradients at the sample steps.
+static int test_context_gradient_nonzero() {
+    std::printf("--- Test: context adjoint writes W_ctx gradients ---\n");
+    std::fflush(stdout);
+    Rig r{};
+    if (rig_init(&r)) return 1;
+    launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                    r.d_weights, nullptr, r.d_ckpt,
+                                    RESIDUAL_ALPHA, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    float h_seed[BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        h_seed[d] = 0.1f * static_cast<float>(d % 3 - 1);
+    }
+    CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed, sizeof(float) * BMAP_DIM,
+                          cudaMemcpyHostToDevice));
+    launch_backward_all(r.d_org, r.d_weights, nullptr, r.d_seed_grad,
+                        r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    GradBuffers g;
+    CUDA_CHECK(cudaMemcpy(&g, r.d_grads, sizeof(GradBuffers),
+                          cudaMemcpyDeviceToHost));
+    float norm2 = 0.f;
+    for (int i = 0; i < W_CTX_SIZE; ++i) {
+        norm2 += g.dW[OFF_CTX + i] * g.dW[OFF_CTX + i];
+    }
+    std::printf("  ||dW_ctx||^2=%.3e\n", norm2);
+    CHECK(norm2 > 0.f, "context adjoint writes W_ctx gradients");
+    rig_free(&r);
+    return 0;
+}
+
 int main() {
     std::printf("Evolution regression suite (role locking, effective weights, "
                 "PT correspondence, finite differences)\n");
@@ -1102,6 +1199,8 @@ int main() {
     rc |= test_finite_difference_gradient();
     rc |= test_residual_dynamics_bounded();
     rc |= test_role_grad_alignment();
+    rc |= test_context_channel_reference();
+    rc |= test_context_gradient_nonzero();
 
     std::printf("\n========================================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);

@@ -79,7 +79,7 @@ constexpr int CH_AUX_LAST      = 15;
 // Compile-time gate: when disabled, the weight space, kernels, and telemetry
 // banks are unchanged. W_ctx maps the 16-channel bmap summary to the two aux
 // channels, broadcast to every cell at sample steps.
-constexpr bool  GLOBAL_CONTEXT_ENABLED = false;
+constexpr bool  GLOBAL_CONTEXT_ENABLED = true;
 constexpr int   W_CTX_COUNT = CA_CHANNELS * (CH_AUX_LAST - CH_AUX_FIRST + 1);  // 32
 constexpr float W_CTX_INIT_SCALE = 0.25f;  // sqrt(1/16), linear layer
 constexpr int   TELEMETRY_BANKS = GLOBAL_CONTEXT_ENABLED ? 5 : 4;

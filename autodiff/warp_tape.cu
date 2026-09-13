@@ -16,6 +16,7 @@ using nca::OrganismState;
 using nca::ForwardInputs;
 using nca::PERC_DIM;
 using nca::grid_idx;
+using nca::CTX_K;
 using ::canonical_role;
 
 // ---- Weight layout constants (mirror genome/codec.cu) --------------------
@@ -204,6 +205,19 @@ __global__ void forward_with_checkpoints_kernel(
         }
         __half* tmp = curr; curr = next; next = tmp;
 
+        // Sample steps: project the bmap and broadcast the global context
+        // FIRST, so the checkpoint saved below is the post-broadcast state
+        // the next CA step actually consumes (the backward re-forwards from
+        // checkpoints and must see the same state).
+        if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
+            nca::project_bmap(curr, W_bmap,
+                              &o->bmap_traj[sample_idx * BMAP_DIM],
+                              GLOBAL_CONTEXT_ENABLED
+                                  ? &o->sample_summary[sample_idx * CA_CHANNELS]
+                                  : nullptr);
+            sample_idx++;
+        }
+
         // Save checkpoints at steps 16, 32, 48 (indices 1, 2, 3).
         if (step == CHECKPOINT_INTERVAL || step == 2 * CHECKPOINT_INTERVAL ||
             step == (NUM_CHECKPOINTS - 1) * CHECKPOINT_INTERVAL) {
@@ -212,11 +226,6 @@ __global__ void forward_with_checkpoints_kernel(
                 ckpt.data[ckpt_idx][i] = curr[i];
             }
             __syncthreads();
-        }
-
-        if (sample_idx < BTRAJ_SAMPLES && step == steps[sample_idx]) {
-            nca::project_bmap(curr, W_bmap, &o->bmap_traj[sample_idx * BMAP_DIM]);
-            sample_idx++;
         }
     }
 
@@ -251,8 +260,11 @@ __global__ void bwd_zero_kernel(
     }
 }
 
-// Sub-kernel 2: Compute avg-pool summary of final grid state.
-// Writes summary into first CA_CHANNELS floats of d_state_B[org].
+// Sub-kernel 2: Write the summary used by the final bmap projection into the
+// first CA_CHANNELS floats of d_state_B[org]. With the global context channel
+// enabled, the projection used the pre-broadcast summary stored during the
+// forward (the final grid's aux channels are post-broadcast); otherwise the
+// summary is the avg-pool of the final grid.
 __global__ void bwd_seed_avgpool_kernel(
     const OrganismState* organisms,
     float* d_state_B,      // [n_org * GRID_ELEMS] (scratch: first CH floats)
@@ -263,6 +275,17 @@ __global__ void bwd_seed_avgpool_kernel(
     extern __shared__ float smem[];  // [CA_CHANNELS]
 
     int tid = threadIdx.x;
+    float* g_summary = &d_state_B[org * GRID_ELEMS];
+
+    if (GLOBAL_CONTEXT_ENABLED) {
+        const int last_slot = BTRAJ_SAMPLES - 1;
+        for (int c = tid; c < CA_CHANNELS; c += BWD_THREADS) {
+            g_summary[c] =
+                organisms[org].sample_summary[last_slot * CA_CHANNELS + c];
+        }
+        return;
+    }
+
     for (int c = tid; c < CA_CHANNELS; c += BWD_THREADS) {
         smem[c] = 0.f;
     }
@@ -276,7 +299,6 @@ __global__ void bwd_seed_avgpool_kernel(
     }
     __syncthreads();
 
-    float* g_summary = &d_state_B[org * GRID_ELEMS];
     for (int c = tid; c < CA_CHANNELS; c += BWD_THREADS) {
         g_summary[c] = smem[c] / static_cast<float>(CELLS);
     }
@@ -418,11 +440,13 @@ __global__ void bwd_reforward_step_kernel(
 __global__ void bwd_weight_grad_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
+    const OrganismState* organisms,
     const __half* recomp_curr, // [n_org * GRID_ELEMS] — recovered input state
     const float* d_state_A,    // [n_org * GRID_ELEMS] — d_state_next
     GradBuffers* grads,
     float* d_perc_buf,         // [n_org * PERC_ELEMS]
     float alpha,               // residual timestep
+    int sample_slot,           // BTRAJ slot for this step, or -1
     int n_organisms)
 {
     int org = blockIdx.x;
@@ -437,6 +461,54 @@ __global__ void bwd_weight_grad_kernel(
     const __half* rc = &recomp_curr[org * GRID_ELEMS];
     const float* dA = &d_state_A[org * GRID_ELEMS];
     float* my_d_perc = &d_perc_buf[org * PERC_ELEMS];
+
+    // Context-broadcast adjoint (A-203, I5). The forward overwrote the aux
+    // channels at this step, so their direct gradient is zero; the summary
+    // that produced them depends on every pre-broadcast channel, so its
+    // adjoint re-adds d_summary[c]/CELLS to all channels. The pre-broadcast
+    // summary comes from the forward store.
+    __shared__ float s_mean[CA_CHANNELS];
+    if (tid < CA_CHANNELS) s_mean[tid] = 0.f;
+    __syncthreads();
+    if (GLOBAL_CONTEXT_ENABLED && sample_slot >= 0) {
+        __shared__ float s_part[BWD_THREADS * CTX_K];
+        for (int k = 0; k < CTX_K; ++k) s_part[tid * CTX_K + k] = 0.f;
+        for (int cell = tid; cell < CELLS; cell += BWD_THREADS) {
+            #pragma unroll
+            for (int k = 0; k < CTX_K; ++k) {
+                s_part[tid * CTX_K + k] +=
+                    dA[cell * CA_CHANNELS + CH_AUX_FIRST + k];
+            }
+        }
+        __syncthreads();
+        for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                #pragma unroll
+                for (int k = 0; k < CTX_K; ++k) {
+                    s_part[tid * CTX_K + k] +=
+                        s_part[(tid + stride) * CTX_K + k];
+                }
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            const float* W_ctx = wbase + OFF_CTX;
+            const float* summary =
+                &organisms[org].sample_summary[sample_slot * CA_CHANNELS];
+            float* dW_ctx = &grads[org].dW[OFF_CTX];
+            float d_ctx[CTX_K];
+            for (int k = 0; k < CTX_K; ++k) d_ctx[k] = s_part[k];
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                float acc = 0.f;
+                for (int k = 0; k < CTX_K; ++k) {
+                    dW_ctx[c * CTX_K + k] += summary[c] * d_ctx[k];
+                    acc += W_ctx[c * CTX_K + k] * d_ctx[k];
+                }
+                s_mean[c] = acc / static_cast<float>(CELLS);
+            }
+        }
+        __syncthreads();
+    }
 
     for (int cell = tid; cell < CELLS; cell += BWD_THREADS) {
         int y, x;
@@ -460,8 +532,14 @@ __global__ void bwd_weight_grad_kernel(
         float d_state[CA_CHANNELS];
         for (int c = 0; c < CA_CHANNELS; ++c) {
             // x_{t+1} = x_t + alpha * F(x_t)  =>  dF = alpha * d_state_next.
-            // Every weight gradient and d_perc below derives from dF.
-            d_state[c] = alpha * dA[cell * CA_CHANNELS + c];
+            // Every weight gradient and d_perc below derives from dF. The aux
+            // channels carry no direct path through the overwrite.
+            float direct = 0.f;
+            if (!(GLOBAL_CONTEXT_ENABLED && sample_slot >= 0)
+                || c < CH_AUX_FIRST || c > CH_AUX_LAST) {
+                direct = dA[cell * CA_CHANNELS + c];
+            }
+            d_state[c] = alpha * (direct + s_mean[c]);
         }
 
         // dW_flow
@@ -900,6 +978,14 @@ inline void launch_residual_magnitude(
         d_tel, n_organisms);
 }
 
+// BTRAJ slot for an absolute CA step, or -1 when the step is not sampled.
+inline int btraj_slot_for_step(int step) {
+    for (int i = 0; i < BTRAJ_SAMPLES; ++i) {
+        if (BTRAJ_STEPS[i] == step) return i;
+    }
+    return -1;
+}
+
 inline void launch_backward_all(
     OrganismState* d_organisms,
     const float* d_weights,
@@ -951,9 +1037,10 @@ inline void launch_backward_all(
             }
 
             // Phase A: weight grads + d_perc.
+            int abs_step = seg * CHECKPOINT_INTERVAL + local_step;
             bwd_weight_grad_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                d_weights, d_eff_weights, rc, dA, d_grads, ws.d_perc,
-                alpha, N);
+                d_weights, d_eff_weights, d_organisms, rc, dA, d_grads,
+                ws.d_perc, alpha, btraj_slot_for_step(abs_step), N);
 
             // Phase B: stencil gather.
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(

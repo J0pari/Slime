@@ -983,13 +983,16 @@ per bmap step in the backward pass.
 ### 16.4 Configuration
 
 ```
-constexpr bool GLOBAL_CONTEXT_ENABLED = false;  // I5 activates
+constexpr bool GLOBAL_CONTEXT_ENABLED = true;   // I5 active
 constexpr int W_CTX_SIZE = CA_CHANNELS * (CH_AUX_LAST - CH_AUX_FIRST + 1);  // 32
 ```
 
-When `GLOBAL_CONTEXT_ENABLED` is false, W_ctx is not allocated, TOTAL_WEIGHTS
-remains 2587, and the forward/backward kernels skip the broadcast step. The
-flag is a compile-time constant — no runtime branching in the kernel.
+With the gate enabled, TOTAL_WEIGHTS is 2619 and the forward/backward
+kernels run the broadcast and its adjoint at sample steps. The backward
+consumes the pre-broadcast summary stored in `OrganismState.sample_summary`
+(project_bmap writes it; the post-broadcast aux channels cannot recover it),
+and checkpoints at sample steps are saved after the broadcast so the
+backward's re-forward starts from the state the next CA step consumes.
 
 ---
 

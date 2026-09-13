@@ -50,9 +50,12 @@ I4
   readback, wired into the generation loop.
 
 I5
-- [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all
+- [x] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all
   offsets, forward broadcast of the bmap summary into channels 14-15,
   backward context adjoint.
+- [x] Host-verified adjoint reference and finite-difference witness.
+- [x] GPU witnesses written (checkpoint aux channels vs stored summary;
+  non-zero dW_ctx); they execute in VERIFY with the rest of the suite.
 
 I6
 - [ ] RD adjoint (replay reproduces residual + reaction + diffusion).
