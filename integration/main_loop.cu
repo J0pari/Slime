@@ -7,6 +7,7 @@
 #define COEVO_INTEGRATION_MAIN_LOOP_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 #include "../nca/engine.cu"
 #include "../autodiff/warp_tape.cu"
 #include "../optimizer/came.cu"
@@ -56,7 +57,7 @@ struct IntentRegistry {
 struct OrganismTable {
     genome::Genome       genomes[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=genome]
     genome::DeltaWeights deltas[TOTAL_ORG];    // [identity:organism] [lifetime:rollout] [crosses:pt=delta]
-    uint32_t             lineage_id[TOTAL_ORG];// [identity:organism] [lifetime:rollout] [crosses:pt=lineage]
+    LineageId            lineage_id[TOTAL_ORG];// [identity:organism] [lifetime:rollout] [crosses:pt=lineage]
     uint32_t             parent_id[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=parent_id]
     int                  spawn_gen[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=spawn_gen]
     uint8_t              replica_tag[TOTAL_ORG];  // slot identity (temperature), never swapped

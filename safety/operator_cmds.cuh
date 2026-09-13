@@ -9,6 +9,7 @@
 #define COEVO_SAFETY_OPERATOR_CMDS_CUH
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 
 #include <cstdint>
 #include <cstdio>
@@ -27,7 +28,7 @@ enum class OperatorCommand : uint8_t {
 
 struct ParsedCommand {
     OperatorCommand command = OperatorCommand::None;
-    uint32_t lineage = 0;   // set when command == Prune
+    LineageId lineage;   // set when command == Prune
 };
 
 // Parse one line of operator_cmd.txt (newline already stripped). Unknown
@@ -36,7 +37,7 @@ inline ParsedCommand parse_operator_line(const char* line) {
     ParsedCommand out;
     if (std::strncmp(line, "prune ", 6) == 0) {
         out.command = OperatorCommand::Prune;
-        out.lineage = static_cast<uint32_t>(std::strtoul(line + 6, nullptr, 10));
+        out.lineage = LineageId(static_cast<uint32_t>(std::strtoul(line + 6, nullptr, 10)));
     } else if (std::strcmp(line, "pause") == 0) {
         out.command = OperatorCommand::Pause;
     } else if (std::strcmp(line, "resume") == 0) {
@@ -51,17 +52,17 @@ inline ParsedCommand parse_operator_line(const char* line) {
 struct OperatorState {
     bool paused = false;
     bool checkpoint_requested = false;
-    uint32_t pruned_lineages[TOTAL_ORG];
+    LineageId pruned_lineages[TOTAL_ORG];
     int n_pruned = 0;
 
-    bool lineage_pruned(uint32_t lineage) const {
+    bool lineage_pruned(LineageId lineage) const {
         for (int i = 0; i < n_pruned; ++i) {
             if (pruned_lineages[i] == lineage) return true;
         }
         return false;
     }
 
-    void add_pruned(uint32_t lineage) {
+    void add_pruned(LineageId lineage) {
         if (lineage_pruned(lineage)) return;
         if (n_pruned < TOTAL_ORG) pruned_lineages[n_pruned++] = lineage;
     }

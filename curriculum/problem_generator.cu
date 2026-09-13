@@ -17,6 +17,7 @@
 #define COEVO_CURRICULUM_PROBLEM_GENERATOR_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 
 #include <cstddef>   // offsetof, size_t
 #include <cstdint>
@@ -46,7 +47,7 @@ struct PredictorBatch {
     // which need not correspond to a live pool organism); the lineage id is
     // carried separately for provenance and archive linkage.
     int      target_pool_slot[PREDICTOR_BATCH];
-    uint32_t target_lineage_id[PREDICTOR_BATCH];
+    LineageId target_lineage_id[PREDICTOR_BATCH];
     float    target_bmap_32[PREDICTOR_BATCH * BMAP_DIM];
     float    target_bmap_64[PREDICTOR_BATCH * BMAP_DIM];  // ground truth
     bool     target_was_sot[PREDICTOR_BATCH];
@@ -167,7 +168,7 @@ inline void assemble_classifier_batch(ClassifierBatch* out,
 // reference).
 struct ProbeSet {
     ClassifierBatch classifier_probes[4];        // 64-batch total (4*16)
-    uint32_t        predictor_probe_targets[PREDICTOR_BATCH];
+    LineageId       predictor_probe_targets[PREDICTOR_BATCH];
 
     // Predictor probe references (A-601/A-701): a fixed pool of archived
     // classifiers signed at bootstrap. Their bmap_32 and ground-truth
@@ -229,7 +230,7 @@ inline void init_probe_set(ProbeSet* ps, uint64_t host_sot_key, Pcg32* rng) {
                                   host_sot_key, rng);
     }
     for (int i = 0; i < PREDICTOR_BATCH; ++i) {
-        ps->predictor_probe_targets[i] = 0;
+        ps->predictor_probe_targets[i] = LineageId();
     }
     ps->predictor_probes_signed = false;
     std::memset(ps->predictor_probe_bmap32, 0, sizeof(ps->predictor_probe_bmap32));
@@ -266,7 +267,7 @@ inline void sign_probe_tuples(ProbeSet* ps,
 // references never change: predictor quality is measured against a
 // stationary evaluation pool.
 inline void sign_predictor_probes(ProbeSet* ps,
-                                  const uint32_t* target_ids,
+                                           const LineageId* target_ids,
                                   const float* bmap32_rows,   // [K][BMAP_DIM]
                                   const float* bmap64_rows,   // [K][BMAP_DIM]
                                   uint64_t host_sot_key) {
@@ -298,7 +299,7 @@ __host__ __device__ inline int predictor_target_slot(int org, int gen) {
 
 inline void assemble_predictor_batch(PredictorBatch* out,
                                      const ProbeSet& probes,
-                                     const uint32_t* pool_lineage_ids,
+                                     const LineageId* pool_lineage_ids,
                                      const float* error_ema,     // [POOL_SIZE]
                                      const float* bmap32_rows,   // [POOL_SIZE][BMAP_DIM]
                                      const float* bmap64_rows,   // [POOL_SIZE][BMAP_DIM]
@@ -313,7 +314,8 @@ inline void assemble_predictor_batch(PredictorBatch* out,
     if (probes.predictor_probes_signed) {
         for (; slot < PREDICTOR_PROBE_SLOTS && slot < PREDICTOR_BATCH; ++slot) {
             out->target_pool_slot[slot] = -1;
-            out->target_lineage_id[slot] = probes.predictor_probe_targets[slot];
+            out->target_lineage_id[slot] =
+                LineageId(probes.predictor_probe_targets[slot]);
             std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
                         &probes.predictor_probe_bmap32[slot * BMAP_DIM],
                         BMAP_DIM * sizeof(float));

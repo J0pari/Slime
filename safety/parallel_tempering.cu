@@ -26,6 +26,7 @@
 #define COEVO_SAFETY_PARALLEL_TEMPERING_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 #include "../nca/engine.cu"
 #include "../autodiff/warp_tape.cu"
 #include "../genome/codec.cu"
@@ -69,7 +70,7 @@ struct SwapContext {
     // Host-side organism table arrays for row swaps.
     genome::Genome*       genomes;
     genome::DeltaWeights* deltas;
-    uint32_t*             lineage_id;
+    LineageId*            lineage_id;
     uint32_t*             parent_id;
     int*                  spawn_gen;
     float*                fitness;
@@ -148,8 +149,9 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
 
     // Scalars.
     {
+        LineageId t_id;
+        t_id = ctx.lineage_id[slot_a]; ctx.lineage_id[slot_a] = ctx.lineage_id[slot_b]; ctx.lineage_id[slot_b] = t_id;
         uint32_t t;
-        t = ctx.lineage_id[slot_a]; ctx.lineage_id[slot_a] = ctx.lineage_id[slot_b]; ctx.lineage_id[slot_b] = t;
         t = ctx.parent_id[slot_a];  ctx.parent_id[slot_a]  = ctx.parent_id[slot_b];  ctx.parent_id[slot_b]  = t;
     }
     {

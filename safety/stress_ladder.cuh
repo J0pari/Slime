@@ -14,6 +14,7 @@
 #define COEVO_SAFETY_STRESS_LADDER_CUH
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 
 #include <cstdint>
 #include <cstdio>
@@ -22,7 +23,7 @@
 namespace slime::safety::pt {
 
 struct StressLineageRecord {
-    uint32_t lineage_id;
+    LineageId lineage_id;
     int      last_stress_gen;                  // -1 = never evaluated
     int8_t   window[STRESS_HISTORY_WINDOW];    // 1 = failure
     int      window_head;
@@ -34,7 +35,7 @@ struct StressLineageRecord {
 
 struct StressLadder {
     // STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE = 24 stress slots.
-    uint32_t lineage_id[STRESS_POOL_SIZE];
+    LineageId lineage_id[STRESS_POOL_SIZE];
     uint32_t source_pool_idx[STRESS_POOL_SIZE];   // back-pointer
     Role     role[STRESS_POOL_SIZE];
     uint8_t  subpop[STRESS_POOL_SIZE];            // 0,1,2 -> 10/20/40% SOT
@@ -72,7 +73,7 @@ __host__ inline void init_stress_ladder(StressLadder* l) {
 
 // Find (or create) the per-lineage record; null when the table is full.
 __host__ inline StressLineageRecord* stress_lineage_record(StressLadder* l,
-                                                           uint32_t lineage_id,
+                                                           LineageId lineage_id,
                                                            bool create) {
     for (int i = 0; i < l->n_lineages; ++i) {
         if (l->lineages[i].lineage_id == lineage_id) return &l->lineages[i];
@@ -89,7 +90,7 @@ __host__ inline StressLineageRecord* stress_lineage_record(StressLadder* l,
 // sub-population), biased toward lineages with the oldest stress shadow.
 // Callers copy the genome/delta of source_pool_idx into the slot afterwards.
 __host__ inline int refresh_stress_slots(StressLadder* l,
-                                         const uint32_t* pool_lineage_ids,
+                                         const LineageId* pool_lineage_ids,
                                          const Role* pool_roles,
                                          int pool_size,
                                          int generation,

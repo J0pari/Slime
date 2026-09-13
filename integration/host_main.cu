@@ -5,6 +5,7 @@
 // every spawn is role-locked to classifier.
 
 #include "main_loop.cu"
+#include "../config/strong_ids.cuh"
 #include "../safety/alignment.cu"
 #include "checkpointing.cu"
 
@@ -412,7 +413,7 @@ bool initialize_world(World* w) {
 
         genome::init_delta_from_prior(g, &w->org_table.deltas[i]);
 
-        w->org_table.lineage_id[i] = static_cast<uint32_t>(i);
+        w->org_table.lineage_id[i] = LineageId(static_cast<uint32_t>(i));
         w->org_table.parent_id[i] = 0;
         w->org_table.spawn_gen[i] = 0;
         w->org_table.role[i] = genome::read_role(g);
@@ -794,7 +795,7 @@ static void spawn_role_wave(World* w, Role target_role, int n_spawns,
 
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = genome::runtime_role(child);
-        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id.value();
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id;
         w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive_idx);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
@@ -838,7 +839,7 @@ static void spawn_wave(World* w) {
 // genomes into the worst-fitness classifier pool slots.
 static bool inject_predictor_founders(World* w) {
     // Sign predictor probes from a deterministic spread of pool organisms.
-    uint32_t target_ids[cur::PREDICTOR_BATCH];
+    LineageId target_ids[cur::PREDICTOR_BATCH];
     float b32[cur::PREDICTOR_BATCH * BMAP_DIM];
     float b64[cur::PREDICTOR_BATCH * BMAP_DIM];
     for (int i = 0; i < cur::PREDICTOR_BATCH; ++i) {
@@ -902,7 +903,7 @@ static bool inject_predictor_founders(World* w) {
 
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = Role::Predictor;
-        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id.value();
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id;
         w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
@@ -1072,7 +1073,7 @@ bool step_generation(World* w) {
     if (w->bootstrap_fired) {
         static float bmap32_rows[POOL_SIZE * BMAP_DIM];
         static float bmap64_rows[POOL_SIZE * BMAP_DIM];
-        static uint32_t pool_ids[POOL_SIZE];
+        static LineageId pool_ids[POOL_SIZE];
         static bool pool_was_sot[POOL_SIZE];
         for (int i = 0; i < POOL_SIZE; ++i) {
             std::memcpy(&bmap32_rows[i * BMAP_DIM],
@@ -1240,7 +1241,7 @@ bool step_generation(World* w) {
         }
         if (best >= 0) {
             archive::set_lineage_brake(&w->archive, role,
-                                       LineageId(w->lineage_stats[best].lineage_id),
+                                       w->lineage_stats[best].lineage_id,
                                        w->lineage_stats[best].archive_share,
                                        LINEAGE_RUNAWAY_THRESHOLD);
         }

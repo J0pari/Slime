@@ -382,7 +382,8 @@ static int test_forced_pt_swap() {
     // Host organism-table rows with sentinels.
     genome::Genome genomes[2];
     DeltaWeights deltas[2];
-    uint32_t lineage[2], parent[2];
+    slime::LineageId lineage[2];
+    uint32_t parent[2];
     int spawn_gen[2];
     float fitness[2], f_raw[2], f_sot[2];
     Role role[2];
@@ -396,7 +397,8 @@ static int test_forced_pt_swap() {
     genomes[1].bits[5] = 0x55555555u;
     deltas[0].count = 3; deltas[0].indices[0] = 11; deltas[0].values[0] = 0.7f;
     deltas[1].count = 7; deltas[1].indices[0] = 29; deltas[1].values[0] = -0.9f;
-    lineage[0] = 101; lineage[1] = 202;
+    lineage[0] = slime::LineageId(101u);
+    lineage[1] = slime::LineageId(202u);
     parent[0] = 1001; parent[1] = 2002;
     spawn_gen[0] = 5; spawn_gen[1] = 9;
     fitness[0] = 0.25f; fitness[1] = 0.75f;
@@ -460,7 +462,8 @@ static int test_forced_pt_swap() {
     ok = true;
     if (genomes[0].bits[5] != 0x55555555u || genomes[1].bits[5] != 0xAAAAAAAAu) ok = false;
     if (deltas[0].count != 7 || deltas[1].count != 3) ok = false;
-    if (lineage[0] != 202 || lineage[1] != 101) ok = false;
+    if (lineage[0] != slime::LineageId(202u)
+        || lineage[1] != slime::LineageId(101u)) ok = false;
     if (parent[0] != 2002 || parent[1] != 1001) ok = false;
     if (spawn_gen[0] != 9 || spawn_gen[1] != 5) ok = false;
     if (fitness[0] != 0.75f || fitness[1] != 0.25f) ok = false;
@@ -609,14 +612,16 @@ static int test_pt_swap_backward_correspondence() {
     // Forced swap of slots 0 <-> 1 (device data + host rows + seed rows).
     genome::Genome genomes[2];
     DeltaWeights deltas_h[2];
-    uint32_t lineage[2], parent[2];
+    slime::LineageId lineage[2];
+    uint32_t parent[2];
     int spawn_gen[2], batch_idx[2];
     float fitness[2], f_raw[2], f_sot[2];
     Role role[2];
     std::memset(&genomes, 0, sizeof(genomes));
     std::memset(&deltas_h, 0, sizeof(deltas_h));
     genomes[0].bits[5] = 0xAAAAAAAAu; genomes[1].bits[5] = 0x55555555u;
-    lineage[0] = 101; lineage[1] = 202;
+    lineage[0] = slime::LineageId(101u);
+    lineage[1] = slime::LineageId(202u);
     parent[0] = 1001; parent[1] = 2002;
     spawn_gen[0] = 5; spawn_gen[1] = 9;
     fitness[0] = 0.25f; fitness[1] = 0.75f;

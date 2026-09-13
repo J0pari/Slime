@@ -9,6 +9,7 @@
 #define COEVO_SAFETY_STRUCTURAL_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 
 #include <cmath>
 #include <cstdint>
@@ -245,7 +246,7 @@ __host__ inline float probe_fit_eval(LinearProbe* p, const float* X,
 __host__ inline void refresh_probe_panel(ProbePanel* out,
                                          const float* descriptors,   // [n][BMAP_DIM]
                                          const float* fitnesses,     // [n]
-                                         const uint32_t* lineage_ids,// [n]
+                                         const LineageId* lineage_ids,// [n]
                                          const Role* roles,          // [n]
                                          int n) {
     static float X[PROBE_PANEL_SAMPLES * BMAP_DIM];
@@ -260,7 +261,7 @@ __host__ inline void refresh_probe_panel(ProbePanel* out,
     }
 
     // Majority lineage.
-    uint32_t majority = lineage_ids[0];
+    LineageId majority = lineage_ids[0];
     int majority_count = 0;
     for (int i = 0; i < n; ++i) {
         int count = 0;
@@ -317,7 +318,7 @@ struct SentinelEnsemble {
 struct SentinelHistoryEntry {
     float    descriptor[BMAP_DIM];
     float    label;
-    uint32_t lineage_id;
+    LineageId lineage_id;
     int      captured_gen;
 };
 
@@ -362,7 +363,7 @@ __host__ __device__ inline void sentinel_train_step(SentinelEnsemble* ens,
 __host__ __device__ inline void sentinel_history_push(SentinelHistory* h,
                                                       const float* descriptor,
                                                       float label,
-                                                      uint32_t lineage_id,
+                                                      LineageId lineage_id,
                                                       int gen) {
     int slot = h->head;
     SentinelHistoryEntry& e = h->buf[slot];
@@ -377,7 +378,7 @@ __host__ __device__ inline void sentinel_history_push(SentinelHistory* h,
 // Label every history entry belonging to a pruned lineage as positive when
 // its capture is still inside the stress window.
 __host__ inline void sentinel_history_mark_pruned(SentinelHistory* h,
-                                                  uint32_t lineage_id,
+                                                  LineageId lineage_id,
                                                   int gen) {
     for (int i = 0; i < h->filled; ++i) {
         SentinelHistoryEntry& e = h->buf[i];
@@ -413,7 +414,7 @@ __host__ inline void train_sentinels_from_history(SentinelEnsemble* ens,
 // lineage are independent threats with independent thresholds; shares are
 // computed against the lineage's own role population.
 struct LineageStats {
-    uint32_t lineage_id;
+    LineageId lineage_id;
     Role     role;
     uint32_t archive_count;
     float    archive_share;
@@ -425,7 +426,7 @@ struct LineageStats {
 // Recompute per-(lineage, role) counts and shares from the archive snapshot.
 // New lineages are appended while the table has room; growth is the share
 // delta since the previous call.
-__host__ inline void update_lineage_stats(const uint32_t* lineage_ids,
+__host__ inline void update_lineage_stats(const LineageId* lineage_ids,
                                           const Role* roles, int n,
                                           LineageStats* stats, int* n_stats,
                                           int gen) {

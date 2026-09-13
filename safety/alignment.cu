@@ -16,6 +16,7 @@
 #define COEVO_SAFETY_ALIGNMENT_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 #include "../nca/engine.cu"
 #include "../curriculum/problem_generator.cu"
 #include "operator_cmds.cuh"
@@ -454,7 +455,7 @@ inline bool poll_off_switch() {
 //
 // After processing, the file is deleted to prevent re-execution.
 inline bool apply_operator_command(float* organism_fitness,
-                                   uint32_t* lineage_ids,
+                                   LineageId* lineage_ids,
                                    int n_organisms,
                                    OperatorState* state) {
     FILE* f = std::fopen("operator_cmd.txt", "r");
@@ -476,7 +477,7 @@ inline bool apply_operator_command(float* organism_fitness,
                         organism_fitness[i] = 0.f;
                     }
                 }
-                std::printf("[OPERATOR] Pruned lineage %u\n", cmd.lineage);
+                std::printf("[OPERATOR] Pruned lineage %u\n", cmd.lineage.value());
                 processed = true;
                 break;
             }

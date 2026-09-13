@@ -887,18 +887,18 @@ static void test_operator_command_parse() {
     EXPECT_TRUE(ops::parse_operator_line("checkpoint").command == ops::OperatorCommand::Checkpoint);
     ops::ParsedCommand prune = ops::parse_operator_line("prune 4242");
     EXPECT_TRUE(prune.command == ops::OperatorCommand::Prune);
-    EXPECT_TRUE(prune.lineage == 4242u);
+    EXPECT_TRUE(prune.lineage == slime::LineageId(4242u));
     EXPECT_TRUE(ops::parse_operator_line("garbage").command == ops::OperatorCommand::None);
     EXPECT_TRUE(ops::parse_operator_line("").command == ops::OperatorCommand::None);
 
     ops::OperatorState st;
     EXPECT_TRUE(!st.paused);
-    st.add_pruned(7u);
-    st.add_pruned(7u);   // duplicate is deduplicated
-    st.add_pruned(9u);
+    st.add_pruned(slime::LineageId(7u));
+    st.add_pruned(slime::LineageId(7u));   // duplicate is deduplicated
+    st.add_pruned(slime::LineageId(9u));
     EXPECT_TRUE(st.n_pruned == 2);
-    EXPECT_TRUE(st.lineage_pruned(7u));
-    EXPECT_TRUE(!st.lineage_pruned(8u));
+    EXPECT_TRUE(st.lineage_pruned(slime::LineageId(7u)));
+    EXPECT_TRUE(!st.lineage_pruned(slime::LineageId(8u)));
 }
 
 static void test_archive_prune_lineage() {
@@ -1111,7 +1111,10 @@ static void test_variance_multiplier() {
 // Per-role lineage shares and growth; the brake table is per-role and
 // non-mutating.
 static void test_lineage_stats_and_brake() {
-    uint32_t ids[8] = {7, 7, 7, 7, 7, 7, 9, 9};
+    slime::LineageId ids[8] = {
+        slime::LineageId(7u), slime::LineageId(7u), slime::LineageId(7u),
+        slime::LineageId(7u), slime::LineageId(7u), slime::LineageId(7u),
+        slime::LineageId(9u), slime::LineageId(9u)};
     Role roles[8] = {Role::Classifier, Role::Classifier, Role::Classifier,
                      Role::Classifier, Role::Classifier, Role::Classifier,
                      Role::Classifier, Role::Classifier};
@@ -1121,7 +1124,7 @@ static void test_lineage_stats_and_brake() {
 
     int idx7 = -1;
     for (int i = 0; i < n_stats; ++i) {
-        if (stats[i].lineage_id == 7) idx7 = i;
+        if (stats[i].lineage_id == slime::LineageId(7u)) idx7 = i;
     }
     EXPECT_TRUE(idx7 >= 0);
     EXPECT_TRUE(stats[idx7].archive_count == 6);
@@ -1181,7 +1184,7 @@ static void test_strong_ids_distinct() {
 static void test_probe_panel_role_separable() {
     static float X[64 * BMAP_DIM];
     static float fit[64];
-    uint32_t ids[64];
+    slime::LineageId ids[64];
     Role roles[64];
     for (int i = 0; i < 64; ++i) {
         roles[i] = (i < 32) ? Role::Classifier : Role::Predictor;
@@ -1191,7 +1194,7 @@ static void test_probe_panel_role_separable() {
         }
         if (roles[i] == Role::Predictor) X[i * BMAP_DIM + 0] += 5.f;
         fit[i] = static_cast<float>(i);
-        ids[i] = static_cast<uint32_t>(i % 4);
+        ids[i] = slime::LineageId(static_cast<uint32_t>(i % 4));
     }
     slime::safety::ProbePanel panel{};
     slime::safety::refresh_probe_panel(&panel, X, fit, ids, roles, 64);
@@ -1212,14 +1215,14 @@ static void test_sentinel_score_and_prune_labels() {
     EXPECT_TRUE(s >= 0.f && s <= 1.f);
 
     slime::safety::SentinelHistory h{};
-    slime::safety::sentinel_history_push(&h, desc, 0.f, 42u, 10);
-    slime::safety::sentinel_history_push(&h, desc, 0.f, 43u, 11);
-    slime::safety::sentinel_history_mark_pruned(&h, 42u, 12);
+    slime::safety::sentinel_history_push(&h, desc, 0.f, slime::LineageId(42u), 10);
+    slime::safety::sentinel_history_push(&h, desc, 0.f, slime::LineageId(43u), 11);
+    slime::safety::sentinel_history_mark_pruned(&h, slime::LineageId(42u), 12);
     EXPECT_TRUE(h.buf[0].label == 1.f);
     EXPECT_TRUE(h.buf[1].label == 0.f);
 
-    slime::safety::sentinel_history_push(&h, desc, 0.f, 42u, 0);
-    slime::safety::sentinel_history_mark_pruned(&h, 42u, 100);
+    slime::safety::sentinel_history_push(&h, desc, 0.f, slime::LineageId(42u), 0);
+    slime::safety::sentinel_history_mark_pruned(&h, slime::LineageId(42u), 100);
     EXPECT_TRUE(h.buf[2].label == 0.f);
 }
 
@@ -1230,10 +1233,10 @@ static void test_sentinel_score_and_prune_labels() {
 static void test_stress_refresh_role_balance() {
     static slime::safety::pt::StressLadder ladder;
     slime::safety::pt::init_stress_ladder(&ladder);
-    uint32_t ids[64];
+    slime::LineageId ids[64];
     Role roles[64];
     for (int i = 0; i < 64; ++i) {
-        ids[i] = static_cast<uint32_t>(i / 4);
+        ids[i] = slime::LineageId(static_cast<uint32_t>(i / 4));
         roles[i] = (i % 2 == 0) ? Role::Classifier : Role::Predictor;
     }
     Pcg32 rng;
@@ -1266,7 +1269,8 @@ static void test_stress_refresh_role_balance() {
 static void test_stress_failure_flagging() {
     static slime::safety::pt::StressLadder ladder;
     slime::safety::pt::init_stress_ladder(&ladder);
-    for (int s = 0; s < STRESS_POOL_SIZE; ++s) ladder.lineage_id[s] = 77u;
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s)
+        ladder.lineage_id[s] = slime::LineageId(77u);
     float f_sot[STRESS_POOL_SIZE];
     for (int e = 0; e < STRESS_HISTORY_WINDOW; ++e) {
         float v = (e < 6) ? 0.1f : 0.9f;
@@ -1289,14 +1293,14 @@ static void test_predictor_batch_contract() {
     probes.predictor_probes_signed = false;
 
     const int N = POOL_SIZE;
-    static uint32_t lineage_ids[N];
+    static slime::LineageId lineage_ids[N];
     static Role roles[N];
     static float error_ema[N];
     static float b32[N * BMAP_DIM];
     static float b64[N * BMAP_DIM];
     static bool was_sot[N];
     for (int i = 0; i < N; ++i) {
-        lineage_ids[i] = static_cast<uint32_t>(100 + i);
+        lineage_ids[i] = slime::LineageId(static_cast<uint32_t>(100 + i));
         roles[i] = (i % 3 == 0) ? Role::Predictor : Role::Classifier;
         error_ema[i] = 1.f;
         was_sot[i] = (i % 5 == 0);
