@@ -15,15 +15,19 @@ from pathlib import Path
 FLAG_RE = re.compile(r"\[STRESS\] lineage \d+ flagged")
 NONFINITE_RE = re.compile(r"(nan|inf)", re.IGNORECASE)
 R_RE = re.compile(r"\br=([0-9.]+)")
+CKPT_RE = re.compile(r"\(generation (\d+)\)")
 
 
-def run_chunk(binary: str, gens: int, ckpt: str, resume: bool) -> str:
-    """Run one chunk, streaming the child's output through so the
-    progress/v1 wrapper sees the binary's per-generation `gen N` lines."""
+def run_chunk(binary: str, target_total: int, ckpt: str, resume: bool) -> str:
+    """Run one chunk up to the cumulative target generation, streaming the
+    child's output through so the progress/v1 wrapper sees the binary's
+    per-generation `gen N` lines. The binary's N argument is the total
+    generation to reach (it resumes from the checkpoint's generation), so
+    callers pass the running total, never the chunk size."""
     # --profile makes the binary emit its per-generation phase trace
     # ("gen N: ..."), which is the progress signal the daemon's watchdog
     # needs; without it a long chunk looks stalled and gets killed.
-    cmd = [binary, str(gens), "--profile", "--ckpt", ckpt]
+    cmd = [binary, str(target_total), "--profile", "--ckpt", ckpt]
     if resume:
         cmd.append("--resume")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -65,7 +69,15 @@ def main() -> int:
     r_total = 0
     while done < args.gens:
         chunk = min(args.chunk, args.gens - done)
-        out = run_chunk(args.binary, chunk, args.ckpt, resume)
+        target = done + chunk
+        out = run_chunk(args.binary, target, args.ckpt, resume)
+        m = CKPT_RE.search(out)
+        if m is None or int(m.group(1)) != target:
+            print(out[-2000:])
+            raise SystemExit(
+                f"checkpoint generation "
+                f"{m.group(1) if m else '?'} != target {target}: the run "
+                f"did not advance as requested")
         if done >= args.warmup and FLAG_RE.search(out):
             print(out[-2000:])
             raise SystemExit(f"spontaneous stress flag after {done} generations")
