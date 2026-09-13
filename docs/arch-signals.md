@@ -29,11 +29,16 @@ cuda_engineering.md, and construction_plan.md.
   (`soft_qd_archive.cu` insertion when nothing changed); no silent error
   swallow was found. No gate was added for it: a line-local rule cannot
   distinguish a legitimate guard from a swallow, so the honest state is
-  scanned-clean, not enforced. Still open: nested-field defaults inside
-  otherwise-valid registries (class 5 remainder); interchangeable runtime id
-  types (class 6, no strong typedefs yet). Until those have failing
-  witnesses of their own, the audit is incomplete; do not describe them as
-  closed.
+  scanned-clean, not enforced. The nested-field remainder was inspected: the
+  load-bearing defaults refuse absence rather than substitute (a missing
+  build-item `status` fails BUILD_STATES, a missing `mechanisms` list fails
+  the names-no-mechanisms check, and `gpu_client.scheduler_root` raises on an
+  unset or empty root); the remaining `.get(key, default)` calls are
+  display-only rendering, which is the deliberate presentation allowance.
+  Still open: interchangeable runtime id types (class 6, no strong typedefs
+  yet) — the only class without either a gate or an inspection result. Until
+  it has a failing witness of its own, the audit is incomplete; do not
+  describe it as closed.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register
