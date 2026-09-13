@@ -39,7 +39,8 @@ or explicitly deferred with a recorded decision.
   were found by the rebuild and fixed: autodiff_acceptance called
   launch_backward_all without the RD coefficients argument, and
   forward_smoke referenced the moved HIDDEN_DIM; both now compile and their
-  runs are queued.
+  runs are queued: e7e8e56edc36a67b (autodiff acceptance) and
+  14bf207e63808404 (forward smoke).
 
 ## Original guard note
 
