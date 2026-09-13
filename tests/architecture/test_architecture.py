@@ -602,6 +602,21 @@ class CompilerTests(unittest.TestCase):
             v3 = evidence.verdict(claim, [manifest], root)
             self.assertEqual(v3.state, "pass/stale")
 
+    def test_registry_missing_structural_key_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "build_status.yaml").write_text("version: 1\n",
+                                                    encoding="utf-8")
+            old_arch = compiler.ARCH
+            try:
+                compiler.ARCH = root
+                with self.assertRaises(ValueError):
+                    compiler.load_build_status()
+            finally:
+                compiler.ARCH = old_arch
+            with self.assertRaises(ValueError):
+                compiler._require_keys({"a": 1}, ("items",), "x.yaml")
+
     def test_broken_evidence_manifest_refused(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

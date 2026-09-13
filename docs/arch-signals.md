@@ -19,12 +19,16 @@ cuda_engineering.md, and construction_plan.md.
   (`load_manifests` now raises instead of silently dropping a manifest, and a
   missing `result` is refused; negative tests in test_architecture.py).
   Environment reads were scanned clean: all three `getenv` uses are presence
-  gates for COEVO_* diagnostics, no literal substitution. Still open: null
-  early-returns that turn failure into a silent no-op (class 3); artifact
-  parsers other than evidence manifests, e.g. the YAML registries (class 5,
-  partially closed); interchangeable runtime id types (class 6, no strong
-  typedefs yet). Until those have failing witnesses of their own, the audit
-  is incomplete; do not describe them as closed.
+  gates for COEVO_* diagnostics, no literal substitution. The registry
+  parsers now refuse missing structural keys (`_require_keys`: build_status
+  `items`, documents, transactions + organism_buffers, bridge
+  fingerprint/gate/contract, experiments) so a truncated registry can no
+  longer validate an empty surface and pass. Still open: null early-returns
+  that turn failure into a silent no-op (class 3); nested-field defaults
+  inside otherwise-valid registries (class 5 remainder); interchangeable
+  runtime id types (class 6, no strong typedefs yet). Until those have
+  failing witnesses of their own, the audit is incomplete; do not describe
+  them as closed.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register

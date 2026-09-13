@@ -139,18 +139,37 @@ def validate_phase_model(order: list[str], invariants: list[dict]) -> list[str]:
 
 
 def load_configs(root: Path) -> tuple[dict, dict, dict]:
-    documents = yaml.safe_load((ARCH / "documents.yaml").read_text(encoding="utf-8"))
-    transactions = yaml.safe_load((ARCH / "transactions.yaml").read_text(encoding="utf-8"))
+    documents = _require_keys(
+        yaml.safe_load((ARCH / "documents.yaml").read_text(encoding="utf-8")),
+        ("documents",), "documents.yaml")
+    transactions = _require_keys(
+        yaml.safe_load((ARCH / "transactions.yaml").read_text(encoding="utf-8")),
+        ("transactions", "organism_buffers"), "transactions.yaml")
     machine = json.loads((ARCH / "machine.json").read_text(encoding="utf-8"))
     return documents, transactions, machine
 
 
+def _require_keys(data: dict, keys: tuple[str, ...], source: str) -> dict:
+    """Refuse a registry that is missing a structural key: defaulting it
+    would make the compiler validate an empty surface and pass."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{source}: expected a mapping, got {type(data).__name__}")
+    missing = [k for k in keys if k not in data]
+    if missing:
+        raise ValueError(f"{source}: missing required keys {missing}")
+    return data
+
+
 def load_build_status() -> dict:
-    return yaml.safe_load((ARCH / "build_status.yaml").read_text(encoding="utf-8"))
+    return _require_keys(
+        yaml.safe_load((ARCH / "build_status.yaml").read_text(encoding="utf-8")),
+        ("items",), "build_status.yaml")
 
 
 def load_bridge() -> dict:
-    return yaml.safe_load((ARCH / "bridge.yaml").read_text(encoding="utf-8"))
+    return _require_keys(
+        yaml.safe_load((ARCH / "bridge.yaml").read_text(encoding="utf-8")),
+        ("declared_fingerprint", "gate", "external_contract"), "bridge.yaml")
 
 
 def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
@@ -495,7 +514,9 @@ def check_canonical_doc_list(root: Path, documents: dict,
 
 
 def load_experiments() -> dict:
-    return yaml.safe_load((ARCH / "experiments.yaml").read_text(encoding="utf-8"))
+    return _require_keys(
+        yaml.safe_load((ARCH / "experiments.yaml").read_text(encoding="utf-8")),
+        ("experiments",), "experiments.yaml")
 
 
 def check_experiments(root: Path, claims: list[Claim],
