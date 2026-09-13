@@ -249,11 +249,11 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(any("I9" in e for e in errors),
                         "inventory item with no build-status entry not caught")
 
-        broken["items"]["I5"]["mechanisms"] = [
+        broken["items"]["I6"]["mechanisms"] = [
             "integration/host_main.cu::step_generation"]
         errors = []
         compiler.check_build_status(ROOT, broken, transactions, errors)
-        self.assertTrue(any("I5" in e and "missing" in e for e in errors),
+        self.assertTrue(any("I6" in e and "missing" in e for e in errors),
                         "missing item naming mechanisms not caught")
 
     def test_gpu_evidence_refused_while_build_incomplete(self):
