@@ -10,6 +10,10 @@
 
 #include "../nca/engine.cu"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 namespace slime::autodiff {
 
 using nca::OrganismState;
@@ -61,10 +65,18 @@ struct GradBuffers {
 // Per cuda_engineering.md section 4.2 (revised) and section 10.
 // All pointers address contiguous arrays of n_organisms sub-buffers.
 // Organism `org` accesses index [org * GRID_ELEMS .. (org+1) * GRID_ELEMS).
+// Staged per-cell vectors for the deterministic weight-gradient reduction
+// (I8): perc[PERC_DIM], d_pre_hidden[HIDDEN_DIM], hidden[HIDDEN_DIM],
+// d_state[CA_CHANNELS], each [CELLS] contiguous per organism.
+constexpr int STAGE_ARRAYS = PERC_DIM + 2 * HIDDEN_DIM + CA_CHANNELS;
+constexpr int STAGE_STRIDE = STAGE_ARRAYS * CELLS;
+
 struct BackwardWorkspace {
     float* d_state[2];          // [n_org * GRID_ELEMS] FP32 each (d_state_A, d_state_B)
     float* d_perc;              // [n_org * PERC_ELEMS] floats (per-org d_perc)
     float* d_rd_g;              // [n_org * CELLS * RD_CHEM_N] clamp-aware RD d_next
+    float* d_cell_stage;        // [n_org * STAGE_STRIDE]
+    float* d_seed_aux;          // [n_org * CTX_K] bmap summary gradient at the aux channels
     // Cached segment states (I8): the checkpointed backward re-forwards each
     // segment once and keeps every intermediate state, so the reverse walk
     // does not re-forward quadratically.
@@ -322,6 +334,7 @@ __global__ void bwd_seed_scatter_kernel(
     GradBuffers* grads,
     float* d_state_A,          // [n_org * GRID_ELEMS]
     const float* d_state_B,    // [n_org * GRID_ELEMS] (summary in first CH)
+    float* d_seed_aux,         // [n_org * CTX_K] or null
     int n_organisms)
 {
     int org = blockIdx.x;
@@ -353,12 +366,22 @@ __global__ void bwd_seed_scatter_kernel(
         dW_bmap[i] += g_summary[c] * org_seed[d];
     }
 
-    // Seed d_state_A: d_state[cell,c] += d_summary[c] / CELLS
+    // Seed d_state_A: d_state[cell,c] += d_summary[c] / CELLS. With the
+    // global context channel enabled, the aux channels' post-state is the
+    // broadcast context, not the pre-state that the summary is computed
+    // from: their bmap-summary gradient belongs to the context adjoint's
+    // summary bucket (read at the final sample), not to the direct path.
     float inv_cells = 1.f / static_cast<float>(CELLS);
     float* my_dA = &d_state_A[org * GRID_ELEMS];
     for (int i = tid; i < GRID_ELEMS; i += BWD_THREADS) {
         int c = i % CA_CHANNELS;
+        if (GLOBAL_CONTEXT_ENABLED && c >= CH_AUX_FIRST && c <= CH_AUX_LAST) {
+            continue;
+        }
         my_dA[i] += smem[c] * inv_cells;
+    }
+    if (GLOBAL_CONTEXT_ENABLED && d_seed_aux != nullptr && tid < CTX_K) {
+        d_seed_aux[org * CTX_K + tid] = smem[CH_AUX_FIRST + tid];
     }
 }
 
@@ -432,7 +455,7 @@ __global__ void bwd_load_checkpoint_kernel(
 // without adding the RD adjoint will produce biased gradients — the checkpoint
 // states (saved after RD in the forward) will not match the re-forwarded states.
 // Reaction-diffusion has no adjoint; its coefficients stay zero until one exists.
-__global__ void bwd_reforward_step_kernel(
+__global__ void __launch_bounds__(BWD_THREADS, 2) bwd_reforward_step_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
     const nca::rd::Coefficients* coeffs,  // per-organism RD or null
@@ -496,14 +519,16 @@ __global__ void bwd_reforward_step_kernel(
 // Sub-kernel 6 (Phase A): Weight gradient accumulation + d_perc computation.
 // eff_weights (nullable) selects each organism's own weight bank. alpha is
 // the residual timestep: x_{t+1} = x_t + alpha*F(x_t), so dF = alpha*d_state.
-__global__ void bwd_weight_grad_kernel(
+__global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
     const nca::rd::Coefficients* coeffs,  // per-organism RD or null
     float* d_rd_g,             // [n_org * CELLS * RD_CHEM_N] clamp-aware d_next
+    float* cell_stage,         // [n_org * STAGE_STRIDE] staged per-cell vectors
+    const float* d_seed_aux,   // [n_org * CTX_K] or null
     const OrganismState* organisms,
     const __half* recomp_curr, // [n_org * GRID_ELEMS] — recovered input state
-    const float* d_state_A,    // [n_org * GRID_ELEMS] — d_state_next
+    float* d_state_A,          // [n_org * GRID_ELEMS] — d_state_next, then G
     GradBuffers* grads,
     float* d_perc_buf,         // [n_org * PERC_ELEMS]
     float alpha,               // residual timestep
@@ -520,7 +545,7 @@ __global__ void bwd_weight_grad_kernel(
     const float* W_flow  = wbase + OFF_FLOW;
 
     const __half* rc = &recomp_curr[org * GRID_ELEMS];
-    const float* dA = &d_state_A[org * GRID_ELEMS];
+    float* dA = &d_state_A[org * GRID_ELEMS];
     float* my_d_perc = &d_perc_buf[org * PERC_ELEMS];
 
     // Context-broadcast adjoint (A-203, I5). The forward overwrote the aux
@@ -559,11 +584,19 @@ __global__ void bwd_weight_grad_kernel(
             float* dW_ctx = &grads[org].dW[OFF_CTX];
             float d_ctx[CTX_K];
             for (int k = 0; k < CTX_K; ++k) d_ctx[k] = s_part[k];
+            // The final sample's bmap projection also reads the summary; its
+            // aux-channel gradient is not a direct post-state path, so it is
+            // added here (see bwd_seed_scatter_kernel).
+            const bool final_sample = (sample_slot == BTRAJ_SAMPLES - 1)
+                && d_seed_aux != nullptr;
             for (int c = 0; c < CA_CHANNELS; ++c) {
                 float acc = 0.f;
                 for (int k = 0; k < CTX_K; ++k) {
                     dW_ctx[c * CTX_K + k] += summary[c] * d_ctx[k];
                     acc += W_ctx[c * CTX_K + k] * d_ctx[k];
+                }
+                if (final_sample && c >= CH_AUX_FIRST && c <= CH_AUX_LAST) {
+                    acc += d_seed_aux[org * CTX_K + (c - CH_AUX_FIRST)];
                 }
                 s_mean[c] = acc / static_cast<float>(CELLS);
             }
@@ -645,14 +678,12 @@ __global__ void bwd_weight_grad_kernel(
                 direct = rd_direct[c];
             }
             d_state[c] = alpha * (direct + s_mean[c]);
-        }
-
-        // dW_flow
-        float* dW_flow = &grads[org].dW[OFF_FLOW];
-        for (int h = 0; h < HIDDEN_DIM; ++h) {
-            for (int c = 0; c < CA_CHANNELS; ++c) {
-                atomicAdd(&dW_flow[h * CA_CHANNELS + c], hidden[h] * d_state[c]);
-            }
+            // The identity path (prev + ...) is handled by the stencil gather
+            // reading this buffer, so the corrected gradient G = direct +
+            // s_mean must replace dA in place: the broadcast overwrite zeroes
+            // the aux direct path, the context mean adjoint applies to every
+            // channel, and RD's clamp zeroes saturated chemical channels.
+            dA[cell * CA_CHANNELS + c] = direct + s_mean[c];
         }
 
         // d_hidden = W_flow^T * d_state
@@ -670,11 +701,18 @@ __global__ void bwd_weight_grad_kernel(
             d_pre_hidden[h] = d_hidden[h] * gelu_derivative(pre_hidden[h]);
         }
 
-        // dW_inter
-        float* dW_inter = &grads[org].dW[OFF_INTER];
-        for (int p = 0; p < PERC_DIM; ++p) {
+        // Stage per-cell vectors for the deterministic reductions below.
+        {
+            float* stage = &cell_stage[static_cast<size_t>(org) * STAGE_STRIDE];
+            for (int p = 0; p < PERC_DIM; ++p) {
+                stage[p * CELLS + cell] = perc[p];
+            }
             for (int h = 0; h < HIDDEN_DIM; ++h) {
-                atomicAdd(&dW_inter[p * HIDDEN_DIM + h], perc[p] * d_pre_hidden[h]);
+                stage[(PERC_DIM + h) * CELLS + cell] = d_pre_hidden[h];
+                stage[(PERC_DIM + HIDDEN_DIM + h) * CELLS + cell] = hidden[h];
+            }
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                stage[(PERC_DIM + 2 * HIDDEN_DIM + c) * CELLS + cell] = d_state[c];
             }
         }
 
@@ -712,9 +750,95 @@ __global__ void bwd_weight_grad_kernel(
     }
 }
 
+// Sub-kernel 6b: deterministic weight-gradient reductions (I8). The
+// per-cell outer products dW_inter[p][h] = sum_cells perc[p]*dpre[h] and
+// dW_flow[h][c] = sum_cells hidden[h]*dstate[c] are computed with one block
+// per output row: threads accumulate partials over cell slices, tree-reduce
+// in shared memory, and thread 0 adds the row. Each entry is owned by
+// exactly one block, so there are no atomics and the summation order is
+// fixed.
+__global__ void bwd_reduce_inter_kernel(const float* cell_stage,
+                                        GradBuffers* grads,
+                                        int n_organisms)
+{
+    int org = blockIdx.x / PERC_DIM;
+    int p = blockIdx.x % PERC_DIM;
+    if (org >= n_organisms) return;
+    const float* base = cell_stage
+        + static_cast<size_t>(org) * STAGE_STRIDE;
+    const float* perc_p = base + p * CELLS;
+    const float* dpre = base + PERC_DIM * CELLS;
+
+    __shared__ float part[BWD_THREADS * HIDDEN_DIM];
+    for (int h = 0; h < HIDDEN_DIM; ++h) {
+        part[threadIdx.x * HIDDEN_DIM + h] = 0.f;
+    }
+    for (int cell = threadIdx.x; cell < CELLS; cell += BWD_THREADS) {
+        float pv = perc_p[cell];
+        for (int h = 0; h < HIDDEN_DIM; ++h) {
+            part[threadIdx.x * HIDDEN_DIM + h] += pv * dpre[h * CELLS + cell];
+        }
+    }
+    __syncthreads();
+    for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            for (int h = 0; h < HIDDEN_DIM; ++h) {
+                part[threadIdx.x * HIDDEN_DIM + h] +=
+                    part[(threadIdx.x + stride) * HIDDEN_DIM + h];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        float* dW = &grads[org].dW[OFF_INTER + p * HIDDEN_DIM];
+        for (int h = 0; h < HIDDEN_DIM; ++h) dW[h] += part[h];
+    }
+}
+
+__global__ void bwd_reduce_flow_kernel(const float* cell_stage,
+                                       GradBuffers* grads,
+                                       int n_organisms)
+{
+    int org = blockIdx.x / CA_CHANNELS;
+    int c = blockIdx.x % CA_CHANNELS;
+    if (org >= n_organisms) return;
+    const float* base = cell_stage
+        + static_cast<size_t>(org) * STAGE_STRIDE;
+    const float* hidden = base + (PERC_DIM + HIDDEN_DIM) * CELLS;
+    const float* dstate_c = base + (PERC_DIM + 2 * HIDDEN_DIM) * CELLS
+                          + c * CELLS;
+
+    __shared__ float part[BWD_THREADS * HIDDEN_DIM];
+    for (int h = 0; h < HIDDEN_DIM; ++h) {
+        part[threadIdx.x * HIDDEN_DIM + h] = 0.f;
+    }
+    for (int cell = threadIdx.x; cell < CELLS; cell += BWD_THREADS) {
+        float dv = dstate_c[cell];
+        for (int h = 0; h < HIDDEN_DIM; ++h) {
+            part[threadIdx.x * HIDDEN_DIM + h] +=
+                hidden[h * CELLS + cell] * dv;
+        }
+    }
+    __syncthreads();
+    for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            for (int h = 0; h < HIDDEN_DIM; ++h) {
+                part[threadIdx.x * HIDDEN_DIM + h] +=
+                    part[(threadIdx.x + stride) * HIDDEN_DIM + h];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        for (int h = 0; h < HIDDEN_DIM; ++h) {
+            grads[org].dW[OFF_FLOW + h * CA_CHANNELS + c] += part[h];
+        }
+    }
+}
+
 // Sub-kernel 7 (Phase B): Stencil adjoint gather.
 // eff_weights (nullable) selects each organism's own W_perc.
-__global__ void bwd_stencil_gather_kernel(
+__global__ void __launch_bounds__(BWD_THREADS, 2) bwd_stencil_gather_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
     const float* d_state_A,    // [n_org * GRID_ELEMS] — d_state_next (read)
@@ -1004,6 +1128,8 @@ inline bool allocate_backward_workspace(BackwardWorkspace& ws, int n_organisms) 
     if (e == cudaSuccess) e = cudaMalloc(&ws.d_perc,     sizeof(float) * PERC_ELEMS * n_organisms);
     if (e == cudaSuccess) e = cudaMalloc(&ws.d_seg_states, sizeof(__half) * GRID_ELEMS * n_organisms * CHECKPOINT_INTERVAL);
     if (e == cudaSuccess) e = cudaMalloc(&ws.d_rd_g, sizeof(float) * GRID_SIZE * GRID_SIZE * RD_CHEM_N * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_cell_stage, sizeof(float) * STAGE_STRIDE * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_seed_aux, sizeof(float) * CTX_K * n_organisms);
     if (e != cudaSuccess) {
         std::printf("[FATAL] CUDA alloc backward workspace failed: %s\n", cudaGetErrorString(e));
         return false;
@@ -1017,6 +1143,8 @@ inline bool free_backward_workspace(BackwardWorkspace& ws) {
     if (e == cudaSuccess) e = cudaFree(ws.d_perc);
     if (e == cudaSuccess) e = cudaFree(ws.d_seg_states);
     if (e == cudaSuccess) e = cudaFree(ws.d_rd_g);
+    if (e == cudaSuccess) e = cudaFree(ws.d_cell_stage);
+    if (e == cudaSuccess) e = cudaFree(ws.d_seed_aux);
     if (e != cudaSuccess) {
         std::printf("[WARN] CUDA free backward workspace failed: %s\n", cudaGetErrorString(e));
         return false;
@@ -1119,7 +1247,7 @@ inline void launch_backward_all(
     // Step 3: Backprop through project_bmap, seed d_state.
     bwd_seed_scatter_kernel<<<N, BWD_THREADS, smem, stream>>>(
         d_weights, d_eff_weights, d_seed_grad, d_grads,
-        ws.d_state[0], ws.d_state[1], N);
+        ws.d_state[0], ws.d_state[1], ws.d_seed_aux, N);
 
     // Step 4: Reverse segments. Each segment re-forwards ONCE from its
     // checkpoint, caching every intermediate state (I8); the reverse walk
@@ -1129,38 +1257,64 @@ inline void launch_backward_all(
     float* dB = ws.d_state[1];
     const size_t seg_stride = static_cast<size_t>(N) * GRID_ELEMS;
 
+    // Optional sub-phase timing (COEVO_BACKWARD_PROFILE): the caller must
+    // bypass the backward phase graph so these synchronizations are legal.
+    const bool bprof = std::getenv("COEVO_BACKWARD_PROFILE") != nullptr;
+    double t_ref = 0.0, t_wg = 0.0, t_sg = 0.0, t_rd = 0.0;
+    auto mark = [] { return std::chrono::steady_clock::now(); };
+    auto since = [](std::chrono::steady_clock::time_point a) {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - a).count();
+    };
+
     for (int seg = 3; seg >= 0; --seg) {
         // Load checkpoint seg into slot 0, then re-forward slots 1..15.
         bwd_load_checkpoint_kernel<<<N, BWD_THREADS, 0, stream>>>(
             seg, d_checkpoints, ws.d_seg_states, N);
+        auto mref = bprof ? mark() : std::chrono::steady_clock::now();
         for (int k = 1; k < CHECKPOINT_INTERVAL; ++k) {
             const __half* prev = ws.d_seg_states + (k - 1) * seg_stride;
             __half* next = ws.d_seg_states + k * seg_stride;
             bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
                 d_weights, d_eff_weights, d_coeffs, prev, next, alpha, N);
         }
+        if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_ref += since(mref); }
 
         for (int local_step = CHECKPOINT_INTERVAL; local_step >= 1; --local_step) {
             const __half* rc = ws.d_seg_states + (local_step - 1) * seg_stride;
 
             // Phase A: weight grads + d_perc.
+            auto m0 = bprof ? mark() : std::chrono::steady_clock::now();
             int abs_step = seg * CHECKPOINT_INTERVAL + local_step;
             bwd_weight_grad_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                d_weights, d_eff_weights, d_coeffs, ws.d_rd_g, d_organisms,
+                d_weights, d_eff_weights, d_coeffs, ws.d_rd_g,
+                ws.d_cell_stage, ws.d_seed_aux, d_organisms,
                 rc, dA, d_grads, ws.d_perc, alpha,
                 btraj_slot_for_step(abs_step), N);
-
+            bwd_reduce_inter_kernel<<<N * PERC_DIM, BWD_THREADS, 0, stream>>>(
+                ws.d_cell_stage, d_grads, N);
+            bwd_reduce_flow_kernel<<<N * CA_CHANNELS, BWD_THREADS, 0, stream>>>(
+                ws.d_cell_stage, d_grads, N);
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_wg += since(m0); m0 = mark(); }
             // Phase B: stencil gather (CA d_curr) + RD gather (RD d_curr).
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
                 d_weights, d_eff_weights, dA, dB, ws.d_perc, N);
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_sg += since(m0); m0 = mark(); }
             if (d_coeffs != nullptr) {
                 bwd_rd_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
                     rc, ws.d_rd_g, d_coeffs, dB, N);
             }
+            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_rd += since(m0); }
 
             // Swap dA/dB.
             float* tmp2 = dA; dA = dB; dB = tmp2;
         }
+    }
+    if (bprof) {
+        std::printf("[BPROFILE] reforward=%.1f ms weight_grad=%.1f ms "
+                    "stencil=%.1f ms rd=%.1f ms\n",
+                    t_ref, t_wg, t_sg, t_rd);
+        std::fflush(stdout);
     }
 }
 

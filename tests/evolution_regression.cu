@@ -408,6 +408,8 @@ static int test_forced_pt_swap() {
         seed_grad[1 * BMAP_DIM + d] = 0.2f * d;
     }
     batch_idx[0] = 3; batch_idx[1] = 12;
+    float pred_err_ema[2] = {0.11f, 0.22f};
+    float pred_loss_ema[2] = {0.33f, 0.44f};
 
     safety::pt::SwapContext ctx;
     ctx.d_organisms = d_org;
@@ -429,6 +431,8 @@ static int test_forced_pt_swap() {
     ctx.role = role;
     ctx.seed_grad = seed_grad;
     ctx.batch_sample_idx = batch_idx;
+    ctx.predictor_error_ema = pred_err_ema;
+    ctx.predictor_loss_ema = pred_loss_ema;
     ctx.stream = 0;
 
     safety::pt::swap_device_organism(ctx, 0, 1);
@@ -471,6 +475,12 @@ static int test_forced_pt_swap() {
     }
     if (batch_idx[0] != 12 || batch_idx[1] != 3) ok = false;
     CHECK(ok, "seed-gradient rows and batch assignment swapped with the organism");
+
+    // The per-organism EMA state (predictor error and loss) moves too.
+    ok = true;
+    if (pred_err_ema[0] != 0.22f || pred_err_ema[1] != 0.11f) ok = false;
+    if (pred_loss_ema[0] != 0.44f || pred_loss_ema[1] != 0.33f) ok = false;
+    CHECK(ok, "predictor error and loss EMAs swapped with the organism");
 
     // Effective-weight banks moved with the organism: backward must re-forward
     // each trajectory with the phenotype that produced it.
@@ -635,6 +645,10 @@ static int test_pt_swap_backward_correspondence() {
     ctx.role = role;
     ctx.seed_grad = h_seed;          // host rows move with the organism
     ctx.batch_sample_idx = batch_idx;
+    float pred_err_ema2[2] = {0.11f, 0.22f};
+    float pred_loss_ema2[2] = {0.33f, 0.44f};
+    ctx.predictor_error_ema = pred_err_ema2;
+    ctx.predictor_loss_ema = pred_loss_ema2;
     ctx.stream = 0;
 
     safety::pt::swap_device_organism(ctx, 0, 1);

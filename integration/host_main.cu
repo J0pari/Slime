@@ -213,6 +213,12 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_seg_states,
         static_cast<size_t>(CHECKPOINT_INTERVAL) * POOL_SIZE * GRID_ELEMS
             * sizeof(__half)), "alloc bwd d_seg_states");
+    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_cell_stage,
+        static_cast<size_t>(autodiff::STAGE_STRIDE) * POOL_SIZE
+            * sizeof(float)), "alloc bwd d_cell_stage");
+    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_seed_aux,
+        static_cast<size_t>(autodiff::CTX_K) * POOL_SIZE
+            * sizeof(float)), "alloc bwd d_seed_aux");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_rd_g,
         static_cast<size_t>(POOL_SIZE) * GRID_SIZE * GRID_SIZE
             * (CH_CHEM_LAST + 1) * sizeof(float)), "alloc bwd d_rd_g");
@@ -285,6 +291,8 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->bwd_workspace.d_state[1]), "free d_state[1]");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_perc), "free d_perc");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_seg_states), "free d_seg_states");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_cell_stage), "free d_cell_stage");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_seed_aux), "free d_seed_aux");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_rd_g), "free d_rd_g");
     CUDA_WARN(cudaFreeHost(w->h_descriptors), "freeHost h_descriptors");
     CUDA_WARN(cudaFreeHost(w->h_btraj), "freeHost h_btraj");
@@ -1291,7 +1299,15 @@ bool step_generation(World* w) {
                     cudaMemcpyHostToDevice, w->stream), "T3 seed_grad");
 
     // ---- GPU: backward (phase-decomposed batched, all orgs in parallel) ----
-    if (!phase_run(&w->fg_backward, w->stream, [&] {
+    // COEVO_BACKWARD_PROFILE runs it outside the phase graph so the internal
+    // synchronizations used by the sub-phase profiler are legal.
+    if (std::getenv("COEVO_BACKWARD_PROFILE") != nullptr) {
+        autodiff::launch_backward_all(
+            w->d_organisms, w->d_weights, w->d_eff_weights,
+            w->d_rd_coeffs, w->d_seed_grad,
+            w->d_checkpoints, w->d_grads,
+            w->bwd_workspace, RESIDUAL_ALPHA, POOL_SIZE, w->stream);
+    } else if (!phase_run(&w->fg_backward, w->stream, [&] {
             autodiff::launch_backward_all(
                 w->d_organisms, w->d_weights, w->d_eff_weights,
                 w->d_rd_coeffs, w->d_seed_grad,
