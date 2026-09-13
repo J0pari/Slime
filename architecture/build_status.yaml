@@ -49,8 +49,10 @@ items:
       - safety/stress_ladder.cuh::refresh_stress_slots
       - safety/stress_ladder.cuh::update_stress_failures
     missing:
-      - stress-ladder device evaluation (elevated-SOT forward on the stress
-        slots and per-slot f_sot readback)
+      - stress-ladder device evaluation for classifier slots (elevated-SOT
+        forward with per-organism references and per-slot f_sot readback)
+      - predictor stress-gate semantics (unspecified; needs a spec change in
+        A-201/A-601 before implementation)
   I5:
     status: missing
   I6:

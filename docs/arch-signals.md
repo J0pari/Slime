@@ -7,6 +7,16 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: The stress ladder's classifier half is well-defined (elevated
+  SOT-marked images at {10%, 20%, 40%} with per-organism effective-weight
+  references), but the blueprint does not define what "fails the SOT gate"
+  means for a predictor stress representative: predictors take a target
+  descriptor, not an image, so the reversible image transformation does not
+  apply. The predictor analogue (e.g. a host-controlled permutation of
+  irrelevant target dimensions) is a new mechanism and must be specified in
+  A-201/A-601 before it is implemented. Until then the device evaluation
+  covers classifier stress slots only; predictor stress slots refresh and
+  carry lineage shadow but are not gated.
 - 2026-09-12: The SOT identity check uses the 24 tail organism slots
   (`d_organisms + POOL_SIZE`) as reference-rollout scratch, but the blueprint
   assigns the same slots to the SOT-density stress sub-populations. The

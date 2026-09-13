@@ -121,7 +121,13 @@ depends on exists.
   expanding-lineage brake wired into archive insertion.
 - Variance floor multiplier per organism.
 - Stress ladder: refresh from the main pool, elevated-SOT evaluation,
-  failure flagging.
+  failure flagging. Classifier stress slots evaluate against the elevated
+  SOT-marked images with per-organism effective-weight references. Predictor
+  stress slots are refreshed and carry lineage shadow, but their gate
+  semantics are not yet specified: the SOT mechanism is image-based and a
+  predictor takes a target descriptor. A predictor analogue (a
+  host-controlled permutation of irrelevant target dimensions) must be
+  specified in A-201/A-601 before it is implemented; see arch-signals.
 - Wire audit_mult and variance_mult into fitness composition; activate the
   lineage brake.
 - Verification: audit_mult range, probe accuracy, sentinel finiteness,
