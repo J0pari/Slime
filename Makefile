@@ -129,3 +129,6 @@ clean:
 
 stability-run: $(BIN)
 	python tests/long_run_check.py --binary $(BIN) --gens 20 --chunk 5
+
+mutation-check:
+	python tests/mutation_check.py

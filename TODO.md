@@ -167,8 +167,10 @@ I9
 - [ ] Property witnesses: C4 genome fieldwise perturbation matrix, C5
   checkpoint continuation equivalence, C6 PT permutation test, C7 phase
   trace checked against the declared phase model.
-- [ ] Gate mutation testing: remove one transaction move, one CUDA check,
-  and one role canonicalization; prove the right witness goes red.
+- [x] Gate mutation testing: the transaction-move and CUDA-check mutations
+  are architecture tests; the role-canonicalization mutation is
+  tests/mutation_check.py (isolated worktree, mutated build, asserts
+  test_canonical_role goes red — validated: Reserved10 line 316).
 
 ## P2 — INTEGRATE (after VERIFY)
 
