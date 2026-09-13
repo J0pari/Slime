@@ -99,7 +99,9 @@ I8
   kernel but throttled the next compute-heavy kernel by ~800 ms (four
   interleaved pairs, unchanged control flat), a net ~0.65 s/generation loss;
   reverted. The occupancy/power coupling between adjacent backward kernels is
-  now itself a measured effect.
+  now itself a measured effect. Landed win: the fused 48-slot stress
+  launch (two 24-block launches -> one 48-block launch), stress 0.84 -> 0.74
+  s/generation with the FD suite green.
 
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure

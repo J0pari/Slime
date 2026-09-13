@@ -316,8 +316,8 @@ inline void checked_copy_async(void* dst, const void* src, size_t n,
 inline bool evaluate_stress_all(
     nca::OrganismState* d_organisms,
     const float* d_weights,
-    const float* d_stress_eff_weights,
-    const nca::rd::Coefficients* d_stress_coeffs,   // [STRESS_POOL_SIZE]
+    const float* d_stress_eff_weights,   // [2 * STRESS_POOL_SIZE] banks
+    const nca::rd::Coefficients* d_stress_coeffs,   // [2 * STRESS_POOL_SIZE]
     const __half* d_stress_batch_images,            // [3][CLASSIFIER_BATCH]
     const __half* d_stress_ref_images,              // [3][SOT_SUBBATCH]
     const float* d_stress_task_embs,                // [3][TASK_EMBED_DIM]
@@ -329,83 +329,70 @@ inline bool evaluate_stress_all(
     nca::ForwardInputs* d_sot_fwd_inputs,
     float* d_sot_descriptors,
     int* d_sot_bank_of,
-    nca::OrganismState* d_stress_ref_organisms,     // [STRESS_POOL_SIZE]
+    nca::OrganismState* d_stress_ref_organisms,     // [2 * STRESS_POOL_SIZE]
     integration::PhaseGraph* fg,
     int weight_stride,
     cudaStream_t stream) {
     namespace cur = slime::curriculum;
 
-    static nca::ForwardInputs s_ref_inputs[STRESS_POOL_SIZE];
-    static nca::ForwardInputs s_stress_inputs[STRESS_POOL_SIZE];
-    static int s_bank_of[STRESS_POOL_SIZE];
-    static float s_ref_desc[STRESS_POOL_SIZE * BMAP_DIM];
-    static float s_stress_desc[STRESS_POOL_SIZE * BMAP_DIM];
+    // Slots 0..STRESS_POOL_SIZE-1 are the reference rollout (un-marked images
+    // or nominal targets), slots STRESS_POOL_SIZE..2*STRESS_POOL_SIZE-1 are
+    // the stress rollout (marked images or pi-permuted targets). One launch
+    // of 48 blocks replaces two launches of 24, which left half the SMs
+    // idle.
+    constexpr int N_SLOTS = 2 * STRESS_POOL_SIZE;
+    static nca::ForwardInputs s_inputs[N_SLOTS];
+    static int s_bank_of[N_SLOTS];
+    static float s_desc[N_SLOTS * BMAP_DIM];
 
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
         int p = s / STRESS_SUBPOP_SIZE;
         int k = s % STRESS_SUBPOP_SIZE;
         bool is_classifier = k < STRESS_SUBPOP_SIZE / 2;
+        nca::ForwardInputs& ref = s_inputs[s];
+        nca::ForwardInputs& stress = s_inputs[STRESS_POOL_SIZE + s];
         if (is_classifier) {
-            int img = k % cur::SOT_SUBBATCH;  // first n_sot are marked
-            s_ref_inputs[s].role = Role::Classifier;
-            s_ref_inputs[s].task_embedding =
-                d_stress_task_embs + p * TASK_EMBED_DIM;
-            s_ref_inputs[s].image_rgb =
-                d_stress_ref_images
-                    + (p * cur::SOT_SUBBATCH + img) * GRID_SIZE * GRID_SIZE * 3;
-            s_ref_inputs[s].target_bmap_32 = nullptr;
-            s_stress_inputs[s].role = Role::Classifier;
-            s_stress_inputs[s].task_embedding =
-                d_stress_task_embs + p * TASK_EMBED_DIM;
-            s_stress_inputs[s].image_rgb =
-                d_stress_batch_images
-                    + (p * cur::CLASSIFIER_BATCH + img) * GRID_SIZE * GRID_SIZE * 3;
-            s_stress_inputs[s].target_bmap_32 = nullptr;
+            int img = k % cur::SOT_SUBBATCH;
+            ref.role = Role::Classifier;
+            ref.task_embedding = d_stress_task_embs + p * TASK_EMBED_DIM;
+            ref.image_rgb = d_stress_ref_images
+                + (p * cur::SOT_SUBBATCH + img) * GRID_SIZE * GRID_SIZE * 3;
+            ref.target_bmap_32 = nullptr;
+            stress.role = Role::Classifier;
+            stress.task_embedding = d_stress_task_embs + p * TASK_EMBED_DIM;
+            stress.image_rgb = d_stress_batch_images
+                + (p * cur::CLASSIFIER_BATCH + img) * GRID_SIZE * GRID_SIZE * 3;
+            stress.target_bmap_32 = nullptr;
         } else {
-            s_ref_inputs[s].role = Role::Predictor;
-            s_ref_inputs[s].task_embedding = d_sot_task_emb;
-            s_ref_inputs[s].image_rgb = nullptr;
-            s_ref_inputs[s].target_bmap_32 =
-                d_stress_target_nominal + s * BMAP_DIM;
-            s_stress_inputs[s].role = Role::Predictor;
-            s_stress_inputs[s].task_embedding = d_sot_task_emb;
-            s_stress_inputs[s].image_rgb = nullptr;
-            s_stress_inputs[s].target_bmap_32 =
-                d_stress_target_permuted + s * BMAP_DIM;
+            ref.role = Role::Predictor;
+            ref.task_embedding = d_sot_task_emb;
+            ref.image_rgb = nullptr;
+            ref.target_bmap_32 = d_stress_target_nominal + s * BMAP_DIM;
+            stress.role = Role::Predictor;
+            stress.task_embedding = d_sot_task_emb;
+            stress.image_rgb = nullptr;
+            stress.target_bmap_32 = d_stress_target_permuted + s * BMAP_DIM;
         }
         s_bank_of[s] = s;
+        s_bank_of[STRESS_POOL_SIZE + s] = s;
     }
 
     if (!integration::phase_run(fg, stream, [&] {
-            checked_copy_async(d_sot_fwd_inputs, s_ref_inputs,
-                               STRESS_POOL_SIZE * sizeof(nca::ForwardInputs),
+            checked_copy_async(d_sot_fwd_inputs, s_inputs,
+                               N_SLOTS * sizeof(nca::ForwardInputs),
                                cudaMemcpyHostToDevice, stream);
             checked_copy_async(d_sot_bank_of, s_bank_of,
-                               STRESS_POOL_SIZE * sizeof(int),
+                               N_SLOTS * sizeof(int),
                                cudaMemcpyHostToDevice, stream);
             nca::launch_forward_effective(d_stress_ref_organisms,
                                           d_sot_fwd_inputs, d_stress_coeffs,
                                           d_stress_eff_weights, d_sot_bank_of,
                                           weight_stride, RESIDUAL_ALPHA,
-                                          STRESS_POOL_SIZE, stream);
+                                          N_SLOTS, stream);
             nca::extract_descriptor(d_stress_ref_organisms, d_sot_descriptors,
-                                    STRESS_POOL_SIZE, stream);
-            checked_copy_async(s_ref_desc, d_sot_descriptors,
-                               STRESS_POOL_SIZE * BMAP_DIM * sizeof(float),
-                               cudaMemcpyDeviceToHost, stream);
-            checked_copy_async(d_sot_fwd_inputs, s_stress_inputs,
-                               STRESS_POOL_SIZE * sizeof(nca::ForwardInputs),
-                               cudaMemcpyHostToDevice, stream);
-            nca::launch_forward_effective(d_organisms + POOL_SIZE,
-                                          d_sot_fwd_inputs, d_stress_coeffs,
-                                          d_stress_eff_weights, d_sot_bank_of,
-                                          weight_stride, RESIDUAL_ALPHA,
-                                          STRESS_POOL_SIZE, stream);
-            nca::extract_descriptor(d_organisms + POOL_SIZE,
-                                    d_sot_descriptors, STRESS_POOL_SIZE,
-                                    stream);
-            checked_copy_async(s_stress_desc, d_sot_descriptors,
-                               STRESS_POOL_SIZE * BMAP_DIM * sizeof(float),
+                                    N_SLOTS, stream);
+            checked_copy_async(s_desc, d_sot_descriptors,
+                               N_SLOTS * BMAP_DIM * sizeof(float),
                                cudaMemcpyDeviceToHost, stream);
         })) {
         return false;
@@ -420,22 +407,21 @@ inline bool evaluate_stress_all(
     float unpermuted[BMAP_DIM];
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
         int k = s % STRESS_SUBPOP_SIZE;
+        const float* ref = &s_desc[s * BMAP_DIM];
+        const float* stress = &s_desc[(STRESS_POOL_SIZE + s) * BMAP_DIM];
         if (k < STRESS_SUBPOP_SIZE / 2) {
-            f_sot_out[s] = cosine_similarity(&s_stress_desc[s * BMAP_DIM],
-                                             &s_ref_desc[s * BMAP_DIM]);
+            f_sot_out[s] = cosine_similarity(stress, ref);
         } else {
-            const float* permuted = &s_stress_desc[s * BMAP_DIM];
             for (int d = 0; d < BMAP_DIM; ++d) {
-                unpermuted[h_perm_inv[d]] = permuted[d];
+                unpermuted[h_perm_inv[d]] = stress[d];
             }
-            f_sot_out[s] = cosine_similarity(unpermuted,
-                                             &s_ref_desc[s * BMAP_DIM]);
+            f_sot_out[s] = cosine_similarity(unpermuted, ref);
         }
     }
     return true;
 }
 
-// Check for shutdown.flag file.// Check for shutdown.flag file. Returns true if the file exists.
+// Check for shutdown.flag file.// Check for shutdown.flag file.// Check for shutdown.flag file. Returns true if the file exists.
 inline bool poll_off_switch() {
     FILE* f = std::fopen("shutdown.flag", "r");
     if (f) {

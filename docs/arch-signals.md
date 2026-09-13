@@ -7,6 +7,15 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 win: the stress reference and stress rollouts are now one
+  48-slot launch instead of two 24-slot launches (24 blocks on 30 SMs left
+  SMs idle). Interleaved A/B: stress 916/843 -> 746/744 ms (~15%), FD suite
+  37/37 on the fused build. The stress coefficients and effective-weight
+  banks are duplicated into both halves (D2D) because reference and stress
+  rollouts share the organism; the shared SOT scratch buffers grew to 48
+  slots (the first build overran them and failed with the phase-copy/illegal
+  access signature). Next I8 targets in whole-step terms: the reforward
+  (0.79 s) and weight-grad main kernel (2.1 s) remain register-limited.
 - 2026-09-12: I8 measured rejection (fifth of its kind) with a new effect
   worth naming: the warp-shuffle reduce_inter (no shared memory, high
   occupancy) measured 12-15% faster on its own kernel (1120 -> 980 ms) but

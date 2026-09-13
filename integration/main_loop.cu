@@ -137,7 +137,8 @@ struct World {
     // Stress-ladder device state (S-003): per-slot effective weights, one
     // elevated-density batch image buffer, nominal+permuted predictor target
     // rows, and the per-slot SOT readback.
-    float* d_stress_eff_weights;   // [STRESS_POOL_SIZE * TOTAL_WEIGHTS]
+    float* d_stress_eff_weights;   // [2 * STRESS_POOL_SIZE * TOTAL_WEIGHTS]
+    nca::rd::Coefficients* d_stress_coeffs;  // [2 * STRESS_POOL_SIZE]
     __half* d_stress_batch_image;  // [3][CLASSIFIER_BATCH] marked images
     __half* d_stress_ref_images;   // [3][SOT_SUBBATCH] un-marked images
     float* d_stress_task_embs;     // [3][TASK_EMBED_DIM]
