@@ -127,6 +127,20 @@ class GateTests(unittest.TestCase):
                         "replay_buffer_push(&b, d);\nspawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_surprise_before_spawn_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_surprise_before_spawn(
+            files_from({"integration/host_main.cu":
+                        "spawn_wave(w);\n"
+                        "float s = evaluate_probe_placeholder(w);"}), report)
+        self.assertFalse(report.ok, "post-spawn surprise was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_surprise_before_spawn(
+            files_from({"integration/host_main.cu":
+                        "float s = evaluate_probe_placeholder(w);\n"
+                        "spawn_wave(w);"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_schedule_host_only_catches_plant(self):
         # [claim:A101.sot-schedule-independent]
         report = source_gates.GateReport()

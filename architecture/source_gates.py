@@ -293,6 +293,37 @@ def gate_replay_before_spawn(files: dict[str, list[str]], report: GateReport) ->
                     "evaluation identity violated)"))
 
 
+# ---- Gate: surprise reads the evaluated pre-spawn population --------------
+# The predictor ensemble ranks and filters organisms by role and fitness.
+# Those fields are mutated by the spawn wave, while the descriptors it
+# consumes describe the evaluated population, so the surprise computation
+# must precede spawn_wave.
+def gate_surprise_before_spawn(files: dict[str, list[str]],
+                               report: GateReport) -> None:
+    lines = files.get("integration/host_main.cu", [])
+    surprise_line = -1
+    spawn_line = -1
+    for i, line in enumerate(lines, 1):
+        if "evaluate_probe_placeholder(w)" in line and surprise_line < 0:
+            surprise_line = i
+        if "spawn_wave(w);" in line and spawn_line < 0:
+            spawn_line = i
+    if surprise_line < 0:
+        report.findings.append(
+            Finding("surprise_before_spawn", "integration/host_main.cu", 0,
+                    "placeholder surprise call missing"))
+    elif spawn_line < 0:
+        report.findings.append(
+            Finding("surprise_before_spawn", "integration/host_main.cu", 0,
+                    "spawn_wave call missing"))
+    elif surprise_line > spawn_line:
+        report.findings.append(
+            Finding("surprise_before_spawn", "integration/host_main.cu",
+                    surprise_line,
+                    "surprise is computed after the spawn wave (pre-spawn "
+                    "population identity violated)"))
+
+
 # ---- Gate: the SOT/probe schedule is computed host-side only --------------
 # Flags device-memory access or device-execution tokens in the schedule file.
 # __host__ __device__ annotations on pure helpers (e.g. the Feistel
@@ -533,6 +564,7 @@ ALL_GATES = [
     gate_host_authority,
     gate_operator_polling,
     gate_replay_before_spawn,
+    gate_surprise_before_spawn,
     gate_schedule_host_only,
     gate_numeric_policy,
 ]

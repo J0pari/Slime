@@ -1356,9 +1356,6 @@ bool step_generation(World* w) {
         std::fflush(stdout);
     }
 
-    // ---- EVOLVE: spawn wave ----
-    spawn_wave(w);
-
     // ---- MONITOR: placeholder training (A-601, device kernel) ----
     // The replay buffer is host-only; sample a minibatch that never includes
     // held-out probe tuples, upload it, and run one AdamW step on the device.
@@ -1528,6 +1525,9 @@ bool step_generation(World* w) {
             std::fflush(stdout);
         }
     }
+
+    // ---- EVOLVE: spawn wave ----
+    spawn_wave(w);
 
     // ---- Periodic: PCA rebin ----
     if (w->generation > 0 && w->generation % AUDIT_INTERVAL == 0) {

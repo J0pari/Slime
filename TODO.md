@@ -18,8 +18,9 @@ or explicitly deferred with a recorded decision.
   (a predictor covers all K targets across K generations) with a
   per-predictor loss EMA feeding fitness; the EMA travels with organism
   identity through PT and checkpoints.
-- [ ] C2 Surprise population identity: compute surprise and the predictor
-  ensemble from the evaluated pre-spawn snapshot.
+- [x] C2 Surprise population identity: placeholder training and the surprise
+  computation (including the predictor ensemble) now precede the spawn wave;
+  the `surprise_before_spawn` source gate pins the order.
 - [ ] C3 Role-gradient PT identity: forced cross-role swap witness.
 - [ ] C8 Archive attribution: decide historical-attribution versus
   replay-equivalent entries in the blueprint and document the shared-base

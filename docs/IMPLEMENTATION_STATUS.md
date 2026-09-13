@@ -64,7 +64,7 @@ BUILD phase incomplete: 5 of 9 inventory items are not implemented (I5, I6, I7, 
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/stale |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/stale |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
 
 Claims: 30 total, 24 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->
