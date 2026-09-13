@@ -162,7 +162,7 @@ static int test_forward_match_and_backward() {
     for (int d = 0; d < BMAP_DIM; ++d) h_seed[d] = 0.1f * (d + 1);
     CUDA_CHECK(cudaMemcpy(d_seed_grad, h_seed, sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
 
-    launch_backward_all(d_org_ckpt, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
+    launch_backward_all(d_org_ckpt, d_weights, nullptr, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Read gradients back.
@@ -313,7 +313,7 @@ static int test_loss_decreases() {
         CUDA_CHECK(cudaMemcpy(d_seed_grad, h_seed, sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
 
         // Backward.
-        launch_backward_all(d_org, d_weights, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
+        launch_backward_all(d_org, d_weights, nullptr, nullptr, d_seed_grad, d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Aggregate + CAME.

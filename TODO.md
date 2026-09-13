@@ -31,7 +31,17 @@ or explicitly deferred with a recorded decision.
   the shared base captured with the entry), with the stored-genome
   witness.
 
-## GPU authorization guard (landed, rebuild pending)
+## GPU authorization guard (complete)
+
+- All six canonical binaries are rebuilt with the guard and refusal-checked
+  (bare launch exits 2): coevo, evolution_regression, checkpoint_state,
+  autodiff_acceptance, task_conditioning, forward_smoke. Two stale witnesses
+  were found by the rebuild and fixed: autodiff_acceptance called
+  launch_backward_all without the RD coefficients argument, and
+  forward_smoke referenced the moved HIDDEN_DIM; both now compile and their
+  runs are queued.
+
+## Original guard note
 
 - The startup guard and its source gate are in source; the canonical
   build/*.exe binaries are NOT yet rebuilt with it because the queued jobs

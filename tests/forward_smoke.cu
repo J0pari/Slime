@@ -57,8 +57,8 @@ int main() {
     float*  W_bmap  = nullptr;
 
     const int n_perc  = W_PERC_SIZE;
-    const int n_inter = slime::nca::PERC_DIM * slime::nca::HIDDEN_DIM;
-    const int n_flow  = slime::nca::HIDDEN_DIM * CA_CHANNELS;
+    const int n_inter = slime::nca::PERC_DIM * HIDDEN_DIM;
+    const int n_flow  = HIDDEN_DIM * CA_CHANNELS;
     const int n_bmap  = CA_CHANNELS * BMAP_DIM;
     const int n_img   = GRID_SIZE * GRID_SIZE * 3;
 
