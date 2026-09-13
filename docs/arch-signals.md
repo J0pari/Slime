@@ -7,6 +7,21 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I6 notes. (1) The old `rd_disabled` gate parsed single lines,
+  so multi-line launcher calls evaded it; it was replaced by
+  `rd_adjoint_present`, which triggers on the coefficients plumbing and
+  requires the RD re-forward, the clamp-aware d_next workspace, and the RD
+  gather in the backward. (2) The finite-difference witness initially failed
+  on the saturated case because the loss was returned as float and the
+  clamped value (~65504) makes the loss ~2e5, whose ulp swamps the FD
+  signal; the loss accumulator is now double. Near the FP16 bound the FD is
+  ill-conditioned (ulp > FD step), so the adversarial case saturates well
+  past the bound. (3) The reaction encoding changed from centred quantization
+  (zero bits = -1) to sign-magnitude (zero bits = 0), which invalidates any
+  prior RD coefficient decode; the liveness test for the numeric exemption
+  moved with `read_bits` into `nca/rd_codec.cuh`. (4) Stress slots re-decode
+  their RD coefficients after the refresh copy, since their genomes change
+  mid-generation.
 - 2026-09-12: I5 backward adjoint design (complete, unexecuted). Two
   correctness traps found while deriving it, both fixed by storing the
   pre-broadcast summary:
