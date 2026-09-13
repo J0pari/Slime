@@ -12,11 +12,10 @@ cuda_engineering.md, and construction_plan.md.
   references), but the blueprint does not define what "fails the SOT gate"
   means for a predictor stress representative: predictors take a target
   descriptor, not an image, so the reversible image transformation does not
-  apply. The predictor analogue (e.g. a host-controlled permutation of
-  irrelevant target dimensions) is a new mechanism and must be specified in
-  A-201/A-601 before it is implemented. Until then the device evaluation
-  covers classifier stress slots only; predictor stress slots refresh and
-  carry lineage shadow but are not gated.
+  apply. Resolved in blueprint S-003 with the target-permutation gate: the
+  host draws a reversible permutation pi of the target bmap_32 dimensions
+  from the SOT key, the nominal-target response is the reference, and the
+  response to pi(target) must match it after pi^-1.
 - 2026-09-12: The SOT identity check uses the 24 tail organism slots
   (`d_organisms + POOL_SIZE`) as reference-rollout scratch, but the blueprint
   assigns the same slots to the SOT-density stress sub-populations. The
