@@ -149,17 +149,27 @@ def save_manifest(evidence_dir: Path, manifest: dict) -> Path:
 
 
 def load_manifests(evidence_dir: Path) -> list[dict]:
+    """Load every manifest, refusing loudly on any file that cannot be read,
+    parsed, or carries the wrong schema: a manifest that silently disappears
+    would render as `never` and could hide a failed witness."""
     out = []
     if not evidence_dir.exists():
         return out
+    broken = []
     for p in sorted(evidence_dir.glob("*.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            if data.get("schema") == SCHEMA:
-                data["_path"] = str(p)
-                out.append(data)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            broken.append(f"{p.name}: {e}")
             continue
+        if data.get("schema") != SCHEMA:
+            broken.append(f"{p.name}: schema {data.get('schema')!r} "
+                          f"!= {SCHEMA!r}")
+            continue
+        data["_path"] = str(p)
+        out.append(data)
+    if broken:
+        raise ValueError("unreadable evidence manifests: " + "; ".join(broken))
     return out
 
 
@@ -176,7 +186,11 @@ def verdict(claim, manifests: list[dict], root: Path) -> Verdict:
         return Verdict(claim.id, "never", None,
                        "no evidence manifest references this claim")
     entry = man["claims"][claim.id]
-    result = entry.get("result", "unknown")
+    if "result" not in entry:
+        raise ValueError(
+            f"evidence manifest {man.get('_path', '?')} has no result for "
+            f"{claim.id}; regenerate it with architecture/evidence.py record")
+    result = entry["result"]
     current_mech = mechanism_file_hashes([claim], root)[claim.id]
     current_wit = witness_file_hashes([claim], root)[claim.id]
     current_prop = claim_hash(claim)

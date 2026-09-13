@@ -576,6 +576,24 @@ class CompilerTests(unittest.TestCase):
             v3 = evidence.verdict(claim, [manifest], root)
             self.assertEqual(v3.state, "pass/stale")
 
+    def test_broken_evidence_manifest_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ev = root / "evidence"
+            ev.mkdir()
+            (ev / "bad.json").write_text("{not json", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                evidence.load_manifests(ev)
+            (ev / "bad.json").write_text("{}", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                evidence.load_manifests(ev)
+            (ev / "bad.json").unlink()
+            claim = Claim(id="X001.foo", kind="invariant", doc="d", line=1)
+            manifest = {"schema": "slime-evidence/v1",
+                        "claims": {"X001.foo": {}}}
+            with self.assertRaises(ValueError):
+                evidence.verdict(claim, [manifest], root)
+
     def test_claim_parser_and_validation(self):
         text = (
             "@claim X001.demo invariant\n"
