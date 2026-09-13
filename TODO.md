@@ -113,7 +113,12 @@ I9
   production path runs on hardware); the claim stays provisional until
   F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
-  -- RUN IN FLIGHT: scheduler job 233fc0ed8322d3ee (slime-5000gen,
+  -- RUN IN FLIGHT: scheduler job 90f2447f11941fd2 (slime-5000gen,
+  50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
+  failed after 583 s while a competing direct run held the GPU; the
+  resubmission raced an owner edit of gpu_scheduler.py and the client
+  refused loudly, then succeeded via the owner CLI (the client path should
+  be retried first next time).
   50-generation chunks, ~10 h); on completion check the harness exit and
   record the manifest after I9 flips implemented
   byte-equivalence, no spontaneous class A-F conditions): the chunked
