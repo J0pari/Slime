@@ -724,6 +724,19 @@ static int test_pt_swap_backward_correspondence() {
     CHECK(buggy_diff > 1e-3f * (1.f + scale),
           "missing bank swap is detected (sensitivity)");
 
+    // Permutation involution (C6): swapping the same pair back restores the
+    // pre-swap arrangement exactly.
+    bool involution_ok = true;
+    if (!safety::pt::swap_device_organism(ctx, slime::PtSlot(1),
+                                          slime::PtSlot(0))) {
+        involution_ok = false;
+    }
+    safety::pt::swap_host_organism(ctx, slime::PtSlot(1), slime::PtSlot(0));
+    if (lineage[0] != slime::LineageId(101u)
+        || lineage[1] != slime::LineageId(202u)) involution_ok = false;
+    CHECK(involution_ok, "reverse swap restores the original permutation");
+
+
     free(h_weights);
     free(h_img);
     free(h_task);

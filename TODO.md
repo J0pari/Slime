@@ -103,7 +103,11 @@ I9
   production path runs on hardware); the claim stays provisional until
   F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
-  byte-equivalence, no spontaneous class A-F conditions).
+  byte-equivalence, no spontaneous class A-F conditions): the chunked
+  harness exists (`make stability-run`, `tests/long_run_check.py`,
+  default 20 generations in 5-generation chunks) and fails on any
+  spontaneous stress flag or nonfinite dashboard value; the 5000-
+  generation acceptance run itself remains.
 
 ## P1 — VERIFY (after BUILD)
 

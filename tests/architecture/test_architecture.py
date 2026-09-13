@@ -177,6 +177,21 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_mutation_transaction_move(self):
+        # Mutation testing: deleting one organism-identity move must make the
+        # transaction check go red (the witnesses for S004 depend on it).
+        documents, transactions, machine = compiler.load_configs(ROOT)
+        errors = []
+        compiler.check_phase_and_transactions(ROOT, transactions, errors)
+        self.assertEqual(errors, [])
+        mutated = json.loads(json.dumps(transactions))
+        identity = mutated["transactions"]["pt_swap"]["organism_identity"]
+        identity.pop(0)
+        errors2 = []
+        compiler.check_phase_and_transactions(ROOT, mutated, errors2)
+        self.assertTrue(errors2,
+                        "removing a PT organism-identity move was not caught")
+
     def test_phase_model_matches_code(self):
         # [claim:I001.phase-order]
         # The declared capturable-phase table in cuda_engineering must match
