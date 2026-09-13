@@ -33,7 +33,7 @@ struct ArchiveEntry {
     float    f_raw;
     float    f_sot;
     LineageId lineage_id;
-    uint32_t parent_id;
+    ArchiveSlot parent_id;
     uint32_t bin_x;
     uint32_t bin_y;
     int      generation;

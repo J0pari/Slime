@@ -383,7 +383,7 @@ static int test_forced_pt_swap() {
     genome::Genome genomes[2];
     DeltaWeights deltas[2];
     slime::LineageId lineage[2];
-    uint32_t parent[2];
+    slime::ArchiveSlot parent[2];
     int spawn_gen[2];
     float fitness[2], f_raw[2], f_sot[2];
     Role role[2];
@@ -399,7 +399,8 @@ static int test_forced_pt_swap() {
     deltas[1].count = 7; deltas[1].indices[0] = 29; deltas[1].values[0] = -0.9f;
     lineage[0] = slime::LineageId(101u);
     lineage[1] = slime::LineageId(202u);
-    parent[0] = 1001; parent[1] = 2002;
+    parent[0] = slime::ArchiveSlot(1001);
+    parent[1] = slime::ArchiveSlot(2002);
     spawn_gen[0] = 5; spawn_gen[1] = 9;
     fitness[0] = 0.25f; fitness[1] = 0.75f;
     f_raw[0] = 0.2f;   f_raw[1] = 0.8f;
@@ -464,7 +465,8 @@ static int test_forced_pt_swap() {
     if (deltas[0].count != 7 || deltas[1].count != 3) ok = false;
     if (lineage[0] != slime::LineageId(202u)
         || lineage[1] != slime::LineageId(101u)) ok = false;
-    if (parent[0] != 2002 || parent[1] != 1001) ok = false;
+    if (parent[0] != slime::ArchiveSlot(2002)
+        || parent[1] != slime::ArchiveSlot(1001)) ok = false;
     if (spawn_gen[0] != 9 || spawn_gen[1] != 5) ok = false;
     if (fitness[0] != 0.75f || fitness[1] != 0.25f) ok = false;
     if (role[0] != Role::Predictor || role[1] != Role::Classifier) ok = false;
@@ -613,7 +615,7 @@ static int test_pt_swap_backward_correspondence() {
     genome::Genome genomes[2];
     DeltaWeights deltas_h[2];
     slime::LineageId lineage[2];
-    uint32_t parent[2];
+    slime::ArchiveSlot parent[2];
     int spawn_gen[2], batch_idx[2];
     float fitness[2], f_raw[2], f_sot[2];
     Role role[2];
@@ -622,7 +624,8 @@ static int test_pt_swap_backward_correspondence() {
     genomes[0].bits[5] = 0xAAAAAAAAu; genomes[1].bits[5] = 0x55555555u;
     lineage[0] = slime::LineageId(101u);
     lineage[1] = slime::LineageId(202u);
-    parent[0] = 1001; parent[1] = 2002;
+    parent[0] = slime::ArchiveSlot(1001);
+    parent[1] = slime::ArchiveSlot(2002);
     spawn_gen[0] = 5; spawn_gen[1] = 9;
     fitness[0] = 0.25f; fitness[1] = 0.75f;
     f_raw[0] = 0.2f; f_raw[1] = 0.8f;

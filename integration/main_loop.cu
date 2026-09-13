@@ -58,7 +58,7 @@ struct OrganismTable {
     genome::Genome       genomes[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=genome]
     genome::DeltaWeights deltas[TOTAL_ORG];    // [identity:organism] [lifetime:rollout] [crosses:pt=delta]
     LineageId            lineage_id[TOTAL_ORG];// [identity:organism] [lifetime:rollout] [crosses:pt=lineage]
-    uint32_t             parent_id[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=parent_id]
+    ArchiveSlot          parent_id[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=parent_id]
     int                  spawn_gen[TOTAL_ORG]; // [identity:organism] [lifetime:rollout] [crosses:pt=spawn_gen]
     uint8_t              replica_tag[TOTAL_ORG];  // slot identity (temperature), never swapped
     float                fitness[TOTAL_ORG];   // [identity:organism] [lifetime:rollout] [crosses:pt=fitness]

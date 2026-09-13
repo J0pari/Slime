@@ -414,7 +414,7 @@ bool initialize_world(World* w) {
         genome::init_delta_from_prior(g, &w->org_table.deltas[i]);
 
         w->org_table.lineage_id[i] = LineageId(static_cast<uint32_t>(i));
-        w->org_table.parent_id[i] = 0;
+        w->org_table.parent_id[i] = ArchiveSlot(0);
         w->org_table.spawn_gen[i] = 0;
         w->org_table.role[i] = genome::read_role(g);
         w->org_table.fitness[i] = 0.f;
@@ -796,7 +796,7 @@ static void spawn_role_wave(World* w, Role target_role, int n_spawns,
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = genome::runtime_role(child);
         w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id;
-        w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive_idx);
+        w->org_table.parent_id[slot] = ArchiveSlot(parent_archive_idx);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
         w->org_table.f_raw[slot] = 0.f;
@@ -904,7 +904,7 @@ static bool inject_predictor_founders(World* w) {
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = Role::Predictor;
         w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id;
-        w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive);
+        w->org_table.parent_id[slot] = ArchiveSlot(parent_archive);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
         w->org_table.f_raw[slot] = 0.f;
