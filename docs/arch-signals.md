@@ -7,6 +7,20 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I7 notes. Capture boundary rule: a phase graph contains only
+  device launches/transfers with stable arguments, so the forward phase's
+  three launches are captured together and the phase trace runs after the
+  graph; the optimizer captures aggregate+came and the grad-norm reduction
+  moved after it. Two graph-stability traps were found and fixed: the
+  reference regressor's training step and the CAME step were kernel
+  arguments (the CAME kernel turned out not to take one; the reference step
+  is now device-resident). StressEval and the SOT reference are deferred:
+  their device launches interleave host readbacks and host cosine
+  computation, so capturing them requires restructuring the readbacks into
+  stable host buffers first. The component formerly called the "placeholder"
+  regressor is the reference regressor; the vocabulary was removed because a
+  repository whose contract forbids stubs must not name a permanent
+  component as if it were unfinished.
 - 2026-09-12: I6 notes. (1) The old `rd_disabled` gate parsed single lines,
   so multi-line launcher calls evaded it; it was replaced by
   `rd_adjoint_present`, which triggers on the coefficients plumbing and

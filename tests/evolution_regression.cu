@@ -15,6 +15,7 @@
 
 #include "../safety/parallel_tempering.cu"
 #include "../optimizer/came.cu"
+#include "../integration/phase_graph.cuh"
 
 #include <cmath>
 #include <cstdio>
@@ -1304,6 +1305,55 @@ static int test_rd_gradient_finite_difference() {
     return 0;
 }
 
+// ---- I7: phase graph equivalence -------------------------------------------
+
+// A captured forward phase replayed on a non-default stream must reproduce
+// the sequential execution bitwise (grid, BTRAJ, and checkpoints).
+static int test_phase_graph_equivalence() {
+    std::printf("--- Test: captured forward phase matches sequential ---\n");
+    std::fflush(stdout);
+    Rig r{};
+    if (rig_init(&r)) return 1;
+    cudaStream_t s = nullptr;
+    CUDA_CHECK(cudaStreamCreate(&s));
+
+    OrganismState h1, h2;
+    CheckpointBuffer c1, c2;
+    launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                    r.d_weights, nullptr, r.d_ckpt,
+                                    RESIDUAL_ALPHA, 1, s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(&h1, r.d_org, sizeof(OrganismState),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&c1, r.d_ckpt, sizeof(CheckpointBuffer),
+                          cudaMemcpyDeviceToHost));
+
+    slime::integration::PhaseGraph fg;
+    if (!slime::integration::phase_run(&fg, s, [&] {
+            launch_forward_with_checkpoints(r.d_org, r.d_inputs, nullptr,
+                                            r.d_weights, nullptr, r.d_ckpt,
+                                            RESIDUAL_ALPHA, 1, s);
+        })) {
+        return 1;
+    }
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(&h2, r.d_org, sizeof(OrganismState),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&c2, r.d_ckpt, sizeof(CheckpointBuffer),
+                          cudaMemcpyDeviceToHost));
+
+    CHECK(std::memcmp(h1.grid, h2.grid, sizeof(h1.grid)) == 0,
+          "captured forward grid matches sequential");
+    CHECK(std::memcmp(h1.bmap_traj, h2.bmap_traj, sizeof(h1.bmap_traj)) == 0,
+          "captured forward BTRAJ matches sequential");
+    CHECK(std::memcmp(&c1, &c2, sizeof(CheckpointBuffer)) == 0,
+          "captured forward checkpoints match sequential");
+
+    cudaStreamDestroy(s);
+    rig_free(&r);
+    return 0;
+}
+
 int main() {
     std::printf("Evolution regression suite (role locking, effective weights, "
                 "PT correspondence, finite differences)\n");
@@ -1321,6 +1371,7 @@ int main() {
     rc |= test_context_channel_reference();
     rc |= test_context_gradient_nonzero();
     rc |= test_rd_gradient_finite_difference();
+    rc |= test_phase_graph_equivalence();
 
     std::printf("\n========================================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);

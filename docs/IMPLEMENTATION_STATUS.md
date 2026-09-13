@@ -13,7 +13,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | I4 | Structural pressures (S-003) | implemented |
 | I5 | Global context channel (A-203, cuda_engineering §16) | implemented |
 | I6 | Reaction-diffusion activation (A-202, A-103) | implemented |
-| I7 | Phase graphs (A-102, cuda_engineering §11) | missing |
+| I7 | Phase graphs (A-102, cuda_engineering §11) | partial |
 | I8 | Performance completion (cuda_engineering, acceptance) | missing |
 | I9 | Long-run hardening (S-001, Q-001) | missing |
 

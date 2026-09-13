@@ -202,9 +202,12 @@ depends on exists.
 
 ### I7 — Phase graphs (A-102, cuda_engineering §11)
 
-- Capture and replay of the capturable phases (forward, descriptor, SOT
-  reference, backward, optimizer, telemetry) with a debug mode that
-  synchronizes and validates.
+- Capture and replay of the capturable phases per cuda_engineering §11
+  (Forward, Backward, Optimizer, WorldPredict, WorldTrain) with a debug mode
+  that synchronizes and validates. The phase list is the engineering spec's;
+  the earlier parenthetical here was a stale summary. StressEval and the SOT
+  reference are host-interleaved and deferred under §11's capture boundary
+  rule.
 - Verification: captured execution produces identical outputs to sequential
   execution over a multi-generation run.
 

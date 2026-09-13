@@ -71,7 +71,13 @@ items:
       - autodiff/warp_tape.cu::bwd_rd_gather_kernel
       - integration/host_main.cu::upload_rd_coefficients
   I7:
-    status: missing
+    status: partial
+    mechanisms:
+      - integration/phase_graph.cuh::phase_run
+      - integration/host_main.cu::step_generation
+    missing:
+      - StressEval capture (per-reference host readbacks must be restructured
+        out of the device sequence; see cuda_engineering §11)
   I8:
     status: missing
   I9:

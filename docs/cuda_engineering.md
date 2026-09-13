@@ -737,6 +737,19 @@ Graph capture after the first generation. Replay on subsequent generations.
 The Backward phase graph contains ~675 batched sub-kernel launches
 (all organisms processed in parallel per launch).
 
+Capture boundary rule: a phase graph may contain only device launches and
+transfers with stable arguments; any host synchronization or host readback
+inside the sequence splits or disqualifies the phase. Consequently the
+Forward phase captures forward_with_checkpoints + extract_descriptor +
+btraj_gather as one sequence (the phase trace runs after the graph), the
+Optimizer phase captures aggregate_gradients + came_step, and the
+placeholder step counter is device-resident so WorldTrain stays replayable.
+StressEval is deferred: evaluate_stress_classifiers/predictors interleave
+per-reference host readbacks and cosine computation between device launches,
+so capturing them requires restructuring the readbacks; until then stress
+evaluation runs sequentially. The SOT reference phase is likewise
+host-interleaved and not captured.
+
 ---
 
 ## 12. Safety/Alignment Functions (S-002)

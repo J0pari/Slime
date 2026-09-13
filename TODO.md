@@ -65,8 +65,11 @@ I6
   GPU FD/determinism witness written (executes in VERIFY).
 
 I7
-- [ ] Capture/replay of the capturable phases with a debug mode that
-  synchronizes and validates.
+- [x] Capture/replay of the capturable phases per cuda_engineering §11
+  (Forward, Backward, Optimizer, WorldPredict, WorldTrain) with a debug
+  mode and an equivalence witness.
+- [ ] StressEval capture: restructure the per-reference host readbacks out
+  of the device sequence (capture boundary rule).
 
 I8
 - [ ] Profile first (per-phase timing, then Nsight where available); the
