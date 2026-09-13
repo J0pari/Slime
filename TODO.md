@@ -171,7 +171,11 @@ I9
   job loudly after bounded polls (which is what killed the previous two
   submissions), impossible claims are refused at submit, and a queue
   control surface exists. Contract fingerprint still validates. Current
-  submissions: c4223d8df9634a4e (5000-gen) and bfd463ba6d5b2a49 (run55). History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  submissions: c4223d8df9634a4e (5000-gen) and bfd463ba6d5b2a49 (run55).
+  Retry semantics (gpu_scheduler._maybe_retry): only nonzero exits retry;
+  policy kills, operator cancellations, and dispatch refusals pass exit
+  code None and never retry, so those still need manual resubmission.
+  Resume-on-start makes each resubmission continue from the last chunk. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
   17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
