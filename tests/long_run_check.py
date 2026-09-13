@@ -17,15 +17,23 @@ NONFINITE_RE = re.compile(r"(nan|inf)", re.IGNORECASE)
 
 
 def run_chunk(binary: str, gens: int, ckpt: str, resume: bool) -> str:
+    """Run one chunk, streaming the child's output through so the
+    progress/v1 wrapper sees the binary's per-generation `gen N` lines."""
     cmd = [binary, str(gens), "--ckpt", ckpt]
     if resume:
         cmd.append("--resume")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    lines = []
+    for line in proc.stdout:
+        print(line, end="")
+        lines.append(line)
+    proc.wait(timeout=3600)
+    out = "".join(lines)
     if proc.returncode != 0:
-        print(proc.stdout[-2000:])
-        print(proc.stderr[-2000:], file=sys.stderr)
+        print(out[-2000:], file=sys.stderr)
         raise SystemExit(f"chunk failed with exit code {proc.returncode}")
-    return proc.stdout
+    return out
 
 
 def main() -> int:
