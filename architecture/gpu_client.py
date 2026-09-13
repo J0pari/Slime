@@ -151,6 +151,25 @@ def status(env: dict | None = None) -> dict:
 
 SCRATCH_JOB_KINDS = ("merge", "export", "scratch")
 
+# Multi-generation runs must go through the chunked, resumable harness: a
+# bare binary launch is killed at its declared duration and restarts from
+# scratch on retry, and the harness's checkpoint verification is what
+# catches a run that silently does not advance.
+LONG_RUN_GENERATIONS = 10
+RESILIENT_HARNESSES = ("long_run_check.py", "measure_run.py")
+
+
+def _is_bare_long_run(command: list[str]) -> bool:
+    joined = " ".join(command).lower()
+    if any(h in joined for h in RESILIENT_HARNESSES):
+        return False
+    if not command or "coevo" not in command[0].lower():
+        return False
+    for part in command[1:]:
+        if part.isdigit() and int(part) > LONG_RUN_GENERATIONS:
+            return True
+    return False
+
 
 def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
            priority: int = 0, max_minutes: float = 0.0, cwd: str = "",
@@ -170,6 +189,12 @@ def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
     repo root) so callers can pass build/foo.exe naturally."""
     if not command:
         raise ValueError("command must be non-empty")
+    if _is_bare_long_run(command):
+        raise ValueError(
+            "multi-generation runs must go through "
+            "tests/long_run_check.py (chunked, resumable, checkpoint-"
+            "verified, progress-emitting); a bare binary launch is killed "
+            "at its declared duration and restarts from scratch on retry")
     if int(ram_mib) <= 0:
         raise ValueError("every submission must declare ramMib > 0")
     if job_kind in SCRATCH_JOB_KINDS and disk_mib is None:
@@ -315,6 +340,13 @@ def _cmd_run(args) -> int:
     if not command:
         print("run: no command given (use -- <cmd...>)", file=sys.stderr)
         return 2
+    if _is_bare_long_run(command):
+        print("run: multi-generation runs must go through "
+              "tests/long_run_check.py (chunked, resumable, checkpoint-"
+              "verified); a bare binary launch is killed at its declared "
+              "duration and restarts from scratch on retry",
+              file=sys.stderr)
+        return 2
 
     if args.direct:
         return _run_direct(command, args)
@@ -331,7 +363,8 @@ def _cmd_run(args) -> int:
                      priority=args.priority,
                      max_minutes=args.max_minutes, cwd=args.cwd,
                      telemetry_log=args.telemetry_log,
-                     disk_mib=args.disk or None, job_kind=args.kind)
+                     disk_mib=args.disk or None, job_kind=args.kind,
+                     retries=args.retries)
     except (SchedulerUnavailable, ContractMismatch) as exc:
         print(f"[gpu-client] scheduler unavailable: {exc}", file=sys.stderr)
         print("[gpu-client] re-run with --direct to execute locally, or set "
@@ -409,6 +442,9 @@ def main(argv=None) -> int:
                        help="job kind; scratch kinds require --disk")
     p_run.add_argument("--priority", type=int, default=0)
     p_run.add_argument("--max-minutes", type=float, default=0.0)
+    p_run.add_argument("--retries", type=int, default=None,
+                       help="scheduler retry budget (default: the owner's "
+                            "bootstrap value)")
     p_run.add_argument("--cwd", default="")
     p_run.add_argument("--telemetry-log", default="")
     p_run.add_argument("--total", type=int, default=0,

@@ -171,6 +171,21 @@ class ClientTests(unittest.TestCase):
             self.assertTrue(os.path.isabs(resolved[0]))
             self.assertTrue(resolved[0].endswith("evolution_test.exe"))
 
+    def test_bare_long_run_refused(self):
+        # Resilience is enforced at the submission choke point: a bare
+        # multi-generation run is refused; short runs and harness-wrapped
+        # runs are allowed.
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeScheduler(td)
+            with self.assertRaises(ValueError):
+                gpu_client.submit("x", ["build/coevo.exe", "100"], 2048, 4096,
+                                  env=fake.env())
+            gpu_client.submit("x", ["build/coevo.exe", "1"], 2048, 4096,
+                              env=fake.env())
+            gpu_client.submit("x", ["python", "tests/long_run_check.py",
+                                    "--gens", "5000"], 2048, 4096,
+                              env=fake.env())
+
     def test_submit_requires_ram_and_scratch_disk(self):
         with tempfile.TemporaryDirectory() as td:
             fake = FakeScheduler(td)
