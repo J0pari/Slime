@@ -64,7 +64,7 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | G100.deterministic-seed | contract | established | ✅ | ✅ | pass/stale |
 | G100.named-tunables | policy | established | ✅ | ✅ | pass/stale |
 | G100.single-prng | invariant | established | ✅ | ✅ | pass/stale |
-| G100.strong-identifiers | policy | provisional | ✅ | ✅ | never |
+| G100.strong-identifiers | policy | established | ✅ | ✅ | never |
 | I001.phase-order | contract | established | ✅ | ✅ | pass/stale |
 | I001.replay-evaluation-identity | invariant | established | ✅ | ✅ | pass/stale |
 | I001.spawn-wave-unique | invariant | established | ✅ | ✅ | pass/stale |
@@ -74,7 +74,7 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/stale |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/stale |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS, strong_ids_identity_fields: PASS
 
-Claims: 31 total, 24 established, 5 provisional, 2 planned.
+Claims: 31 total, 25 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->

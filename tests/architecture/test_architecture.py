@@ -177,6 +177,21 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_strong_ids_identity_fields_catches_plant(self):
+        # [claim:G100.strong-identifiers]
+        report = source_gates.GateReport()
+        source_gates.gate_strong_ids_identity_fields(
+            files_from({"integration/main_loop.cu":
+                        "    uint32_t lineage_id[TOTAL_ORG];"
+                        "  // [identity:organism]"}), report)
+        self.assertFalse(report.ok, "raw identity id was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_strong_ids_identity_fields(
+            files_from({"integration/main_loop.cu":
+                        "    LineageId lineage_id[TOTAL_ORG];"
+                        "  // [identity:organism]"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_no_value_ternary_string_default_catches_plant(self):
         report = source_gates.GateReport()
         source_gates.gate_no_value_ternary_string_default(

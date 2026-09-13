@@ -657,6 +657,24 @@ def gate_no_value_ternary_string_default(files: dict[str, list[str]],
                     "ternary substitutes a string literal for an absent value"))
 
 
+# ---- Gate: identity fields use strong id types -----------------------------
+# Fields carrying the [identity:organism] annotation are the registry hook for
+# organism state; declaring one as a raw uint32_t reintroduces exactly the
+# interchangeable-id class the strong types removed.
+def gate_strong_ids_identity_fields(files: dict[str, list[str]],
+                                    report: GateReport) -> None:
+    for path, lines in files.items():
+        if not path.endswith((".cu", ".cuh")):
+            continue
+        for i, line in enumerate(lines, 1):
+            if "[identity:organism]" not in line:
+                continue
+            if re.search(r"\buint32_t\b", line):
+                report.findings.append(Finding(
+                    "strong_ids_identity_fields", path, i,
+                    "identity field declared uint32_t; use a strong id type"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -674,6 +692,7 @@ ALL_GATES = [
     gate_no_masked_cuda_errors,
     gate_no_unchecked_error_vars,
     gate_no_value_ternary_string_default,
+    gate_strong_ids_identity_fields,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

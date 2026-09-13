@@ -130,9 +130,11 @@ M config/strong_ids.cuh::StrongId
 M config/strong_ids.cuh::LineageId
 M archive/soft_qd_archive.cu::prune_lineage
 M archive/soft_qd_archive.cu::set_lineage_brake
+M architecture/source_gates.py::gate_strong_ids_identity_fields
 W+ tests/host_unit_tests.cpp::test_strong_ids_distinct
+W+ tests/architecture/test_architecture.py::test_gate_strong_ids_identity_fields_catches_plant
 P correctness
-T provisional
+T established
 C observed
 
 

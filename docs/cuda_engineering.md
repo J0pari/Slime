@@ -110,8 +110,7 @@ These never touch the GPU:
 - `ReplayBuffer` (host-only; the training minibatch is uploaded per step)
 - `ClassifierBatch` (host assembly, images copied to device)
 - Safety structs: CusumState, MutationLadder, StressLadder,
-  SentinelEnsemble, SentinelHistory, AuditRegressor, ProbePanel,
-  HostAuthority, CorrelationWindow, PredictorSelectionCache
+  SentinelEnsemble, SentinelHistory, AuditRegressor, ProbePanel
 - `IntentRegistry`: BTRAJ copied from device after forward
 
 **Annotation policy.** Functions that operate exclusively on host-resident

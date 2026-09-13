@@ -357,11 +357,6 @@ inline bool launch_reference_train(ReferenceRegressor* d_reg,
 // For a probe target classifier organism, surprise = variance across
 // predictions from the top-K predictors (by recent fitness).
 
-struct PredictorSelectionCache {
-    uint32_t organism_idx[PREDICTOR_ENSEMBLE_TOP_K];
-    float    recent_fitness[PREDICTOR_ENSEMBLE_TOP_K];
-};
-
 // Ensemble surprise per probe target. Each predictor's bmap_64 prediction
 // for the probe lives in the Intent Registry from the forward phase.
 // Surprise = mean (over BMAP_DIM) variance across the K predictions.
