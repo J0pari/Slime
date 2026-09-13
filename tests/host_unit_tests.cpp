@@ -28,6 +28,7 @@
 
 #include "../config/constants.cuh"
 #include "../nca/context_adjoint.cuh"
+#include "../nca/rd_adjoint.cuh"
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
@@ -1364,8 +1365,8 @@ static void test_context_broadcast_adjoint() {
     float worst_w = 0.f;
     for (int i = 0; i < CA_CHANNELS * K; ++i) {
         float save = W_ctx[i];
-        W_ctx[i] = save + eps; float Lp = loss();
-        W_ctx[i] = save - eps; float Lm = loss();
+        W_ctx[i] = save + eps; double Lp = loss();
+        W_ctx[i] = save - eps; double Lm = loss();
         W_ctx[i] = save;
         float numeric = (Lp - Lm) / (2.f * eps);
         float err = std::fabs(numeric - dW_ctx[i])
@@ -1377,8 +1378,8 @@ static void test_context_broadcast_adjoint() {
     float worst_s = 0.f;
     for (int i = 0; i < NC * CA_CHANNELS; ++i) {
         float save = state_pre[i];
-        state_pre[i] = save + eps; float Lp = loss();
-        state_pre[i] = save - eps; float Lm = loss();
+        state_pre[i] = save + eps; double Lp = loss();
+        state_pre[i] = save - eps; double Lm = loss();
         state_pre[i] = save;
         float numeric = (Lp - Lm) / (2.f * eps);
         float err = std::fabs(numeric - d_state_pre[i])
@@ -1388,6 +1389,125 @@ static void test_context_broadcast_adjoint() {
     EXPECT_TRUE(worst_s < 1e-2f);
     std::printf("  context adjoint worst rel err: W_ctx=%.2e state=%.2e\n",
                 worst_w, worst_s);
+}
+
+// ---- I6: reaction-diffusion adjoint ----------------------------------------
+// Finite differences over curr, base, K, and D must match the adjoint,
+// including the saturated-clamp case where the derivative is zero.
+static void test_rd_adjoint_finite_difference() {
+    namespace rd = slime::nca::rd;
+    const int N = 4;                       // cells per side
+    const int CELLS = N * N;
+    const int K = rd::RD_CHEM_N;
+    static float curr[CELLS * CA_CHANNELS];
+    static float base[CELLS * CA_CHANNELS];
+    static float next[CELLS * CA_CHANNELS];
+    static float d_next[CELLS * CA_CHANNELS];
+    static float d_curr[CELLS * CA_CHANNELS];
+    static float Kmat[K * K];
+    static float Dvec[K];
+    static float dK[K * K];
+    static float dD[K];
+
+    uint32_t s = 0x6D2B79F5u;
+    auto next_rand = [&]() {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        return static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+    };
+    for (int i = 0; i < CELLS * CA_CHANNELS; ++i) {
+        curr[i] = next_rand();
+        base[i] = next_rand();
+        d_next[i] = next_rand();
+    }
+    for (int i = 0; i < K * K; ++i) Kmat[i] = next_rand();
+    for (int i = 0; i < K; ++i) Dvec[i] = 0.5f + next_rand();
+
+    auto loss = [&]() {
+        rd::rd_step_ref(curr, base, next, N, Kmat, Dvec);
+        double L = 0.0;
+        for (int i = 0; i < CELLS * CA_CHANNELS; ++i) {
+            L += static_cast<double>(d_next[i]) * next[i];
+        }
+        return L;
+    };
+
+    for (int i = 0; i < CELLS * CA_CHANNELS; ++i) d_curr[i] = 0.f;
+    for (int i = 0; i < K * K; ++i) dK[i] = 0.f;
+    for (int i = 0; i < K; ++i) dD[i] = 0.f;
+    rd::rd_adjoint_ref(curr, base, d_next, N, Kmat, Dvec,
+                       dK, dD, d_curr);
+
+    const float eps = 1e-3f;
+    auto rel = [](float numeric, float analytic) {
+        return std::fabs(numeric - analytic)
+             / std::fmax(std::fabs(numeric), 1e-2f);
+    };
+
+    float worst_curr = 0.f;
+    for (int i = 0; i < CELLS * CA_CHANNELS; ++i) {
+        float save = curr[i];
+        curr[i] = save + eps; double Lp = loss();
+        curr[i] = save - eps; double Lm = loss();
+        curr[i] = save;
+        float e = rel(static_cast<float>((Lp - Lm) / (2.0 * eps)), d_curr[i]);
+        if (e > worst_curr) worst_curr = e;
+    }
+    EXPECT_TRUE(worst_curr < 1e-2f);
+
+    float worst_K = 0.f;
+    for (int i = 0; i < K * K; ++i) {
+        float save = Kmat[i];
+        Kmat[i] = save + eps; double Lp = loss();
+        Kmat[i] = save - eps; double Lm = loss();
+        Kmat[i] = save;
+        float e = rel(static_cast<float>((Lp - Lm) / (2.0 * eps)), dK[i]);
+        if (e > worst_K) worst_K = e;
+    }
+    EXPECT_TRUE(worst_K < 1e-2f);
+
+    float worst_D = 0.f;
+    for (int i = 0; i < K; ++i) {
+        float save = Dvec[i];
+        Dvec[i] = save + eps; double Lp = loss();
+        Dvec[i] = save - eps; double Lm = loss();
+        Dvec[i] = save;
+        float e = rel(static_cast<float>((Lp - Lm) / (2.0 * eps)), dD[i]);
+        if (e > worst_D) worst_D = e;
+    }
+    EXPECT_TRUE(worst_D < 1e-2f);
+
+    // Non-chemical channels are not read by RD.
+    bool nonchem_zero = true;
+    for (int p = 0; p < CELLS; ++p) {
+        for (int c = K; c < CA_CHANNELS; ++c) {
+            if (d_curr[p * CA_CHANNELS + c] != 0.f) nonchem_zero = false;
+        }
+    }
+    EXPECT_TRUE(nonchem_zero);
+
+    // Adversarial: saturate a cell's output well past the FP16 bound so the
+    // clamp is unambiguous (near the bound, float ulp exceeds the FD step).
+    base[0] = FP16_MAX_VALUE + 1000.f;
+    for (int i = 0; i < CELLS * CA_CHANNELS; ++i) d_curr[i] = 0.f;
+    for (int i = 0; i < K * K; ++i) dK[i] = 0.f;
+    for (int i = 0; i < K; ++i) dD[i] = 0.f;
+    rd::rd_adjoint_ref(curr, base, d_next, N, Kmat, Dvec,
+                       dK, dD, d_curr);
+    float worst_sat = 0.f;
+    for (int c = 0; c < K; ++c) {
+        int i = 0 * CA_CHANNELS + c;
+        float save = curr[i];
+        curr[i] = save + eps; double Lp = loss();
+        curr[i] = save - eps; double Lm = loss();
+        curr[i] = save;
+        float numeric = static_cast<float>((Lp - Lm) / (2.0 * eps));
+        float e = rel(numeric, d_curr[i]);
+        if (e > worst_sat) worst_sat = e;
+    }
+    EXPECT_TRUE(worst_sat < 1e-2f);
+
+    std::printf("  rd adjoint worst rel err: curr=%.2e K=%.2e D=%.2e "
+                "saturated=%.2e\n", worst_curr, worst_K, worst_D, worst_sat);
 }
 
 int main() {
@@ -1437,6 +1557,7 @@ int main() {
     test_predictor_batch_contract();
     test_predictor_target_rotation();
     test_context_broadcast_adjoint();
+    test_rd_adjoint_finite_difference();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }
