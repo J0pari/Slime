@@ -7,6 +7,16 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 measured rejection (third of its kind). The reduce kernels
+  were rewritten to tile the cell axis through shared memory once per
+  organism (one block per organism, one thread per output, serial 4096-long
+  accumulation) to remove the 48x dpre re-reads. Memory traffic fell but the
+  kernels measured 6x SLOWER (reduce_inter 932 -> 5767 ms, reduce_flow 287 ->
+  1581 ms): 64 blocks with 4096-FMA dependent chains cannot hide latency,
+  while the one-block-per-row tree form ran 3072 blocks with 16-cell
+  partials. Reverted; the padded tree kernels stay. The remaining lever for
+  these kernels is more parallelism per output (shorter partial chains) or a
+  split-cell two-stage reduction with a fixed-order merge, not bigger tiles.
 - 2026-09-12: Fallback/default audit opened (type-theory pass, inspired by
   KanForge's sum-type discipline and training-architecture's AST scanners).
   Closed with gates and negative tests: silent switch defaults
