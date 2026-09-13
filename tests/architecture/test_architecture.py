@@ -177,6 +177,37 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_phase_model_matches_code(self):
+        # [claim:I001.phase-order]
+        # The declared capturable-phase table in cuda_engineering must match
+        # the phase graphs host_main actually runs, in order.
+        doc = (ROOT / "docs" / "cuda_engineering.md").read_text(
+            encoding="utf-8")
+        table = doc[doc.index("| Phase | Kernels captured |"):]
+        names = []
+        for line in table.splitlines():
+            if line.startswith("| ") and "Kernels" not in line \
+                    and "---" not in line:
+                names.append(line.split("|")[1].strip())
+            if "StressEval" in line and names:
+                break
+        host = (ROOT / "integration" / "host_main.cu").read_text(
+            encoding="utf-8")
+        stress = (ROOT / "safety" / "alignment.cu").read_text(
+            encoding="utf-8")
+        members = {"Forward": "fg_forward", "Backward": "fg_backward",
+                   "Optimizer": "fg_optimizer",
+                   "WorldPredict": "fg_world_predict",
+                   "WorldTrain": "fg_world_train", "StressEval": "fg_stress"}
+        for n in names:
+            surface = stress if n == "StressEval" else host
+            self.assertIn(f"phase_run(&w->{members[n]}", surface,
+                          f"{n} phase graph is declared but never run")
+        order = [host.index(f"phase_run(&w->{members[n]}")
+                 for n in ("Forward", "Backward", "Optimizer", "WorldTrain")]
+        self.assertEqual(order, sorted(order),
+                         "phase order deviates from the declared model")
+
     def test_red_team_schedule_manipulation_gates(self):
         # [claim:S003.red-team-coverage]
         # Class C injection: a device->host read inside the schedule, and a

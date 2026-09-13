@@ -25,9 +25,11 @@ or explicitly deferred with a recorded decision.
   post-PT role buffer (uploaded after the swap), and the cross-role swap
   witness is written in `tests/evolution_regression.cu` (executes in VERIFY
   with the rest of the GPU suite).
-- [ ] C8 Archive attribution: decide historical-attribution versus
-  replay-equivalent entries in the blueprint and document the shared-base
-  interaction.
+- [x] C8 Archive attribution: historical attribution decided and
+  documented in A401 (stored genome at insertion time, never a
+  replay-equivalent reconstruction; delta entries reconstruct against
+  the shared base captured with the entry), with the stored-genome
+  witness.
 
 ## P0 — Finish the BUILD phase
 
@@ -94,7 +96,12 @@ I8
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
   flags in one periodic telemetry line.
-- [ ] Red-team classes A-F with detection verification.
+- [x] Red-team classes A-F with detection verification: A/B/F in the
+  host injection test, C in the attack-framed gate test, D in the
+  checkpoint tamper/schema refusals, E in the PT correspondence
+  sensitivity check. F's host witness mirrors the CUSUM reference (the
+  production path runs on hardware); the claim stays provisional until
+  F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
   byte-equivalence, no spontaneous class A-F conditions).
 

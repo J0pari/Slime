@@ -143,6 +143,15 @@ int main() {
           "replay buffer identical");
     CHECK(memeq(&a->corr_window, &b->corr_window, sizeof(a->corr_window)),
           "correlation window identical");
+
+    // Continuation safety: a resumed run reloads the same file; drifted
+    // in-memory state must be overwritten by the saved state.
+    b->predictor_error_ema[0] = 123.0f;
+    CHECK(load_checkpoint(b, ckpt), "checkpoint reloads");
+    CHECK(memeq(&a->org_table, &b->org_table, sizeof(OrganismTable)),
+          "reload restores the organism table");
+    CHECK(b->predictor_error_ema[0] != 123.0f,
+          "reload overwrites drifted state");
     CHECK(memeq(&a->probe_set, &b->probe_set, sizeof(a->probe_set)),
           "probe set identical");
     CHECK(memeq(&a->classifier_batch, &b->classifier_batch, sizeof(a->classifier_batch)),
