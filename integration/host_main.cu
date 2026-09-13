@@ -210,8 +210,9 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_state[0], GRID_ELEMS * sizeof(float) * POOL_SIZE), "alloc bwd d_state[0]");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_state[1], GRID_ELEMS * sizeof(float) * POOL_SIZE), "alloc bwd d_state[1]");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_perc,     PERC_ELEMS * sizeof(float) * POOL_SIZE), "alloc bwd d_perc");
-    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.recomp[0],  GRID_ELEMS * sizeof(__half) * POOL_SIZE), "alloc bwd recomp[0]");
-    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.recomp[1],  GRID_ELEMS * sizeof(__half) * POOL_SIZE), "alloc bwd recomp[1]");
+    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_seg_states,
+        static_cast<size_t>(CHECKPOINT_INTERVAL) * POOL_SIZE * GRID_ELEMS
+            * sizeof(__half)), "alloc bwd d_seg_states");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_rd_g,
         static_cast<size_t>(POOL_SIZE) * GRID_SIZE * GRID_SIZE
             * (CH_CHEM_LAST + 1) * sizeof(float)), "alloc bwd d_rd_g");
@@ -283,8 +284,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->bwd_workspace.d_state[0]), "free d_state[0]");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_state[1]), "free d_state[1]");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_perc), "free d_perc");
-    CUDA_WARN(cudaFree(w->bwd_workspace.recomp[0]), "free recomp[0]");
-    CUDA_WARN(cudaFree(w->bwd_workspace.recomp[1]), "free recomp[1]");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_seg_states), "free d_seg_states");
     CUDA_WARN(cudaFree(w->bwd_workspace.d_rd_g), "free d_rd_g");
     CUDA_WARN(cudaFreeHost(w->h_descriptors), "freeHost h_descriptors");
     CUDA_WARN(cudaFreeHost(w->h_btraj), "freeHost h_btraj");

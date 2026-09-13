@@ -65,7 +65,10 @@ struct BackwardWorkspace {
     float* d_state[2];          // [n_org * GRID_ELEMS] FP32 each (d_state_A, d_state_B)
     float* d_perc;              // [n_org * PERC_ELEMS] floats (per-org d_perc)
     float* d_rd_g;              // [n_org * CELLS * RD_CHEM_N] clamp-aware RD d_next
-    __half* recomp[2];          // [n_org * GRID_ELEMS] FP16 each (re-forward curr/next)
+    // Cached segment states (I8): the checkpointed backward re-forwards each
+    // segment once and keeps every intermediate state, so the reverse walk
+    // does not re-forward quadratically.
+    __half* d_seg_states;       // [CHECKPOINT_INTERVAL * n_org * GRID_ELEMS]
     int n_organisms;            // stored for indexing
 };
 
@@ -999,8 +1002,8 @@ inline bool allocate_backward_workspace(BackwardWorkspace& ws, int n_organisms) 
     cudaError_t e = cudaMalloc(&ws.d_state[0], sizeof(float) * GRID_ELEMS * n_organisms);
     if (e == cudaSuccess) e = cudaMalloc(&ws.d_state[1], sizeof(float) * GRID_ELEMS * n_organisms);
     if (e == cudaSuccess) e = cudaMalloc(&ws.d_perc,     sizeof(float) * PERC_ELEMS * n_organisms);
-    if (e == cudaSuccess) e = cudaMalloc(&ws.recomp[0],  sizeof(__half) * GRID_ELEMS * n_organisms);
-    if (e == cudaSuccess) e = cudaMalloc(&ws.recomp[1],  sizeof(__half) * GRID_ELEMS * n_organisms);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_seg_states, sizeof(__half) * GRID_ELEMS * n_organisms * CHECKPOINT_INTERVAL);
+    if (e == cudaSuccess) e = cudaMalloc(&ws.d_rd_g, sizeof(float) * GRID_SIZE * GRID_SIZE * RD_CHEM_N * n_organisms);
     if (e != cudaSuccess) {
         std::printf("[FATAL] CUDA alloc backward workspace failed: %s\n", cudaGetErrorString(e));
         return false;
@@ -1012,8 +1015,8 @@ inline bool free_backward_workspace(BackwardWorkspace& ws) {
     cudaError_t e = cudaFree(ws.d_state[0]);
     if (e == cudaSuccess) e = cudaFree(ws.d_state[1]);
     if (e == cudaSuccess) e = cudaFree(ws.d_perc);
-    if (e == cudaSuccess) e = cudaFree(ws.recomp[0]);
-    if (e == cudaSuccess) e = cudaFree(ws.recomp[1]);
+    if (e == cudaSuccess) e = cudaFree(ws.d_seg_states);
+    if (e == cudaSuccess) e = cudaFree(ws.d_rd_g);
     if (e != cudaSuccess) {
         std::printf("[WARN] CUDA free backward workspace failed: %s\n", cudaGetErrorString(e));
         return false;
@@ -1118,26 +1121,27 @@ inline void launch_backward_all(
         d_weights, d_eff_weights, d_seed_grad, d_grads,
         ws.d_state[0], ws.d_state[1], N);
 
-    // Step 4: Reverse segments.
+    // Step 4: Reverse segments. Each segment re-forwards ONCE from its
+    // checkpoint, caching every intermediate state (I8); the reverse walk
+    // then reads the cached state instead of re-forwarding per step.
     // dA = d_state[0], dB = d_state[1]. Host swaps pointers.
     float* dA = ws.d_state[0];
     float* dB = ws.d_state[1];
-    __half* rc = ws.recomp[0];
-    __half* rn = ws.recomp[1];
+    const size_t seg_stride = static_cast<size_t>(N) * GRID_ELEMS;
 
     for (int seg = 3; seg >= 0; --seg) {
-        for (int local_step = CHECKPOINT_INTERVAL; local_step >= 1; --local_step) {
-            // Load checkpoint.
-            bwd_load_checkpoint_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                seg, d_checkpoints, rc, N);
+        // Load checkpoint seg into slot 0, then re-forward slots 1..15.
+        bwd_load_checkpoint_kernel<<<N, BWD_THREADS, 0, stream>>>(
+            seg, d_checkpoints, ws.d_seg_states, N);
+        for (int k = 1; k < CHECKPOINT_INTERVAL; ++k) {
+            const __half* prev = ws.d_seg_states + (k - 1) * seg_stride;
+            __half* next = ws.d_seg_states + k * seg_stride;
+            bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
+                d_weights, d_eff_weights, d_coeffs, prev, next, alpha, N);
+        }
 
-            // Re-forward (local_step - 1) steps.
-            for (int fwd = 0; fwd < local_step - 1; ++fwd) {
-                bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                    d_weights, d_eff_weights, d_coeffs, rc, rn, alpha, N);
-                // Swap curr/next.
-                __half* tmp = rc; rc = rn; rn = tmp;
-            }
+        for (int local_step = CHECKPOINT_INTERVAL; local_step >= 1; --local_step) {
+            const __half* rc = ws.d_seg_states + (local_step - 1) * seg_stride;
 
             // Phase A: weight grads + d_perc.
             int abs_step = seg * CHECKPOINT_INTERVAL + local_step;
