@@ -7,6 +7,27 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: Fallback/default audit opened (type-theory pass, inspired by
+  KanForge's sum-type discipline and training-architecture's AST scanners).
+  Eliminated so far: the one silent switch default (`OperatorCommand`, now a
+  compile error on new variants; `gate_enum_no_silent_default`); seven masked
+  CUDA syncs in the BPROFILE path (`gate_no_masked_cuda_errors`). Existing
+  coverage: numeric literals at live seams (`gate_numeric_policy`), ambient
+  RNG, managed memory, unchecked CUDA calls, bridge code. Remaining classes,
+  each needing its own scan + negative test before it can be called closed:
+  (1) conditional literal defaults in C++ (`cond ? value : literal` where
+  the literal is not numeric — the numeric gate sees numbers only); (2)
+  environment reads that substitute a literal when unset; (3) null-pointer
+  early returns that turn a failure into a silent no-op; (4) error codes
+  assigned and then ignored outside the `(void)` pattern (e.g. a status
+  stored but never branched on); (5) artifact parsing that defaults missing
+  fields instead of refusing (the parse-don't-validate class; the contracts
+  JSONs and the scheduler pin are the surfaces); (6) interchangeable id
+  types (`lineage_id`, claim ids, job ids) that no compiler distinguishes —
+  the branded-type analog in C++ is a strong typedef, and the architecture
+  compiler's referential checks only cover the registry, not runtime
+  wiring. Until each class has a failing witness of its own, the audit is
+  incomplete; none of the above should be described as closed.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register
