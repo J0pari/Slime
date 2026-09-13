@@ -7,6 +7,22 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I5 backward adjoint design (complete, unexecuted). The forward
+  broadcast overwrites channels 14-15 after computing the summary, so the
+  pre-broadcast channel values are unrecoverable from the re-forwarded
+  state; the summary must be stored. Two placements: (a) project_bmap gains
+  a nullable summary-out pointer and the forward saves it per sample step
+  into an [n_org * BTRAJ_SAMPLES * CA_CHANNELS] workspace, or (b) the
+  re-forward computes the summary from its CA output before applying the
+  broadcast and stores it. (b) keeps project_bmap untouched but makes the
+  re-forward kernel own the reduction. Either way, per replayed sample step
+  the weight-grad kernel must: consume dA channels 14-15 into d_ctx; add
+  dW_ctx[c*2+k] += s_t[c]*d_ctx[k]; add sum_k W_ctx[c*2+k]*d_ctx[k] to the
+  per-cell mean adjoint; zero dA channels 14-15 before the CA adjoint; and
+  step 64 must be excluded from the d_ctx path (recorded above). The host
+  backward loop must pass the step index to the re-forward and weight-grad
+  kernels. This is the first implementation task of the next session; the
+  gate stays disabled until the finite-difference witness exists.
 - 2026-09-12: I5 forward broadcast landed; the backward context adjoint needs
   care about which sample steps have a downstream path. `project_bmap` runs
   at steps {16, 32, 48, 64} and the context write happens after the bmap
