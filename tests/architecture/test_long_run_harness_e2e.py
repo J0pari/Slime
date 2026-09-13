@@ -28,14 +28,15 @@ def make_fake_binary(td: Path) -> Path:
 
 
 class HarnessEndToEndTests(unittest.TestCase):
-    def run_harness(self, td: Path, gens: int, chunk: int, extra_env=None):
+    def run_harness(self, td: Path, gens: int, chunk: int, extra_env=None,
+                    extra_args=None):
         env = dict(os.environ)
         env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(HARNESS),
              "--binary", str(make_fake_binary(td)),
              "--gens", str(gens), "--chunk", str(chunk),
-             "--ckpt", str(td / "ck.bin")],
+             "--ckpt", str(td / "ck.bin"), *(extra_args or [])],
             capture_output=True, text=True, timeout=120, env=env)
 
     def test_end_to_end_pass_and_chunking(self):
@@ -60,7 +61,29 @@ class HarnessEndToEndTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             td = Path(tmp)
             proc = self.run_harness(td, gens=10, chunk=5)
-            self.assertNotIn("spontaneous stress flag", proc.stdout)
+            self.assertNotIn("spontaneous stress", proc.stdout)
+
+    def test_retry_resumes_from_the_checkpoint(self):
+        # A scheduler retry must continue, not restart: run 10, then run 15
+        # against the same checkpoint.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            first = self.run_harness(td, gens=10, chunk=5)
+            self.assertEqual(first.returncode, 0, first.stdout)
+            second = self.run_harness(td, gens=15, chunk=5)
+            self.assertEqual(second.returncode, 0, second.stdout)
+            self.assertIn("resuming from generation 10", second.stdout)
+            self.assertEqual((td / "ck.bin.gen").read_text(
+                encoding="utf-8"), "15")
+
+    def test_sustained_flags_fail_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            proc = self.run_harness(td, gens=20, chunk=10,
+                                    extra_env={"FAKE_FLAG_EVERY": "1"},
+                                    extra_args=["--warmup", "0"])
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("sustained", proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

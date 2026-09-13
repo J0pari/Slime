@@ -173,7 +173,12 @@ marker the client sets (`config/gpu_authorization.cuh`), and
 `gate_gpu_authorization` fails any GPU binary that drops the guard.
 Scheduled commands are wrapped by
 `architecture/progress_wrap.py`, which emits `progress/v1` envelopes for the
-daemon. See README.md for the commands.
+daemon. Long jobs are chunked and resumable (`tests/long_run_check.py`
+resumes from the checkpoint on start, so a scheduler retry or a
+resource-pressure cancellation continues instead of restarting) and
+declare a `--max-minutes` that covers the whole run, because the
+scheduler kills a job at its declared duration. See README.md for the
+commands.
 
 ## What not to do
 

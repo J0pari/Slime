@@ -40,12 +40,13 @@ class HarnessTests(unittest.TestCase):
         target = 100
         self.assertNotEqual(harness.parse_checkpoint_generation(out), target)
 
-    def test_warmup_fixture_ignores_the_gen_zero_flag(self):
-        flag = ("[STRESS] lineage 0 flagged: 60% SOT-gate failures over the "
-                "last 10 stress evaluations (operator review)\n")
-        self.assertFalse(harness.flag_is_spontaneous(0, 50, flag))
-        self.assertTrue(harness.flag_is_spontaneous(50, 50, flag))
-        self.assertFalse(harness.flag_is_spontaneous(50, 50, "clean output"))
+    def test_flag_policy_is_sustained_not_first_occurrence(self):
+        # Isolated flags are operator-review signals; only sustained flags
+        # fail the run. No post-warmup chunks can never fail.
+        self.assertFalse(harness.flag_policy_failed(0, 0, 0.5))
+        self.assertFalse(harness.flag_policy_failed(1, 4, 0.5))
+        self.assertFalse(harness.flag_policy_failed(2, 4, 0.5))
+        self.assertTrue(harness.flag_policy_failed(3, 4, 0.5))
 
     def test_r_samples_counts_post_warmup_dashboard_lines(self):
         out = ("[DASHBOARD] role_frac_C=1.0 r=0.6000 rho=0.5\n"

@@ -19,6 +19,7 @@ for i, a in enumerate(sys.argv):
 state = Path(str(ckpt) + ".gen")
 gen = int(state.read_text()) if (resume and state.is_file()) else 0
 stuck = os.environ.get("FAKE_STUCK") == "1"
+flag_every = os.environ.get("FAKE_FLAG_EVERY") == "1"
 
 if resume:
     print(f"Resumed from {ckpt} at generation {gen} (archive size 1)")
@@ -26,13 +27,13 @@ else:
     print("World initialized: 1 pool organism")
 for g in range(gen, target):
     print(f"gen {g}: forward+descriptor+btraj")
-    if g == 0:
+    if g == 0 or flag_every:
         print("[STRESS] lineage 0 flagged: 60% SOT-gate failures over the "
               "last 10 stress evaluations (operator review; no automatic "
               "pruning)")
     print("[DASHBOARD] role_frac_C=1.000 role_frac_P=0.000 r=0.6000 "
           "rho=0.0000 swaps=0/0 stress_flagged=1 archive=64")
-new_gen = gen if stuck else target
+new_gen = gen if (stuck or target < gen) else target
 state.write_text(str(new_gen), encoding="utf-8")
 ckpt.write_bytes(b"fake-checkpoint")
 print(f"=== Run complete: {target - gen} generations ===")
