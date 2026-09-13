@@ -715,14 +715,25 @@ is performed for this check.
 A-601: Predictor Role & Hybrid Surprise Signal
 
 @claim A601.trust-weight-composition capability
-S the hybrid blending weight is currently the clipped Pearson correlation
-  between reference and predictor surprise; correlation measures agreement,
-  not correctness, so two jointly miscalibrated signals can correlate at 1
-  while both are unreliable. The weight is provisional until it composes
-  correlation with calibration error, held-out prediction error, and
-  ensemble diversity
+S the hybrid blending weight composes four bounded signals instead of the
+  clipped Pearson correlation alone: correlation (agreement), reference
+  calibration error (the replay-window EMA of |predicted minus actual|
+  relative to the reference's own uncertainty bound), held-out prediction
+  error (probe tuples, never trained on), and ensemble diversity (mean
+  pairwise variance of the K predictor outputs; vacuous agreement discounts
+  the predictor). The reference's uncertainty output is its second
+  regressor head, exponentiated and clamped to a calibrated range; surprise
+  is read in units of that bound, and a sample whose surprise exceeds the
+  bound ceiling is discounted and flagged rather than treated as a robust
+  signal. The composed weight is in [0, 1] and is zero before bootstrap, so
+  the reference dominates until both signals have measured support. The
+  weight is provisional until each factor is computed from measured state
+  and the composition is validated against held-out error
 M predictor/hybrid_surprise.cu::blend_surprise
 M predictor/hybrid_surprise.cu::pearson_r_clipped
+M predictor/hybrid_surprise.cu::ReferenceRegressor
+M predictor/hybrid_surprise.cu::launch_reference_train
+M predictor/hybrid_surprise.cu::ensemble_surprise
 T planned
 C unobserved
 

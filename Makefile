@@ -132,3 +132,6 @@ stability-run: $(BIN)
 
 mutation-check:
 	python tests/mutation_check.py
+
+rebuild-gpu:
+	python tests/rebuild_binaries.py

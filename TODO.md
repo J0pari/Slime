@@ -36,11 +36,10 @@ or explicitly deferred with a recorded decision.
 - The startup guard and its source gate are in source; the canonical
   build/*.exe binaries are NOT yet rebuilt with it because the queued jobs
   (5000-gen and the three measurements) run the pre-guard binaries and their
-  submitted env predates the marker. Once the queue drains, rebuild
-  build/coevo.exe, build/evolution_regression.exe, build/checkpoint_state.exe,
-  build/autodiff_acceptance.exe, build/task_conditioning.exe, and
-  build/forward_smoke.exe, then confirm a bare launch refuses (exit 2) and a
-  client submission runs.
+  submitted env predates the marker. Once the queue drains:
+  `python tests/rebuild_binaries.py` builds all six canonical binaries and
+  asserts each refuses a bare launch (exit 2). Then resubmit any queued
+  measurement whose env predates the marker.
 
 ## Queued measurements (scheduler)
 
@@ -50,9 +49,11 @@ or explicitly deferred with a recorded decision.
   --profile (the soft-target measurement).
 - [ ] slime-regress-verify (8d7a97da45cbc63a): evolution_regression re-run
   for fresh VERIFY evidence.
-All queued behind slime-5000gen (90f2447f11941fd2) and the Trader job; the
-scheduler dispatches them in turn. No direct GPU process runs while any of
-these are pending.
+All three are queued behind slime-5000gen (17f6be1c8143f710) and other
+repos' jobs. Their submitted env predates the client marker, so they must
+run before the canonical binaries are rebuilt with the guard (the rebuild
+script's own guard check is what catches this if the order is violated).
+No direct GPU process runs while any of these are pending.
 
 ## P0 — Finish the BUILD phase
 
@@ -137,12 +138,13 @@ I9
   F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
   -- RUN IN FLIGHT: scheduler job 17f6be1c8143f710 (slime-5000gen,
-  50-generation chunks, ~10 h). The previous submissions failed: the first
-  under GPU contention from a direct run, the second on the harness warmup
-  bug (a chunk straddling the calibration window counted the expected gen-0
-  flag); both are fixed and the harness now also enforces sustained r > 0.5
-  after generation 100. History: 233fc0ed8322d3ee (contention),
-  90f2447f11941fd2 (warmup bug),
+  50-generation chunks, ~10 h), attempt 1 queued for retry; the harness it
+  reads now streams --profile output so the watchdog sees per-generation
+  progress. The previous submissions failed: the first under GPU contention
+  from a direct run, the second on the harness warmup bug, the third on the
+  missing progress signal (watchdog killed it at 103 s); all three causes
+  are fixed. History: 233fc0ed8322d3ee (contention),
+  90f2447f11941fd2 (warmup bug), 17f6be1c8143f710 attempt 0 (watchdog),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
   resubmission raced an owner edit of gpu_scheduler.py and the client
@@ -167,7 +169,13 @@ I9
   reference; probe surprise nonzero and varying; MSE decreases over
   generations.
 - [ ] Bound the reference's uncertainty output before surprise is treated
-  as a robust signal (`A601.trust-weight-composition`).
+  as a robust signal (`A601.trust-weight-composition`). Design closed in
+  the blueprint: four bounded factors (correlation, calibration error
+  against the reference's uncertainty bound, held-out error, ensemble
+  diversity), second regressor head as the exp-scaled clamped bound,
+  surprise read in bound units with an over-bound discount and flag.
+  Implementation: host composition function plus wiring, then the GPU
+  validation run and its manifest.
 - [ ] Execute the preregistered experiments (E1-E5) and record manifests;
   update each protocol's status in `architecture/experiments.yaml`.
 - [ ] Property witnesses: C4 genome fieldwise perturbation matrix, C5
