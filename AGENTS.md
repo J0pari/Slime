@@ -29,8 +29,8 @@ CLAIM_DELTA
   none: implementation under existing claims
 
 WITNESS_DELTA
-  + tests/foo.cpp::test_x
-  Δ tests/bar.cu::test_y
+  + <witness-file>::<test>
+  Δ <witness-file>::<test>
   none: no witness changed
 
 SPEC_DELTA
@@ -47,12 +47,12 @@ UNCERTAINTY
 
 Run before finishing:
 
-- `python architecture/compiler.py check --golden` — claim registry,
-  mechanisms, bidirectional witnesses, dependency DAG, document ownership,
-  capability drift, phase model, golden status file.
-- `python architecture/source_gates.py` — no ambient PRNG, no
-  `cudaMallocManaged`, checked CUDA calls, named tunables only, RD disabled
-  until its adjoint, host authority polling.
+- `python architecture/compiler.py check --golden` — referential integrity
+  over the claim registry, code, documents, transactions, build inventory,
+  and operational prose (that module owns the check list); the golden status
+  file must match.
+- `python architecture/source_gates.py` — the source gates (that module owns
+  the gate list).
 - `python -m unittest discover -s tests/architecture -v` — the guards'
   own negative tests.
 - `make check`, `make autodiff-test`, `make evolution-test` — the executable

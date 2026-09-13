@@ -16,14 +16,12 @@
 
 items:
   I1:
-    title: Checkpoint and resume
     status: implemented
     mechanisms:
       - integration/checkpointing.cu::save_checkpoint
       - integration/checkpointing.cu::load_checkpoint
       - integration/host_main.cu::run
   I2:
-    title: Predictor role activation
     status: implemented
     mechanisms:
       - curriculum/problem_generator.cu::assemble_predictor_batch
@@ -31,14 +29,12 @@ items:
       - integration/host_main.cu::step_generation
       - predictor/hybrid_surprise.cu::blend_surprise
   I3:
-    title: Probe and placeholder completion
     status: partial
     mechanisms:
       - predictor/hybrid_surprise.cu::placeholder_train_step
     missing:
       - GPU placeholder forward/training kernels per cuda_engineering sections 4.5-4.6
   I4:
-    title: Structural pressures
     status: partial
     mechanisms:
       - safety/structural.cu::run_audit_cycle
@@ -50,17 +46,12 @@ items:
       - stress ladder
       - wiring into fitness composition and archive insertion
   I5:
-    title: Global context channel
     status: missing
   I6:
-    title: Reaction-diffusion activation
     status: missing
   I7:
-    title: Phase graphs
     status: missing
   I8:
-    title: Performance completion
     status: missing
   I9:
-    title: Long-run hardening
     status: missing

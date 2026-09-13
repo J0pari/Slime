@@ -11,39 +11,39 @@ not a history.
 No GPU integration, acceptance, or production run happens before this list
 is empty; `evidence.py record` refuses GPU manifests until then.
 
-I3 — Probe and placeholder completion
+I3
 - [ ] GPU placeholder forward/train kernels per cuda_engineering 4.5/4.6.
 - [ ] Bound the uncertainty parameterization before surprise is treated as
   a robust signal.
 
-I4 — Structural pressures
+I4
 - [ ] Variance floor multiplier per organism.
 - [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
   failure flagging.
 - [ ] Wire audit_mult and variance_mult into fitness composition; activate
   the expanding-lineage brake in archive insertion.
 
-I5 — Global context channel
+I5
 - [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all
   offsets, forward broadcast of the bmap summary into channels 14-15,
   backward context adjoint.
 
-I6 — Reaction-diffusion activation
+I6
 - [ ] RD adjoint (replay reproduces residual + reaction + diffusion).
 - [ ] Neutral genome encoding for RD coefficients (zero bits mean zero).
 - [ ] Enable RD in the main loop with per-organism decoded coefficients.
 
-I7 — Phase graphs
+I7
 - [ ] Capture/replay of the capturable phases with a debug mode that
   synchronizes and validates.
 
-I8 — Performance completion
+I8
 - [ ] Profile first (per-phase timing, then Nsight where available); the
   shared-memory-atomic experiment is already measured and rejected.
 - [ ] Meet the 10-generation / 60-second gate with per-generation
   checkpoint writes included.
 
-I9 — Long-run hardening
+I9
 - [ ] 5000-generation stability under all subsystems.
 - [ ] Red-team classes A-F with detection verification.
 - [ ] Dashboard surface: role fraction, r, rho, swap stats, stress failure

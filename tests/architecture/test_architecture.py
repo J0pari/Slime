@@ -249,6 +249,94 @@ class CompilerTests(unittest.TestCase):
         complete = {"items": {"I1": {"status": "implemented"}}}
         self.assertEqual(evidence.gpu_evidence_gate(complete), "")
 
+    def test_prose_citations_resolve(self):
+        _documents, _transactions, _machine = compiler.load_configs(ROOT)
+        build = compiler.load_build_status()
+        claims, _errors = load_registry(compiler.SPEC_DOCS)
+        errors: list[str] = []
+        compiler.check_prose_citations(ROOT, claims, build, errors)
+        self.assertFalse(errors, f"prose citations unresolved: {errors}")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "Makefile").write_text("check:\n\t@true\n", encoding="utf-8")
+            (root / "README.md").write_text(
+                "Run `make ghost` and `python architecture/ghost.py run`;\n"
+                "see architecture/ghost.cu and claim A999.ghost.\n",
+                encoding="utf-8")
+            (root / "AGENTS.md").write_text("", encoding="utf-8")
+            (root / "TODO.md").write_text("", encoding="utf-8")
+            for doc in ("docs/construction_plan.md", "docs/blueprint.md",
+                        "docs/cuda_engineering.md"):
+                p = root / doc
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("", encoding="utf-8")
+            errors = []
+            compiler.check_prose_citations(root, claims, {"items": {}}, errors)
+            for needle in ("make ghost", "architecture/ghost.py",
+                           "architecture/ghost.cu", "A999.ghost"):
+                self.assertTrue(any(needle in e for e in errors),
+                                f"citation {needle} not caught: {errors}")
+
+    def test_todo_covers_incomplete_build_items(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "Makefile").write_text("", encoding="utf-8")
+            (root / "README.md").write_text("", encoding="utf-8")
+            (root / "AGENTS.md").write_text("", encoding="utf-8")
+            (root / "TODO.md").write_text("I1\n", encoding="utf-8")
+            for doc in ("docs/construction_plan.md", "docs/blueprint.md",
+                        "docs/cuda_engineering.md"):
+                p = root / doc
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("", encoding="utf-8")
+            errors = []
+            build = {"items": {"I1": {"status": "implemented"},
+                               "I2": {"status": "missing"}}}
+            compiler.check_prose_citations(root, [], build, errors)
+            self.assertTrue(any("I2" in e for e in errors),
+                            "unlisted incomplete item not caught")
+
+    def test_claim_grammar_doc_matches_registry(self):
+        errors: list[str] = []
+        compiler.check_claim_grammar_doc(ROOT, errors)
+        self.assertFalse(errors, f"AGENTS grammar drifted: {errors}")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "AGENTS.md").write_text(
+                "@claim <id> <kind>            invariant|contract\n"
+                "T <lifecycle>                 planned|provisional\n"
+                "C <confidence>                unobserved|inferred\n",
+                encoding="utf-8")
+            errors = []
+            compiler.check_claim_grammar_doc(root, errors)
+            self.assertEqual(len(errors), 3, errors)
+
+    def test_canonical_doc_list_matches_registry(self):
+        documents, _transactions, _machine = compiler.load_configs(ROOT)
+        errors: list[str] = []
+        compiler.check_canonical_doc_list(ROOT, documents, errors)
+        self.assertFalse(errors, f"AGENTS canonical list drifted: {errors}")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "AGENTS.md").write_text("see docs/blueprint.md\n",
+                                            encoding="utf-8")
+            docs = {"documents": {
+                "a": {"kind": "canonical",
+                      "files": ["docs/blueprint.md", "docs/ghost.md"]},
+                "b": {"kind": "generated", "files": ["docs/status.md"]},
+            }}
+            errors = []
+            compiler.check_canonical_doc_list(root, docs, errors)
+            self.assertTrue(any("docs/ghost.md" in e for e in errors),
+                            "unlisted canonical document not caught")
+            (root / "AGENTS.md").write_text("see docs/undeclared.md\n",
+                                            encoding="utf-8")
+            errors = []
+            compiler.check_canonical_doc_list(root, docs, errors)
+            self.assertTrue(any("docs/undeclared.md" in e for e in errors),
+                            "undeclared document mention not caught")
+
     def test_crosses_annotation_completeness_both_directions(self):
         # A code field annotated [crosses:pt=rogue] that is missing from the
         # transaction registry must be caught — this is exactly how

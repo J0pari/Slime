@@ -11,8 +11,9 @@ README as a stable entry point.
   invariants, and quality requirements.
 - [CUDA engineering specification](docs/cuda_engineering.md) — memory model,
   kernels, transfers, initialization, and execution constraints.
-- [Construction plan](docs/construction_plan.md) — dependency-ordered waves and
-  their acceptance criteria.
+- [Construction plan](docs/construction_plan.md) — dependency-ordered build,
+  verification, integration, and operation phases and their acceptance
+  criteria.
 
 ## Project navigation
 
@@ -37,7 +38,7 @@ make clean      # remove generated build artifacts
 Architecture gates (run before finishing any behavior change):
 
 ```sh
-make architecture-check    # claim registry + golden status + source gates + negative tests
+make architecture-check    # the full architecture gate suite
 make architecture-test     # the gates' own negative tests
 make architecture-report   # the generated architecture report
 ```

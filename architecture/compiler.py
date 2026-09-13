@@ -3,7 +3,8 @@
 Commands:
   check     parse claims, resolve mechanisms/witnesses (both directions),
             validate the dependency DAG, document ownership, capability-drift
-            regexes, and the executable phase model. Exit 1 on any error.
+            regexes, the executable phase model, the build inventory, and
+            prose citations in the operational documents. Exit 1 on any error.
   status    regenerate docs/IMPLEMENTATION_STATUS.md from claims + evidence
             manifests (golden-file source; CI runs `check --golden`).
   report    print the architecture report (claims, mechanism integrity,
@@ -31,6 +32,7 @@ import yaml  # noqa: E402
 from architecture.claims import (  # noqa: E402
     Claim, WitnessRef, SPEC_DOCS, CODE_SUFFIXES, code_token_re, flatten_keys,
     load_registry, resolve_mechanism, resolve_witness, claim_hash,
+    VALID_KINDS, VALID_LIFECYCLE, VALID_CONFIDENCE,
 )
 from architecture import evidence as evidence_mod  # noqa: E402
 from architecture import source_gates as gates  # noqa: E402
@@ -41,7 +43,26 @@ STATUS_END = "<!-- architecture-status:end -->"
 BUILD_STATUS_FILE = "architecture/build_status.yaml"
 PLAN_DOC = "docs/construction_plan.md"
 INVENTORY_RE = re.compile(r"^### (I\d+)\b", re.MULTILINE)
+PLAN_HEADING_RE = re.compile(r"^### (I\d+) \u2014 (.+?)\s*$", re.MULTILINE)
 BUILD_STATES = ("missing", "partial", "implemented")
+
+# ---- Prose citation guards ------------------------------------------------
+# Operational docs may not restate derivable facts: they cite paths, make
+# targets, scripts, claim ids, and the build inventory, and the compiler
+# verifies every citation resolves. The friction log (docs/arch-signals.md)
+# is historical and exempt.
+OPERATIONAL_DOCS = ("README.md", "AGENTS.md", "TODO.md")
+CITATION_DOCS = OPERATIONAL_DOCS + (PLAN_DOC, "docs/blueprint.md",
+                                    "docs/cuda_engineering.md")
+CITED_PATH_RE = re.compile(
+    r"\b((?:architecture|tests|integration|optimizer|autodiff|nca|genome|"
+    r"archive|safety|curriculum|predictor|contracts|config|docs)/"
+    r"[A-Za-z0-9_./-]+\.(?:cu|cuh|cpp|h|py|md|json|yaml))\b")
+MAKE_TARGET_RE = re.compile(r"\bmake ([a-z][a-z0-9-]*)\b")
+PYTHON_CITE_RE = re.compile(
+    r"python (architecture/[a-z_]+\.py)(?:\s+([a-z][a-z-]*))?")
+CLAIM_MENTION_RE = re.compile(r"\b([A-Z]\d{3}\.[a-z][a-z0-9-]+)\b")
+TODO_ITEM_RE = re.compile(r"\b(I[1-9])\b")
 
 # Source annotations in integration/main_loop.cu (see its OrganismTable/World
 # comments). The compiler enforces registry completeness in BOTH directions:
@@ -322,6 +343,91 @@ def check_phase_and_transactions(root: Path, transactions: dict,
                 f"annotations for {len(identity)} registry buffers")
 
 
+def check_prose_citations(root: Path, claims: list[Claim], build: dict,
+                          errors: list[str]) -> None:
+    """Every citation in the operational docs must resolve.
+
+    The compiler enforces referential integrity inside the claim registry;
+    this extends it to prose. A path, make target, script, subcommand, claim
+    id, or build item mentioned in README/AGENTS/TODO that does not exist is
+    a silently drifted restatement, so it fails the check.
+    """
+    makefile = (root / "Makefile").read_text(encoding="utf-8")
+    make_targets = set(re.findall(r"^([a-zA-Z0-9_-]+):", makefile,
+                                  re.MULTILINE))
+    claim_ids = {c.id for c in claims}
+    for doc in OPERATIONAL_DOCS:
+        text = (root / doc).read_text(encoding="utf-8")
+        for path in sorted(set(CITED_PATH_RE.findall(text))):
+            if not (root / path).exists():
+                errors.append(f"{doc}: cites missing path {path}")
+        for target in sorted(set(MAKE_TARGET_RE.findall(text))):
+            if target not in make_targets:
+                errors.append(f"{doc}: cites undefined make target "
+                              f"`make {target}`")
+        for script, sub in sorted(set(PYTHON_CITE_RE.findall(text))):
+            script_path = root / script
+            if not script_path.exists():
+                errors.append(f"{doc}: cites missing script {script}")
+            elif sub:
+                body = script_path.read_text(encoding="utf-8")
+                if f'"{sub}"' not in body and f"'{sub}'" not in body:
+                    errors.append(f"{doc}: cites unknown subcommand "
+                                  f"{script} {sub}")
+    for doc in CITATION_DOCS:
+        text = (root / doc).read_text(encoding="utf-8")
+        for cid in sorted(set(CLAIM_MENTION_RE.findall(text))):
+            if cid not in claim_ids:
+                errors.append(f"{doc}: mentions unknown claim {cid}")
+
+    # The work queue must cover the incomplete build inventory.
+    todo = (root / "TODO.md").read_text(encoding="utf-8")
+    mentioned = set(TODO_ITEM_RE.findall(todo))
+    items = set(build.get("items", {}))
+    incomplete = {iid for iid, item in build.get("items", {}).items()
+                  if item.get("status") != "implemented"}
+    for iid in sorted(incomplete - mentioned):
+        errors.append(f"TODO.md: incomplete build item {iid} is not listed")
+    for iid in sorted(mentioned - items):
+        errors.append(f"TODO.md: unknown build item {iid}")
+
+
+def check_claim_grammar_doc(root: Path, errors: list[str]) -> None:
+    """The claim grammar restated in AGENTS.md must match claims.py."""
+    text = (root / "AGENTS.md").read_text(encoding="utf-8")
+    patterns = (
+        ("kind", r"@claim <id> <kind>\s+(.+)", VALID_KINDS),
+        ("lifecycle", r"T <lifecycle>\s+(.+)", VALID_LIFECYCLE),
+        ("confidence", r"C <confidence>\s+(.+)", VALID_CONFIDENCE),
+    )
+    for label, pattern, valid in patterns:
+        m = re.search(pattern, text)
+        if not m:
+            errors.append(f"AGENTS.md: claim grammar line for {label} missing")
+            continue
+        listed = {t.strip() for t in m.group(1).split("|")}
+        if listed != valid:
+            errors.append(f"AGENTS.md: {label} tokens {sorted(listed)} do not "
+                          f"match claims.py {sorted(valid)}")
+
+
+def check_canonical_doc_list(root: Path, documents: dict,
+                             errors: list[str]) -> None:
+    """AGENTS.md must list every canonical document and invent none."""
+    declared: set[str] = set()
+    canonical: set[str] = set()
+    for concern in documents.get("documents", {}).values():
+        declared.update(concern.get("files", []))
+        if concern.get("kind") == "canonical":
+            canonical.update(concern.get("files", []))
+    text = (root / "AGENTS.md").read_text(encoding="utf-8")
+    mentioned = set(re.findall(r"docs/[a-z_]+\.md", text))
+    for path in sorted(canonical - mentioned):
+        errors.append(f"AGENTS.md: canonical document {path} is not listed")
+    for path in sorted(mentioned - declared):
+        errors.append(f"AGENTS.md: mentions undeclared document {path}")
+
+
 def gate_summary_line(gates_report: gates.GateReport) -> str:
     parts = []
     for g in gates.GATE_NAMES:
@@ -350,10 +456,10 @@ def render_status(claims: list[Claim], root: Path, manifests: list[dict],
     return "\n".join(lines)
 
 
-def render_build_status(build: dict) -> str:
+def render_build_status(build: dict, titles: dict[str, str]) -> str:
     rows = []
     for iid, item in sorted(build.get("items", {}).items()):
-        rows.append(f"| {iid} | {item.get('title', '')} | "
+        rows.append(f"| {iid} | {titles.get(iid, '')} | "
                     f"{item.get('status', '')} |")
     lines = [
         "| Item | Feature | Build status |",
@@ -366,7 +472,9 @@ def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
                       transactions: dict, gates_report: gates.GateReport,
                       build: dict) -> str:
     table = render_status(claims, root, manifests, transactions)
-    inventory = render_build_status(build)
+    plan = (root / PLAN_DOC).read_text(encoding="utf-8")
+    titles = dict(PLAN_HEADING_RE.findall(plan))
+    inventory = render_build_status(build, titles)
     n_items = len(build.get("items", {}))
     incomplete = build_incomplete(build)
     if incomplete:
@@ -424,6 +532,9 @@ def check(args) -> int:
     check_capability_drift(root, documents, errors)
     check_phase_and_transactions(root, transactions, errors)
     check_build_status(root, build, transactions, errors)
+    check_prose_citations(root, claims, build, errors)
+    check_claim_grammar_doc(root, errors)
+    check_canonical_doc_list(root, documents, errors)
 
     gates_report = gates.run_gates(root, strict=getattr(args, "strict", False))
     errors.extend(str(f) for f in gates_report.errors)
