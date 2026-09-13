@@ -308,6 +308,9 @@ constexpr int   GRAD_HEALTH_WINDOW   = 10;
 #define SLIME_DEBUG_CHECKS 1
 #endif
 
+// Per-phase timing table capacity (I8 profiling).
+constexpr int PHASE_TIMING_SLOTS = 24;
+
 // ---- Numeric policy constants (N1..N5 schema home) ------------------------
 // FP16 clamp bounds (forward, checkpoint re-forward, RD) and the saturation
 // telemetry threshold.

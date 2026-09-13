@@ -909,11 +909,75 @@ static safety::pt::SwapContext make_swap_context(World* w) {
 
 // ---- Step generation (section 5 data flow) ---------------------------------
 
+// Per-phase timing (I8): each phase ends with a stream sync, so the wall time
+// since the previous trace is that phase's execution time. The table is
+// printed at run end when --profile is set; the flag also silences the
+// per-phase lines so long profiling logs stay compact.
+struct PhaseTiming {
+    const char* name;
+    double total_ms;
+    int count;
+};
+static constexpr int PHASE_TIMING_SLOTS = ::PHASE_TIMING_SLOTS;
+static PhaseTiming g_phase_timing[PHASE_TIMING_SLOTS];
+static int g_n_phase_timings = 0;
+static std::chrono::steady_clock::time_point g_phase_mark;
+static bool g_phase_mark_set = false;
+static bool g_profile = false;
+
+static void phase_timing_add(const char* tag, double ms) {
+    for (int i = 0; i < g_n_phase_timings; ++i) {
+        if (std::strcmp(g_phase_timing[i].name, tag) == 0) {
+            g_phase_timing[i].total_ms += ms;
+            g_phase_timing[i].count++;
+            return;
+        }
+    }
+    if (g_n_phase_timings >= PHASE_TIMING_SLOTS) return;
+    g_phase_timing[g_n_phase_timings].name = tag;
+    g_phase_timing[g_n_phase_timings].total_ms = ms;
+    g_phase_timing[g_n_phase_timings].count = 1;
+    g_n_phase_timings++;
+}
+
+static void print_phase_timings() {
+    std::printf("\n[PROFILE] per-phase totals:\n");
+    // Insertion sort by total descending (few entries).
+    for (int i = 1; i < g_n_phase_timings; ++i) {
+        PhaseTiming key = g_phase_timing[i];
+        int j = i - 1;
+        while (j >= 0 && g_phase_timing[j].total_ms < key.total_ms) {
+            g_phase_timing[j + 1] = g_phase_timing[j];
+            j--;
+        }
+        g_phase_timing[j + 1] = key;
+    }
+    double sum = 0.0;
+    for (int i = 0; i < g_n_phase_timings; ++i) sum += g_phase_timing[i].total_ms;
+    for (int i = 0; i < g_n_phase_timings; ++i) {
+        const PhaseTiming& t = g_phase_timing[i];
+        std::printf("[PROFILE] %-28s %10.2f ms  n=%d  %5.1f%%\n",
+                    t.name, t.total_ms, t.count,
+                    sum > 0.0 ? 100.0 * t.total_ms / sum : 0.0);
+    }
+    std::printf("[PROFILE] %-28s %10.2f ms\n", "TOTAL", sum);
+    std::fflush(stdout);
+}
+
 // Phase progress trace: prints phase tag + checks CUDA errors after each sync.
 // Always flushed so output is never lost to buffering. Returns false on any
 // CUDA error — a failed phase invalidates the run (fail-fast, A-501).
 static bool phase_trace(const char* tag, int gen, cudaStream_t stream) {
     cudaError_t err = cudaStreamSynchronize(stream);
+    if (!g_phase_mark_set) {
+        g_phase_mark = std::chrono::steady_clock::now();
+        g_phase_mark_set = true;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(
+        now - g_phase_mark).count();
+    g_phase_mark = now;
+    phase_timing_add(tag, ms);
     if (err != cudaSuccess) {
         std::printf("[FATAL] gen %d %s: %s — run invalidated\n",
                     gen, tag, cudaGetErrorString(err));
@@ -927,8 +991,10 @@ static bool phase_trace(const char* tag, int gen, cudaStream_t stream) {
         std::fflush(stdout);
         return false;
     }
-    std::printf("  gen %d: %s\n", gen, tag);
-    std::fflush(stdout);
+    if (!g_profile) {
+        std::printf("  gen %d: %s\n", gen, tag);
+        std::fflush(stdout);
+    }
     return true;
 }
 
@@ -1742,6 +1808,7 @@ void run(int n_generations, bool resume, const char* checkpoint_path) {
     std::printf("Checkpoint: %s (generation %d)\n",
                 w->checkpoint_path, w->generation);
     std::fflush(stdout);
+    if (g_profile) print_phase_timings();
 
     free_gpu_buffers(w);
     delete w;
@@ -1762,6 +1829,8 @@ int main(int argc, char** argv) {
             resume = true;
         } else if (std::strcmp(argv[i], "--ckpt") == 0 && i + 1 < argc) {
             ckpt_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--profile") == 0) {
+            slime::integration::g_profile = true;
         } else {
             int parsed = std::atoi(argv[i]);
             if (parsed > 0) n_gen = parsed;
