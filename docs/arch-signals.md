@@ -7,6 +7,17 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 profile correction. The "score+archive+PT" phase label
+  included stress_cycle; splitting the trace shows score+archive+PT is
+  1 ms/generation while stress is 12.9 s / 3 = 4.3 s/generation (15.5%).
+  A debug-checks hypothesis was also tested and disproven: building the
+  integration binary with SLIME_DEBUG_CHECKS=0 changed nothing measurable
+  (13.4 vs 13.2 s), so the archive invariant checker stays enabled in
+  release. Current phase budget per generation: backward ~22.3 s, stress
+  ~4.3 s, forward ~0.7 s, SOT ~0.36 s, everything else negligible. Next I8
+  targets in order: the backward weight-grad atomic accumulation (structural
+  tiled rewrite; the shared-memory variant is measured and rejected), then
+  stress internals (batch assembly vs the six small phase replays).
 - 2026-09-12: I8 measured rejection (second of its kind). The backward
   weight-grad kernel issues ~2,075 global atomicAdds per cell (~35 billion
   per generation); a shared-memory accumulation with one flush per block was

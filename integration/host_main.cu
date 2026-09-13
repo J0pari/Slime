@@ -1273,6 +1273,7 @@ bool step_generation(World* w) {
     }
 
     // ---- Stress ladder (S-003, I4): refresh, evaluate, flag ----
+    if (!phase_trace("score+archive+PT", gen, w->stream)) return false;
     if (!stress_cycle(w, gen)) return false;
 
     // ---- T3a: post-PT roles for gradient attribution (C3) ----
@@ -1282,7 +1283,7 @@ bool step_generation(World* w) {
                     POOL_SIZE * sizeof(Role), cudaMemcpyHostToDevice,
                     w->stream), "T3a roles");
 
-    if (!phase_trace("score+archive+PT", gen, w->stream)) return false;
+    if (!phase_trace("stress", gen, w->stream)) return false;
 
     // ---- T3: H→D seed_grad (AFTER PT swaps) ----
     TRANSFER_ABORT(cudaMemcpyAsync(w->d_seed_grad, w->h_seed_grad,
