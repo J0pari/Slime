@@ -14,6 +14,7 @@ from pathlib import Path
 
 FLAG_RE = re.compile(r"\[STRESS\] lineage \d+ flagged")
 NONFINITE_RE = re.compile(r"(nan|inf)", re.IGNORECASE)
+R_RE = re.compile(r"\br=([0-9.]+)")
 
 
 def run_chunk(binary: str, gens: int, ckpt: str, resume: bool) -> str:
@@ -45,6 +46,11 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=5,
                     help="generations before stress flags count as "
                          "spontaneous (the ladder calibrates early)")
+    ap.add_argument("--r-warmup", type=int, default=100,
+                    help="generations before the r > 0.5 fraction is "
+                         "enforced (predictors do not exist before bootstrap)")
+    ap.add_argument("--r-floor", type=float, default=0.5,
+                    help="I9 verification floor for the role balance r")
     args = ap.parse_args()
 
     Path(args.ckpt).parent.mkdir(parents=True, exist_ok=True)
@@ -52,6 +58,8 @@ def main() -> int:
 
     done = 0
     resume = False
+    r_ok = 0
+    r_total = 0
     while done < args.gens:
         chunk = min(args.chunk, args.gens - done)
         out = run_chunk(args.binary, chunk, args.ckpt, resume)
@@ -62,12 +70,24 @@ def main() -> int:
             if "[DASHBOARD]" in line and NONFINITE_RE.search(line):
                 print(line)
                 raise SystemExit("nonfinite dashboard value")
+            if done >= args.r_warmup and "[DASHBOARD]" in line:
+                m = R_RE.search(line)
+                if m is not None:
+                    r_total += 1
+                    if float(m.group(1)) > args.r_floor:
+                        r_ok += 1
         done += chunk
         resume = True
         print(f"chunk ok: {done}/{args.gens} generations")
 
     if not Path(args.ckpt).is_file():
         raise SystemExit("checkpoint missing after the run")
+    if r_total > 0:
+        frac = r_ok / r_total
+        print(f"sustained role balance: r > {args.r_floor} in "
+              f"{r_ok}/{r_total} post-warmup samples ({frac:.2f})")
+        if frac <= 0.5:
+            raise SystemExit("sustained role balance not met (I9)")
     print(f"long-run stability check: PASS ({args.gens} generations, "
           f"chunks of {args.chunk})")
     return 0
