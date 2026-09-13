@@ -164,8 +164,14 @@ I9
   Queue state: both queued, feasible; dispatch is held by the daemon's
   global RAM floor (6144 MiB free required, ~2.1 GiB free with OpenCode and
   system processes resident). OLLAMA_KEEP_ALIVE=0 is now set persistently
-  for future ollama starts (the daemon was idle); the jobs dispatch when
-  free RAM clears the floor. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  for future ollama starts (the daemon was idle). The scheduler then
+  changed (owner commits 4deb26b/c8eaccc/5ddcc8b): RAM is reclaimed at
+  dispatch (largest non-protected working sets die until the claim fits;
+  operator tool and shell last), a resource-blocked queue fails its front
+  job loudly after bounded polls (which is what killed the previous two
+  submissions), impossible claims are refused at submit, and a queue
+  control surface exists. Contract fingerprint still validates. Current
+  submissions: c4223d8df9634a4e (5000-gen) and bfd463ba6d5b2a49 (run55). History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
   17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
