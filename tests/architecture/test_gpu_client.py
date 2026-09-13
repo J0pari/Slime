@@ -26,7 +26,7 @@ import gpu_client  # noqa: E402
 import progress_wrap  # noqa: E402
 from architecture import evidence  # noqa: E402
 
-CANONICAL_FP = "f0cd8ac689bc2ed65d40f2ff4fece1377c401a03754202b6d8e65d078df88ed6"
+CANONICAL_FP = "e176dd7756e5b7859eb8e45efc7da2b179327eb9b6fc2215a14fbc15b754b904"
 
 FAKE_SCHEDULER = '''\
 import json, os, sys
@@ -152,13 +152,13 @@ class ClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fake = FakeScheduler(td)
             ack = gpu_client.submit(
-                "slime-wave2", ["build/wave2_test.exe"], 2048, priority=5,
+                "slime-evolution-regression", ["build/evolution_test.exe"], 2048, priority=5,
                 max_minutes=30, env=fake.env())
             self.assertEqual(ack, {"jobId": "0123456789abcdef",
                                    "status": "queued"})
             argv = json.loads(fake.argv_path.read_text(encoding="utf-8"))
             self.assertIn("--name", argv)
-            self.assertEqual(argv[argv.index("--name") + 1], "slime-wave2")
+            self.assertEqual(argv[argv.index("--name") + 1], "slime-evolution-regression")
             self.assertEqual(argv[argv.index("--repo") + 1], "slime-evolution")
             self.assertEqual(argv[argv.index("--vram") + 1], "2048")
             self.assertEqual(argv[argv.index("--cwd") + 1], str(ROOT))
@@ -168,7 +168,7 @@ class ClientTests(unittest.TestCase):
             # the relative path is resolved against the job cwd for the
             # owner's absolute-executable validation
             self.assertTrue(os.path.isabs(resolved[0]))
-            self.assertTrue(resolved[0].endswith("wave2_test.exe"))
+            self.assertTrue(resolved[0].endswith("evolution_test.exe"))
 
     def test_wait_and_result_ledger_provenance(self):
         with tempfile.TemporaryDirectory() as td:

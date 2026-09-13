@@ -42,7 +42,11 @@ struct ClassifierBatch {
 };
 
 struct PredictorBatch {
-    uint32_t target_organism_id[PREDICTOR_BATCH];
+    // Pool-slot identity of each target (-1 for the stationary probe slots,
+    // which need not correspond to a live pool organism); the lineage id is
+    // carried separately for provenance and archive linkage.
+    int      target_pool_slot[PREDICTOR_BATCH];
+    uint32_t target_lineage_id[PREDICTOR_BATCH];
     float    target_bmap_32[PREDICTOR_BATCH * BMAP_DIM];
     float    target_bmap_64[PREDICTOR_BATCH * BMAP_DIM];  // ground truth
     bool     target_was_sot[PREDICTOR_BATCH];
@@ -177,7 +181,7 @@ struct ProbeSet {
     // Held-out probe tuples for the placeholder regressor (A-601): signed
     // classifier (bmap_64, task_embedding, fitness) tuples snapshotted from
     // the replay buffer at bootstrap, never trained on afterwards. This is
-    // the placeholder's ground-truth held-out signal (previously zeros).
+    // the placeholder's ground-truth held-out signal.
     bool  probe_tuples_signed;
     float probe_bmap[PROBE_BATCH * BMAP_DIM];
     float probe_task_emb[PROBE_BATCH * TASK_EMBED_DIM];
@@ -299,7 +303,8 @@ inline void assemble_predictor_batch(PredictorBatch* out,
     int slot = 0;
     if (probes.predictor_probes_signed) {
         for (; slot < PREDICTOR_PROBE_SLOTS && slot < PREDICTOR_BATCH; ++slot) {
-            out->target_organism_id[slot] = probes.predictor_probe_targets[slot];
+            out->target_pool_slot[slot] = -1;
+            out->target_lineage_id[slot] = probes.predictor_probe_targets[slot];
             std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
                         &probes.predictor_probe_bmap32[slot * BMAP_DIM],
                         BMAP_DIM * sizeof(float));
@@ -327,7 +332,8 @@ inline void assemble_predictor_batch(PredictorBatch* out,
             }
         }
         if (chosen < 0) chosen = static_cast<int>(pcg32_random(rng) % POOL_SIZE);
-        out->target_organism_id[slot] = pool_lineage_ids[chosen];
+        out->target_pool_slot[slot] = chosen;
+        out->target_lineage_id[slot] = pool_lineage_ids[chosen];
         std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
                     &bmap32_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));
         std::memcpy(&out->target_bmap_64[slot * BMAP_DIM],
@@ -346,4 +352,5 @@ inline void assemble_predictor_batch(PredictorBatch* out,
 }  // namespace slime::curriculum
 
 #endif  // COEVO_CURRICULUM_PROBLEM_GENERATOR_CU
+
 

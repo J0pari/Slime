@@ -44,7 +44,7 @@ S forward_with_checkpoints reproduces the plain forward bitwise and replayed
   segments reconstruct checkpointed states
 M autodiff/warp_tape.cu::forward_with_checkpoints_kernel
 M autodiff/warp_tape.cu::bwd_reforward_step_kernel
-W+ tests/wave1_autodiff.cu::test_forward_match_and_backward
+W+ tests/autodiff_acceptance.cu::test_forward_match_and_backward
 T established
 C observed
 """,
@@ -52,7 +52,7 @@ C observed
 S the analytic backward agrees with directional finite differences of the
   executed forward, and gradients remain finite
 M autodiff/warp_tape.cu::launch_backward_all
-W+ tests/wave2_evolution.cu::test_finite_difference_gradient
+W+ tests/evolution_regression.cu::test_finite_difference_gradient
 D A103.checkpoint-replay-equivalence
 T established
 C observed
@@ -72,7 +72,7 @@ S classifier and predictor roles execute the same NCA architecture, delta
 M nca/engine.cu::forward_one
 M genome/codec.cu::read_role
 M integration/host_main.cu::step_generation
-W tests/wave1_autodiff.cu::test_forward_match_and_backward
+W tests/autodiff_acceptance.cu::test_forward_match_and_backward
 T provisional
 C observed
 """,
@@ -91,7 +91,7 @@ S active genome differences can alter the executed phenotype while shared
 M genome/codec.cu::apply_delta
 M autodiff/warp_tape.cu::materialize_effective_weights_kernel
 M integration/host_main.cu::step_generation
-W+ tests/wave2_evolution.cu::test_genotype_causality
+W+ tests/evolution_regression.cu::test_genotype_causality
 T established
 C observed
 """,
@@ -100,7 +100,7 @@ S the archive stores the genome that produced the archived descriptor and
   fitness, and parent selection draws from those stored genomes
 M integration/host_main.cu::insert_into_archive
 M integration/host_main.cu::spawn_wave
-W tests/wave2_evolution.cu::test_genotype_causality
+W tests/evolution_regression.cu::test_genotype_causality
 D A301.genotype-causes-phenotype
 T provisional
 C inferred
@@ -164,7 +164,7 @@ S an accepted PT swap moves every organism-associated rollout state together:
 M safety/parallel_tempering.cu::propose_swaps
 M safety/parallel_tempering.cu::swap_host_organism
 M architecture/transactions.yaml::pt_swap
-W+ tests/wave2_evolution.cu::test_forced_pt_swap
+W+ tests/evolution_regression.cu::test_forced_pt_swap
 T established
 C observed
 """,

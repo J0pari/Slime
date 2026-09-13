@@ -1,4 +1,4 @@
-// Wave 1: CAME Optimizer + Gradient Aggregation
+// CAME optimizer and gradient aggregation
 //
 // Per cuda_engineering.md sections 4.3, 4.7, 8.
 // aggregate_gradients_kernel: averages per-organism GradBuffers into d_mean_grad.
@@ -328,6 +328,55 @@ inline bool launch_telemetry_kernels(
     return true;
 }
 
+// ---- Role gradient alignment (A-501) -------------------------------------
+// One thread per shared weight; each thread sums the classifier and predictor
+// contributions to that weight before a single set of atomics. Telemetry-only;
+// float atomicAdd ordering is irrelevant. The caller must have zeroed the
+// TelemetryScalars buffer already (launch_telemetry_kernels does).
+__global__ void role_grad_alignment_kernel(
+    const GradBuffers* grads,
+    const nca::ForwardInputs* inputs,
+    int n_organisms,
+    TelemetryScalars* out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= TOTAL_WEIGHTS) return;
+
+    float sum_c = 0.f;
+    float sum_p = 0.f;
+    for (int org = 0; org < n_organisms; ++org) {
+        float g = grads[org].dW[i];
+        if (::canonical_role(inputs[org].role) == Role::Classifier) {
+            sum_c += g;
+        } else {
+            sum_p += g;
+        }
+    }
+    atomicAdd(&out->role_grad_dot, sum_c * sum_p);
+    atomicAdd(&out->role_grad_norm_sq[0], sum_c * sum_c);
+    atomicAdd(&out->role_grad_norm_sq[1], sum_p * sum_p);
+}
+
+inline bool launch_role_grad_alignment(
+    const GradBuffers* d_grads,
+    const nca::ForwardInputs* d_inputs,
+    int n_organisms,
+    TelemetryScalars* d_tel,
+    cudaStream_t stream)
+{
+    int grid = (TOTAL_WEIGHTS + 255) / 256;
+    role_grad_alignment_kernel<<<grid, 256, 0, stream>>>(
+        d_grads, d_inputs, n_organisms, d_tel);
+    cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::printf("[FATAL] CUDA role grad alignment launch failed: %s\n",
+                    cudaGetErrorString(e));
+        return false;
+    }
+    return true;
+}
+
 }  // namespace slime::optimizer
 
 #endif  // COEVO_OPTIMIZER_CAME_CU
+

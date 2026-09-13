@@ -1,8 +1,8 @@
-// Wave 2: Host Main — Allocation, Initialization, Generation Loop, Entry Point
+// Host main: allocation, initialization, generation loop, entry point
 //
 // Per cuda_engineering.md sections 2, 3, 5, 6, 8, 9, 12, 13, 15 and
-// construction_plan.md Wave 2. Classifier-only loop (predictors activate
-// in Wave 4 after bootstrap).
+// Predictors participate once the bootstrap injects founders; before that
+// every spawn is role-locked to classifier.
 
 #include "main_loop.cu"
 #include "../safety/alignment.cu"
@@ -339,7 +339,7 @@ bool initialize_world(World* w) {
     w->cusum_surprise = {0.f, 0.f, 0.f, 0.5f, 5.0f, 0};
     w->cusum_r        = {0.f, 0.f, 0.f, 0.1f, 3.0f, 0};
 
-    // Wave 3: Placeholder regressor, replay buffer, probe set, correlation window.
+    // Placeholder regressor, replay buffer, probe set, correlation window (A-601).
     predictor::init_placeholder_regressor(&w->placeholder_reg, &w->rng);
     std::memset(&w->replay_buffer, 0, sizeof(w->replay_buffer));
     w->replay_buffer.head = 0;
@@ -411,11 +411,12 @@ static void score_organisms(World* w, float classifier_multiplier,
             role_mult = predictor_multiplier;
 
             // Ensemble prediction error EMA per pool target organism: the
-            // predictor curriculum re-weights toward weak spots.
-            int target_org = static_cast<int>(w->predictor_batch.target_organism_id[slot]);
-            if (target_org >= 0 && target_org < POOL_SIZE) {
-                w->predictor_error_ema[target_org] =
-                    (1.f - PREDICTOR_ERROR_EMA_ALPHA) * w->predictor_error_ema[target_org] +
+            // predictor curriculum re-weights toward weak spots. Probe slots
+            // carry pool_slot == -1 and have no pool EMA.
+            int target_slot = w->predictor_batch.target_pool_slot[slot];
+            if (target_slot >= 0 && target_slot < POOL_SIZE) {
+                w->predictor_error_ema[target_slot] =
+                    (1.f - PREDICTOR_ERROR_EMA_ALPHA) * w->predictor_error_ema[target_slot] +
                     PREDICTOR_ERROR_EMA_ALPHA * loss;
             }
         }
@@ -437,8 +438,6 @@ static void score_organisms(World* w, float classifier_multiplier,
 
 static void insert_into_archive(World* w) {
     for (int org = 0; org < POOL_SIZE; ++org) {
-        if (canonical_role(w->org_table.role[org]) != Role::Classifier) continue;
-
         archive::ArchiveEntry cand;
         std::memcpy(cand.descriptor, &w->h_descriptors[org * BMAP_DIM],
                     BMAP_DIM * sizeof(float));
@@ -922,6 +921,12 @@ bool step_generation(World* w) {
             w->d_tel, w->stream)) {
         return false;
     }
+    // Enqueued after the telemetry memset so the role sums survive; stream
+    // order places this before the readback below.
+    if (!optimizer::launch_role_grad_alignment(
+            w->d_grads, w->d_fwd_inputs, POOL_SIZE, w->d_tel, w->stream)) {
+        return false;
+    }
     autodiff::launch_state_saturation(w->d_checkpoints, w->d_organisms,
                                       w->d_tel, POOL_SIZE, w->stream);
     // The residual-magnitude measurement costs several forward passes worth
@@ -991,11 +996,14 @@ bool step_generation(World* w) {
     if (log_this_gen) {
         float sum_fit = 0.f, sum_raw = 0.f;
         int count = 0;
+        int n_pred = 0;
         for (int i = 0; i < POOL_SIZE; ++i) {
             if (canonical_role(w->org_table.role[i]) == Role::Classifier) {
                 sum_fit += w->org_table.fitness[i];
                 sum_raw += w->org_table.f_raw[i];
                 count++;
+            } else {
+                n_pred++;
             }
         }
         float mean_fit = count > 0 ? sum_fit / count : 0.f;
@@ -1033,13 +1041,30 @@ bool step_generation(World* w) {
                     t.res_ratio_mean[3], t.res_ratio_mean[4],
                     t.res_ratio_max[0], t.res_ratio_max[1], t.res_ratio_max[2],
                     t.res_ratio_max[3], t.res_ratio_max[4]);
+        bool role_cos_valid = (count > 0 && n_pred > 0
+                               && t.role_grad_norm_sq[0] > 0.f
+                               && t.role_grad_norm_sq[1] > 0.f);
+        if (role_cos_valid) {
+            float role_cos = t.role_grad_dot
+                / (sqrtf(t.role_grad_norm_sq[0])
+                   * sqrtf(t.role_grad_norm_sq[1]));
+            std::printf("         role grad cos=%.4f  |g_C|/n_C=%.3e  "
+                        "|g_P|/n_P=%.3e  n_C=%d n_P=%d\n",
+                        role_cos,
+                        sqrtf(t.role_grad_norm_sq[0]) / static_cast<float>(count),
+                        sqrtf(t.role_grad_norm_sq[1]) / static_cast<float>(n_pred),
+                        count, n_pred);
+        } else {
+            std::printf("         role grad cos=n/a  n_C=%d n_P=%d\n",
+                        count, n_pred);
+        }
         std::fflush(stdout);
     }
 
     // ---- EVOLVE: spawn wave ----
     spawn_wave(w);
 
-    // ---- MONITOR: placeholder training (A-601, Wave 3) ----
+    // ---- MONITOR: placeholder training (A-601) ----
     predictor::placeholder_train_step(&w->placeholder_reg,
                                       &w->replay_buffer, &w->rng);
 
@@ -1102,6 +1127,15 @@ bool step_generation(World* w) {
     predictor::push_correlation(&w->corr_window, s_placeholder, s_predictor);
     safety::cusum_update(&w->cusum_surprise, s_blended);
     safety::cusum_update(&w->cusum_r, r);
+
+    if (log_this_gen) {
+        float rho = (w->s_target_calibrated && w->s_target > EPS_DENOM)
+            ? s_blended / w->s_target : 0.f;
+        std::printf("         surprise s_ph=%.4e s_pr=%.4e r=%.4f "
+                    "s_blend=%.4e rho=%.4f\n",
+                    s_placeholder, s_predictor, r, s_blended, rho);
+        std::fflush(stdout);
+    }
 
     // Rolling blended-surprise history for rho = s_avg / s_target.
     w->s_blended_history[w->s_hist_head] = s_blended;
@@ -1311,6 +1345,10 @@ int main(int argc, char** argv) {
     return 0;
 }
 #endif  // COEVO_NO_MAIN
+
+
+
+
 
 
 

@@ -907,7 +907,7 @@ asynchronous copy engines, block limit, concurrent-kernel/UVA/managed-memory
 support, and a one-time 64 MiB pinned H2D/D2H/D2D transfer probe. The probe is
 diagnostic only; it does not change generation data flow or fitness. Its values
 identify device capability and transfer regressions without substituting for
-the Wave 2.5 end-to-end timing acceptance test.
+the end-to-end timing acceptance test.
 
 ---
 

@@ -19,6 +19,9 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | A401.live-statistics-exact | invariant | established | ✅ | ✅ | pass/stale |
 | A401.weighted-metric-active | contract | established | ✅ | ✅ | pass/stale |
 | A501.came-production-equation | contract | established | ✅ | ✅ | pass/stale |
+| A501.role-gradient-alignment | empirical | provisional | ✅ | ✅ | never |
+| A601.ensemble-epistemic-uncertainty | empirical | provisional | ✅ | ❌ | never |
+| A601.trust-weight-composition | capability | planned | ✅ | ❌ | never |
 | C001.acceptance-evidence-current | acceptance | established | ✅ | ✅ | pass/stale |
 | G100.deterministic-seed | contract | established | ✅ | ✅ | pass/stale |
 | G100.named-tunables | policy | established | ✅ | ✅ | never |
@@ -34,5 +37,5 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 
 Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_disabled: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
 
-Claims: 26 total, 24 established, 2 provisional, 0 planned.
+Claims: 29 total, 24 established, 4 provisional, 1 planned.
 <!-- architecture-status:end -->

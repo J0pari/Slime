@@ -42,7 +42,7 @@ cuda_engineering.md, and construction_plan.md.
   `src/integration.py` `_ENV_ROOTS` so the doctor observes the pin.
 - 2026-09-12: The shared-atomic weight-gradient experiment was measured and
   rejected: replacing the global atomicAdds with per-block shared-memory
-  accumulation ran wave1 in 166-171s versus 34-40s for the global-atomic
+  accumulation ran the autodiff acceptance suite in 166-171s versus 34-40s for the global-atomic
   kernel (same-address shared-atomic replay serializes; L2 handles the
   global atomics at high throughput). The kernel was reverted; the finding
   means the backward bottleneck is launch structure/occupancy, not atomic

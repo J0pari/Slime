@@ -1,13 +1,13 @@
-// Wave 1 Acceptance Test
+// Autodiff acceptance test: checkpointed forward, backward gradients,
+// stencil adjoint, end-to-end loss descent, gradient aggregation.
 //
-// Per construction_plan.md Wave 1 acceptance criteria:
 // 1. Allocate via cudaMalloc. Forward with checkpoints matches forward_kernel.
 // 2. Backward produces finite nonzero gradients in all 4 weight groups.
 // 3. Stencil adjoint produces nonzero d_state contributions.
 // 4. 5 iterations of forward→backward→aggregate→CAME: loss decreases.
 // 5. POOL_SIZE=4 gradient aggregation averages correctly.
 //
-// Build: make wave1-test
+// Build: make autodiff-test
 
 #include "../optimizer/came.cu"
 
@@ -401,7 +401,7 @@ static int test_gradient_aggregation() {
 }
 
 int main() {
-    std::printf("Wave 1 Acceptance Test\n");
+    std::printf("Autodiff acceptance test\n");
     std::printf("======================\n");
     std::fflush(stdout);
 
@@ -423,10 +423,10 @@ int main() {
     std::printf("\n======================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);
     if (g_fail > 0 || rc != 0) {
-        std::printf("WAVE 1: FAIL\n");
+        std::printf("AUTODIFF: FAIL\n");
         return 1;
     }
-    std::printf("WAVE 1: PASS\n");
+    std::printf("AUTODIFF: PASS\n");
     return 0;
 }
 

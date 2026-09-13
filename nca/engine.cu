@@ -255,7 +255,7 @@ __device__ inline void ca_step(const __half* state_curr,
 //
 // forward_one is the shared body used by both the shared-weight kernel and the
 // per-organism effective-weight kernel; both must produce identical results
-// for identical weight banks (see wave2_evolution.cu determinism check).
+// for identical weight banks (see evolution_regression.cu determinism check).
 __device__ inline void forward_one(OrganismState* o,
                                    const ForwardInputs& in,
                                    const rd::Coefficients* coeffs,  // this organism's RD coeffs or null

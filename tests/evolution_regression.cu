@@ -1,4 +1,5 @@
-// Wave 2/2.5 Regression Suite: Gates 1-3
+// Evolution regression suite: role locking, effective weights, PT
+// correspondence, finite differences.
 //
 // 1. Effective-weight materialization: W_eff == W_shared + delta (bitwise).
 // 2. Genome -> phenotype causality: changing one active genome delta changes
@@ -10,7 +11,7 @@
 // 4. Directional finite difference: analytic gradient agrees with the
 //    central-difference loss derivative.
 //
-// Build: make wave2-test
+// Build: make evolution-test
 
 #include "../safety/parallel_tempering.cu"
 #include "../optimizer/came.cu"
@@ -979,8 +980,89 @@ static int test_residual_dynamics_bounded() {
     return 0;
 }
 
+// ---- Test 6: per-role gradient alignment telemetry -------------------------
+static int test_role_grad_alignment() {
+    // [claim:A501.role-gradient-alignment]
+    std::printf("--- Test: role gradient alignment matches a host reference ---\n");
+    std::fflush(stdout);
+
+    const int N = 3;  // two classifiers, one predictor
+    GradBuffers* d_grads = nullptr;
+    ForwardInputs* d_inputs = nullptr;
+    TelemetryScalars* d_tel = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_grads, sizeof(GradBuffers) * N));
+    CUDA_CHECK(cudaMalloc(&d_inputs, sizeof(ForwardInputs) * N));
+    CUDA_CHECK(cudaMalloc(&d_tel, sizeof(TelemetryScalars)));
+    CUDA_CHECK(cudaMemset(d_tel, 0, sizeof(TelemetryScalars)));
+
+    GradBuffers h_grads[N];
+    uint32_t s = 0xC0FFEE11u;
+    for (int org = 0; org < N; ++org) {
+        for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+            h_grads[org].dW[i] =
+                static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+        }
+    }
+    ForwardInputs h_inputs[N];
+    std::memset(h_inputs, 0, sizeof(h_inputs));
+    h_inputs[0].role = Role::Classifier;
+    h_inputs[1].role = Role::Classifier;
+    h_inputs[2].role = Role::Predictor;
+
+    CUDA_CHECK(cudaMemcpy(d_grads, h_grads, sizeof(GradBuffers) * N,
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_inputs, h_inputs, sizeof(ForwardInputs) * N,
+                          cudaMemcpyHostToDevice));
+    if (!optimizer::launch_role_grad_alignment(d_grads, d_inputs, N, d_tel, 0)) {
+        return 1;
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    TelemetryScalars h_tel;
+    CUDA_CHECK(cudaMemcpy(&h_tel, d_tel, sizeof(TelemetryScalars),
+                          cudaMemcpyDeviceToHost));
+
+    // Host reference in double precision so the float device sums are the
+    // only source of disagreement.
+    double dot = 0.0, nc = 0.0, np = 0.0;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        double gc = static_cast<double>(h_grads[0].dW[i])
+                  + static_cast<double>(h_grads[1].dW[i]);
+        double gp = static_cast<double>(h_grads[2].dW[i]);
+        dot += gc * gp;
+        nc  += gc * gc;
+        np  += gp * gp;
+    }
+    float ref_cos = static_cast<float>(dot / std::sqrt(nc * np));
+    float got_cos = h_tel.role_grad_dot
+                  / (std::sqrt(h_tel.role_grad_norm_sq[0])
+                     * std::sqrt(h_tel.role_grad_norm_sq[1]));
+    float norm_err_c = std::fabs(h_tel.role_grad_norm_sq[0]
+                                 - static_cast<float>(nc))
+                     / static_cast<float>(nc);
+    float norm_err_p = std::fabs(h_tel.role_grad_norm_sq[1]
+                                 - static_cast<float>(np))
+                     / static_cast<float>(np);
+    std::printf("  cos device=%.6f host=%.6f  rel_err_norm_C=%.2e "
+                "rel_err_norm_P=%.2e\n",
+                got_cos, ref_cos, norm_err_c, norm_err_p);
+    CHECK(norm_err_c < 1e-4f,
+          "classifier role gradient norm matches host reference");
+    CHECK(norm_err_p < 1e-4f,
+          "predictor role gradient norm matches host reference");
+    CHECK(std::fabs(got_cos - ref_cos) < 1e-4f,
+          "role gradient cosine matches host reference");
+
+    cudaFree(d_grads);
+    cudaFree(d_inputs);
+    cudaFree(d_tel);
+    return 0;
+}
+
 int main() {
-    std::printf("Wave 2/2.5 Regression Suite (Gates 1-3)\n");
+    std::printf("Evolution regression suite (role locking, effective weights, "
+                "PT correspondence, finite differences)\n");
     std::printf("========================================\n");
     std::fflush(stdout);
 
@@ -991,14 +1073,15 @@ int main() {
     rc |= test_pt_swap_backward_correspondence();
     rc |= test_finite_difference_gradient();
     rc |= test_residual_dynamics_bounded();
+    rc |= test_role_grad_alignment();
 
     std::printf("\n========================================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);
     if (g_fail > 0 || rc != 0) {
-        std::printf("WAVE2 REGRESSION: FAIL\n");
+        std::printf("EVOLUTION REGRESSION: FAIL\n");
         return 1;
     }
-    std::printf("WAVE2 REGRESSION: PASS\n");
+    std::printf("EVOLUTION REGRESSION: PASS\n");
     return 0;
 }
 

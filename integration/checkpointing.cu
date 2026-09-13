@@ -326,20 +326,17 @@ inline bool save_checkpoint(World* w, const char* path) {
     }
 
     // Direct replace: MSVC std::filesystem::rename replaces an existing
-    // target (MoveFileEx with MOVEFILE_REPLACE_EXISTING). Fall back to a
-    // remove+rename only if the direct rename is refused.
+    // target (MoveFileEx with MOVEFILE_REPLACE_EXISTING). If that fails the
+    // previous checkpoint is left untouched and the save is a loud failure:
+    // there is no remove-then-rename fallback, because the window between a
+    // remove and a rename can destroy the only good checkpoint.
     fs::rename(tmp, target, ec);
     if (ec) {
-        std::printf("[WARN] checkpoint: direct replace refused (%s); "
-                    "falling back to remove+rename\n", ec.message().c_str());
-        fs::remove(target, ec);
-        ec.clear();
-        fs::rename(tmp, target, ec);
-        if (ec) {
-            std::printf("[FATAL] checkpoint: replace failed for %s: %s\n",
-                        target.string().c_str(), ec.message().c_str());
-            return false;
-        }
+        std::printf("[FATAL] checkpoint: replace failed for %s: %s "
+                    "(previous checkpoint left intact)\n",
+                    target.string().c_str(), ec.message().c_str());
+        std::remove(tmp.string().c_str());
+        return false;
     }
     return true;
 }

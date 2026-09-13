@@ -55,7 +55,7 @@ Run before finishing:
   until its adjoint, host authority polling.
 - `python -m unittest discover -s tests/architecture -v` — the guards'
   own negative tests.
-- `make check`, `make wave1-test`, `make wave2-test` — the executable
+- `make check`, `make autodiff-test`, `make evolution-test` — the executable
   witnesses on hardware.
 
 ## Claim block reference

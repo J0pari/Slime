@@ -12,8 +12,8 @@ BUILD_DIR ?= build
 BIN          := $(BUILD_DIR)/coevo.exe
 HOST_TESTS   := $(BUILD_DIR)/host_tests.exe
 FORWARD_SMOKE := $(BUILD_DIR)/forward_smoke.exe
-WAVE1_TEST   := $(BUILD_DIR)/wave1_test.exe
-WAVE2_TEST   := $(BUILD_DIR)/wave2_test.exe
+AUTODIFF_TEST   := $(BUILD_DIR)/autodiff_test.exe
+EVOLUTION_TEST  := $(BUILD_DIR)/evolution_test.exe
 
 SRC := integration/host_main.cu
 HOST_SRC := tests/host_unit_tests.cpp
@@ -21,16 +21,16 @@ HOST_SRC := tests/host_unit_tests.cpp
 HOST_CXX      ?= g++
 HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Wall -Wextra
 
-.PHONY: all run run-10 clean host-tests check forward-smoke wave1-test wave2-test \
+.PHONY: all run run-10 clean host-tests check forward-smoke autodiff-test evolution-test \
 	task-conditioning-test architecture-check architecture-test architecture-status architecture-report \
-	gpu-status gpu-contract gpu-wave2 gpu-run10
+	gpu-status gpu-contract gpu-evolution gpu-run10
 
 all: $(BIN)
 
 run: $(BIN)
 	./$(BIN)
 
-# Wave 2.5 acceptance run: the integration binary accepts a generation count.
+# Acceptance run: the integration binary accepts a generation count.
 run-10: $(BIN)
 	./$(BIN) 10
 
@@ -60,9 +60,9 @@ gpu-status:
 gpu-contract:
 	python architecture/gpu_client.py contract
 
-gpu-wave2:
-	python architecture/gpu_client.py run --name slime-wave2 --vram 2048 \
-		-- build/wave2_test.exe
+gpu-evolution:
+	python architecture/gpu_client.py run --name slime-evolution-regression --vram 2048 \
+		-- build/evolution_test.exe
 
 gpu-run10:
 	python architecture/gpu_client.py run --name slime-run10 --vram 2048 \
@@ -90,25 +90,25 @@ $(FORWARD_SMOKE): tests/forward_smoke.cu nca/engine.cu nca/reaction_diffusion.cu
 forward-smoke: $(FORWARD_SMOKE)
 	./$(FORWARD_SMOKE)
 
-# Wave 1: Autodiff + CAME. Forward with checkpoints, backward with full
+# Autodiff + CAME: forward with checkpoints, backward with full
 # stencil adjoint, gradient aggregation, CAME step, loss decreases.
-$(WAVE1_TEST): tests/wave1_autodiff.cu autodiff/warp_tape.cu optimizer/came.cu optimizer/came_math.cuh nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/wave1_autodiff.cu -o $@ -lcudadevrt
+$(AUTODIFF_TEST): tests/autodiff_acceptance.cu autodiff/warp_tape.cu optimizer/came.cu optimizer/came_math.cuh nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/autodiff_acceptance.cu -o $@ -lcudadevrt
 
-wave1-test: $(WAVE1_TEST)
-	./$(WAVE1_TEST)
+autodiff-test: $(AUTODIFF_TEST)
+	./$(AUTODIFF_TEST)
 
-# Gates 1-3 regression: effective-weight causality, materialization, PT
+# Regression: effective-weight causality, materialization, PT
 # transaction, finite-difference gradient validation. Links with a larger
 # stack: the test functions hold several 32KB DeltaWeights/GradBuffers frames.
-$(WAVE2_TEST): tests/wave2_evolution.cu safety/parallel_tempering.cu safety/pt_ladder.cuh optimizer/came.cu optimizer/came_math.cuh autodiff/warp_tape.cu nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
-	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/wave2_evolution.cu -o $@ -lcudadevrt -Xlinker /STACK:33554432
+$(EVOLUTION_TEST): tests/evolution_regression.cu safety/parallel_tempering.cu safety/pt_ladder.cuh optimizer/came.cu optimizer/came_math.cuh autodiff/warp_tape.cu nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/evolution_regression.cu -o $@ -lcudadevrt -Xlinker /STACK:33554432
 
-wave2-test: $(WAVE2_TEST)
-	./$(WAVE2_TEST)
+evolution-test: $(EVOLUTION_TEST)
+	./$(EVOLUTION_TEST)
 
-# Task-conditioning witness (A201.task-conditioning-complete). Currently
-# expected to FAIL: task embedding dims 5..15 do not reach the NCA forward.
+# Task-conditioning witness (A201.task-conditioning-complete): perturbing a
+# single task-embedding dimension must change the descriptor.
 TASK_CONDITIONING := $(BUILD_DIR)/task_conditioning.exe
 $(TASK_CONDITIONING): tests/task_conditioning.cu autodiff/warp_tape.cu nca/engine.cu nca/reaction_diffusion.cu genome/codec.cu config/constants.cuh | $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) $(CXXFLAGS) tests/task_conditioning.cu -o $@ -lcudadevrt

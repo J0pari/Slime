@@ -187,6 +187,36 @@ Component and property tests, per subsystem:
 - Production events only after the above; every run is resumable and every
   result is evidence-linked.
 
+## Experimental program (after INTEGRATE passes)
+
+The co-evolutionary claims are empirical, not guaranteed by construction.
+These are the experiments that decide whether the coupled system contains
+something real; they run on the telemetry series, not new subsystems.
+
+- E1 — Endogenous prediction pressure. Compare classifier-only, classifier
+  + fixed placeholder, and classifier + evolved predictor ecology. Measure
+  rates of behavioral novelty and archive expansion, not final accuracy:
+  the hypothesis is that d(novelty)/dt stays higher under co-evolution
+  rather than merely oscillating.
+- E2 — Shared-substrate transfer versus interference. Track the cosine
+  similarity of the mean classifier and predictor gradients
+  (`A501.role-gradient-alignment`) over time and compare the shared-W
+  system against completely separate substrates. Positive alignment that
+  grows while the shared system wins is evidence for an emergent common
+  representation; persistent negative alignment is interference.
+- E3 — Surprise homeostasis. Track rho_t = s_t / s_target, the classifier
+  and predictor populations, and novelty over time; analyze
+  cross-correlations and phase relationships. A stable fixed point
+  (rho_t -> 1 with rising novelty) and persistent limit cycles
+  (C -> S -> P -> S -> C) are both scientifically interesting; role
+  extinction is a failure mode to detect.
+
+Dynamics questions the series should answer: stable fixed point,
+oscillation, hysteresis, boom/bust cycles, role extinction, and
+Red-Queen behavior. Treating surprise as a robust safety signal requires
+the trust composition of `A601.trust-weight-composition` first: raw
+correlation measures agreement, not correctness.
+
 ## Current implementation status
 
 The repository is in the BUILD phase. Implemented and compiling today:

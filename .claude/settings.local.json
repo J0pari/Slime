@@ -25,7 +25,7 @@
       "Bash(echo \"EXIT=$?\")",
       "Bash(./build/coevo 100)",
       "Bash(make forward-smoke:*)",
-      "Bash(make wave1-test:*)",
+      "Bash(make autodiff-test:*)",
       "mcp__filesystem__search_files",
       "mcp__filesystem__read_text_file",
       "Bash(taskkill //F //IM coevo.exe)",

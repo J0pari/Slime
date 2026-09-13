@@ -1,4 +1,4 @@
-// Wave 2: Integration Layer — World Struct, OrganismTable, IntentRegistry
+// Integration layer: World, OrganismTable, IntentRegistry
 //
 // Per cuda_engineering.md sections 2, 3, 5. Defines the central data
 // structures that hold all device pointers, host buffers, and host-only state.
@@ -129,7 +129,7 @@ struct World {
     safety::pt::MutationLadder mutation_ladder;
     safety::pt::StressLadder   stress_ladder;
 
-    // Wave 3: Placeholder regressor + probe set (A-601).
+    // Placeholder regressor and probe set (A-601).
     predictor::PlaceholderRegressor placeholder_reg;
     predictor::PlaceholderReplayBuffer replay_buffer;
     predictor::CorrelationWindow corr_window;
@@ -180,4 +180,5 @@ void run(int n_generations, bool resume, const char* checkpoint_path);
 }  // namespace slime::integration
 
 #endif  // COEVO_INTEGRATION_MAIN_LOOP_CU
+
 

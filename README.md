@@ -61,9 +61,13 @@ export SLIME_EVOLUTION_ROOT="/path/to/this/repo"             # read by the owner
 ```sh
 make gpu-status     # daemon state: running job, queue, gates, holds
 make gpu-contract   # validate the pinned contract
-make gpu-wave2      # submit + wait for the wave2 witness on the scheduler
-make gpu-run10      # submit + wait for a 10-generation run (progress/v1 wrapped)
+make gpu-evolution  # submit the evolution regression witness (detached)
+make gpu-run10      # submit a 10-generation run (detached, progress/v1 wrapped)
 ```
+
+Jobs are submitted detached; poll with
+`python architecture/gpu_client.py inspect --job <id>` and wait for a
+terminal status. `--wait` exists but blocks the caller.
 
 Scheduled jobs run under the scheduler's GPU lock and emit `progress/v1`
 envelopes (via `architecture/progress_wrap.py`) so the daemon can estimate

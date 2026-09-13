@@ -164,9 +164,10 @@ def submit(name: str, command: list[str], vram_mib: int,
     work_dir = cwd or str(REPO_ROOT)
     first = command[0]
     if not os.path.isabs(first):
-        candidate = Path(work_dir) / first
-        if candidate.is_file():
-            command = [str(candidate), *command[1:]]
+        # Always resolve against the job cwd: the owner validates that the
+        # executable exists, and a relative path would otherwise be checked
+        # against the owner's working directory, not the job's.
+        command = [str((Path(work_dir) / first).resolve()), *command[1:]]
     args = ["submit", "--name", name, "--repo", "slime-evolution",
             "--vram", str(int(vram_mib)), "--priority", str(int(priority)),
             "--max-minutes", str(float(max_minutes))]
@@ -283,7 +284,9 @@ def wrap_progress_command(name: str, total: int,
 
 
 def _cmd_run(args) -> int:
-    """Submit a job through the scheduler, wait, and report the result.
+    """Submit a job through the scheduler and exit. The daemon owns the job;
+    --wait opts into blocking until it reaches a terminal status (never the
+    default: a foreground wait defeats the daemon and ties up the caller).
     --direct is the explicit escape hatch for machines without the
     scheduler; it executes locally (under the GPU lock when reachable)."""
     command = list(args.cmd)
@@ -309,6 +312,10 @@ def _cmd_run(args) -> int:
 
     job_id = ack["jobId"]
     print(f"[gpu-client] submitted {args.name}: {job_id}")
+    if not args.wait:
+        print(f"[gpu-client] detached; poll with: "
+              f"python architecture/gpu_client.py inspect --job {job_id}")
+        return 0
 
     def _on_status(job):
         print(f"[gpu-client] {job_id}: {job['status']}"
@@ -368,6 +375,9 @@ def main(argv=None) -> int:
     p_run.add_argument("--total", type=int, default=0,
                        help="generation/step total for progress/v1 wrapping")
     p_run.add_argument("--poll", type=float, default=10.0)
+    p_run.add_argument("--wait", action="store_true",
+                       help="block until the job finishes (default: submit "
+                            "and exit; the daemon owns the job)")
     p_run.add_argument("--direct", action="store_true",
                        help="execute locally instead of submitting")
     p_run.add_argument("cmd", nargs=argparse.REMAINDER)

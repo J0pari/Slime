@@ -10,7 +10,7 @@ A manifest can be created from a real run with:
 
     python architecture/evidence.py record --name run5 --binary build/coevo.exe \
         --cuda 13.0.48 --gpu "RTX 3060 Laptop" --seed default \
-        --result A103.checkpoint-replay-equivalence=tests/wave1_autodiff.cu::test_forward_match_and_backward:pass
+        --result A103.checkpoint-replay-equivalence=tests/autodiff_acceptance.cu::test_forward_match_and_backward:pass
 
 stdlib-only (plus the project's own claims module).
 """
@@ -237,7 +237,7 @@ def record(args) -> int:
     """CLI: record a manifest from a completed run.
 
     --result has the form <claim>=<witness>:<pass|fail>, e.g.
-        --result A301.genotype-causes-phenotype=tests/wave2_evolution.cu::test_genotype_causality:pass
+        --result A301.genotype-causes-phenotype=tests/evolution_regression.cu::test_genotype_causality:pass
     The witness must be registered for the claim (or be the executed binary
     itself for integration-run attestation), and its file must declare
     [claim:<id>]. This makes the manifest a provenance record, not a promise.

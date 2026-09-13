@@ -100,7 +100,7 @@ __device__ inline void rd_step(__half* grid,
 // Decode quantized coefficient bits from the genome into floats.
 // Reaction coeffs: 200 bits across 36 entries (6x6) -> ~5.5 bits each.
 // We quantize to 5 bits per entry centred on zero (-1.0 .. +1.0 in 32 steps),
-// with the spare 20 bits ignored for now (reserved for sign or scale).
+// with the spare 20 bits reserved for sign or scale.
 // Diffusion: 48 bits / 6 entries = 8 bits each in [0, 1].
 __device__ inline void decode_coefficients(const uint32_t* genome_bits,
                                            Coefficients* out) {
@@ -130,3 +130,4 @@ __device__ inline void decode_coefficients(const uint32_t* genome_bits,
 }  // namespace slime::nca::rd
 
 #endif  // COEVO_NCA_REACTION_DIFFUSION_CU
+

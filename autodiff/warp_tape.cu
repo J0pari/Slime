@@ -1,4 +1,4 @@
-// Wave 1/2.5: Checkpointed Forward + Phase-Decomposed Batched Backward + BTRAJ Gather
+// Checkpointed forward, phase-decomposed batched backward, BTRAJ gather
 //
 // Per cuda_engineering.md sections 4.1, 4.2 (revised), 4.8, 10.
 // forward_with_checkpoints: identical to forward_kernel but saves 4 checkpoints.
@@ -85,6 +85,11 @@ struct TelemetryScalars {
     float res_x_norm2[5];     // mean over pool of ||x_t||^2
     float res_ratio_mean[5];  // mean over pool of ||F||/||x||
     float res_ratio_max[5];   // max over pool of per-cell ||F||/||x||
+    // Role-gradient alignment (A-501): sums over shared weights of the
+    // classifier and predictor gradient products. The host divides the
+    // squared norms by the role counts before reporting mean-gradient norms.
+    float role_grad_dot;       // <g_C, g_P> over the shared weight buffer
+    float role_grad_norm_sq[2]; // [0] = ||g_C||^2, [1] = ||g_P||^2
 };
 
 // ---- Loss functions (host-callable, proven in host tests) ----------------
@@ -351,7 +356,7 @@ __global__ void bwd_load_checkpoint_kernel(
 // launches forward with coeffs = nullptr, so this omission is safe.  Enabling RD
 // without adding the RD adjoint will produce biased gradients — the checkpoint
 // states (saved after RD in the forward) will not match the re-forwarded states.
-// The RD adjoint is deferred to the wave that enables reaction-diffusion.
+// Reaction-diffusion has no adjoint; its coefficients stay zero until one exists.
 __global__ void bwd_reforward_step_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
@@ -972,4 +977,5 @@ inline void launch_btraj_gather(
 }  // namespace slime::autodiff
 
 #endif  // COEVO_AUTODIFF_WARP_TAPE_CU
+
 

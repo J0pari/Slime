@@ -231,7 +231,7 @@ S forward_with_checkpoints reproduces the plain forward bitwise and replayed
   segments reconstruct checkpointed states
 M autodiff/warp_tape.cu::forward_with_checkpoints_kernel
 M autodiff/warp_tape.cu::bwd_reforward_step_kernel
-W+ tests/wave1_autodiff.cu::test_forward_match_and_backward
+W+ tests/autodiff_acceptance.cu::test_forward_match_and_backward
 T established
 C observed
 
@@ -239,7 +239,7 @@ C observed
 S the analytic backward agrees with directional finite differences of the
   executed forward, and gradients remain finite
 M autodiff/warp_tape.cu::launch_backward_all
-W+ tests/wave2_evolution.cu::test_finite_difference_gradient
+W+ tests/evolution_regression.cu::test_finite_difference_gradient
 D A103.checkpoint-replay-equivalence
 T established
 C observed
@@ -269,7 +269,7 @@ S classifier and predictor roles execute the same NCA architecture, delta
 M nca/engine.cu::forward_one
 M genome/codec.cu::read_role
 M integration/host_main.cu::step_generation
-W tests/wave1_autodiff.cu::test_forward_match_and_backward
+W tests/autodiff_acceptance.cu::test_forward_match_and_backward
 T provisional
 C observed
 
@@ -292,7 +292,7 @@ S under the residual timestep x_{t+1} = x_t + alpha F_theta(x_t) with
 M config/constants.cuh::RESIDUAL_ALPHA
 M nca/engine.cu::ca_step
 M autodiff/warp_tape.cu::bwd_reforward_step_kernel
-W+ tests/wave2_evolution.cu::test_residual_dynamics_bounded
+W+ tests/evolution_regression.cu::test_residual_dynamics_bounded
 T established
 C observed
 
@@ -450,7 +450,7 @@ S active genome differences can alter the executed phenotype while shared
 M genome/codec.cu::apply_delta
 M autodiff/warp_tape.cu::materialize_effective_weights_kernel
 M integration/host_main.cu::step_generation
-W+ tests/wave2_evolution.cu::test_genotype_causality
+W+ tests/evolution_regression.cu::test_genotype_causality
 T established
 C observed
 
@@ -493,7 +493,7 @@ S the archive stores the genome that produced the archived descriptor and
   fitness, and parent selection draws from those stored genomes
 M integration/host_main.cu::insert_into_archive
 M integration/host_main.cu::spawn_wave
-W tests/wave2_evolution.cu::test_genotype_causality
+W tests/evolution_regression.cu::test_genotype_causality
 D A301.genotype-causes-phenotype
 T provisional
 C inferred
@@ -635,6 +635,17 @@ W+ tests/host_unit_tests.cpp::test_came_production_equation
 T established
 C observed
 
+@claim A501.role-gradient-alignment empirical
+S the mean classifier gradient and the mean predictor gradient are reduced
+  separately every generation and their cosine similarity, together with
+  each role's gradient norm, is reported, so shared-substrate transfer
+  versus interference is directly measurable
+M optimizer/came.cu::role_grad_alignment_kernel
+M integration/host_main.cu::step_generation
+W+ tests/evolution_regression.cu::test_role_grad_alignment
+T provisional
+C unobserved
+
 
 Confidence-Adjusted Momentum Estimation. Operates uniformly across roles; only
 the loss feeding the backward pass differs between classifiers (cross-entropy on
@@ -664,6 +675,28 @@ writing a single float to a pinned host scalar. No full D→H weight transfer
 is performed for this check.
 
 A-601: Predictor Role & Hybrid Surprise Signal
+
+@claim A601.trust-weight-composition capability
+S the hybrid blending weight is currently the clipped Pearson correlation
+  between placeholder and predictor surprise; correlation measures agreement,
+  not correctness, so two jointly miscalibrated signals can correlate at 1
+  while both are unreliable. The weight is provisional until it composes
+  correlation with calibration error, held-out prediction error, and
+  ensemble diversity
+M predictor/hybrid_surprise.cu::blend_surprise
+M predictor/hybrid_surprise.cu::pearson_r_clipped
+T planned
+C unobserved
+
+@claim A601.ensemble-epistemic-uncertainty empirical
+S the predictor ensemble's per-descriptor variance is a crude epistemic
+  uncertainty signal whose scientific value depends on whether QD pressure
+  yields genuinely distinct hypotheses rather than cosmetically different
+  outputs; the variance series is instrumented for that analysis
+M predictor/hybrid_surprise.cu::ensemble_surprise
+M integration/host_main.cu::step_generation
+T provisional
+C unobserved
 
 Two surprise sources operate in parallel throughout the run.
 
@@ -874,8 +907,8 @@ M safety/parallel_tempering.cu::propose_swaps
 M safety/parallel_tempering.cu::swap_host_organism
 M safety/parallel_tempering.cu::swap_device_organism
 M architecture/transactions.yaml::pt_swap
-W+ tests/wave2_evolution.cu::test_forced_pt_swap
-W+ tests/wave2_evolution.cu::test_pt_swap_backward_correspondence
+W+ tests/evolution_regression.cu::test_forced_pt_swap
+W+ tests/evolution_regression.cu::test_pt_swap_backward_correspondence
 T established
 C observed
 

@@ -1,7 +1,7 @@
 {
   "schema": "gpu-scheduler/v1",
-  "fingerprint": "f0cd8ac689bc2ed65d40f2ff4fece1377c401a03754202b6d8e65d078df88ed6",
+  "fingerprint": "e176dd7756e5b7859eb8e45efc7da2b179327eb9b6fc2215a14fbc15b754b904",
   "adoptedAt": "2026-09-12",
   "capabilities": ["contract", "status", "submit", "inspect", "progress/v1", "gpu-lock/v1"],
-  "notes": "Slime Evolution pins the training-architecture GPU scheduler contract. Adoption is observed by the owner's doctor (src/integration.py) from this file; the client refuses submission on a schema-major or fingerprint mismatch."
+  "notes": "Slime Evolution pins the training-architecture GPU scheduler contract. Adoption is observed by the owner's doctor (src/integration.py) from this file; the client refuses submission on a schema-major or fingerprint mismatch. Re-pinned after the additive slime-evolution consumer registration (owner commit 42e5d82)."
 }

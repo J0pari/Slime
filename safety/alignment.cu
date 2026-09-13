@@ -287,7 +287,7 @@ inline bool poll_off_switch() {
 //   pause               - state.paused = true
 //   resume              - state.paused = false
 //   checkpoint          - state.checkpoint_requested = true (the run loop
-//                         reports honestly; serialization lands in Wave 7)
+//                         writes a full checkpoint immediately)
 //
 // After processing, the file is deleted to prevent re-execution.
 inline bool apply_operator_command(float* organism_fitness,
@@ -349,5 +349,6 @@ inline bool apply_operator_command(float* organism_fitness,
 }  // namespace slime::safety::alignment
 
 #endif  // COEVO_SAFETY_ALIGNMENT_CU
+
 
 
