@@ -176,8 +176,11 @@ I9
   policy kills, operator cancellations, and dispatch refusals pass exit
   code None and never retry, so those still need manual resubmission.
   Resume-on-start makes each resubmission continue from the last chunk.
-  Operator pressure explained and the bug confirmed: the scheduler
-  reserves 2048 MiB free RAM + 4096 MiB commit for the interactive tool;
+  Operator pressure explained and the bug confirmed. Terminology: the
+  "operator tool" is not a repo; it is OpenCode.exe (this session) plus
+  the Windows shell, named in policy.py RECLAIM_LAST_IMAGES and reclaimed
+  only after every other process. The scheduler reserves 2048 MiB free
+  RAM + 4096 MiB commit for it;
   after 4 strikes with no reclaimable victims it kills the running job.
   The stop was labelled (transient) and called _maybe_retry(transient=True)
   but the old _maybe_retry refused exit-None failures, so pressure-stopped
