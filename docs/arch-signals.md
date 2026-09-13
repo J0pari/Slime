@@ -7,22 +7,30 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
-- 2026-09-12: I5 backward adjoint design (complete, unexecuted). The forward
-  broadcast overwrites channels 14-15 after computing the summary, so the
-  pre-broadcast channel values are unrecoverable from the re-forwarded
-  state; the summary must be stored. Two placements: (a) project_bmap gains
-  a nullable summary-out pointer and the forward saves it per sample step
-  into an [n_org * BTRAJ_SAMPLES * CA_CHANNELS] workspace, or (b) the
-  re-forward computes the summary from its CA output before applying the
-  broadcast and stores it. (b) keeps project_bmap untouched but makes the
-  re-forward kernel own the reduction. Either way, per replayed sample step
-  the weight-grad kernel must: consume dA channels 14-15 into d_ctx; add
-  dW_ctx[c*2+k] += s_t[c]*d_ctx[k]; add sum_k W_ctx[c*2+k]*d_ctx[k] to the
-  per-cell mean adjoint; zero dA channels 14-15 before the CA adjoint; and
-  step 64 must be excluded from the d_ctx path (recorded above). The host
-  backward loop must pass the step index to the re-forward and weight-grad
-  kernels. This is the first implementation task of the next session; the
-  gate stays disabled until the finite-difference witness exists.
+- 2026-09-12: I5 backward adjoint design (complete, unexecuted). Two
+  correctness traps found while deriving it, both fixed by storing the
+  pre-broadcast summary:
+  (1) The forward broadcast overwrites channels 14-15 after computing the
+  summary, so the pre-broadcast channel values are unrecoverable from the
+  re-forwarded state; the summary must be saved per organism per sample step
+  (project_bmap gains a nullable summary-out, or the re-forward stores it
+  from its CA output before broadcasting).
+  (2) The seed backward's avgpool reads the final grid, which is
+  post-broadcast, but the forward's bmap projection used the pre-broadcast
+  summary. Recomputing the summary from the final grid would include the
+  broadcast-written channels and bias the seed path; the seed scatter must
+  consume the stored pre-broadcast summary instead. An earlier note here
+  claiming step 64 had no downstream path was wrong for the same reason:
+  the final broadcast changes the grid that the seed avgpool reads, so the
+  step-64 adjoint exists through the summary, not through a later CA step.
+  Remaining design: per replayed sample step the weight-grad kernel consumes
+  dA channels 14-15 into d_ctx; adds dW_ctx[c*2+k] += s_t[c]*d_ctx[k]; adds
+  sum_k W_ctx[c*2+k]*d_ctx[k] to the mean adjoint; zeroes dA channels 14-15
+  before the CA adjoint. The host backward loop must pass the absolute step
+  index (seg*CHECKPOINT_INTERVAL + local_step) to the re-forward and
+  weight-grad kernels. This is the first implementation task of the next
+  session; the gate stays disabled until the finite-difference witness
+  exists.
 - 2026-09-12: I5 forward broadcast landed; the backward context adjoint needs
   care about which sample steps have a downstream path. `project_bmap` runs
   at steps {16, 32, 48, 64} and the context write happens after the bmap
