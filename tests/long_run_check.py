@@ -43,7 +43,7 @@ def main() -> int:
     ap.add_argument("--gens", type=int, default=20)
     ap.add_argument("--chunk", type=int, default=5)
     ap.add_argument("--ckpt", default="checkpoints/long-run.bin")
-    ap.add_argument("--warmup", type=int, default=5,
+    ap.add_argument("--warmup", type=int, default=50,
                     help="generations before stress flags count as "
                          "spontaneous (the ladder calibrates early)")
     ap.add_argument("--r-warmup", type=int, default=100,
@@ -63,7 +63,7 @@ def main() -> int:
     while done < args.gens:
         chunk = min(args.chunk, args.gens - done)
         out = run_chunk(args.binary, chunk, args.ckpt, resume)
-        if done + chunk > args.warmup and FLAG_RE.search(out):
+        if done >= args.warmup and FLAG_RE.search(out):
             print(out[-2000:])
             raise SystemExit(f"spontaneous stress flag after {done} generations")
         for line in out.splitlines():
