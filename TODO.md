@@ -80,10 +80,11 @@ I8
   tile, then launch-level work.
 
 I9
-- [ ] 5000-generation stability under all subsystems.
+- [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
+  flags in one periodic telemetry line.
 - [ ] Red-team classes A-F with detection verification.
-- [ ] Dashboard surface: role fraction, r, rho, swap stats, stress failure
-  rates.
+- [ ] 5000-generation stability verification (checkpoint/restart
+  byte-equivalence, no spontaneous class A-F conditions).
 
 ## P1 — VERIFY (after BUILD)
 

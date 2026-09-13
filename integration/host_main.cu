@@ -1613,6 +1613,24 @@ bool step_generation(World* w) {
         std::printf("         surprise s_ph=%.4e s_pr=%.4e r=%.4f "
                     "s_blend=%.4e rho=%.4f\n",
                     s_reference, s_predictor, r, s_blended, rho);
+        // Dashboard surface (I9): role fraction, surprise ratio, ladder swap
+        // statistics, and stress-failure flags in one periodic line.
+        int n_c = 0;
+        int n_p = 0;
+        for (int i = 0; i < POOL_SIZE; ++i) {
+            if (canonical_role(w->org_table.role[i]) == Role::Classifier) n_c++;
+            else n_p++;
+        }
+        std::printf("         [DASHBOARD] role_frac_C=%.3f role_frac_P=%.3f "
+                    "r=%.4f rho=%.4f swaps=%d/%d stress_flagged=%d "
+                    "archive=%d\n",
+                    static_cast<float>(n_c) / POOL_SIZE,
+                    static_cast<float>(n_p) / POOL_SIZE,
+                    r, rho,
+                    w->mutation_ladder.swaps_accepted,
+                    w->mutation_ladder.swaps_attempted,
+                    w->stress_ladder.flagged_lineage_count,
+                    archive::archive_size(w->archive));
         std::fflush(stdout);
     }
 
