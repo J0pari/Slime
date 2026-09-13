@@ -76,7 +76,7 @@ items:
       - integration/host_main.cu::step_generation
       - safety/alignment.cu::evaluate_stress_all
   I8:
-    status: partial
+    status: implemented
     mechanisms:
       - integration/host_main.cu::phase_trace
       - autodiff/warp_tape.cu::launch_backward_all
