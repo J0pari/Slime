@@ -1278,6 +1278,14 @@ inline void launch_backward_all(
     const bool bprof = std::getenv("COEVO_BACKWARD_PROFILE") != nullptr;
     double t_ref = 0.0, t_wg = 0.0, t_sg = 0.0, t_rd = 0.0;
     double t_wgk = 0.0, t_ri = 0.0, t_rf = 0.0;
+    auto bprof_sync = [&] {
+        cudaError_t e = cudaStreamSynchronize(stream);
+        if (e != cudaSuccess) {
+            std::printf("[FATAL] CUDA backward profile sync failed: %s\n",
+                        cudaGetErrorString(e));
+            std::abort();
+        }
+    };
     auto mark = [] { return std::chrono::steady_clock::now(); };
     auto since = [](std::chrono::steady_clock::time_point a) {
         return std::chrono::duration<double, std::milli>(
@@ -1295,7 +1303,7 @@ inline void launch_backward_all(
             bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
                 d_weights, d_eff_weights, d_coeffs, prev, next, alpha, N);
         }
-        if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_ref += since(mref); }
+        if (bprof) { bprof_sync(); t_ref += since(mref); }
 
         for (int local_step = CHECKPOINT_INTERVAL; local_step >= 1; --local_step) {
             const __half* rc = ws.d_seg_states + (local_step - 1) * seg_stride;
@@ -1308,23 +1316,23 @@ inline void launch_backward_all(
                 ws.d_cell_stage, ws.d_seed_aux, d_organisms,
                 rc, dA, d_grads, ws.d_perc, alpha,
                 btraj_slot_for_step(abs_step), N);
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_wgk += since(m0); m0 = mark(); }
+            if (bprof) { bprof_sync(); t_wgk += since(m0); m0 = mark(); }
             bwd_reduce_inter_kernel<<<N * PERC_DIM, BWD_THREADS, 0, stream>>>(
                 ws.d_cell_stage, d_grads, N);
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_ri += since(m0); m0 = mark(); }
+            if (bprof) { bprof_sync(); t_ri += since(m0); m0 = mark(); }
             bwd_reduce_flow_kernel<<<N * CA_CHANNELS, BWD_THREADS, 0, stream>>>(
                 ws.d_cell_stage, d_grads, N);
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_rf += since(m0); m0 = mark(); }
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_wg += since(m0); m0 = mark(); }
+            if (bprof) { bprof_sync(); t_rf += since(m0); m0 = mark(); }
+            if (bprof) { bprof_sync(); t_wg += since(m0); m0 = mark(); }
             // Phase B: stencil gather (CA d_curr) + RD gather (RD d_curr).
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
                 d_weights, d_eff_weights, dA, dB, ws.d_perc, N);
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_sg += since(m0); m0 = mark(); }
+            if (bprof) { bprof_sync(); t_sg += since(m0); m0 = mark(); }
             if (d_coeffs != nullptr) {
                 bwd_rd_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
                     rc, ws.d_rd_g, d_coeffs, dB, N);
             }
-            if (bprof) { cudaError_t _bs = cudaStreamSynchronize(stream); (void)_bs; t_rd += since(m0); }
+            if (bprof) { bprof_sync(); t_rd += since(m0); }
 
             // Swap dA/dB.
             float* tmp2 = dA; dA = dB; dB = tmp2;

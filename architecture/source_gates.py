@@ -589,6 +589,26 @@ def gate_enum_no_silent_default(files: dict[str, list[str]],
                 "switch default silently handles a value"))
 
 
+# ---- Gate: no masked CUDA errors -------------------------------------------
+# Discarding a CUDA call's result with `(void)` hides a failure the pipeline
+# would otherwise report; every CUDA result is either checked or the call is
+# removed. The scan is line-local: a line carrying both a CUDA call and a
+# `(void)` discard is an offense.
+def gate_no_masked_cuda_errors(files: dict[str, list[str]],
+                               report: GateReport) -> None:
+    for path, lines in files.items():
+        if not path.endswith((".cu", ".cuh")):
+            continue
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            if "cuda" in line and "(void)" in line:
+                report.findings.append(Finding(
+                    "no_masked_cuda_errors", path, i,
+                    "CUDA result discarded with (void)"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -603,6 +623,7 @@ ALL_GATES = [
     gate_schedule_host_only,
     gate_numeric_policy,
     gate_enum_no_silent_default,
+    gate_no_masked_cuda_errors,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

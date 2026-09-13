@@ -177,6 +177,20 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_no_masked_cuda_errors_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_no_masked_cuda_errors(
+            files_from({"autodiff/warp_tape.cu":
+                        "cudaError_t e = cudaStreamSynchronize(stream); (void)e;"}),
+            report)
+        self.assertFalse(report.ok, "masked CUDA error was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_no_masked_cuda_errors(
+            files_from({"autodiff/warp_tape.cu":
+                        "cudaError_t e = cudaStreamSynchronize(stream);\n"
+                        "if (e != cudaSuccess) std::abort();"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_enum_no_silent_default_catches_plant(self):
         report = source_gates.GateReport()
         source_gates.gate_enum_no_silent_default(
