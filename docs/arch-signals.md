@@ -7,6 +7,24 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 combined stress pass landed: `evaluate_stress_all` replaces
+  the six per-sub-population/per-role replays with one reference launch and
+  one stress launch over all 24 slots (staged images, task embeddings, and
+  nominal/permuted targets in shared World buffers). Measured stress
+  4.44 -> 0.84 s/generation (2-generation profile: 1676.64 ms / 2, 5.3x);
+  total generation ~9.3 s before the backward work. Observable output is
+  identical to the previous build on the same 3-generation run (every
+  [STRESS]/[DASHBOARD]/checkpoint line matches); the two builds' checkpoint
+  hashes differ in low-order float bytes, and a same-binary rerun also
+  produced a different hash, so checkpoint hashing is not currently a
+  determinism witness — the run-to-run difference needs attribution (the
+  printed state is identical, so it is below reporting precision). The
+  combined pass shares `d_sot_fwd_inputs`/`d_sot_descriptors`/`d_sot_bank_of`
+  with the SOT path, so those scratch buffers are now allocated for
+  STRESS_POOL_SIZE (24) slots; the 16-slot allocation was the cause of the
+  first launch's `invalid argument` + illegal access. The backward reduce
+  kernels gained shared-array padding (HIDDEN_DIM+1) to break bank conflicts
+  with unchanged summation order (weight_grad 21.5 -> 5.1 s/generation).
 - 2026-09-12: I8 profile correction. The "score+archive+PT" phase label
   included stress_cycle; splitting the trace shows score+archive+PT is
   1 ms/generation while stress is 12.9 s / 3 = 4.3 s/generation (15.5%).

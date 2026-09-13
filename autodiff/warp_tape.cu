@@ -769,22 +769,22 @@ __global__ void bwd_reduce_inter_kernel(const float* cell_stage,
     const float* perc_p = base + p * CELLS;
     const float* dpre = base + PERC_DIM * CELLS;
 
-    __shared__ float part[BWD_THREADS * HIDDEN_DIM];
+    __shared__ float part[BWD_THREADS * (HIDDEN_DIM + 1)];
     for (int h = 0; h < HIDDEN_DIM; ++h) {
-        part[threadIdx.x * HIDDEN_DIM + h] = 0.f;
+        part[threadIdx.x * (HIDDEN_DIM + 1) + h] = 0.f;
     }
     for (int cell = threadIdx.x; cell < CELLS; cell += BWD_THREADS) {
         float pv = perc_p[cell];
         for (int h = 0; h < HIDDEN_DIM; ++h) {
-            part[threadIdx.x * HIDDEN_DIM + h] += pv * dpre[h * CELLS + cell];
+            part[threadIdx.x * (HIDDEN_DIM + 1) + h] += pv * dpre[h * CELLS + cell];
         }
     }
     __syncthreads();
     for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride) {
             for (int h = 0; h < HIDDEN_DIM; ++h) {
-                part[threadIdx.x * HIDDEN_DIM + h] +=
-                    part[(threadIdx.x + stride) * HIDDEN_DIM + h];
+                part[threadIdx.x * (HIDDEN_DIM + 1) + h] +=
+                    part[(threadIdx.x + stride) * (HIDDEN_DIM + 1) + h];
             }
         }
         __syncthreads();
@@ -808,14 +808,14 @@ __global__ void bwd_reduce_flow_kernel(const float* cell_stage,
     const float* dstate_c = base + (PERC_DIM + 2 * HIDDEN_DIM) * CELLS
                           + c * CELLS;
 
-    __shared__ float part[BWD_THREADS * HIDDEN_DIM];
+    __shared__ float part[BWD_THREADS * (HIDDEN_DIM + 1)];
     for (int h = 0; h < HIDDEN_DIM; ++h) {
-        part[threadIdx.x * HIDDEN_DIM + h] = 0.f;
+        part[threadIdx.x * (HIDDEN_DIM + 1) + h] = 0.f;
     }
     for (int cell = threadIdx.x; cell < CELLS; cell += BWD_THREADS) {
         float dv = dstate_c[cell];
         for (int h = 0; h < HIDDEN_DIM; ++h) {
-            part[threadIdx.x * HIDDEN_DIM + h] +=
+            part[threadIdx.x * (HIDDEN_DIM + 1) + h] +=
                 hidden[h * CELLS + cell] * dv;
         }
     }
@@ -823,8 +823,8 @@ __global__ void bwd_reduce_flow_kernel(const float* cell_stage,
     for (int stride = BWD_THREADS / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride) {
             for (int h = 0; h < HIDDEN_DIM; ++h) {
-                part[threadIdx.x * HIDDEN_DIM + h] +=
-                    part[(threadIdx.x + stride) * HIDDEN_DIM + h];
+                part[threadIdx.x * (HIDDEN_DIM + 1) + h] +=
+                    part[(threadIdx.x + stride) * (HIDDEN_DIM + 1) + h];
             }
         }
         __syncthreads();

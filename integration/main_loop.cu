@@ -105,9 +105,9 @@ struct World {
     // SOT reference buffers (section 12): pre-allocated, not per-call.
     __half*           d_sot_temp_images;  // [SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3]
     float*            d_sot_task_emb;     // [TASK_EMBED_DIM]
-    ForwardInputs*    d_sot_fwd_inputs;   // [SOT_MAX_REFS]
-    float*            d_sot_descriptors;  // [SOT_MAX_REFS * BMAP_DIM]
-    int*              d_sot_bank_of;      // [SOT_MAX_REFS]
+    ForwardInputs*    d_sot_fwd_inputs;   // [STRESS_POOL_SIZE] shared scratch
+    float*            d_sot_descriptors;  // [STRESS_POOL_SIZE * BMAP_DIM]
+    int*              d_sot_bank_of;      // [STRESS_POOL_SIZE]
     nca::OrganismState* d_sot_ref_organisms;  // [SOT_MAX_REFS] reference scratch weight bank per reference
 
     // PT swap temp buffers (section 13): pre-allocated for full data swap.
@@ -137,7 +137,10 @@ struct World {
     // elevated-density batch image buffer, nominal+permuted predictor target
     // rows, and the per-slot SOT readback.
     float* d_stress_eff_weights;   // [STRESS_POOL_SIZE * TOTAL_WEIGHTS]
-    __half* d_stress_batch_image;  // [CLASSIFIER_BATCH * GRID*GRID*3]
+    __half* d_stress_batch_image;  // [3][CLASSIFIER_BATCH] marked images
+    __half* d_stress_ref_images;   // [3][SOT_SUBBATCH] un-marked images
+    float* d_stress_task_embs;     // [3][TASK_EMBED_DIM]
+    nca::OrganismState* d_stress_ref_organisms;  // [STRESS_POOL_SIZE]
     float* d_stress_targets;       // [2 * STRESS_POOL_SIZE * BMAP_DIM]
     float  h_stress_f_sot[STRESS_POOL_SIZE];
     curriculum::ClassifierBatch stress_batch;
@@ -223,8 +226,7 @@ struct World {
     PhaseGraph fg_optimizer;
     PhaseGraph fg_world_predict;
     PhaseGraph fg_world_train;
-    PhaseGraph fg_stress_cls[STRESS_SUBPOP_COUNT];
-    PhaseGraph fg_stress_pred[STRESS_SUBPOP_COUNT];
+    PhaseGraph fg_stress;
     int* d_ref_step;   // device step for the reference train kernel (graph-stable)
 
     cudaStream_t      stream;

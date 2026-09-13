@@ -48,8 +48,7 @@ items:
       - integration/host_main.cu::score_organisms
       - safety/stress_ladder.cuh::refresh_stress_slots
       - safety/stress_ladder.cuh::update_stress_failures
-      - safety/alignment.cu::evaluate_stress_classifiers
-      - safety/alignment.cu::evaluate_stress_predictors
+      - safety/alignment.cu::evaluate_stress_all
       - integration/host_main.cu::stress_cycle
   I5:
     status: implemented
@@ -75,8 +74,7 @@ items:
     mechanisms:
       - integration/phase_graph.cuh::phase_run
       - integration/host_main.cu::step_generation
-      - safety/alignment.cu::evaluate_stress_classifiers
-      - safety/alignment.cu::evaluate_stress_predictors
+      - safety/alignment.cu::evaluate_stress_all
   I8:
     status: partial
     mechanisms:

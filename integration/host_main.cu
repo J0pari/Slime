@@ -178,7 +178,10 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_ref_surprise, PROBE_BATCH * sizeof(float)), "alloc d_ref_surprise");
     CUDA_ABORT(cudaMalloc(&w->d_ref_step, sizeof(int)), "alloc d_ref_step");
     CUDA_ABORT(cudaMalloc(&w->d_stress_eff_weights, STRESS_POOL_SIZE * TOTAL_WEIGHTS * sizeof(float)), "alloc d_stress_eff_weights");
-    CUDA_ABORT(cudaMalloc(&w->d_stress_batch_image, cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_batch_image");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_batch_image, STRESS_SUBPOP_COUNT * cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_batch_image");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_ref_images, STRESS_SUBPOP_COUNT * cur::SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_ref_images");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_task_embs, STRESS_SUBPOP_COUNT * TASK_EMBED_DIM * sizeof(float)), "alloc d_stress_task_embs");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_ref_organisms, STRESS_POOL_SIZE * sizeof(OrganismState)), "alloc d_stress_ref_organisms");
     CUDA_ABORT(cudaMalloc(&w->d_stress_targets, 2 * STRESS_POOL_SIZE * BMAP_DIM * sizeof(float)), "alloc d_stress_targets");
     CUDA_ABORT(cudaMalloc(&w->d_rd_coeffs, TOTAL_ORG * sizeof(nca::rd::Coefficients)), "alloc d_rd_coeffs");
     CUDA_ABORT(cudaMalloc(&w->d_sot_ref_coeffs, cur::SOT_MAX_REFS * sizeof(nca::rd::Coefficients)), "alloc d_sot_ref_coeffs");
@@ -192,9 +195,9 @@ static bool alloc_gpu_buffers(World* w) {
     // SOT reference buffers (section 12): pre-allocated, bounded by SOT_MAX_REFS.
     CUDA_ABORT(cudaMalloc(&w->d_sot_temp_images, cur::SOT_SUBBATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_sot_temp_images");
     CUDA_ABORT(cudaMalloc(&w->d_sot_task_emb,    TASK_EMBED_DIM * sizeof(float)), "alloc d_sot_task_emb");
-    CUDA_ABORT(cudaMalloc(&w->d_sot_fwd_inputs,  cur::SOT_MAX_REFS * sizeof(ForwardInputs)), "alloc d_sot_fwd_inputs");
-    CUDA_ABORT(cudaMalloc(&w->d_sot_descriptors, cur::SOT_MAX_REFS * BMAP_DIM * sizeof(float)), "alloc d_sot_descriptors");
-    CUDA_ABORT(cudaMalloc(&w->d_sot_bank_of,     cur::SOT_MAX_REFS * sizeof(int)), "alloc d_sot_bank_of");
+    CUDA_ABORT(cudaMalloc(&w->d_sot_fwd_inputs,  STRESS_POOL_SIZE * sizeof(ForwardInputs)), "alloc d_sot_fwd_inputs");
+    CUDA_ABORT(cudaMalloc(&w->d_sot_descriptors, STRESS_POOL_SIZE * BMAP_DIM * sizeof(float)), "alloc d_sot_descriptors");
+    CUDA_ABORT(cudaMalloc(&w->d_sot_bank_of,     STRESS_POOL_SIZE * sizeof(int)), "alloc d_sot_bank_of");
     CUDA_ABORT(cudaMalloc(&w->d_sot_ref_organisms, cur::SOT_MAX_REFS * sizeof(OrganismState)), "alloc d_sot_ref_organisms");
 
     // PT swap temp buffers (section 13): one organism's worth each.
@@ -272,6 +275,9 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_ref_step), "free d_ref_step");
     CUDA_WARN(cudaFree(w->d_stress_eff_weights), "free d_stress_eff_weights");
     CUDA_WARN(cudaFree(w->d_stress_batch_image), "free d_stress_batch_image");
+    CUDA_WARN(cudaFree(w->d_stress_ref_images), "free d_stress_ref_images");
+    CUDA_WARN(cudaFree(w->d_stress_task_embs), "free d_stress_task_embs");
+    CUDA_WARN(cudaFree(w->d_stress_ref_organisms), "free d_stress_ref_organisms");
     CUDA_WARN(cudaFree(w->d_stress_targets), "free d_stress_targets");
     CUDA_WARN(cudaFree(w->d_rd_coeffs), "free d_rd_coeffs");
     CUDA_WARN(cudaFree(w->d_sot_ref_coeffs), "free d_sot_ref_coeffs");
@@ -646,27 +652,52 @@ static bool stress_cycle(World* w, int gen) {
 
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) w->h_stress_f_sot[s] = 1.f;
 
+    // Assemble the three elevated batches once and stage every image and task
+    // embedding in combined host arrays, so one reference launch and one
+    // stress launch carry all 24 slots (I8): the per-sub-population replays
+    // were six latency-bound sequences of four-block forwards.
+    static __half h_batch_images[STRESS_SUBPOP_COUNT * cur::CLASSIFIER_BATCH
+                                 * IMG_HALVES];
+    static __half h_unmarked[STRESS_SUBPOP_COUNT * cur::SOT_SUBBATCH
+                             * IMG_HALVES];
+    static float h_task_embs[STRESS_SUBPOP_COUNT * TASK_EMBED_DIM];
     for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
         cur::assemble_classifier_batch(&w->stress_batch,
                                        STRESS_SOT_DENSITIES[p],
                                        w->host_sot_key, &w->rng);
-        TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_batch_image,
-                        w->stress_batch.image,
-                        cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3
-                            * sizeof(__half),
-                        cudaMemcpyHostToDevice, w->stream),
-                       "upload stress batch image");
-        if (!safety::alignment::evaluate_stress_classifiers(
-                w->d_organisms, w->d_weights, w->d_stress_eff_weights,
-                w->d_rd_coeffs + POOL_SIZE + p * STRESS_SUBPOP_SIZE,
-                w->stress_batch, w->d_stress_batch_image, w->host_sot_key,
-                p, w->h_stress_f_sot, w->d_sot_temp_images, w->d_sot_task_emb,
-                w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
-                w->d_sot_ref_organisms, &w->fg_stress_cls[p],
-                TOTAL_WEIGHTS, w->stream)) {
-            return false;
+        std::memcpy(&h_batch_images[p * cur::CLASSIFIER_BATCH * IMG_HALVES],
+                    w->stress_batch.image,
+                    cur::CLASSIFIER_BATCH * IMG_HALVES * sizeof(__half));
+        std::memcpy(&h_task_embs[p * TASK_EMBED_DIM],
+                    w->stress_batch.task_embedding,
+                    TASK_EMBED_DIM * sizeof(float));
+        __half scratch[IMG_HALVES];
+        int n_sot = 0;
+        for (int s = 0; s < cur::CLASSIFIER_BATCH; ++s) {
+            if (!w->stress_batch.is_sot[s]) continue;
+            if (n_sot >= cur::SOT_SUBBATCH) break;
+            __half* dst = &h_unmarked[(p * cur::SOT_SUBBATCH + n_sot)
+                                      * IMG_HALVES];
+            std::memcpy(dst, &w->stress_batch.image[s * IMG_HALVES],
+                        IMG_HALVES * sizeof(__half));
+            cur::apply_sot_permutation(dst, w->host_sot_key, true, scratch);
+            n_sot++;
         }
     }
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_batch_image, h_batch_images,
+                    STRESS_SUBPOP_COUNT * cur::CLASSIFIER_BATCH * IMG_HALVES
+                        * sizeof(__half),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress batch images");
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_ref_images, h_unmarked,
+                    STRESS_SUBPOP_COUNT * cur::SOT_SUBBATCH * IMG_HALVES
+                        * sizeof(__half),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress reference images");
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_task_embs, h_task_embs,
+                    STRESS_SUBPOP_COUNT * TASK_EMBED_DIM * sizeof(float),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress task embeddings");
 
     // Predictor half: nominal and pi-permuted target rows.
     uint8_t perm[BMAP_DIM], inv[BMAP_DIM];
@@ -695,20 +726,21 @@ static bool stress_cycle(World* w, int gen) {
                     TASK_EMBED_DIM * sizeof(float),
                     cudaMemcpyHostToDevice, w->stream),
                    "upload stress predictor task embedding");
-    for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
-        if (!safety::alignment::evaluate_stress_predictors(
-                w->d_organisms, w->d_weights, w->d_stress_eff_weights,
-                w->d_rd_coeffs + POOL_SIZE + p * STRESS_SUBPOP_SIZE
-                    + STRESS_SUBPOP_SIZE / 2,
-                w->d_stress_targets,
-                w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
-                inv, p, w->h_stress_f_sot, w->d_sot_task_emb,
-                w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
-                w->d_sot_ref_organisms, &w->fg_stress_pred[p],
-                TOTAL_WEIGHTS, w->stream)) {
-            return false;
-        }
+
+    if (!safety::alignment::evaluate_stress_all(
+            w->d_organisms, w->d_weights, w->d_stress_eff_weights,
+            w->d_rd_coeffs + POOL_SIZE,
+            w->d_stress_batch_image, w->d_stress_ref_images,
+            w->d_stress_task_embs,
+            w->d_stress_targets,
+            w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
+            inv, w->d_sot_task_emb, w->h_stress_f_sot,
+            w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
+            w->d_stress_ref_organisms, &w->fg_stress,
+            TOTAL_WEIGHTS, w->stream)) {
+        return false;
     }
+
     safety::pt::update_stress_failures(&w->stress_ladder, w->h_stress_f_sot,
                                        gen);
     return true;
