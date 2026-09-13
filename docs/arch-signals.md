@@ -50,7 +50,9 @@ cuda_engineering.md, and construction_plan.md.
   Remaining for the class: index variables that are semantically slots are
   still `int` in most places. `PoolSlot` is now adopted by the stress
   ladder's source back-pointer (the field that sits next to a `LineageId` in
-  the same struct, where a mix-up would be a real bug). `PtSlot` is
+  the same struct, where a mix-up would be a real bug) and by
+  PredictorBatch's target pool slot (which sits beside `target_lineage_id`
+  and whose -1 probe sentinel is now the invalid default). `PtSlot` is
   now adopted by the PT swap functions and their call sites. `GenomeSeed` is
   now adopted by the genome codec (read_seed/write_seed and the delta-seed
   PCG32 derivation) with the one caller and test constructing it explicitly.
