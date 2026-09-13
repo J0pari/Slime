@@ -21,7 +21,10 @@ or explicitly deferred with a recorded decision.
 - [x] C2 Surprise population identity: placeholder training and the surprise
   computation (including the predictor ensemble) now precede the spawn wave;
   the `surprise_before_spawn` source gate pins the order.
-- [ ] C3 Role-gradient PT identity: forced cross-role swap witness.
+- [x] C3 Role-gradient PT identity: the alignment kernel groups by a
+  post-PT role buffer (uploaded after the swap), and the cross-role swap
+  witness is written in `tests/evolution_regression.cu` (executes in VERIFY
+  with the rest of the GPU suite).
 - [ ] C8 Archive attribution: decide historical-attribution versus
   replay-equivalent entries in the blueprint and document the shared-base
   interaction.

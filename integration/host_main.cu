@@ -138,6 +138,7 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_eff_weights,  POOL_SIZE * TOTAL_WEIGHTS * sizeof(float)), "alloc d_eff_weights");
     CUDA_ABORT(cudaMalloc(&w->d_deltas,       POOL_SIZE * sizeof(genome::DeltaWeights)), "alloc d_deltas");
     CUDA_ABORT(cudaMalloc(&w->d_fwd_inputs,   POOL_SIZE * sizeof(ForwardInputs)), "alloc d_fwd_inputs");
+    CUDA_ABORT(cudaMalloc(&w->d_roles,        POOL_SIZE * sizeof(Role)), "alloc d_roles");
     CUDA_ABORT(cudaMalloc(&w->d_checkpoints,  POOL_SIZE * sizeof(CheckpointBuffer)), "alloc d_checkpoints");
     CUDA_ABORT(cudaMalloc(&w->d_grads,        POOL_SIZE * sizeof(GradBuffers)), "alloc d_grads");
     CUDA_ABORT(cudaMalloc(&w->d_mean_grad,    TOTAL_WEIGHTS * sizeof(float)), "alloc d_mean_grad");
@@ -219,6 +220,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_eff_weights), "free d_eff_weights");
     CUDA_WARN(cudaFree(w->d_deltas), "free d_deltas");
     CUDA_WARN(cudaFree(w->d_fwd_inputs), "free d_fwd_inputs");
+    CUDA_WARN(cudaFree(w->d_roles), "free d_roles");
     CUDA_WARN(cudaFree(w->d_checkpoints), "free d_checkpoints");
     CUDA_WARN(cudaFree(w->d_grads), "free d_grads");
     CUDA_WARN(cudaFree(w->d_mean_grad), "free d_mean_grad");
@@ -1158,6 +1160,13 @@ bool step_generation(World* w) {
     // ---- Stress ladder (S-003, I4): refresh, evaluate, flag ----
     if (!stress_cycle(w, gen)) return false;
 
+    // ---- T3a: post-PT roles for gradient attribution (C3) ----
+    // The alignment kernel groups gradients by the organism's post-swap role;
+    // the per-generation ForwardInputs roles are stale after a PT swap.
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_roles, w->org_table.role,
+                    POOL_SIZE * sizeof(Role), cudaMemcpyHostToDevice,
+                    w->stream), "T3a roles");
+
     if (!phase_trace("score+archive+PT", gen, w->stream)) return false;
 
     // ---- T3: H→D seed_grad (AFTER PT swaps) ----
@@ -1206,7 +1215,7 @@ bool step_generation(World* w) {
     // Enqueued after the telemetry memset so the role sums survive; stream
     // order places this before the readback below.
     if (!optimizer::launch_role_grad_alignment(
-            w->d_grads, w->d_fwd_inputs, POOL_SIZE, w->d_tel, w->stream)) {
+            w->d_grads, w->d_roles, POOL_SIZE, w->d_tel, w->stream)) {
         return false;
     }
     autodiff::launch_state_saturation(w->d_checkpoints, w->d_organisms,

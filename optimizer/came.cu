@@ -335,7 +335,7 @@ inline bool launch_telemetry_kernels(
 // TelemetryScalars buffer already (launch_telemetry_kernels does).
 __global__ void role_grad_alignment_kernel(
     const GradBuffers* grads,
-    const nca::ForwardInputs* inputs,
+    const Role* roles,        // post-PT role per pool slot
     int n_organisms,
     TelemetryScalars* out)
 {
@@ -346,7 +346,7 @@ __global__ void role_grad_alignment_kernel(
     float sum_p = 0.f;
     for (int org = 0; org < n_organisms; ++org) {
         float g = grads[org].dW[i];
-        if (::canonical_role(inputs[org].role) == Role::Classifier) {
+        if (::canonical_role(roles[org]) == Role::Classifier) {
             sum_c += g;
         } else {
             sum_p += g;
@@ -359,14 +359,14 @@ __global__ void role_grad_alignment_kernel(
 
 inline bool launch_role_grad_alignment(
     const GradBuffers* d_grads,
-    const nca::ForwardInputs* d_inputs,
+    const Role* d_roles,
     int n_organisms,
     TelemetryScalars* d_tel,
     cudaStream_t stream)
 {
     int grid = (TOTAL_WEIGHTS + 255) / 256;
     role_grad_alignment_kernel<<<grid, 256, 0, stream>>>(
-        d_grads, d_inputs, n_organisms, d_tel);
+        d_grads, d_roles, n_organisms, d_tel);
     cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::printf("[FATAL] CUDA role grad alignment launch failed: %s\n",

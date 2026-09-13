@@ -79,6 +79,7 @@ struct World {
     float*            d_eff_weights;      // [POOL_SIZE * TOTAL_WEIGHTS] W_shared + genome delta [identity:organism] [lifetime:rollout] [crosses:pt=effective_weights]
     genome::DeltaWeights* d_deltas;       // [POOL_SIZE] device copy of org_table.deltas (derived cache, re-uploaded each T1)
     ForwardInputs*    d_fwd_inputs;       // [POOL_SIZE] [identity:organism] [lifetime:generation]
+    Role*             d_roles;            // [POOL_SIZE] post-PT role per slot (derived each generation)
     CheckpointBuffer* d_checkpoints;      // [POOL_SIZE] [identity:organism] [lifetime:rollout] [crosses:pt=checkpoint]
     GradBuffers*      d_grads;            // [POOL_SIZE] [identity:organism] [lifetime:rollout] [crosses:pt=grads]
     BackwardWorkspace bwd_workspace;      // 2 d_state + d_perc + 2 recomp (recomputed each backward)

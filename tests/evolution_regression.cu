@@ -988,10 +988,10 @@ static int test_role_grad_alignment() {
 
     const int N = 3;  // two classifiers, one predictor
     GradBuffers* d_grads = nullptr;
-    ForwardInputs* d_inputs = nullptr;
+    Role* d_roles = nullptr;
     TelemetryScalars* d_tel = nullptr;
     CUDA_CHECK(cudaMalloc(&d_grads, sizeof(GradBuffers) * N));
-    CUDA_CHECK(cudaMalloc(&d_inputs, sizeof(ForwardInputs) * N));
+    CUDA_CHECK(cudaMalloc(&d_roles, sizeof(Role) * N));
     CUDA_CHECK(cudaMalloc(&d_tel, sizeof(TelemetryScalars)));
     CUDA_CHECK(cudaMemset(d_tel, 0, sizeof(TelemetryScalars)));
 
@@ -1004,17 +1004,13 @@ static int test_role_grad_alignment() {
                 static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
         }
     }
-    ForwardInputs h_inputs[N];
-    std::memset(h_inputs, 0, sizeof(h_inputs));
-    h_inputs[0].role = Role::Classifier;
-    h_inputs[1].role = Role::Classifier;
-    h_inputs[2].role = Role::Predictor;
+    Role h_roles[N] = {Role::Classifier, Role::Classifier, Role::Predictor};
 
     CUDA_CHECK(cudaMemcpy(d_grads, h_grads, sizeof(GradBuffers) * N,
                           cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_inputs, h_inputs, sizeof(ForwardInputs) * N,
+    CUDA_CHECK(cudaMemcpy(d_roles, h_roles, sizeof(Role) * N,
                           cudaMemcpyHostToDevice));
-    if (!optimizer::launch_role_grad_alignment(d_grads, d_inputs, N, d_tel, 0)) {
+    if (!optimizer::launch_role_grad_alignment(d_grads, d_roles, N, d_tel, 0)) {
         return 1;
     }
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -1054,8 +1050,40 @@ static int test_role_grad_alignment() {
     CHECK(std::fabs(got_cos - ref_cos) < 1e-4f,
           "role gradient cosine matches host reference");
 
+    // Cross-role swap: org 0 becomes predictor, org 2 becomes classifier.
+    // Attribution must follow the role buffer, not any stale per-generation
+    // forward-input roles.
+    h_roles[0] = Role::Predictor;
+    h_roles[2] = Role::Classifier;
+    CUDA_CHECK(cudaMemcpy(d_roles, h_roles, sizeof(Role) * N,
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_tel, 0, sizeof(TelemetryScalars)));
+    if (!optimizer::launch_role_grad_alignment(d_grads, d_roles, N, d_tel, 0)) {
+        return 1;
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(&h_tel, d_tel, sizeof(TelemetryScalars),
+                          cudaMemcpyDeviceToHost));
+    dot = 0.0; nc = 0.0; np = 0.0;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        double gc = static_cast<double>(h_grads[1].dW[i])
+                  + static_cast<double>(h_grads[2].dW[i]);
+        double gp = static_cast<double>(h_grads[0].dW[i]);
+        dot += gc * gp;
+        nc  += gc * gc;
+        np  += gp * gp;
+    }
+    ref_cos = static_cast<float>(dot / std::sqrt(nc * np));
+    got_cos = h_tel.role_grad_dot
+            / (std::sqrt(h_tel.role_grad_norm_sq[0])
+               * std::sqrt(h_tel.role_grad_norm_sq[1]));
+    std::printf("  cross-role swap: cos device=%.6f host=%.6f\n",
+                got_cos, ref_cos);
+    CHECK(std::fabs(got_cos - ref_cos) < 1e-4f,
+          "post-swap role attribution follows the role buffer");
+
     cudaFree(d_grads);
-    cudaFree(d_inputs);
+    cudaFree(d_roles);
     cudaFree(d_tel);
     return 0;
 }
