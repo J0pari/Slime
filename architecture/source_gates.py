@@ -609,6 +609,54 @@ def gate_no_masked_cuda_errors(files: dict[str, list[str]],
                     "CUDA result discarded with (void)"))
 
 
+# ---- Gate: no unchecked error variables ------------------------------------
+# A `cudaError_t x = ...` whose name is never compared or passed on stores a
+# failure nobody reads. The scan is per file: the name must reappear in a
+# comparison or another assignment after its declaration.
+_ERROR_VAR_RE = re.compile(r"cudaError_t\s+(\w+)\s*=")
+
+
+def gate_no_unchecked_error_vars(files: dict[str, list[str]],
+                                 report: GateReport) -> None:
+    for path, lines in files.items():
+        if not path.endswith((".cu", ".cuh")):
+            continue
+        text = "\n".join(lines)
+        for m in _ERROR_VAR_RE.finditer(text):
+            name = m.group(1)
+            rest = text[m.end():]
+            if re.search(rf"\b{re.escape(name)}\b\s*(?:!=|==|\))", rest) \
+                    or re.search(rf"if\s*\(\s*{re.escape(name)}\b", rest) \
+                    or re.search(rf"\b{re.escape(name)}\b\s*=\s*", rest):
+                continue
+            line = text[:m.start()].count("\n") + 1
+            report.findings.append(Finding(
+                "no_unchecked_error_vars", path, line,
+                f"cudaError_t {name} is never checked"))
+
+
+# ---- Gate: no value-to-literal ternary collapse ----------------------------
+# `x ? x : "literal"` substitutes a fabricated string when x is absent; the
+# honest form branches on the absence itself. (Boolean-to-label mappings like
+# `flag ? "yes" : "no"` are presentation and stay allowed.)
+_VALUE_COLLAPSE_RE = re.compile(r"\b(\w+)\s*\?\s*\1\s*:\s*\"")
+
+
+def gate_no_value_ternary_string_default(files: dict[str, list[str]],
+                                         report: GateReport) -> None:
+    for path, lines in files.items():
+        if not path.endswith((".cu", ".cuh")):
+            continue
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            if _VALUE_COLLAPSE_RE.search(line):
+                report.findings.append(Finding(
+                    "no_value_ternary_string_default", path, i,
+                    "ternary substitutes a string literal for an absent value"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -624,6 +672,8 @@ ALL_GATES = [
     gate_numeric_policy,
     gate_enum_no_silent_default,
     gate_no_masked_cuda_errors,
+    gate_no_unchecked_error_vars,
+    gate_no_value_ternary_string_default,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

@@ -9,25 +9,22 @@ cuda_engineering.md, and construction_plan.md.
 
 - 2026-09-12: Fallback/default audit opened (type-theory pass, inspired by
   KanForge's sum-type discipline and training-architecture's AST scanners).
-  Eliminated so far: the one silent switch default (`OperatorCommand`, now a
-  compile error on new variants; `gate_enum_no_silent_default`); seven masked
-  CUDA syncs in the BPROFILE path (`gate_no_masked_cuda_errors`). Existing
-  coverage: numeric literals at live seams (`gate_numeric_policy`), ambient
-  RNG, managed memory, unchecked CUDA calls, bridge code. Remaining classes,
-  each needing its own scan + negative test before it can be called closed:
-  (1) conditional literal defaults in C++ (`cond ? value : literal` where
-  the literal is not numeric — the numeric gate sees numbers only); (2)
-  environment reads that substitute a literal when unset; (3) null-pointer
-  early returns that turn a failure into a silent no-op; (4) error codes
-  assigned and then ignored outside the `(void)` pattern (e.g. a status
-  stored but never branched on); (5) artifact parsing that defaults missing
-  fields instead of refusing (the parse-don't-validate class; the contracts
-  JSONs and the scheduler pin are the surfaces); (6) interchangeable id
-  types (`lineage_id`, claim ids, job ids) that no compiler distinguishes —
-  the branded-type analog in C++ is a strong typedef, and the architecture
-  compiler's referential checks only cover the registry, not runtime
-  wiring. Until each class has a failing witness of its own, the audit is
-  incomplete; none of the above should be described as closed.
+  Closed with gates and negative tests: silent switch defaults
+  (`gate_enum_no_silent_default`; the one offense removed), masked CUDA
+  results (`gate_no_masked_cuda_errors`; seven offenses, all introduced this
+  session, fixed), stored-but-unchecked `cudaError_t` variables
+  (`gate_no_unchecked_error_vars`; scan found none), value-to-literal ternary
+  collapse `x ? x : "literal"` (`gate_no_value_ternary_string_default`; one
+  offense in the startup banner fixed), and unreadable evidence manifests
+  (`load_manifests` now raises instead of silently dropping a manifest, and a
+  missing `result` is refused; negative tests in test_architecture.py).
+  Environment reads were scanned clean: all three `getenv` uses are presence
+  gates for COEVO_* diagnostics, no literal substitution. Still open: null
+  early-returns that turn failure into a silent no-op (class 3); artifact
+  parsers other than evidence manifests, e.g. the YAML registries (class 5,
+  partially closed); interchangeable runtime id types (class 6, no strong
+  typedefs yet). Until those have failing witnesses of their own, the audit
+  is incomplete; do not describe them as closed.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register

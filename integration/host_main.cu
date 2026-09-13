@@ -1905,9 +1905,13 @@ int main(int argc, char** argv) {
     }
 
     std::printf("Slime Evolution — co-evolving NCA system\n");
-    std::printf("%s run: %d generations%s\n",
-                resume ? "Resuming" : "Fresh", n_gen,
-                ckpt_path ? ckpt_path : "");
+    if (ckpt_path != nullptr) {
+        std::printf("%s run: %d generations, checkpoints at %s\n",
+                    resume ? "Resuming" : "Fresh", n_gen, ckpt_path);
+    } else {
+        std::printf("%s run: %d generations, no checkpoint path\n",
+                    resume ? "Resuming" : "Fresh", n_gen);
+    }
     std::fflush(stdout);
 
     slime::integration::run(n_gen, resume, ckpt_path);

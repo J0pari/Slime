@@ -177,6 +177,32 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_no_value_ternary_string_default_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_no_value_ternary_string_default(
+            files_from({"integration/host_main.cu":
+                        'std::printf("%s", path ? path : "");'}), report)
+        self.assertFalse(report.ok, "value-to-literal collapse was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_no_value_ternary_string_default(
+            files_from({"safety/monitoring.cu":
+                        'printf("%s", ok ? "yes" : "no");'}), report2)
+        self.assertTrue(report2.ok)
+
+    def test_gate_no_unchecked_error_vars_catches_plant(self):
+        report = source_gates.GateReport()
+        source_gates.gate_no_unchecked_error_vars(
+            files_from({"nca/engine.cu":
+                        "cudaError_t e = cudaDeviceSynchronize();\n"
+                        "do_something();"}), report)
+        self.assertFalse(report.ok, "stored-but-unchecked error was not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_no_unchecked_error_vars(
+            files_from({"nca/engine.cu":
+                        "cudaError_t e = cudaDeviceSynchronize();\n"
+                        "if (e != cudaSuccess) std::abort();"}), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_no_masked_cuda_errors_catches_plant(self):
         report = source_gates.GateReport()
         source_gates.gate_no_masked_cuda_errors(
