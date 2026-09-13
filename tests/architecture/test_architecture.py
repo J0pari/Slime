@@ -177,6 +177,16 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_mutation_cuda_check(self):
+        # Mutation testing: removing a CUDA check (a bare cudaMalloc) must
+        # make the checked-CUDA gate go red; the S001.cuda-errors-fatal
+        # witnesses depend on that gate.
+        report = source_gates.GateReport()
+        source_gates.gate_checked_cuda_calls(
+            files_from({"nca/engine.cu": "cudaMalloc(&p, n);"}), report,
+            strict=False)
+        self.assertFalse(report.ok, "unchecked cudaMalloc was not caught")
+
     def test_gate_mutation_transaction_move(self):
         # Mutation testing: deleting one organism-identity move must make the
         # transaction check go red (the witnesses for S004 depend on it).

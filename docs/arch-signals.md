@@ -7,6 +7,13 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-13: Measurement incident: a 10-generation wall-clock run launched
+  directly while the 5000-generation scheduler job (233fc0ed8322d3ee) held
+  the GPU measured 306 s (30.6 s/gen) against the ~7.2 s/gen phase budget.
+  The run bypassed the GPU lock, so the number is contention, not a result,
+  and is void. The valid I8 budget remains the BPROFILE phase sums taken on
+  a free GPU; all future timing measurements go through
+  `gpu_client.py run --direct` (lock) and not while a scheduled job runs.
 - 2026-09-12: I8 win: the stress reference and stress rollouts are now one
   48-slot launch instead of two 24-slot launches (24 blocks on 30 SMs left
   SMs idle). Interleaved A/B: stress 916/843 -> 746/744 ms (~15%), FD suite
