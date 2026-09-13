@@ -7,6 +7,15 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: GPU scheduler re-pinned to 5d602cc... (schema gpu-scheduler/v1),
+  validated against the live scheduler (`gpu_client.py contract` ->
+  validated: true). The owner made resource declarations explicit: ramMib is
+  now required on every submission and diskMib on merge/export/scratch jobs,
+  because the scheduler no longer infers either. The client refuses a
+  submission without ramMib and a scratch-kind job without diskMib; the CLI
+  exposes --ram/--disk/--kind and the tests cover both refusals. The
+  strong-id family matrix was also completed: every cross-family conversion
+  is a compile error, not just the lineage pairs.
 - 2026-09-12: I8 measured rejection (third of its kind). The reduce kernels
   were rewritten to tile the cell axis through shared memory once per
   organism (one block per organism, one thread per output, serial 4096-long

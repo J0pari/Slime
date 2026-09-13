@@ -70,7 +70,8 @@ using ArchiveSlot = StrongId<ArchiveSlotTag, int>;
 using PtSlot     = StrongId<PtSlotTag, int>;
 
 // A strong id is not its raw integer and a raw integer is not a strong id;
-// both directions require an explicit act.
+// both directions require an explicit act. The full family matrix is
+// asserted so a new family cannot be introduced with a silent conversion.
 static_assert(!std::is_convertible_v<LineageId, std::uint32_t>,
               "LineageId must not decay to its raw type");
 static_assert(!std::is_convertible_v<std::uint32_t, LineageId>,
@@ -81,7 +82,25 @@ static_assert(!std::is_convertible_v<LineageId, PoolSlot>,
               "lineage and slot ids must not interchange");
 static_assert(!std::is_convertible_v<GenomeSeed, LineageId>,
               "genome seeds and lineage ids must not interchange");
+static_assert(!std::is_convertible_v<ArchiveSlot, LineageId>,
+              "archive slots and lineage ids must not interchange");
+static_assert(!std::is_convertible_v<PtSlot, LineageId>,
+              "PT slots and lineage ids must not interchange");
+static_assert(!std::is_convertible_v<PoolSlot, ArchiveSlot>,
+              "pool slots and archive slots must not interchange");
+static_assert(!std::is_convertible_v<PoolSlot, PtSlot>,
+              "pool slots and PT slots must not interchange");
+static_assert(!std::is_convertible_v<ArchiveSlot, PtSlot>,
+              "archive slots and PT slots must not interchange");
+static_assert(!std::is_convertible_v<GenomeSeed, PoolSlot>,
+              "genome seeds and pool slots must not interchange");
+static_assert(!std::is_convertible_v<GenomeSeed, ArchiveSlot>,
+              "genome seeds and archive slots must not interchange");
+static_assert(!std::is_convertible_v<GenomeSeed, PtSlot>,
+              "genome seeds and PT slots must not interchange");
 static_assert(std::is_trivially_copyable_v<LineageId>,
+              "strong ids must stay trivially copyable for device buffers");
+static_assert(std::is_trivially_copyable_v<ArchiveSlot>,
               "strong ids must stay trivially copyable for device buffers");
 
 }  // namespace slime
