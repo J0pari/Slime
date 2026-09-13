@@ -176,7 +176,14 @@ I9
   policy kills, operator cancellations, and dispatch refusals pass exit
   code None and never retry, so those still need manual resubmission.
   Resume-on-start makes each resubmission continue from the last chunk.
-  Observed contention: the operator floor cancels slime long runs while
+  Operator pressure explained and the bug confirmed: the scheduler
+  reserves 2048 MiB free RAM + 4096 MiB commit for the interactive tool;
+  after 4 strikes with no reclaimable victims it kills the running job.
+  The stop was labelled (transient) and called _maybe_retry(transient=True)
+  but the old _maybe_retry refused exit-None failures, so pressure-stopped
+  jobs died permanently. The owner fixed it: _maybe_retry now requeues
+  transient failures (pressure stops and blocked queues) with backoff and
+  bounded retries. Observed contention: the operator floor cancels slime long runs while
   its own jobs (priority -21/-22) run, and the global 6144 MiB free-RAM
   gate refuses dispatch; chunks were reduced to 25 (5000-gen) and 10
   (run55) so each preemption costs less and progress accumulates. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
