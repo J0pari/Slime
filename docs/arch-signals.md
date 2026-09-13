@@ -7,6 +7,18 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 profile (3 generations, RTX 3060 Laptop, --profile). Before
+  the cached-segment backward: backward 85.4 s (83.6%), score+archive+PT
+  13.2 s (13.0%), forward+descriptor+btraj 2.2 s (2.1%), SOT 1.1 s, total
+  102.1 s. After caching each segment's 16 states once instead of
+  re-forwarding quadratically (480 -> 64 CA steps per generation): backward
+  65.5 s, total 81.5 s. Target is 10 generations in 60 s (6 s/gen); current
+  ~27 s/gen. Remaining hotspot: the per-step weight-grad and stencil-gather
+  kernels, which round-trip the 48-wide d_perc buffer through global memory
+  (~500 MB per call: 64 orgs x 4096 cells x 48 floats written, then read
+  with a 9-neighbor stencil); fusing the two kernels (or staging d_perc per
+  tile) is the next optimization, then launch-level work. The measured
+  shared-memory-atomic variant remains rejected with data.
 - 2026-09-12: Cross-repo bridge admission assessment (non-normative; no code,
   no claims, no inventory change). An external `adaptive-ecology/v1` handoff
   from the LLM-Trader side was evaluated against the binding extension gate

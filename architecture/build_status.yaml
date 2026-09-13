@@ -78,6 +78,13 @@ items:
       - safety/alignment.cu::evaluate_stress_classifiers
       - safety/alignment.cu::evaluate_stress_predictors
   I8:
-    status: missing
+    status: partial
+    mechanisms:
+      - integration/host_main.cu::phase_trace
+      - autodiff/warp_tape.cu::launch_backward_all
+    missing:
+      - meet the 10-generations-in-60-seconds target (profile shows ~27 s/gen;
+        the backward's per-step weight-grad and stencil-gather kernels
+        dominate, see arch-signals)
   I9:
     status: missing

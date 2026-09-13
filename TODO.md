@@ -72,10 +72,12 @@ I7
   staging; the SOT reference stays host-interleaved by design.
 
 I8
-- [ ] Profile first (per-phase timing, then Nsight where available); the
-  shared-memory-atomic experiment is already measured and rejected.
+- [x] Profile first (per-phase timing table under --profile; cached-segment
+  backward removed the quadratic re-forward: total 102 -> 81.5 s for 3 gens).
 - [ ] Meet the 10-generation / 60-second gate with per-generation
-  checkpoint writes included.
+  checkpoint writes included. Remaining hotspot: the backward's per-step
+  weight-grad + stencil-gather d_perc round-trip (~500 MB/call); fuse or
+  tile, then launch-level work.
 
 I9
 - [ ] 5000-generation stability under all subsystems.

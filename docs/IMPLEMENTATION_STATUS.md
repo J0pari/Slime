@@ -14,7 +14,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | I5 | Global context channel (A-203, cuda_engineering §16) | implemented |
 | I6 | Reaction-diffusion activation (A-202, A-103) | implemented |
 | I7 | Phase graphs (A-102, cuda_engineering §11) | implemented |
-| I8 | Performance completion (cuda_engineering, acceptance) | missing |
+| I8 | Performance completion (cuda_engineering, acceptance) | partial |
 | I9 | Long-run hardening (S-001, Q-001) | missing |
 
 BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No GPU integration, acceptance, or production run is permitted, and `evidence.py record` refuses GPU manifests.

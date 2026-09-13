@@ -26,7 +26,7 @@ import gpu_client  # noqa: E402
 import progress_wrap  # noqa: E402
 from architecture import evidence  # noqa: E402
 
-CANONICAL_FP = "e176dd7756e5b7859eb8e45efc7da2b179327eb9b6fc2215a14fbc15b754b904"
+CANONICAL_FP = "fb83a1463c28afb0e32eceead47d875b0728cb24d263c4a05ceef27970b51907"
 
 FAKE_SCHEDULER = '''\
 import json, os, sys
