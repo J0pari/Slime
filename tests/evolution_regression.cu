@@ -438,8 +438,10 @@ static int test_forced_pt_swap() {
     ctx.predictor_loss_ema = pred_loss_ema;
     ctx.stream = 0;
 
-    safety::pt::swap_device_organism(ctx, 0, 1);
-    safety::pt::swap_host_organism(ctx, 0, 1);
+    safety::pt::swap_device_organism(ctx, slime::PtSlot(0),
+                                     slime::PtSlot(1));
+    safety::pt::swap_host_organism(ctx, slime::PtSlot(0),
+                                   slime::PtSlot(1));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     bool ok = true;
@@ -659,8 +661,10 @@ static int test_pt_swap_backward_correspondence() {
     ctx.predictor_loss_ema = pred_loss_ema2;
     ctx.stream = 0;
 
-    safety::pt::swap_device_organism(ctx, 0, 1);
-    safety::pt::swap_host_organism(ctx, 0, 1);
+    safety::pt::swap_device_organism(ctx, slime::PtSlot(0),
+                                     slime::PtSlot(1));
+    safety::pt::swap_host_organism(ctx, slime::PtSlot(0),
+                                   slime::PtSlot(1));
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Production order: T3 uploads the REORDERED host seed rows after PT.

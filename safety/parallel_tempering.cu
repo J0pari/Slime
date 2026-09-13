@@ -92,7 +92,7 @@ struct SwapContext {
 // Swap device data for two pool-slot organisms through temp buffer.
 // A ↔ B via: temp = A; A = B; B = temp. Returns false (with a report) if any
 // enqueue fails; the caller aborts the run.
-static inline bool swap_device_organism(SwapContext& ctx, int slot_a, int slot_b) {
+static inline bool swap_device_organism(SwapContext& ctx, PtSlot slot_a, PtSlot slot_b) {
     cudaError_t cuda_err = cudaSuccess;
     auto copy = [&](void* dst, const void* src, size_t bytes) {
         if (cuda_err != cudaSuccess) return;
@@ -100,29 +100,29 @@ static inline bool swap_device_organism(SwapContext& ctx, int slot_a, int slot_b
     };
 
     // OrganismState swap.
-    copy(ctx.d_swap_org, &ctx.d_organisms[slot_a], sizeof(OrganismState));
-    copy(&ctx.d_organisms[slot_a], &ctx.d_organisms[slot_b], sizeof(OrganismState));
-    copy(&ctx.d_organisms[slot_b], ctx.d_swap_org, sizeof(OrganismState));
+    copy(ctx.d_swap_org, &ctx.d_organisms[slot_a.value()], sizeof(OrganismState));
+    copy(&ctx.d_organisms[slot_a.value()], &ctx.d_organisms[slot_b.value()], sizeof(OrganismState));
+    copy(&ctx.d_organisms[slot_b.value()], ctx.d_swap_org, sizeof(OrganismState));
 
     // CheckpointBuffer swap.
-    copy(ctx.d_swap_ckpt, &ctx.d_checkpoints[slot_a], sizeof(CheckpointBuffer));
-    copy(&ctx.d_checkpoints[slot_a], &ctx.d_checkpoints[slot_b], sizeof(CheckpointBuffer));
-    copy(&ctx.d_checkpoints[slot_b], ctx.d_swap_ckpt, sizeof(CheckpointBuffer));
+    copy(ctx.d_swap_ckpt, &ctx.d_checkpoints[slot_a.value()], sizeof(CheckpointBuffer));
+    copy(&ctx.d_checkpoints[slot_a.value()], &ctx.d_checkpoints[slot_b.value()], sizeof(CheckpointBuffer));
+    copy(&ctx.d_checkpoints[slot_b.value()], ctx.d_swap_ckpt, sizeof(CheckpointBuffer));
 
     // GradBuffers swap.
-    copy(ctx.d_swap_grad, &ctx.d_grads[slot_a], sizeof(GradBuffers));
-    copy(&ctx.d_grads[slot_a], &ctx.d_grads[slot_b], sizeof(GradBuffers));
-    copy(&ctx.d_grads[slot_b], ctx.d_swap_grad, sizeof(GradBuffers));
+    copy(ctx.d_swap_grad, &ctx.d_grads[slot_a.value()], sizeof(GradBuffers));
+    copy(&ctx.d_grads[slot_a.value()], &ctx.d_grads[slot_b.value()], sizeof(GradBuffers));
+    copy(&ctx.d_grads[slot_b.value()], ctx.d_swap_grad, sizeof(GradBuffers));
 
     // Effective-weight bank swap: backward must re-forward each trajectory
     // with the phenotype that produced it.
     copy(ctx.d_swap_wbank,
-         &ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
+         &ctx.d_eff_weights[slot_a.value() * autodiff::TOTAL_WEIGHTS],
          autodiff::TOTAL_WEIGHTS * sizeof(float));
-    copy(&ctx.d_eff_weights[slot_a * autodiff::TOTAL_WEIGHTS],
-         &ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+    copy(&ctx.d_eff_weights[slot_a.value() * autodiff::TOTAL_WEIGHTS],
+         &ctx.d_eff_weights[slot_b.value() * autodiff::TOTAL_WEIGHTS],
          autodiff::TOTAL_WEIGHTS * sizeof(float));
-    copy(&ctx.d_eff_weights[slot_b * autodiff::TOTAL_WEIGHTS],
+    copy(&ctx.d_eff_weights[slot_b.value() * autodiff::TOTAL_WEIGHTS],
          ctx.d_swap_wbank,
          autodiff::TOTAL_WEIGHTS * sizeof(float));
 
@@ -136,36 +136,36 @@ static inline bool swap_device_organism(SwapContext& ctx, int slot_a, int slot_b
 // Swap host-side OrganismTable row data between two pool slots, including the
 // evaluation correlation state (seed gradients, batch assignment) so every
 // field belonging to a logical organism moves together.
-static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) {
+static inline void swap_host_organism(SwapContext& ctx, PtSlot slot_a, PtSlot slot_b) {
     // Genome.
-    genome::Genome tmp_genome = ctx.genomes[slot_a];
-    ctx.genomes[slot_a] = ctx.genomes[slot_b];
-    ctx.genomes[slot_b] = tmp_genome;
+    genome::Genome tmp_genome = ctx.genomes[slot_a.value()];
+    ctx.genomes[slot_a.value()] = ctx.genomes[slot_b.value()];
+    ctx.genomes[slot_b.value()] = tmp_genome;
 
     // DeltaWeights.
-    genome::DeltaWeights tmp_delta = ctx.deltas[slot_a];
-    ctx.deltas[slot_a] = ctx.deltas[slot_b];
-    ctx.deltas[slot_b] = tmp_delta;
+    genome::DeltaWeights tmp_delta = ctx.deltas[slot_a.value()];
+    ctx.deltas[slot_a.value()] = ctx.deltas[slot_b.value()];
+    ctx.deltas[slot_b.value()] = tmp_delta;
 
     // Scalars.
     {
         LineageId t_id;
-        t_id = ctx.lineage_id[slot_a]; ctx.lineage_id[slot_a] = ctx.lineage_id[slot_b]; ctx.lineage_id[slot_b] = t_id;
+        t_id = ctx.lineage_id[slot_a.value()]; ctx.lineage_id[slot_a.value()] = ctx.lineage_id[slot_b.value()]; ctx.lineage_id[slot_b.value()] = t_id;
         ArchiveSlot t_slot;
-        t_slot = ctx.parent_id[slot_a];  ctx.parent_id[slot_a]  = ctx.parent_id[slot_b];  ctx.parent_id[slot_b]  = t_slot;
+        t_slot = ctx.parent_id[slot_a.value()];  ctx.parent_id[slot_a.value()]  = ctx.parent_id[slot_b.value()];  ctx.parent_id[slot_b.value()]  = t_slot;
     }
     {
-        int t = ctx.spawn_gen[slot_a]; ctx.spawn_gen[slot_a] = ctx.spawn_gen[slot_b]; ctx.spawn_gen[slot_b] = t;
-        t = ctx.batch_sample_idx[slot_a]; ctx.batch_sample_idx[slot_a] = ctx.batch_sample_idx[slot_b]; ctx.batch_sample_idx[slot_b] = t;
+        int t = ctx.spawn_gen[slot_a.value()]; ctx.spawn_gen[slot_a.value()] = ctx.spawn_gen[slot_b.value()]; ctx.spawn_gen[slot_b.value()] = t;
+        t = ctx.batch_sample_idx[slot_a.value()]; ctx.batch_sample_idx[slot_a.value()] = ctx.batch_sample_idx[slot_b.value()]; ctx.batch_sample_idx[slot_b.value()] = t;
     }
     {
         float t;
-        t = ctx.fitness[slot_a]; ctx.fitness[slot_a] = ctx.fitness[slot_b]; ctx.fitness[slot_b] = t;
-        t = ctx.f_raw[slot_a];   ctx.f_raw[slot_a]   = ctx.f_raw[slot_b];   ctx.f_raw[slot_b]   = t;
-        t = ctx.f_sot[slot_a];   ctx.f_sot[slot_a]   = ctx.f_sot[slot_b];   ctx.f_sot[slot_b]   = t;
+        t = ctx.fitness[slot_a.value()]; ctx.fitness[slot_a.value()] = ctx.fitness[slot_b.value()]; ctx.fitness[slot_b.value()] = t;
+        t = ctx.f_raw[slot_a.value()];   ctx.f_raw[slot_a.value()]   = ctx.f_raw[slot_b.value()];   ctx.f_raw[slot_b.value()]   = t;
+        t = ctx.f_sot[slot_a.value()];   ctx.f_sot[slot_a.value()]   = ctx.f_sot[slot_b.value()];   ctx.f_sot[slot_b.value()]   = t;
     }
     {
-        Role t = ctx.role[slot_a]; ctx.role[slot_a] = ctx.role[slot_b]; ctx.role[slot_b] = t;
+        Role t = ctx.role[slot_a.value()]; ctx.role[slot_a.value()] = ctx.role[slot_b.value()]; ctx.role[slot_b.value()] = t;
     }
 
     // Seed-gradient rows (BMAP_DIM floats each). These are the loss gradients
@@ -173,8 +173,8 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
     // carry its own objective through the swap.
     {
         float tmp_sg[BMAP_DIM];
-        float* sa = &ctx.seed_grad[slot_a * BMAP_DIM];
-        float* sb = &ctx.seed_grad[slot_b * BMAP_DIM];
+        float* sa = &ctx.seed_grad[slot_a.value() * BMAP_DIM];
+        float* sb = &ctx.seed_grad[slot_b.value() * BMAP_DIM];
         std::memcpy(tmp_sg, sa, sizeof(tmp_sg));
         std::memcpy(sa, sb, sizeof(tmp_sg));
         std::memcpy(sb, tmp_sg, sizeof(tmp_sg));
@@ -183,14 +183,14 @@ static inline void swap_host_organism(SwapContext& ctx, int slot_a, int slot_b) 
     // Predictor curriculum error estimate: it describes the organism as a
     // target, so it moves with the organism.
     {
-        float t = ctx.predictor_error_ema[slot_a];
-        ctx.predictor_error_ema[slot_a] = ctx.predictor_error_ema[slot_b];
-        ctx.predictor_error_ema[slot_b] = t;
+        float t = ctx.predictor_error_ema[slot_a.value()];
+        ctx.predictor_error_ema[slot_a.value()] = ctx.predictor_error_ema[slot_b.value()];
+        ctx.predictor_error_ema[slot_b.value()] = t;
     }
     {
-        float t = ctx.predictor_loss_ema[slot_a];
-        ctx.predictor_loss_ema[slot_a] = ctx.predictor_loss_ema[slot_b];
-        ctx.predictor_loss_ema[slot_b] = t;
+        float t = ctx.predictor_loss_ema[slot_a.value()];
+        ctx.predictor_loss_ema[slot_a.value()] = ctx.predictor_loss_ema[slot_b.value()];
+        ctx.predictor_loss_ema[slot_b.value()] = t;
     }
 }
 
@@ -235,8 +235,8 @@ inline bool propose_swaps(MutationLadder* l,
             // Swap paired organisms (by offset within replica).
             int n_pairs = (n_lo < n_hi) ? n_lo : n_hi;
             for (int k = 0; k < n_pairs; ++k) {
-                int slot_a = lo_slots[k];
-                int slot_b = hi_slots[k];
+                PtSlot slot_a(lo_slots[k]);
+                PtSlot slot_b(hi_slots[k]);
 
                 // Device data swap (OrganismState + Checkpoint + Grads +
                 // effective weights).
