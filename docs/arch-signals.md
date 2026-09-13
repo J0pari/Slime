@@ -7,6 +7,15 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 measured rejection (fourth of its kind), with interleaved
+  A/B runs to defeat session drift: raising the launch bound to three
+  blocks/SM on the reforward, weight-grad, and stencil kernels cut the
+  register budget to 85 and measured 1.7x slower on the spill-bound kernels
+  (weight-grad 2.07-2.14 -> 3.60-3.61 s, reforward 0.79-0.80 -> 1.10-1.12 s)
+  with the stencil neutral. Reverted. The register file, not the block
+  count, is the binding constraint at every backward kernel; the remaining
+  I8 levers are reducing live state per thread or restructuring the
+  reductions, both of which need the register budget respected.
 - 2026-09-12: GPU scheduler re-pinned to 5d602cc... (schema gpu-scheduler/v1),
   validated against the live scheduler (`gpu_client.py contract` ->
   validated: true). The owner made resource declarations explicit: ramMib is

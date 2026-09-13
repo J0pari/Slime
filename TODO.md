@@ -91,7 +91,10 @@ I8
   occupancy) with 128 registers per thread; the next lever is reducing
   register pressure (fewer live arrays per thread) or an explicit
   3-blocks/SM launch bound with controlled spills, then the same analysis
-  for the stencil gather.
+  for the stencil gather. Also rejected with interleaved A/B runs:
+  __launch_bounds__(256, 3) on the reforward/weight-grad/stencil kernels
+  (weight-grad 2.07-2.14 -> 3.60-3.61 s, reforward 0.79-0.80 -> 1.10-1.12 s;
+  the 85-register budget spills; stencil neutral).
 
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
