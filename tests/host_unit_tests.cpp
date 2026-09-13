@@ -1254,10 +1254,11 @@ static void test_stress_refresh_role_balance() {
         } else {
             per_subpop_pred[p]++;
         }
-        EXPECT_TRUE(ladder.source_pool_idx[s] < 64);
-        EXPECT_TRUE(canonical_role(roles[ladder.source_pool_idx[s]])
+        EXPECT_TRUE(ladder.source_pool_idx[s].value() < 64);
+        EXPECT_TRUE(canonical_role(roles[ladder.source_pool_idx[s].value()])
                     == canonical_role(ladder.role[s]));
-        EXPECT_TRUE(ladder.lineage_id[s] == ids[ladder.source_pool_idx[s]]);
+        EXPECT_TRUE(ladder.lineage_id[s]
+                    == ids[ladder.source_pool_idx[s].value()]);
     }
     for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
         EXPECT_TRUE(per_subpop_cls[p] == 1);

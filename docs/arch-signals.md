@@ -47,8 +47,10 @@ cuda_engineering.md, and construction_plan.md.
   The claim `G100.strong-identifiers` is provisional with witness
   `test_strong_ids_distinct` (compile-time non-convertibility plus runtime
   sentinel/round-trip checks); host 4911/4911, evolution_regression 36/36.
-  Remaining for the class: `PoolSlot` has a type but no adopted seams, and
-  index variables that are semantically slots are still `int`. `PtSlot` is
+  Remaining for the class: index variables that are semantically slots are
+  still `int` in most places. `PoolSlot` is now adopted by the stress
+  ladder's source back-pointer (the field that sits next to a `LineageId` in
+  the same struct, where a mix-up would be a real bug). `PtSlot` is
   now adopted by the PT swap functions and their call sites. `GenomeSeed` is
   now adopted by the genome codec (read_seed/write_seed and the delta-seed
   PCG32 derivation) with the one caller and test constructing it explicitly.

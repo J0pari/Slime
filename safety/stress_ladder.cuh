@@ -36,7 +36,7 @@ struct StressLineageRecord {
 struct StressLadder {
     // STRESS_SUBPOP_COUNT * STRESS_SUBPOP_SIZE = 24 stress slots.
     LineageId lineage_id[STRESS_POOL_SIZE];
-    uint32_t source_pool_idx[STRESS_POOL_SIZE];   // back-pointer
+    PoolSlot source_pool_idx[STRESS_POOL_SIZE];   // back-pointer
     Role     role[STRESS_POOL_SIZE];
     uint8_t  subpop[STRESS_POOL_SIZE];            // 0,1,2 -> 10/20/40% SOT
     bool     sot_gate_pass[STRESS_POOL_SIZE];
@@ -131,7 +131,7 @@ __host__ inline int refresh_stress_slots(StressLadder* l,
             int chosen = (pcg32_float(rng) < STRESS_BIAS_PROBABILITY)
                 ? biased_pick : uniform_pick;
 
-            l->source_pool_idx[slot] = static_cast<uint32_t>(chosen);
+            l->source_pool_idx[slot] = PoolSlot(chosen);
             l->lineage_id[slot] = pool_lineage_ids[chosen];
             l->role[slot] = role;
             l->last_refresh_gen[slot] = generation;

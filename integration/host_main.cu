@@ -633,12 +633,15 @@ static bool stress_cycle(World* w, int gen) {
                                      &w->rng);
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
         if (w->stress_ladder.last_refresh_gen[s] != gen) continue;
-        uint32_t src = w->stress_ladder.source_pool_idx[s];
-        w->org_table.genomes[POOL_SIZE + s] = w->org_table.genomes[src];
-        w->org_table.deltas[POOL_SIZE + s] = w->org_table.deltas[src];
-        w->org_table.role[POOL_SIZE + s] = w->org_table.role[src];
+        PoolSlot src = w->stress_ladder.source_pool_idx[s];
+        w->org_table.genomes[POOL_SIZE + s] =
+            w->org_table.genomes[src.value()];
+        w->org_table.deltas[POOL_SIZE + s] =
+            w->org_table.deltas[src.value()];
+        w->org_table.role[POOL_SIZE + s] =
+            w->org_table.role[src.value()];
         w->org_table.lineage_id[POOL_SIZE + s] =
-            w->org_table.lineage_id[src];
+            w->org_table.lineage_id[src.value()];
         w->org_table.fitness[POOL_SIZE + s] = 0.f;
         w->org_table.f_raw[POOL_SIZE + s] = 0.f;
         w->org_table.f_sot[POOL_SIZE + s] = 1.f;
