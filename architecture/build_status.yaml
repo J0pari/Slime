@@ -62,7 +62,14 @@ items:
       - nca/engine.cu::project_bmap
       - autodiff/warp_tape.cu::bwd_weight_grad_kernel
   I6:
-    status: missing
+    status: implemented
+    mechanisms:
+      - nca/rd_codec.cuh::decode_coefficients
+      - nca/rd_adjoint.cuh::rd_step_ref
+      - nca/rd_adjoint.cuh::rd_adjoint_ref
+      - autodiff/warp_tape.cu::bwd_reforward_step_kernel
+      - autodiff/warp_tape.cu::bwd_rd_gather_kernel
+      - integration/host_main.cu::upload_rd_coefficients
   I7:
     status: missing
   I8:

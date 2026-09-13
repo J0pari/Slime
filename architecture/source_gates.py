@@ -203,46 +203,31 @@ def gate_named_tunables(files: dict[str, list[str]], report: GateReport) -> None
                     break
 
 
-# ---- Gate: reaction-diffusion stays disabled until its adjoint exists -----
-RD_LAUNCHERS = ("launch_forward_with_checkpoints", "launch_forward_effective", "launch_forward")
+# ---- Gate: reaction-diffusion may be enabled only with its adjoint --------
+# RD is enabled when the forward carries per-organism coefficients. Whenever
+# the coefficients plumbing is present, the backward must re-forward RD,
+# produce the clamp-aware d_next workspace, and run the RD gather; otherwise
+# gradients are silently biased (the failure the old rd_disabled gate
+# prevented by banning coefficients outright).
+RD_ADJOINT_MARKERS = (
+    "rd_step(rc, rn, coeffs[org])",
+    "bwd_rd_gather_kernel",
+    "d_rd_g",
+)
 
 
-def _call_args(line: str, fn: str) -> list[str] | None:
-    idx = line.find(fn + "(")
-    if idx < 0:
-        return None
-    start = idx + len(fn) + 1
-    depth = 1
-    args: list[str] = []
-    cur = ""
-    for ch in line[start:]:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                args.append(cur)
-                break
-        if ch == "," and depth == 1:
-            args.append(cur)
-            cur = ""
-            continue
-        cur += ch
-    return [a.strip() for a in args]
-
-
-def gate_rd_disabled(files: dict[str, list[str]], report: GateReport) -> None:
-    for path, lines in files.items():
-        for i, line in enumerate(lines, 1):
-            for fn in RD_LAUNCHERS:
-                if fn + "(" not in line:
-                    continue
-                args = _call_args(line, fn)
-                if args is None or len(args) < 4:
-                    continue
-                if args[2] != "nullptr":
-                    report.findings.append(
-                        Finding("rd_disabled", path, i, line))
+def gate_rd_adjoint_present(files: dict[str, list[str]],
+                            report: GateReport) -> None:
+    host = " ".join(" ".join(files.get("integration/host_main.cu", [])).split())
+    if "d_rd_coeffs" not in host:
+        return  # reaction-diffusion plumbing absent: nothing to require
+    tape = " ".join(files.get("autodiff/warp_tape.cu", []))
+    for marker in RD_ADJOINT_MARKERS:
+        if marker not in tape:
+            report.findings.append(
+                Finding("rd_adjoint_present", "autodiff/warp_tape.cu", 0,
+                        "reaction-diffusion is enabled but the backward is "
+                        f"missing {marker}"))
 
 
 # ---- Gate: host authority polls the off-switch in the run loop ------------
@@ -371,7 +356,7 @@ NUMERIC_POLICY_EXEMPTIONS: dict[tuple[str, str], str] = {
     ("genome/codec.cu", "read_bits"): (
         "the bit-layout helper indexes a 32-bit word: 32 is the word width, "
         "structural to the codec's own representation"),
-    ("nca/reaction_diffusion.cu", "read_bits"): (
+    ("nca/rd_codec.cuh", "read_bits"): (
         "the bit-layout helper indexes a 32-bit word: 32 is the word width, "
         "structural to the codec's own representation"),
     ("nca/engine.cu", "project_bmap"): (
@@ -560,7 +545,7 @@ ALL_GATES = [
     gate_no_managed_memory,
     gate_checked_cuda_calls,
     gate_named_tunables,
-    gate_rd_disabled,
+    gate_rd_adjoint_present,
     gate_host_authority,
     gate_operator_polling,
     gate_replay_before_spawn,

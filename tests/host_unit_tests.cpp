@@ -29,6 +29,7 @@
 #include "../config/constants.cuh"
 #include "../nca/context_adjoint.cuh"
 #include "../nca/rd_adjoint.cuh"
+#include "../nca/rd_codec.cuh"
 #include "../genome/codec.cu"
 #include "../optimizer/came_math.cuh"
 #include "../safety/pt_ladder.cuh"
@@ -1510,6 +1511,51 @@ static void test_rd_adjoint_finite_difference() {
                 "saturated=%.2e\n", worst_curr, worst_K, worst_D, worst_sat);
 }
 
+// ---- I6: RD coefficient encoding -------------------------------------------
+// Zero genome bits decode to zero coefficients (neutral); a non-zero genome
+// yields non-zero coefficients; the reaction encoding is sign-magnitude.
+static void test_rd_neutral_encoding() {
+    uint32_t zeros[slime::genome::GENOME_WORDS] = {};
+    slime::nca::rd::Coefficients c;
+    slime::nca::rd::decode_coefficients(zeros, &c);
+    bool all_zero = true;
+    for (int i = 0; i < 36; ++i) {
+        if (c.reaction[i] != 0.f) all_zero = false;
+    }
+    for (int i = 0; i < 6; ++i) {
+        if (c.diffusion[i] != 0.f) all_zero = false;
+    }
+    EXPECT_TRUE(all_zero);
+
+    uint32_t ones[slime::genome::GENOME_WORDS];
+    for (int i = 0; i < slime::genome::GENOME_WORDS; ++i) ones[i] = 0xFFFFFFFFu;
+    slime::nca::rd::decode_coefficients(ones, &c);
+    float max_abs = 0.f;
+    for (int i = 0; i < 36; ++i) {
+        max_abs = std::fmax(max_abs, std::fabs(c.reaction[i]));
+    }
+    for (int i = 0; i < 6; ++i) {
+        max_abs = std::fmax(max_abs, c.diffusion[i]);
+    }
+    EXPECT_TRUE(max_abs > 0.5f);
+
+    // Sign-magnitude: entry 0 = magnitude 1, negative (bits 00001 = 1).
+    uint32_t crafted[slime::genome::GENOME_WORDS] = {};
+    crafted[GENOME_BIT_REACTION_LO / 32] |=
+        (1u << (GENOME_BIT_REACTION_LO % 32));
+    slime::nca::rd::decode_coefficients(crafted, &c);
+    EXPECT_TRUE(std::fabs(c.reaction[0] + 1.0f / 15.0f) < 1e-6f);
+
+    // Entry 1 = magnitude 1, positive (bits 10001 = 17 at +5 bits).
+    for (int i = 0; i < slime::genome::GENOME_WORDS; ++i) crafted[i] = 0;
+    {
+        int start = GENOME_BIT_REACTION_LO + 5;
+        crafted[start / 32] |= (17u << (start % 32));
+    }
+    slime::nca::rd::decode_coefficients(crafted, &c);
+    EXPECT_TRUE(std::fabs(c.reaction[1] - 1.0f / 15.0f) < 1e-6f);
+}
+
 int main() {
     test_sot_gate();
     test_role_multipliers();
@@ -1558,6 +1604,7 @@ int main() {
     test_predictor_target_rotation();
     test_context_broadcast_adjoint();
     test_rd_adjoint_finite_difference();
+    test_rd_neutral_encoding();
     std::printf("\n%d / %d passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

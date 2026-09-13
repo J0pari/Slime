@@ -70,19 +70,25 @@ class GateTests(unittest.TestCase):
             report2)
         self.assertTrue(report2.ok)
 
-    def test_gate_rd_disabled_catches_nonnull(self):
-        # [claim:A202.rd-disabled-until-adjoint]
+    def test_gate_rd_adjoint_present(self):
+        # [claim:A202.rd-adjoint-present]
         report = source_gates.GateReport()
-        source_gates.gate_rd_disabled(
-            files_from({"src/foo.cu":
-                        "launch_forward_with_checkpoints(org, in, coeffs, w, ckpt, n, s);"}),
-            report)
-        self.assertFalse(report.ok, "non-null RD coefficients were not caught")
+        source_gates.gate_rd_adjoint_present(
+            files_from({"integration/host_main.cu":
+                        "launch_forward_with_checkpoints(\n"
+                        "    w->d_organisms, w->d_fwd_inputs, w->d_rd_coeffs,\n"
+                        "    ...);",
+                        "autodiff/warp_tape.cu": "no adjoint here"}), report)
+        self.assertFalse(report.ok, "RD without its adjoint was not caught")
         report2 = source_gates.GateReport()
-        source_gates.gate_rd_disabled(
-            files_from({"src/foo.cu":
-                        "launch_forward_with_checkpoints(org, in, nullptr, w, ckpt, n, s);"}),
-            report2)
+        source_gates.gate_rd_adjoint_present(
+            files_from({"integration/host_main.cu":
+                        "launch_forward_with_checkpoints(\n"
+                        "    w->d_organisms, w->d_fwd_inputs, w->d_rd_coeffs,\n"
+                        "    ...);",
+                        "autodiff/warp_tape.cu":
+                        "rd_step(rc, rn, coeffs[org]); "
+                        "bwd_rd_gather_kernel; d_rd_g"}), report2)
         self.assertTrue(report2.ok)
 
     def test_gate_host_authority_catches_plant(self):
@@ -249,11 +255,15 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(any("I9" in e for e in errors),
                         "inventory item with no build-status entry not caught")
 
-        broken["items"]["I6"]["mechanisms"] = [
+        # Lifecycle-independent: force a known item to `missing`, then give it
+        # mechanisms; the validator must reject that regardless of the real
+        # build state.
+        broken["items"]["I1"]["status"] = "missing"
+        broken["items"]["I1"]["mechanisms"] = [
             "integration/host_main.cu::step_generation"]
         errors = []
         compiler.check_build_status(ROOT, broken, transactions, errors)
-        self.assertTrue(any("I6" in e and "missing" in e for e in errors),
+        self.assertTrue(any("I1" in e and "missing" in e for e in errors),
                         "missing item naming mechanisms not caught")
 
     def test_gpu_evidence_refused_while_build_incomplete(self):

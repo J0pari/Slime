@@ -226,13 +226,15 @@ static int test_genotype_causality() {
     for (int d = 0; d < BMAP_DIM; ++d) h_seed[d] = 0.1f * (d + 1);
     CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed,
         sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
-    launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
+    launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, nullptr,
+                        r.d_seed_grad,
                         r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g_eff;
     CUDA_CHECK(cudaMemcpy(&g_eff, r.d_grads, sizeof(GradBuffers), cudaMemcpyDeviceToHost));
 
-    launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
+    launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, nullptr,
+                        r.d_seed_grad,
                         r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g_shared;
@@ -587,7 +589,7 @@ static int test_pt_swap_backward_correspondence() {
     CUDA_CHECK(cudaMemcpy(d_seed, h_seed, sizeof(h_seed), cudaMemcpyHostToDevice));
 
     // Pre-swap backward: gradients of logical organisms 0 and 1 in place.
-    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+    launch_backward_all(d_org, d_weights, d_eff, nullptr, d_seed,
                         d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_pre[2];
@@ -642,7 +644,7 @@ static int test_pt_swap_backward_correspondence() {
     CUDA_CHECK(cudaMemcpy(d_seed, h_seed, sizeof(h_seed), cudaMemcpyHostToDevice));
 
     // Post-swap backward.
-    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+    launch_backward_all(d_org, d_weights, d_eff, nullptr, d_seed,
                         d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_post[2];
@@ -674,7 +676,7 @@ static int test_pt_swap_backward_correspondence() {
     // bank swap rather than passing vacuously.
     launch_materialize_effective_weights(d_weights, d_deltas, d_eff, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
-    launch_backward_all(d_org, d_weights, d_eff, d_seed,
+    launch_backward_all(d_org, d_weights, d_eff, nullptr, d_seed,
                         d_ckpt, d_grads, ws, RESIDUAL_ALPHA, N, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers h_buggy[2];
@@ -757,7 +759,8 @@ static int fd_run(Rig& r, float alpha, float eps, bool assert_banks) {
     }
     CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed,
         sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
-    launch_backward_all(r.d_org, r.d_weights, nullptr, r.d_seed_grad,
+    launch_backward_all(r.d_org, r.d_weights, nullptr, nullptr,
+                        r.d_seed_grad,
                         r.d_ckpt, r.d_grads, r.ws, alpha, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
     GradBuffers g;
@@ -883,7 +886,8 @@ static int fd_run(Rig& r, float alpha, float eps, bool assert_banks) {
         }
         CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed_e,
             sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
-        launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, r.d_seed_grad,
+        launch_backward_all(r.d_org, r.d_weights, r.d_eff_weights, nullptr,
+                        r.d_seed_grad,
                             r.d_ckpt, r.d_grads, r.ws, alpha, 1, 0);
         CUDA_CHECK(cudaDeviceSynchronize());
         GradBuffers ge;
@@ -1168,7 +1172,8 @@ static int test_context_gradient_nonzero() {
     }
     CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed, sizeof(float) * BMAP_DIM,
                           cudaMemcpyHostToDevice));
-    launch_backward_all(r.d_org, r.d_weights, nullptr, r.d_seed_grad,
+    launch_backward_all(r.d_org, r.d_weights, nullptr, nullptr,
+                        r.d_seed_grad,
                         r.d_ckpt, r.d_grads, r.ws, RESIDUAL_ALPHA, 1, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1181,6 +1186,120 @@ static int test_context_gradient_nonzero() {
     }
     std::printf("  ||dW_ctx||^2=%.3e\n", norm2);
     CHECK(norm2 > 0.f, "context adjoint writes W_ctx gradients");
+    rig_free(&r);
+    return 0;
+}
+
+// ---- I6: reaction-diffusion gradients --------------------------------------
+
+// With RD active, the analytic gradient must match central differences (the
+// FD is also the strongest witness that the backward's RD re-forward matches
+// the forward's checkpoints), and the forward must be deterministic.
+static int test_rd_gradient_finite_difference() {
+    std::printf("--- Test: RD-enabled gradient matches finite differences ---\n");
+    std::fflush(stdout);
+    Rig r{};
+    if (rig_init(&r)) return 1;
+    const float alpha = 1.0f;
+    const int target_class = 2;
+
+    nca::rd::Coefficients h_coeffs;
+    uint32_t s = 0x9E3779B9u;
+    auto next_rand = [&]() {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        return static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+    };
+    for (int i = 0; i < 36; ++i) h_coeffs.reaction[i] = 0.6f * next_rand();
+    for (int i = 0; i < 6; ++i) {
+        h_coeffs.diffusion[i] = 0.2f + 0.4f * (next_rand() + 0.5f);
+    }
+    nca::rd::Coefficients* d_coeffs = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_coeffs, sizeof(nca::rd::Coefficients)));
+    CUDA_CHECK(cudaMemcpy(d_coeffs, &h_coeffs,
+                          sizeof(nca::rd::Coefficients),
+                          cudaMemcpyHostToDevice));
+
+    auto forward_and_loss = [&](const float* w, float* loss_out,
+                                float* desc_out) {
+        CUDA_CHECK(cudaMemcpy(r.d_weights, w, sizeof(float) * TOTAL_WEIGHTS,
+                              cudaMemcpyHostToDevice));
+        launch_forward_with_checkpoints(r.d_org, r.d_inputs, d_coeffs,
+                                        r.d_weights, nullptr,
+                                        r.d_ckpt, alpha, 1, 0);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        if (read_descriptor(&r, desc_out)) return 1;
+        float dlogits[NUM_CLASSES];
+        classifier_loss(desc_out, target_class, NUM_CLASSES, dlogits, loss_out);
+        return 0;
+    };
+
+    float desc0[BMAP_DIM];
+    float L0 = 0.f;
+    if (forward_and_loss(r.h_weights, &L0, desc0)) return 1;
+
+    // Determinism: the same weights produce the same descriptor bitwise.
+    {
+        float desc_again[BMAP_DIM];
+        float L_again = 0.f;
+        if (forward_and_loss(r.h_weights, &L_again, desc_again)) return 1;
+        bool identical = true;
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            if (desc0[d] != desc_again[d]) identical = false;
+        }
+        CHECK(identical, "RD forward is deterministic");
+    }
+
+    float h_seed[BMAP_DIM];
+    for (int d = 0; d < BMAP_DIM; ++d) h_seed[d] = 0.f;
+    {
+        float dlogits[NUM_CLASSES];
+        float tmp;
+        classifier_loss(desc0, target_class, NUM_CLASSES, dlogits, &tmp);
+        for (int d = 0; d < NUM_CLASSES; ++d) h_seed[d] = dlogits[d];
+    }
+    CUDA_CHECK(cudaMemcpy(r.d_seed_grad, h_seed,
+                          sizeof(float) * BMAP_DIM, cudaMemcpyHostToDevice));
+    launch_backward_all(r.d_org, r.d_weights, nullptr, d_coeffs,
+                        r.d_seed_grad, r.d_ckpt, r.d_grads, r.ws, alpha, 1, 0);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    GradBuffers g;
+    CUDA_CHECK(cudaMemcpy(&g, r.d_grads, sizeof(GradBuffers),
+                          cudaMemcpyDeviceToHost));
+
+    float v[TOTAL_WEIGHTS];
+    float norm2 = 0.f;
+    s = 0x1234ABCDu;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+        float u = static_cast<float>(s) * (1.0f / 4294967296.0f) - 0.5f;
+        v[i] = u;
+        norm2 += u * u;
+    }
+    float inv = 1.0f / sqrtf(norm2);
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) v[i] *= inv;
+
+    float d_analytic = 0.f;
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) d_analytic += g.dW[i] * v[i];
+
+    const float eps = 0.05f;
+    float w_plus[TOTAL_WEIGHTS], w_minus[TOTAL_WEIGHTS];
+    for (int i = 0; i < TOTAL_WEIGHTS; ++i) {
+        w_plus[i]  = r.h_weights[i] + eps * v[i];
+        w_minus[i] = r.h_weights[i] - eps * v[i];
+    }
+    float Lp = 0.f, Lm = 0.f;
+    float desc_tmp[BMAP_DIM];
+    if (forward_and_loss(w_plus, &Lp, desc_tmp)) return 1;
+    if (forward_and_loss(w_minus, &Lm, desc_tmp)) return 1;
+    float d_numeric = (Lp - Lm) / (2.0f * eps);
+    float rel_err = std::fabs(d_analytic - d_numeric)
+                  / std::fmax(std::fabs(d_numeric), 1e-9f);
+    std::printf("  RD d_analytic=% .6e d_numeric=% .6e rel_err=%.4e\n",
+                d_analytic, d_numeric, rel_err);
+    CHECK(std::fabs(d_numeric) > 1e-9f, "RD FD direction is informative");
+    CHECK(rel_err < 5e-2f, "RD-enabled analytic gradient matches FD");
+
+    cudaFree(d_coeffs);
     rig_free(&r);
     return 0;
 }
@@ -1201,6 +1320,7 @@ int main() {
     rc |= test_role_grad_alignment();
     rc |= test_context_channel_reference();
     rc |= test_context_gradient_nonzero();
+    rc |= test_rd_gradient_finite_difference();
 
     std::printf("\n========================================\n");
     std::printf("Results: %d passed, %d failed\n", g_pass, g_fail);

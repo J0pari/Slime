@@ -351,12 +351,16 @@ for identical inputs occupy identical niches; specialization emerges from
 archive pressure.
 
 A-202: Reaction-Diffusion Field
-@claim A202.rd-disabled-until-adjoint contract
-S reaction-diffusion stays disabled in the active loop until the RD adjoint
-  and checkpoint replay exist; the forward receives null coefficients
+@claim A202.rd-adjoint-present contract
+S reaction-diffusion may run in the active loop only with its adjoint wired:
+  when the forward carries per-organism coefficients, the backward must
+  re-forward RD, write the clamp-aware d_next workspace, and apply the RD
+  gather (transposed reaction, decay, symmetric Laplacian), so gradients are
+  never silently biased
 M autodiff/warp_tape.cu::bwd_reforward_step_kernel
-M architecture/source_gates.py::gate_rd_disabled
-W+ tests/architecture/test_architecture.py::test_gate_rd_disabled_catches_nonnull
+M autodiff/warp_tape.cu::bwd_rd_gather_kernel
+M architecture/source_gates.py::gate_rd_adjoint_present
+W+ tests/architecture/test_architecture.py::test_gate_rd_adjoint_present
 T established
 C observed
 
@@ -379,6 +383,15 @@ stable (dt·diffusion ≤ ¼ CFL; decay keeps a continuously-sourced field bound
 The reaction term is linear and, with arbitrary genome coefficients, can drive a
 channel to saturation; the FP16 clamp bounds it and selection penalises
 organisms whose chemical fields saturate into degenerate bmaps.
+
+Activation. RD is active in the main loop (I6). Coefficients decode with a
+neutral encoding: zero genome bits mean zero reaction and zero diffusion, and
+the reaction entries are sign-magnitude over [-1, +1]. The backward re-forwards
+the RD step from checkpoints, produces the clamp-aware d_next, and applies the
+adjoint (transposed reaction matrix, symmetric Laplacian gather, decay, and
+clamp zeroing that matches the forward's strict bounds); the finite-difference
+witness `tests/evolution_regression.cu::test_rd_gradient_finite_difference`
+and the host reference `nca/rd_adjoint.cuh` pin the mathematics.
 
 A-203: Global Context Channel
 

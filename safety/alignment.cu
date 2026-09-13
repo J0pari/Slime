@@ -86,6 +86,8 @@ inline bool apply_sot_identity(nca::OrganismState* d_organisms,
                                float* d_sot_descriptors,
                                int* d_sot_bank_of,
                                nca::OrganismState* d_sot_ref_organisms,
+                               const nca::rd::Coefficients* h_rd_coeffs,
+                               nca::rd::Coefficients* d_sot_ref_coeffs,
                                int weight_stride,
                                cudaStream_t stream) {
     namespace cur = slime::curriculum;
@@ -179,12 +181,25 @@ inline bool apply_sot_identity(nca::OrganismState* d_organisms,
                             n_refs * sizeof(int),
                             cudaMemcpyHostToDevice, stream);
         }
+        // Each reference must run the same dynamics (RD coefficients) as the
+        // organism it mirrors (A-202, I6).
+        if (_ce == cudaSuccess && h_rd_coeffs != nullptr) {
+            nca::rd::Coefficients ref_coeffs[cur::SOT_MAX_REFS];
+            for (int r = 0; r < n_refs; ++r) {
+                ref_coeffs[r] = h_rd_coeffs[ref_org_of[r]];
+            }
+            _ce = cudaMemcpyAsync(d_sot_ref_coeffs, ref_coeffs,
+                            n_refs * sizeof(nca::rd::Coefficients),
+                            cudaMemcpyHostToDevice, stream);
+        }
         if (_ce != cudaSuccess) {
             std::printf("[FATAL] CUDA SOT ref copy failed: %s\n", cudaGetErrorString(_ce));
             return false;
         }
 
-        nca::launch_forward_effective(d_ref_organisms, d_sot_fwd_inputs, nullptr,
+        nca::launch_forward_effective(d_ref_organisms, d_sot_fwd_inputs,
+                                      (h_rd_coeffs != nullptr)
+                                          ? d_sot_ref_coeffs : nullptr,
                                       d_eff_weights, d_sot_bank_of, weight_stride,
                                       RESIDUAL_ALPHA, n_refs, stream);
 
@@ -284,6 +299,7 @@ inline bool evaluate_stress_classifiers(
     nca::OrganismState* d_organisms,
     const float* d_weights,
     const float* d_stress_eff_weights,
+    const nca::rd::Coefficients* d_stress_coeffs,
     const curriculum::ClassifierBatch& batch,
     const __half* d_stress_batch_image,
     uint64_t host_sot_key,
@@ -352,7 +368,8 @@ inline bool evaluate_stress_classifiers(
                     cudaGetErrorString(_ce));
         return false;
     }
-    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs, nullptr,
+    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs,
+                                  d_stress_coeffs,
                                   d_stress_eff_weights, d_sot_bank_of,
                                   weight_stride, RESIDUAL_ALPHA, n_slots, stream);
     nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
@@ -383,7 +400,7 @@ inline bool evaluate_stress_classifiers(
         return false;
     }
     nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
-                                  d_sot_fwd_inputs, nullptr,
+                                  d_sot_fwd_inputs, d_stress_coeffs,
                                   d_stress_eff_weights, d_sot_bank_of,
                                   weight_stride, RESIDUAL_ALPHA, n_slots, stream);
     nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,
@@ -412,6 +429,7 @@ inline bool evaluate_stress_predictors(
     nca::OrganismState* d_organisms,
     const float* d_weights,
     const float* d_stress_eff_weights,
+    const nca::rd::Coefficients* d_stress_coeffs,
     const float* d_stress_target_nominal,
     const float* d_stress_target_permuted,
     const uint8_t* h_perm_inv,
@@ -444,7 +462,8 @@ inline bool evaluate_stress_predictors(
                     cudaGetErrorString(_ce));
         return false;
     }
-    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs, nullptr,
+    nca::launch_forward_effective(d_sot_ref_organisms, d_sot_fwd_inputs,
+                                  d_stress_coeffs,
                                   d_stress_eff_weights, d_sot_bank_of,
                                   weight_stride, RESIDUAL_ALPHA, n_slots, stream);
     nca::extract_descriptor(d_sot_ref_organisms, d_sot_descriptors,
@@ -472,7 +491,7 @@ inline bool evaluate_stress_predictors(
         return false;
     }
     nca::launch_forward_effective(d_organisms + POOL_SIZE + slot_lo,
-                                  d_sot_fwd_inputs, nullptr,
+                                  d_sot_fwd_inputs, d_stress_coeffs,
                                   d_stress_eff_weights, d_sot_bank_of,
                                   weight_stride, RESIDUAL_ALPHA, n_slots, stream);
     nca::extract_descriptor(d_organisms + POOL_SIZE + slot_lo,

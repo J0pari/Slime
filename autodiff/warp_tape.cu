@@ -17,6 +17,7 @@ using nca::ForwardInputs;
 using nca::PERC_DIM;
 using nca::grid_idx;
 using nca::CTX_K;
+using nca::rd::RD_CHEM_N;
 using ::canonical_role;
 
 // ---- Weight layout constants (mirror genome/codec.cu) --------------------
@@ -63,6 +64,7 @@ struct GradBuffers {
 struct BackwardWorkspace {
     float* d_state[2];          // [n_org * GRID_ELEMS] FP32 each (d_state_A, d_state_B)
     float* d_perc;              // [n_org * PERC_ELEMS] floats (per-org d_perc)
+    float* d_rd_g;              // [n_org * CELLS * RD_CHEM_N] clamp-aware RD d_next
     __half* recomp[2];          // [n_org * GRID_ELEMS] FP16 each (re-forward curr/next)
     int n_organisms;            // stored for indexing
 };
@@ -357,6 +359,52 @@ __global__ void bwd_seed_scatter_kernel(
     }
 }
 
+// Sub-kernel 3b: RD adjoint gather (A-202, I6). Adds the RD d_curr terms —
+// transposed reaction, decay, and the symmetric Laplacian over the
+// clamp-aware d_next written by the weight-grad kernel — into d_state_out.
+__global__ void bwd_rd_gather_kernel(
+    const __half* recomp_curr,
+    const float* d_rd_g,       // [n_org * CELLS * RD_CHEM_N]
+    const nca::rd::Coefficients* coeffs,
+    float* d_state_out,        // [n_org * GRID_ELEMS] accumulated
+    int n_organisms)
+{
+    int org = blockIdx.x;
+    if (org >= n_organisms) return;
+    int tid = threadIdx.x;
+    const __half* rc = &recomp_curr[org * GRID_ELEMS];
+    const float* g = &d_rd_g[static_cast<size_t>(org) * CELLS * RD_CHEM_N];
+    float* dout = &d_state_out[org * GRID_ELEMS];
+    const nca::rd::Coefficients& C = coeffs[org];
+    (void)rc;
+
+    for (int cell = tid; cell < CELLS; cell += BWD_THREADS) {
+        int y, x;
+        cell_yx(cell, y, x);
+        int yp = (y + 1) % GRID_SIZE;
+        int ym = (y + GRID_SIZE - 1) % GRID_SIZE;
+        int xp = (x + 1) % GRID_SIZE;
+        int xm = (x + GRID_SIZE - 1) % GRID_SIZE;
+        const int nbp[4] = {yp * GRID_SIZE + x, ym * GRID_SIZE + x,
+                            y * GRID_SIZE + xp, y * GRID_SIZE + xm};
+        for (int c = 0; c < RD_CHEM_N; ++c) {
+            float g_pc = g[cell * RD_CHEM_N + c];
+            float lap_g = -4.f * g_pc;
+            for (int t = 0; t < 4; ++t) {
+                lap_g += g[nbp[t] * RD_CHEM_N + c];
+            }
+            float react_t = 0.f;
+            for (int o = 0; o < RD_CHEM_N; ++o) {
+                react_t += g[cell * RD_CHEM_N + o]
+                         * C.reaction[o * RD_CHEM_N + c];
+            }
+            dout[cell * CA_CHANNELS + c] +=
+                RD_DT * (C.diffusion[c] * lap_g + react_t
+                         - RD_DECAY * g_pc);
+        }
+    }
+}
+
 // Sub-kernel 4: Load checkpoint into recomp_curr.
 __global__ void bwd_load_checkpoint_kernel(
     int seg,
@@ -384,6 +432,7 @@ __global__ void bwd_load_checkpoint_kernel(
 __global__ void bwd_reforward_step_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
+    const nca::rd::Coefficients* coeffs,  // per-organism RD or null
     const __half* recomp_curr, // [n_org * GRID_ELEMS]
     __half* recomp_next,       // [n_org * GRID_ELEMS]
     float alpha,               // residual timestep (must mirror the forward)
@@ -432,6 +481,13 @@ __global__ void bwd_reforward_step_kernel(
             rn[cell * CA_CHANNELS + c] = __float2half(nxt);
         }
     }
+
+    // Reproduce the forward's RD step so the re-forwarded state matches the
+    // checkpoint exactly (A-202, I6). rd_step reads rc and adds onto rn.
+    if (coeffs != nullptr) {
+        __syncthreads();
+        nca::rd::rd_step(rc, rn, coeffs[org]);
+    }
 }
 
 // Sub-kernel 6 (Phase A): Weight gradient accumulation + d_perc computation.
@@ -440,6 +496,8 @@ __global__ void bwd_reforward_step_kernel(
 __global__ void bwd_weight_grad_kernel(
     const float* weights,
     const float* eff_weights,    // [n_banks * TOTAL_WEIGHTS] or null
+    const nca::rd::Coefficients* coeffs,  // per-organism RD or null
+    float* d_rd_g,             // [n_org * CELLS * RD_CHEM_N] clamp-aware d_next
     const OrganismState* organisms,
     const __half* recomp_curr, // [n_org * GRID_ELEMS] — recovered input state
     const float* d_state_A,    // [n_org * GRID_ELEMS] — d_state_next
@@ -529,6 +587,50 @@ __global__ void bwd_weight_grad_kernel(
             hidden[h] = nca::gelu_approx(acc);
         }
 
+        // RD clamp mask and clamp-aware d_next per chemical channel (I6).
+        // The CA output `base` is recomputed here with the same arithmetic
+        // as the forward, and the clamp decision matches rd_step's strict
+        // bounds; the RD local/neighbor d_curr terms are added by
+        // bwd_rd_gather_kernel from this workspace.
+        float rd_direct[CA_CHANNELS];
+        for (int c = 0; c < CA_CHANNELS; ++c) {
+            rd_direct[c] = dA[cell * CA_CHANNELS + c];
+        }
+        if (coeffs != nullptr) {
+            const nca::rd::Coefficients& rc_coeffs = coeffs[org];
+            int yp = (y + 1) % GRID_SIZE;
+            int ym = (y + GRID_SIZE - 1) % GRID_SIZE;
+            int xp = (x + 1) % GRID_SIZE;
+            int xm = (x + GRID_SIZE - 1) % GRID_SIZE;
+            const int nbp[4] = {yp * GRID_SIZE + x, ym * GRID_SIZE + x,
+                                y * GRID_SIZE + xp, y * GRID_SIZE + xm};
+            for (int c = 0; c < RD_CHEM_N; ++c) {
+                float acc = 0.f;
+                for (int h = 0; h < HIDDEN_DIM; ++h) {
+                    acc += W_flow[h * CA_CHANNELS + c] * hidden[h];
+                }
+                float prev = __half2float(rc[cell * CA_CHANNELS + c]);
+                float base_c = prev + alpha * acc;
+                float lap = -4.f * prev;
+                for (int t = 0; t < 4; ++t) {
+                    lap += __half2float(rc[nbp[t] * CA_CHANNELS + c]);
+                }
+                float react = 0.f;
+                for (int j = 0; j < RD_CHEM_N; ++j) {
+                    react += rc_coeffs.reaction[c * RD_CHEM_N + j]
+                          * __half2float(rc[cell * CA_CHANNELS + j]);
+                }
+                float updated = base_c
+                    + RD_DT * (rc_coeffs.diffusion[c] * lap + react
+                               - RD_DECAY * prev);
+                bool clamped = (updated > FP16_MAX_VALUE
+                                || updated < -FP16_MAX_VALUE);
+                float g = clamped ? 0.f : dA[cell * CA_CHANNELS + c];
+                d_rd_g[((size_t)org * CELLS + cell) * RD_CHEM_N + c] = g;
+                rd_direct[c] = g;
+            }
+        }
+
         float d_state[CA_CHANNELS];
         for (int c = 0; c < CA_CHANNELS; ++c) {
             // x_{t+1} = x_t + alpha * F(x_t)  =>  dF = alpha * d_state_next.
@@ -537,7 +639,7 @@ __global__ void bwd_weight_grad_kernel(
             float direct = 0.f;
             if (!(GLOBAL_CONTEXT_ENABLED && sample_slot >= 0)
                 || c < CH_AUX_FIRST || c > CH_AUX_LAST) {
-                direct = dA[cell * CA_CHANNELS + c];
+                direct = rd_direct[c];
             }
             d_state[c] = alpha * (direct + s_mean[c]);
         }
@@ -990,6 +1092,7 @@ inline void launch_backward_all(
     OrganismState* d_organisms,
     const float* d_weights,
     const float* d_eff_weights,      // [n_banks * TOTAL_WEIGHTS] or null
+    const nca::rd::Coefficients* d_coeffs,  // per-organism RD or null
     const float* d_seed_grad,
     CheckpointBuffer* d_checkpoints,
     GradBuffers* d_grads,
@@ -1031,7 +1134,7 @@ inline void launch_backward_all(
             // Re-forward (local_step - 1) steps.
             for (int fwd = 0; fwd < local_step - 1; ++fwd) {
                 bwd_reforward_step_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                    d_weights, d_eff_weights, rc, rn, alpha, N);
+                    d_weights, d_eff_weights, d_coeffs, rc, rn, alpha, N);
                 // Swap curr/next.
                 __half* tmp = rc; rc = rn; rn = tmp;
             }
@@ -1039,12 +1142,17 @@ inline void launch_backward_all(
             // Phase A: weight grads + d_perc.
             int abs_step = seg * CHECKPOINT_INTERVAL + local_step;
             bwd_weight_grad_kernel<<<N, BWD_THREADS, 0, stream>>>(
-                d_weights, d_eff_weights, d_organisms, rc, dA, d_grads,
-                ws.d_perc, alpha, btraj_slot_for_step(abs_step), N);
+                d_weights, d_eff_weights, d_coeffs, ws.d_rd_g, d_organisms,
+                rc, dA, d_grads, ws.d_perc, alpha,
+                btraj_slot_for_step(abs_step), N);
 
-            // Phase B: stencil gather.
+            // Phase B: stencil gather (CA d_curr) + RD gather (RD d_curr).
             bwd_stencil_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
                 d_weights, d_eff_weights, dA, dB, ws.d_perc, N);
+            if (d_coeffs != nullptr) {
+                bwd_rd_gather_kernel<<<N, BWD_THREADS, 0, stream>>>(
+                    rc, ws.d_rd_g, d_coeffs, dB, N);
+            }
 
             // Swap dA/dB.
             float* tmp2 = dA; dA = dB; dB = tmp2;

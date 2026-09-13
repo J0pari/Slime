@@ -20,6 +20,7 @@
 #include <cuda_fp16.h>
 
 #include "context_adjoint.cuh"
+#include "rd_adjoint.cuh"
 
 namespace slime::nca {
 

@@ -141,6 +141,12 @@ struct World {
     float  h_stress_f_sot[STRESS_POOL_SIZE];
     curriculum::ClassifierBatch stress_batch;
 
+    // Per-organism reaction-diffusion coefficients (A-202, I6), decoded from
+    // the genomes each generation (stress slots re-decoded after refresh).
+    nca::rd::Coefficients* d_rd_coeffs;        // [TOTAL_ORG]
+    nca::rd::Coefficients* d_sot_ref_coeffs;   // [SOT_MAX_REFS] reference scratch
+    nca::rd::Coefficients  h_rd_coeffs[TOTAL_ORG];  // host mirror for SOT refs
+
     // Structural pressures (S-003, I4): audit regressors, interpretability
     // probe panel, sentinel ensemble and pruning history, per-role lineage
     // share tracking, and the per-organism sentinel anomaly scores.

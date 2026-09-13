@@ -58,9 +58,11 @@ I5
   non-zero dW_ctx); they execute in VERIFY with the rest of the suite.
 
 I6
-- [ ] RD adjoint (replay reproduces residual + reaction + diffusion).
-- [ ] Neutral genome encoding for RD coefficients (zero bits mean zero).
-- [ ] Enable RD in the main loop with per-organism decoded coefficients.
+- [x] RD adjoint (replay reproduces residual + reaction + diffusion).
+- [x] Neutral genome encoding for RD coefficients (zero bits mean zero).
+- [x] Enable RD in the main loop with per-organism decoded coefficients.
+- [x] Host-verified RD adjoint reference with an adversarial FD witness;
+  GPU FD/determinism witness written (executes in VERIFY).
 
 I7
 - [ ] Capture/replay of the capturable phases with a debug mode that

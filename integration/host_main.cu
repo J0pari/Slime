@@ -108,6 +108,20 @@ static bool upload_probe_batch(World* w) {
     return true;
 }
 
+// Decode every organism's reaction-diffusion coefficients from its genome
+// and upload them for the forward/backward kernels (A-202, I6).
+static bool upload_rd_coefficients(World* w) {
+    for (int i = 0; i < TOTAL_ORG; ++i) {
+        nca::rd::decode_coefficients(w->org_table.genomes[i].bits,
+                                     &w->h_rd_coeffs[i]);
+    }
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_rd_coeffs, w->h_rd_coeffs,
+                    TOTAL_ORG * sizeof(nca::rd::Coefficients),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload rd coefficients");
+    return true;
+}
+
 // Parameters and AdamW state are device-resident; mirror them into the host
 // struct before the serializer writes, and back after a load.
 static bool sync_placeholder_from_device(World* w) {
@@ -163,6 +177,8 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_stress_eff_weights, STRESS_POOL_SIZE * TOTAL_WEIGHTS * sizeof(float)), "alloc d_stress_eff_weights");
     CUDA_ABORT(cudaMalloc(&w->d_stress_batch_image, cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_batch_image");
     CUDA_ABORT(cudaMalloc(&w->d_stress_targets, 2 * STRESS_POOL_SIZE * BMAP_DIM * sizeof(float)), "alloc d_stress_targets");
+    CUDA_ABORT(cudaMalloc(&w->d_rd_coeffs, TOTAL_ORG * sizeof(nca::rd::Coefficients)), "alloc d_rd_coeffs");
+    CUDA_ABORT(cudaMalloc(&w->d_sot_ref_coeffs, cur::SOT_MAX_REFS * sizeof(nca::rd::Coefficients)), "alloc d_sot_ref_coeffs");
 
     // Gradient health: pinned host scalar (section 8).
     CUDA_ABORT(cudaMalloc(&w->d_grad_norm, sizeof(float)), "alloc d_grad_norm");
@@ -193,6 +209,9 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_perc,     PERC_ELEMS * sizeof(float) * POOL_SIZE), "alloc bwd d_perc");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.recomp[0],  GRID_ELEMS * sizeof(__half) * POOL_SIZE), "alloc bwd recomp[0]");
     CUDA_ABORT(cudaMalloc(&w->bwd_workspace.recomp[1],  GRID_ELEMS * sizeof(__half) * POOL_SIZE), "alloc bwd recomp[1]");
+    CUDA_ABORT(cudaMalloc(&w->bwd_workspace.d_rd_g,
+        static_cast<size_t>(POOL_SIZE) * GRID_SIZE * GRID_SIZE
+            * (CH_CHEM_LAST + 1) * sizeof(float)), "alloc bwd d_rd_g");
 
     // Section 2.2: pinned host buffers.
     CUDA_ABORT(cudaMallocHost(&w->h_descriptors, POOL_SIZE * BMAP_DIM * sizeof(float)), "allocHost h_descriptors");
@@ -243,6 +262,8 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_stress_eff_weights), "free d_stress_eff_weights");
     CUDA_WARN(cudaFree(w->d_stress_batch_image), "free d_stress_batch_image");
     CUDA_WARN(cudaFree(w->d_stress_targets), "free d_stress_targets");
+    CUDA_WARN(cudaFree(w->d_rd_coeffs), "free d_rd_coeffs");
+    CUDA_WARN(cudaFree(w->d_sot_ref_coeffs), "free d_sot_ref_coeffs");
     CUDA_WARN(cudaFree(w->d_grad_norm), "free d_grad_norm");
     CUDA_WARN(cudaFree(w->d_tel), "free d_tel");
     CUDA_WARN(cudaFree(w->d_sot_temp_images), "free d_sot_temp_images");
@@ -260,6 +281,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->bwd_workspace.d_perc), "free d_perc");
     CUDA_WARN(cudaFree(w->bwd_workspace.recomp[0]), "free recomp[0]");
     CUDA_WARN(cudaFree(w->bwd_workspace.recomp[1]), "free recomp[1]");
+    CUDA_WARN(cudaFree(w->bwd_workspace.d_rd_g), "free d_rd_g");
     CUDA_WARN(cudaFreeHost(w->h_descriptors), "freeHost h_descriptors");
     CUDA_WARN(cudaFreeHost(w->h_btraj), "freeHost h_btraj");
     CUDA_WARN(cudaFreeHost(w->h_seed_grad), "freeHost h_seed_grad");
@@ -606,6 +628,10 @@ static bool stress_cycle(World* w, int gen) {
         w->d_weights, w->d_deltas + POOL_SIZE, w->d_stress_eff_weights,
         STRESS_POOL_SIZE, w->stream);
 
+    // The refreshed stress slots have new genomes: re-decode their RD
+    // coefficients before evaluating them (A-202, I6).
+    if (!upload_rd_coefficients(w)) return false;
+
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) w->h_stress_f_sot[s] = 1.f;
 
     for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
@@ -620,6 +646,7 @@ static bool stress_cycle(World* w, int gen) {
                        "upload stress batch image");
         if (!safety::alignment::evaluate_stress_classifiers(
                 w->d_organisms, w->d_weights, w->d_stress_eff_weights,
+                w->d_rd_coeffs + POOL_SIZE + p * STRESS_SUBPOP_SIZE,
                 w->stress_batch, w->d_stress_batch_image, w->host_sot_key,
                 p, w->h_stress_f_sot, w->d_sot_temp_images, w->d_sot_task_emb,
                 w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
@@ -658,6 +685,8 @@ static bool stress_cycle(World* w, int gen) {
     for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
         if (!safety::alignment::evaluate_stress_predictors(
                 w->d_organisms, w->d_weights, w->d_stress_eff_weights,
+                w->d_rd_coeffs + POOL_SIZE + p * STRESS_SUBPOP_SIZE
+                    + STRESS_SUBPOP_SIZE / 2,
                 w->d_stress_targets,
                 w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
                 inv, p, w->h_stress_f_sot, w->d_sot_task_emb,
@@ -922,6 +951,10 @@ bool step_generation(World* w) {
                                        w->host_sot_key, &w->rng);
     }
 
+    // Reaction-diffusion coefficients (A-202, I6): decoded from the current
+    // genomes before the forward.
+    if (!upload_rd_coefficients(w)) return false;
+
     // Predictor batch (A-701): assembled from the previous generation's
     // Intent Registry. Stationary probe slots are used once signed.
     if (w->bootstrap_fired) {
@@ -997,7 +1030,7 @@ bool step_generation(World* w) {
 
     // ---- GPU: forward_with_checkpoints (per-organism effective weights) ----
     autodiff::launch_forward_with_checkpoints(
-        w->d_organisms, w->d_fwd_inputs, nullptr,
+        w->d_organisms, w->d_fwd_inputs, w->d_rd_coeffs,
         w->d_weights, w->d_eff_weights, w->d_checkpoints,
         RESIDUAL_ALPHA, POOL_SIZE, w->stream);
     if (!phase_trace("forward", gen, w->stream)) return false;
@@ -1038,6 +1071,7 @@ bool step_generation(World* w) {
             w->d_sot_temp_images, w->d_sot_task_emb,
             w->d_sot_fwd_inputs, w->d_sot_descriptors,
             w->d_sot_bank_of, w->d_sot_ref_organisms,
+            w->h_rd_coeffs, w->d_sot_ref_coeffs,
             TOTAL_WEIGHTS, w->stream)) {
         return false;
     }
@@ -1184,7 +1218,8 @@ bool step_generation(World* w) {
 
     // ---- GPU: backward (phase-decomposed batched, all orgs in parallel) ----
     autodiff::launch_backward_all(
-        w->d_organisms, w->d_weights, w->d_eff_weights, w->d_seed_grad,
+        w->d_organisms, w->d_weights, w->d_eff_weights, w->d_rd_coeffs,
+        w->d_seed_grad,
         w->d_checkpoints, w->d_grads,
         w->bwd_workspace, RESIDUAL_ALPHA, POOL_SIZE, w->stream);
     if (!phase_trace("backward", gen, w->stream)) return false;
