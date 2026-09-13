@@ -1321,7 +1321,7 @@ static void test_predictor_batch_contract() {
         was_sot, &rng);
 
     for (int slot = 0; slot < slime::curriculum::PREDICTOR_BATCH; ++slot) {
-        int org = batch.target_pool_slot[slot];
+        int org = batch.target_pool_slot[slot].value();
         EXPECT_TRUE(org >= 0 && org < N);
         EXPECT_TRUE(canonical_role(roles[org]) == Role::Classifier);
         EXPECT_TRUE(batch.target_lineage_id[slot] == lineage_ids[org]);

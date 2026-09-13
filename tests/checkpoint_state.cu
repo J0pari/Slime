@@ -108,9 +108,9 @@ int main() {
     // rather than comparing zeros.
     a->predictor_error_ema[3] = 0.25f;
     a->predictor_error_ema[POOL_SIZE - 1] = 0.75f;
-    a->predictor_batch.target_pool_slot[0] = 7;
-    a->predictor_batch.target_pool_slot[1] = -1;
-    a->predictor_batch.target_lineage_id[0] = 1234u;
+    a->predictor_batch.target_pool_slot[0] = slime::PoolSlot(7);
+    a->predictor_batch.target_pool_slot[1] = slime::PoolSlot();
+    a->predictor_batch.target_lineage_id[0] = slime::LineageId(1234u);
     a->predictor_batch.target_bmap_64[0] = 0.5f;
     a->s_blended_history[0] = 1.25f;
     a->s_hist_head = 1;

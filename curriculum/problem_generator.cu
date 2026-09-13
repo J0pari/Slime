@@ -46,7 +46,7 @@ struct PredictorBatch {
     // Pool-slot identity of each target (-1 for the stationary probe slots,
     // which need not correspond to a live pool organism); the lineage id is
     // carried separately for provenance and archive linkage.
-    int      target_pool_slot[PREDICTOR_BATCH];
+    PoolSlot target_pool_slot[PREDICTOR_BATCH];
     LineageId target_lineage_id[PREDICTOR_BATCH];
     float    target_bmap_32[PREDICTOR_BATCH * BMAP_DIM];
     float    target_bmap_64[PREDICTOR_BATCH * BMAP_DIM];  // ground truth
@@ -313,7 +313,7 @@ inline void assemble_predictor_batch(PredictorBatch* out,
     int slot = 0;
     if (probes.predictor_probes_signed) {
         for (; slot < PREDICTOR_PROBE_SLOTS && slot < PREDICTOR_BATCH; ++slot) {
-            out->target_pool_slot[slot] = -1;
+            out->target_pool_slot[slot] = PoolSlot();
             out->target_lineage_id[slot] =
                 LineageId(probes.predictor_probe_targets[slot]);
             std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
@@ -356,7 +356,7 @@ inline void assemble_predictor_batch(PredictorBatch* out,
             }
         }
         if (chosen < 0) continue;  // no classifier targets available
-        out->target_pool_slot[slot] = chosen;
+        out->target_pool_slot[slot] = PoolSlot(chosen);
         out->target_lineage_id[slot] = pool_lineage_ids[chosen];
         std::memcpy(&out->target_bmap_32[slot * BMAP_DIM],
                     &bmap32_rows[chosen * BMAP_DIM], BMAP_DIM * sizeof(float));

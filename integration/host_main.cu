@@ -560,11 +560,12 @@ static void score_organisms(World* w, float classifier_multiplier,
             // Ensemble prediction error EMA per pool target organism: the
             // predictor curriculum re-weights toward weak spots. Probe slots
             // carry pool_slot == -1 and have no pool EMA.
-            int target_slot = w->predictor_batch.target_pool_slot[slot];
-            if (target_slot >= 0 && target_slot < POOL_SIZE) {
-                w->predictor_error_ema[target_slot] =
-                    (1.f - PREDICTOR_ERROR_EMA_ALPHA) * w->predictor_error_ema[target_slot] +
-                    PREDICTOR_ERROR_EMA_ALPHA * loss;
+            PoolSlot target_slot = w->predictor_batch.target_pool_slot[slot];
+            if (target_slot.valid() && target_slot.value() < POOL_SIZE) {
+                w->predictor_error_ema[target_slot.value()] =
+                    (1.f - PREDICTOR_ERROR_EMA_ALPHA)
+                        * w->predictor_error_ema[target_slot.value()]
+                    + PREDICTOR_ERROR_EMA_ALPHA * loss;
             }
         }
 
