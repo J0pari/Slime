@@ -804,7 +804,10 @@ inline void recompute_bins(Archive* a, cudaStream_t /*stream*/) {
             for (int i = 0; i < MAX_ARCHIVE; ++i) {
                 const ArchiveEntry& e = a->entries[i];
                 if (!e.alive || e.role != role) continue;
-                if (e.bin_x != (b / ARCHIVE_BINS_Y) || e.bin_y != (b % ARCHIVE_BINS_Y)) continue;
+                if (e.bin_x != static_cast<uint32_t>(b / ARCHIVE_BINS_Y)
+                    || e.bin_y != static_cast<uint32_t>(b % ARCHIVE_BINS_Y)) {
+                    continue;
+                }
                 occupants[n_occ++] = i;
             }
             // Keep the top-cap by QD score; tombstone the rest.

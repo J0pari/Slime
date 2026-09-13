@@ -19,7 +19,7 @@ SRC := integration/host_main.cu
 HOST_SRC := tests/host_unit_tests.cpp
 
 HOST_CXX      ?= g++
-HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Wall -Wextra
+HOST_CXXFLAGS := -Itests/stubs -I. -std=c++17 -Wall -Wextra -Werror
 
 .PHONY: all run run-10 clean host-tests check forward-smoke autodiff-test evolution-test \
 	task-conditioning-test architecture-check architecture-test architecture-status architecture-report \

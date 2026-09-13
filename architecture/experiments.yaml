@@ -96,3 +96,22 @@ experiments:
     claims:
       - A601.ensemble-epistemic-uncertainty
       - A601.trust-weight-composition
+
+  E5:
+    title: CAME versus AdamW
+    hypothesis: the confidence-adjusted update improves a preregistered
+      optimization metric beyond the AdamW baseline band under identical
+      seeds and compute budgets, or it does not earn its complexity
+    intervention: CAME optimizer active
+    controls:
+      - AdamW with matched hyperparameters
+    metrics:
+      - task loss trajectory
+      - instability-accumulator statistics
+      - wall-clock to matched loss
+    seeds: [1, 2, 3]
+    decision: CAME exceeds the baseline band on the preregistered metric
+      across the seed set; otherwise the claim of added value is withdrawn
+    status: planned
+    claims:
+      - A501.came-production-equation

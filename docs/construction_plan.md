@@ -60,6 +60,47 @@ back.
 
 ---
 
+## Semantic correctness stream (gates further BUILD)
+
+Syntactic coverage is not semantic coverage. Mechanism-presence checks can
+pass while the described contract is not met. The following defects in
+implemented items are closed with semantic witnesses before any inventory
+item after I4 starts:
+
+- C1 Predictor-target contract. `assemble_predictor_batch` draws
+  classifier-only targets, carries the real lineage id (not the pool index)
+  and the SOT status of the target; a predictor's score aggregates over its
+  K targets; a typed transaction test asserts targets, lineage attribution,
+  SOT status, and target descriptors stay together.
+- C2 Surprise population identity. Surprise and the predictor ensemble are
+  computed from the evaluated pre-spawn population snapshot, never from
+  post-spawn role/fitness metadata (descriptors describe the pre-spawn
+  population; roles and fitness must describe the same one).
+- C3 Role-gradient PT identity. A forced cross-role PT swap witness proves
+  gradient role attribution follows organism identity through the swap.
+
+C4-C7 are property witnesses recorded in VERIFY:
+
+- C4 Genome fieldwise perturbation matrix: each declared genome field is
+  mutated independently and either changes the phenotype as declared or is
+  marked dormant with a reason (RD bits dormant until I6).
+- C5 Checkpoint continuation equivalence: run N -> checkpoint -> run M
+  agrees with run N -> checkpoint -> reload -> run M at the required
+  determinism level.
+- C6 PT permutation test: a random permutation of organism identities
+  transforms every identity-bound observable equivariantly.
+- C7 Phase trace: `step_generation` emits runtime phase tokens checked
+  against the declared phase model, so the executable order is witnessed,
+  not only declared.
+
+C8 is a specification decision: the blueprint must state whether archive
+entries are historical attributions (descriptor and fitness at capture time
+under the then-current shared W) or replay-equivalent solutions, and the
+shared-base interaction must be explicit where insertion and selection
+consume fitness.
+
+---
+
 ## Feature inventory (build order)
 
 Dependencies are semantic: an item may only be built when everything it
@@ -207,6 +248,10 @@ Component and property tests, per subsystem:
 
 - Multi-generation runs (classifier-only, then full role mixture) with
   archive/telemetry invariants checked every generation.
+- Gate mutation testing: deliberately remove one required transaction move,
+  one CUDA error check, and one role canonicalization, and prove the
+  appropriate witness goes red.
+- The C4-C7 property witnesses above.
 - 10-generation timing gate on the specified hardware.
 - Numerical health: no NaN/Inf, bounded activations, no persistent FP16
   saturation, finite weight/update norms.
@@ -252,6 +297,13 @@ hysteresis, boom/bust cycles, role extinction.
 Is ensemble variance a usable epistemic signal? Rank-correlate it with
 squared held-out error on the frozen probes, with calibration and diversity
 bounds.
+
+### E5 — CAME versus AdamW
+
+Does the confidence-adjusted update earn its complexity? Matched runs of
+CAME against AdamW under identical seeds and compute budgets; the decision
+rule asks whether CAME improves a preregistered metric beyond the baseline
+band rather than whether it is implementable.
 
 Dynamics questions the series should answer: stable fixed point,
 oscillation, hysteresis, boom/bust cycles, role extinction, and

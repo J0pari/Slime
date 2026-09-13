@@ -6,6 +6,21 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history.
 
+## P0 — Semantic correctness (gates further BUILD)
+
+Mechanism presence is not contract fulfillment. C1-C3 close defects in
+implemented items; no inventory item after I4 starts until they are closed
+or explicitly deferred with a recorded decision.
+
+- [ ] C1 Predictor-target contract: classifier-only targets, real lineage
+  ids, SOT status, K-target aggregation, and a typed transaction witness.
+- [ ] C2 Surprise population identity: compute surprise and the predictor
+  ensemble from the evaluated pre-spawn snapshot.
+- [ ] C3 Role-gradient PT identity: forced cross-role swap witness.
+- [ ] C8 Archive attribution: decide historical-attribution versus
+  replay-equivalent entries in the blueprint and document the shared-base
+  interaction.
+
 ## P0 — Finish the BUILD phase
 
 No GPU integration, acceptance, or production run happens before this list
@@ -64,8 +79,13 @@ I9
   generations.
 - [ ] Bound the placeholder's uncertainty output before surprise is treated
   as a robust signal (`A601.trust-weight-composition`).
-- [ ] Execute the preregistered experiments (E1-E4) and record manifests;
+- [ ] Execute the preregistered experiments (E1-E5) and record manifests;
   update each protocol's status in `architecture/experiments.yaml`.
+- [ ] Property witnesses: C4 genome fieldwise perturbation matrix, C5
+  checkpoint continuation equivalence, C6 PT permutation test, C7 phase
+  trace checked against the declared phase model.
+- [ ] Gate mutation testing: remove one transaction move, one CUDA check,
+  and one role canonicalization; prove the right witness goes red.
 
 ## P2 — INTEGRATE (after VERIFY)
 

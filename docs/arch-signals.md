@@ -7,6 +7,15 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: A semantic-coverage review distilled into the construction
+  plan's semantic correctness stream: C1 predictor-target contract (classifier
+  targets, real lineage ids, SOT status, K-target aggregation), C2 surprise
+  population identity across spawn, C3 role-gradient PT identity, C4 genome
+  fieldwise perturbation matrix, C5 checkpoint continuation equivalence, C6
+  PT permutation test, C7 phase trace, C8 archive attribution semantics.
+  C1-C3 gate further BUILD; C4-C7 are VERIFY witnesses; C8 is a blueprint
+  decision. The host test build now carries -Werror, and the two
+  signed/unsigned comparisons in the archive rebin are fixed.
 - 2026-09-12: The stress ladder's classifier half is well-defined (elevated
   SOT-marked images at {10%, 20%, 40%} with per-organism effective-weight
   references), but the blueprint does not define what "fails the SOT gate"

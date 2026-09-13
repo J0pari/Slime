@@ -27,6 +27,7 @@ BUILD phase incomplete: 5 of 9 inventory items are not implemented (I5, I6, I7, 
 | E2 | Shared-substrate transfer versus interference | planned | A501.role-gradient-alignment |
 | E3 | Surprise homeostasis and role dynamics | planned | A601.trust-weight-composition |
 | E4 | Ensemble disagreement tracks held-out error | planned | A601.ensemble-epistemic-uncertainty, A601.trust-weight-composition |
+| E5 | CAME versus AdamW | planned | A501.came-production-equation |
 
 ## Claims
 
