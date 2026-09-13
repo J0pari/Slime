@@ -356,16 +356,16 @@ constexpr int PREDICTOR_POOL_SLOT_COUNT  = PREDICTOR_EVAL_K - PREDICTOR_PROBE_SL
 // First generations always logged, independent of TELEMETRY_INTERVAL.
 constexpr int FIRST_GENS_TELEMETRY  = 5;
 
-// Placeholder regressor (A-601): layer sizes and AdamW hyperparameters.
-constexpr int   PH_H1               = 128;
-constexpr int   PH_H2               = 64;
-constexpr int   PH_REPLAY_CAPACITY  = MAX_ARCHIVE;
-constexpr float PH_LR               = 1e-4f;
-constexpr float PH_BETA1            = 0.9f;
-constexpr float PH_BETA2            = 0.999f;
-constexpr float PH_EPS              = 1e-8f;
-constexpr float PH_WD               = 0.01f;
-constexpr int   PH_TRAIN_MINIBATCH  = 8;
+// Reference regressor (A-601): layer sizes and AdamW hyperparameters.
+constexpr int   REF_H1               = 128;
+constexpr int   REF_H2               = 64;
+constexpr int   REF_REPLAY_CAPACITY  = MAX_ARCHIVE;
+constexpr float REF_LR               = 1e-4f;
+constexpr float REF_BETA1            = 0.9f;
+constexpr float REF_BETA2            = 0.999f;
+constexpr float REF_EPS              = 1e-8f;
+constexpr float REF_WD               = 0.01f;
+constexpr int   REF_TRAIN_MINIBATCH  = 8;
 
 // PT ladder adaptation bounds.
 constexpr float PT_BETA_MIN      = 1e-3f;

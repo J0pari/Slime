@@ -9,7 +9,7 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 | :--- | :------ | :----------- |
 | I1 | Checkpoint and resume (S-001, cuda_engineering §14) | implemented |
 | I2 | Predictor role activation (A-601, A-701) | implemented |
-| I3 | Probe and placeholder completion (A-601, cuda_engineering §4.5–4.6) | implemented |
+| I3 | Probe and reference completion (A-601, cuda_engineering §4.5–4.6) | implemented |
 | I4 | Structural pressures (S-003) | implemented |
 | I5 | Global context channel (A-203, cuda_engineering §16) | implemented |
 | I6 | Reaction-diffusion activation (A-202, A-103) | implemented |

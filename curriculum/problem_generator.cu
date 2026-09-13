@@ -178,10 +178,10 @@ struct ProbeSet {
     float predictor_probe_bmap32[PREDICTOR_BATCH * BMAP_DIM];
     float predictor_probe_bmap64[PREDICTOR_BATCH * BMAP_DIM];
 
-    // Held-out probe tuples for the placeholder regressor (A-601): signed
+    // Held-out probe tuples for the reference regressor (A-601): signed
     // classifier (bmap_64, task_embedding, fitness) tuples snapshotted from
     // the replay buffer at bootstrap, never trained on afterwards. This is
-    // the placeholder's ground-truth held-out signal.
+    // the reference's ground-truth held-out signal.
     bool  probe_tuples_signed;
     float probe_bmap[PROBE_BATCH * BMAP_DIM];
     float probe_task_emb[PROBE_BATCH * TASK_EMBED_DIM];
@@ -244,7 +244,7 @@ inline void init_probe_set(ProbeSet* ps, uint64_t host_sot_key, Pcg32* rng) {
 // Sign the held-out probe tuples at bootstrap: snapshot PROBE_BATCH real
 // (bmap_64, task_embedding, fitness) tuples from the replay buffer and
 // re-sign the probe set. After this the tuples never change, so the
-// placeholder's held-out error is a stationary signal.
+// reference's held-out error is a stationary signal.
 inline void sign_probe_tuples(ProbeSet* ps,
                               const float* bmap_rows,      // [PROBE_BATCH][BMAP_DIM]
                               const float* task_rows,      // [PROBE_BATCH][TASK_EMBED_DIM]

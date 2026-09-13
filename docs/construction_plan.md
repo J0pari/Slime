@@ -118,7 +118,7 @@ depends on exists.
   parent, spawn_gen, replica_tag, fitness, f_raw, f_sot, role,
   batch_sample_idx), archive (entries, bins, live lists, RFF means,
   inverse-variance EMA, descriptor EMA, PCA state), mutation ladder, CUSUM
-  states, placeholder regressor + AdamW moments, replay buffer, correlation
+  states, reference regressor + AdamW moments, replay buffer, correlation
   window, probe set + probe fitness, classifier batch, RNG state, operator
   state, calibrated s_target and flags, generation counter.
 - Device state: shared weights and CAME moments (m, v, c, prev_u). Grids and
@@ -142,21 +142,21 @@ depends on exists.
 - Predictors participate in archive insertion, spawning, role-proportional
   parent selection, and fitness composition.
 - Ensemble surprise (top-K predictors, per-descriptor variance), hybrid
-  blending with the placeholder on the correlation window, role-balance
+  blending with the reference on the correlation window, role-balance
   fitness scaling driven by rho = s_avg / s_target.
 - CUSUM calibration over the specified window: k = 0.5 sigma, h = 5 sigma,
   frozen s_target.
 - Verification: founder injection, predictor survival and MSE decrease,
   BTRAJ agreement, role mutation rate in range, calibration firing.
 
-### I3 — Probe and placeholder completion (A-601, cuda_engineering §4.5–4.6)
+### I3 — Probe and reference completion (A-601, cuda_engineering §4.5–4.6)
 
-- GPU placeholder forward and training kernels per the engineering spec.
+- GPU reference forward and training kernels per the engineering spec.
 - Signed probe set evaluation with real ground-truth fitness (probe targets
-  currently zeros are a defect, not a placeholder).
-- Placeholder surprise from real probe prediction error; the correlation
+  currently zeros are a defect, not a reference).
+- Reference surprise from real probe prediction error; the correlation
   window starts only when both signals are live.
-- Verification: placeholder MSE decreases, surprise nonzero and varying,
+- Verification: reference MSE decreases, surprise nonzero and varying,
   probe signature validity, CUSUM detection on an injected shift.
 
 ### I4 — Structural pressures (S-003)
@@ -244,7 +244,7 @@ Component and property tests, per subsystem:
 - Task conditioning (all 16 embedding dimensions reach the forward).
 - Residual-dynamics bounds under the production timestep.
 - Checkpoint roundtrip and resume continuity.
-- Placeholder/probe/probe-signature behavior.
+- Reference/probe/probe-signature behavior.
 - Predictor: founder injection, MSE decrease, correlation, calibration.
 - Structural: audit, sentinel, lineage brake, stress ladder.
 - RD: adjoint correctness with RD enabled.
@@ -281,7 +281,7 @@ as evidence manifests, not as prose. The program:
 ### E1 — Endogenous prediction pressure
 
 Does co-evolving prediction change search dynamics? Classifier-only,
-fixed-placeholder, and evolved-predictor conditions under identical compute
+fixed-reference, and evolved-predictor conditions under identical compute
 budgets, measuring rates of behavioral novelty and archive expansion rather
 than final accuracy.
 

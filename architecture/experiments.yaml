@@ -20,7 +20,7 @@ experiments:
       spawning, hybrid surprise, predictor curriculum)
     controls:
       - classifier-only QD
-      - QD plus fixed placeholder predictor
+      - QD plus fixed reference predictor
     metrics:
       - archive expansion rate
       - behavioral novelty rate

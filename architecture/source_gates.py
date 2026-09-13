@@ -289,14 +289,14 @@ def gate_surprise_before_spawn(files: dict[str, list[str]],
     surprise_line = -1
     spawn_line = -1
     for i, line in enumerate(lines, 1):
-        if "evaluate_probe_placeholder(w)" in line and surprise_line < 0:
+        if "evaluate_probe_reference(w)" in line and surprise_line < 0:
             surprise_line = i
         if "spawn_wave(w);" in line and spawn_line < 0:
             spawn_line = i
     if surprise_line < 0:
         report.findings.append(
             Finding("surprise_before_spawn", "integration/host_main.cu", 0,
-                    "placeholder surprise call missing"))
+                    "reference surprise call missing"))
     elif spawn_line < 0:
         report.findings.append(
             Finding("surprise_before_spawn", "integration/host_main.cu", 0,

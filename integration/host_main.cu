@@ -68,21 +68,23 @@ constexpr const char* CHECKPOINT_DEFAULT_PATH = "checkpoints/slime-ckpt.bin";
 // forward recomputes the per-tuple surprise on real
 // (bmap_64, task_embedding, fitness) tuples snapshotted from the replay
 // buffer at bootstrap. Returns the mean surprise, or -1 on launch failure.
-static float evaluate_probe_placeholder(World* w) {
+static float evaluate_probe_reference(World* w) {
     if (!cur::verify_probe_set(w->probe_set, w->host_sot_key)) return 0.f;
     if (!w->probe_set.probe_tuples_signed) return 0.f;
-    if (!predictor::launch_placeholder_forward(
-            w->d_placeholder_reg, w->d_ph_probe_input, PROBE_BATCH,
-            nullptr, w->d_ph_probe_target, w->d_ph_surprise, w->stream)) {
+    if (!phase_run(&w->fg_world_predict, w->stream, [&] {
+            predictor::launch_reference_forward(
+                w->d_reference_reg, w->d_ref_probe_input, PROBE_BATCH,
+                nullptr, w->d_ref_probe_target, w->d_ref_surprise, w->stream);
+        })) {
         return -1.f;
     }
-    TRANSFER_ABORT(cudaMemcpyAsync(w->h_ph_surprise, w->d_ph_surprise,
+    TRANSFER_ABORT(cudaMemcpyAsync(w->h_ref_surprise, w->d_ref_surprise,
                     PROBE_BATCH * sizeof(float), cudaMemcpyDeviceToHost,
-                    w->stream), "read placeholder surprise");
+                    w->stream), "read reference surprise");
     TRANSFER_ABORT(cudaStreamSynchronize(w->stream),
-                   "placeholder surprise sync");
+                   "reference surprise sync");
     float total = 0.f;
-    for (int i = 0; i < PROBE_BATCH; ++i) total += w->h_ph_surprise[i];
+    for (int i = 0; i < PROBE_BATCH; ++i) total += w->h_ref_surprise[i];
     return total / static_cast<float>(PROBE_BATCH);
 }
 
@@ -91,17 +93,17 @@ static float evaluate_probe_placeholder(World* w) {
 // load that restores a signed probe set.
 static bool upload_probe_batch(World* w) {
     for (int i = 0; i < PROBE_BATCH; ++i) {
-        std::memcpy(&w->h_ph_probe_input[i * predictor::PH_INPUT],
+        std::memcpy(&w->h_ref_probe_input[i * predictor::REF_INPUT],
                     &w->probe_set.probe_bmap[i * BMAP_DIM],
                     BMAP_DIM * sizeof(float));
-        std::memcpy(&w->h_ph_probe_input[i * predictor::PH_INPUT + BMAP_DIM],
+        std::memcpy(&w->h_ref_probe_input[i * predictor::REF_INPUT + BMAP_DIM],
                     &w->probe_set.probe_task_emb[i * TASK_EMBED_DIM],
                     TASK_EMBED_DIM * sizeof(float));
     }
-    TRANSFER_ABORT(cudaMemcpyAsync(w->d_ph_probe_input, w->h_ph_probe_input,
-                    PROBE_BATCH * predictor::PH_INPUT * sizeof(float),
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_ref_probe_input, w->h_ref_probe_input,
+                    PROBE_BATCH * predictor::REF_INPUT * sizeof(float),
                     cudaMemcpyHostToDevice, w->stream), "upload probe input");
-    TRANSFER_ABORT(cudaMemcpyAsync(w->d_ph_probe_target,
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_ref_probe_target,
                     w->probe_set.probe_fitness,
                     PROBE_BATCH * sizeof(float),
                     cudaMemcpyHostToDevice, w->stream), "upload probe target");
@@ -124,20 +126,20 @@ static bool upload_rd_coefficients(World* w) {
 
 // Parameters and AdamW state are device-resident; mirror them into the host
 // struct before the serializer writes, and back after a load.
-static bool sync_placeholder_from_device(World* w) {
-    TRANSFER_ABORT(cudaMemcpyAsync(&w->placeholder_reg, w->d_placeholder_reg,
-                    sizeof(predictor::PlaceholderRegressor),
+static bool sync_reference_from_device(World* w) {
+    TRANSFER_ABORT(cudaMemcpyAsync(&w->reference_reg, w->d_reference_reg,
+                    sizeof(predictor::ReferenceRegressor),
                     cudaMemcpyDeviceToHost, w->stream),
-                   "sync placeholder from device");
-    TRANSFER_ABORT(cudaStreamSynchronize(w->stream), "placeholder sync");
+                   "sync reference from device");
+    TRANSFER_ABORT(cudaStreamSynchronize(w->stream), "reference sync");
     return true;
 }
 
-static bool sync_placeholder_to_device(World* w) {
-    TRANSFER_ABORT(cudaMemcpyAsync(w->d_placeholder_reg, &w->placeholder_reg,
-                    sizeof(predictor::PlaceholderRegressor),
+static bool sync_reference_to_device(World* w) {
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_reference_reg, &w->reference_reg,
+                    sizeof(predictor::ReferenceRegressor),
                     cudaMemcpyHostToDevice, w->stream),
-                   "sync placeholder to device");
+                   "sync reference to device");
     return true;
 }
 
@@ -167,13 +169,14 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_btraj,        POOL_SIZE * BTRAJ_SAMPLES * BMAP_DIM * sizeof(float)), "alloc d_btraj");
     CUDA_ABORT(cudaMalloc(&w->d_predictor_bmap32, cur::PREDICTOR_BATCH * BMAP_DIM * sizeof(float)), "alloc d_predictor_bmap32");
 
-    // Device placeholder state and probe batch (cuda_engineering 4.5-4.6, T5).
-    CUDA_ABORT(cudaMalloc(&w->d_placeholder_reg, sizeof(predictor::PlaceholderRegressor)), "alloc d_placeholder_reg");
-    CUDA_ABORT(cudaMalloc(&w->d_ph_batch_input, PH_TRAIN_MINIBATCH * predictor::PH_INPUT * sizeof(float)), "alloc d_ph_batch_input");
-    CUDA_ABORT(cudaMalloc(&w->d_ph_batch_target, PH_TRAIN_MINIBATCH * sizeof(float)), "alloc d_ph_batch_target");
-    CUDA_ABORT(cudaMalloc(&w->d_ph_probe_input, PROBE_BATCH * predictor::PH_INPUT * sizeof(float)), "alloc d_ph_probe_input");
-    CUDA_ABORT(cudaMalloc(&w->d_ph_probe_target, PROBE_BATCH * sizeof(float)), "alloc d_ph_probe_target");
-    CUDA_ABORT(cudaMalloc(&w->d_ph_surprise, PROBE_BATCH * sizeof(float)), "alloc d_ph_surprise");
+    // Device reference state and probe batch (cuda_engineering 4.5-4.6, T5).
+    CUDA_ABORT(cudaMalloc(&w->d_reference_reg, sizeof(predictor::ReferenceRegressor)), "alloc d_reference_reg");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_batch_input, REF_TRAIN_MINIBATCH * predictor::REF_INPUT * sizeof(float)), "alloc d_ref_batch_input");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_batch_target, REF_TRAIN_MINIBATCH * sizeof(float)), "alloc d_ref_batch_target");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_probe_input, PROBE_BATCH * predictor::REF_INPUT * sizeof(float)), "alloc d_ref_probe_input");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_probe_target, PROBE_BATCH * sizeof(float)), "alloc d_ref_probe_target");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_surprise, PROBE_BATCH * sizeof(float)), "alloc d_ref_surprise");
+    CUDA_ABORT(cudaMalloc(&w->d_ref_step, sizeof(int)), "alloc d_ref_step");
     CUDA_ABORT(cudaMalloc(&w->d_stress_eff_weights, STRESS_POOL_SIZE * TOTAL_WEIGHTS * sizeof(float)), "alloc d_stress_eff_weights");
     CUDA_ABORT(cudaMalloc(&w->d_stress_batch_image, cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_batch_image");
     CUDA_ABORT(cudaMalloc(&w->d_stress_targets, 2 * STRESS_POOL_SIZE * BMAP_DIM * sizeof(float)), "alloc d_stress_targets");
@@ -220,7 +223,7 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMallocHost(&w->h_fwd_inputs,  POOL_SIZE * sizeof(ForwardInputs)), "allocHost h_fwd_inputs");
     CUDA_ABORT(cudaMallocHost(&w->h_weights,     TOTAL_WEIGHTS * sizeof(float)), "allocHost h_weights");
     CUDA_ABORT(cudaMallocHost(&w->h_tel,         sizeof(TelemetryScalars)), "allocHost h_tel");
-    CUDA_ABORT(cudaMallocHost(&w->h_ph_surprise, PROBE_BATCH * sizeof(float)), "allocHost h_ph_surprise");
+    CUDA_ABORT(cudaMallocHost(&w->h_ref_surprise, PROBE_BATCH * sizeof(float)), "allocHost h_ref_surprise");
 
     // Zero CAME state on device.
     CUDA_ABORT(cudaMemset(w->d_came_m,      0, TOTAL_WEIGHTS * sizeof(float)), "memset d_came_m");
@@ -253,12 +256,13 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_batch_task_emb), "free d_batch_task_emb");
     CUDA_WARN(cudaFree(w->d_btraj), "free d_btraj");
     CUDA_WARN(cudaFree(w->d_predictor_bmap32), "free d_predictor_bmap32");
-    CUDA_WARN(cudaFree(w->d_placeholder_reg), "free d_placeholder_reg");
-    CUDA_WARN(cudaFree(w->d_ph_batch_input), "free d_ph_batch_input");
-    CUDA_WARN(cudaFree(w->d_ph_batch_target), "free d_ph_batch_target");
-    CUDA_WARN(cudaFree(w->d_ph_probe_input), "free d_ph_probe_input");
-    CUDA_WARN(cudaFree(w->d_ph_probe_target), "free d_ph_probe_target");
-    CUDA_WARN(cudaFree(w->d_ph_surprise), "free d_ph_surprise");
+    CUDA_WARN(cudaFree(w->d_reference_reg), "free d_reference_reg");
+    CUDA_WARN(cudaFree(w->d_ref_batch_input), "free d_ref_batch_input");
+    CUDA_WARN(cudaFree(w->d_ref_batch_target), "free d_ref_batch_target");
+    CUDA_WARN(cudaFree(w->d_ref_probe_input), "free d_ref_probe_input");
+    CUDA_WARN(cudaFree(w->d_ref_probe_target), "free d_ref_probe_target");
+    CUDA_WARN(cudaFree(w->d_ref_surprise), "free d_ref_surprise");
+    CUDA_WARN(cudaFree(w->d_ref_step), "free d_ref_step");
     CUDA_WARN(cudaFree(w->d_stress_eff_weights), "free d_stress_eff_weights");
     CUDA_WARN(cudaFree(w->d_stress_batch_image), "free d_stress_batch_image");
     CUDA_WARN(cudaFree(w->d_stress_targets), "free d_stress_targets");
@@ -288,7 +292,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFreeHost(w->h_fwd_inputs), "freeHost h_fwd_inputs");
     CUDA_WARN(cudaFreeHost(w->h_weights), "freeHost h_weights");
     CUDA_WARN(cudaFreeHost(w->h_tel), "freeHost h_tel");
-    CUDA_WARN(cudaFreeHost(w->h_ph_surprise), "freeHost h_ph_surprise");
+    CUDA_WARN(cudaFreeHost(w->h_ref_surprise), "freeHost h_ref_surprise");
     CUDA_WARN(cudaStreamDestroy(w->stream), "destroy stream");
 }
 
@@ -456,11 +460,11 @@ bool initialize_world(World* w) {
     w->cusum_surprise = {0.f, 0.f, 0.f, 0.5f, 5.0f, 0};
     w->cusum_r        = {0.f, 0.f, 0.f, 0.1f, 3.0f, 0};
 
-    // Placeholder regressor, replay buffer, probe set, correlation window (A-601).
-    predictor::init_placeholder_regressor(&w->placeholder_reg, &w->rng);
-    TRANSFER_ABORT(cudaMemcpy(w->d_placeholder_reg, &w->placeholder_reg,
-                    sizeof(predictor::PlaceholderRegressor),
-                    cudaMemcpyHostToDevice), "upload placeholder reg");
+    // Reference regressor, replay buffer, probe set, correlation window (A-601).
+    predictor::init_reference_regressor(&w->reference_reg, &w->rng);
+    TRANSFER_ABORT(cudaMemcpy(w->d_reference_reg, &w->reference_reg,
+                    sizeof(predictor::ReferenceRegressor),
+                    cudaMemcpyHostToDevice), "upload reference reg");
     std::memset(&w->replay_buffer, 0, sizeof(w->replay_buffer));
     w->replay_buffer.head = 0;
     w->replay_buffer.filled = 0;
@@ -809,8 +813,8 @@ static bool inject_predictor_founders(World* w) {
     cur::sign_predictor_probes(&w->probe_set, target_ids, b32, b64,
                                w->host_sot_key);
 
-    // Sign the held-out placeholder probe tuples from the replay buffer
-    // (real evaluated tuples; the placeholder never trains on them — the
+    // Sign the held-out reference probe tuples from the replay buffer
+    // (real evaluated tuples; the reference never trains on them — the
     // snapshotted ring positions are marked held out below).
     if (!w->probe_set.probe_tuples_signed &&
         w->replay_buffer.filled >= PROBE_BATCH) {
@@ -934,7 +938,7 @@ static bool phase_trace(const char* tag, int gen, cudaStream_t stream) {
 //   TELEMETRY norms + nonfinite hard abort
 //   RECORD    replay push + evaluated-population logging (pre-spawn)
 //   EVOLVE    spawn wave
-//   MONITOR   placeholder train, surprise, CUSUM, PCA rebin, operator checks
+//   MONITOR   reference train, surprise, CUSUM, PCA rebin, operator checks
 //
 // Returns false when the generation invalidated the run (CUDA error or a
 // nonfinite numerical state); run() then aborts the experiment.
@@ -1028,21 +1032,22 @@ bool step_generation(World* w) {
     autodiff::launch_materialize_effective_weights(
         w->d_weights, w->d_deltas, w->d_eff_weights, POOL_SIZE, w->stream);
 
-    // ---- GPU: forward_with_checkpoints (per-organism effective weights) ----
-    autodiff::launch_forward_with_checkpoints(
-        w->d_organisms, w->d_fwd_inputs, w->d_rd_coeffs,
-        w->d_weights, w->d_eff_weights, w->d_checkpoints,
-        RESIDUAL_ALPHA, POOL_SIZE, w->stream);
-    if (!phase_trace("forward", gen, w->stream)) return false;
-
-    // ---- GPU: extract_descriptor ----
-    nca::extract_descriptor(w->d_organisms, w->d_descriptors,
-                            POOL_SIZE, w->stream);
-
-    // ---- GPU: btraj_gather ----
-    autodiff::launch_btraj_gather(w->d_organisms, w->d_btraj,
-                                  POOL_SIZE, w->stream);
-    if (!phase_trace("descriptor+btraj", gen, w->stream)) return false;
+    // ---- GPU: forward + descriptor + btraj (phase graph, A-102) ----
+    // The three launches are captured together: no host synchronization may
+    // occur between them, so the phase trace runs once after the graph.
+    if (!phase_run(&w->fg_forward, w->stream, [&] {
+            autodiff::launch_forward_with_checkpoints(
+                w->d_organisms, w->d_fwd_inputs, w->d_rd_coeffs,
+                w->d_weights, w->d_eff_weights, w->d_checkpoints,
+                RESIDUAL_ALPHA, POOL_SIZE, w->stream);
+            nca::extract_descriptor(w->d_organisms, w->d_descriptors,
+                                    POOL_SIZE, w->stream);
+            autodiff::launch_btraj_gather(w->d_organisms, w->d_btraj,
+                                          POOL_SIZE, w->stream);
+        })) {
+        return false;
+    }
+    if (!phase_trace("forward+descriptor+btraj", gen, w->stream)) return false;
 
     // ---- T2: D→H transfers ----
     TRANSFER_ABORT(cudaMemcpyAsync(w->h_descriptors, w->d_descriptors,
@@ -1217,24 +1222,18 @@ bool step_generation(World* w) {
                     cudaMemcpyHostToDevice, w->stream), "T3 seed_grad");
 
     // ---- GPU: backward (phase-decomposed batched, all orgs in parallel) ----
-    autodiff::launch_backward_all(
-        w->d_organisms, w->d_weights, w->d_eff_weights, w->d_rd_coeffs,
-        w->d_seed_grad,
-        w->d_checkpoints, w->d_grads,
-        w->bwd_workspace, RESIDUAL_ALPHA, POOL_SIZE, w->stream);
-    if (!phase_trace("backward", gen, w->stream)) return false;
-
-    // ---- GPU: aggregate gradients ----
-    optimizer::launch_aggregate_gradients(w->d_grads, w->d_mean_grad,
-                                          POOL_SIZE, w->stream);
-
-    // ---- GPU: gradient norm via device-side reduction (section 8) ----
-    if (!optimizer::launch_grad_norm_reduce(w->d_mean_grad, w->d_grad_norm,
-                                            w->stream)) {
+    if (!phase_run(&w->fg_backward, w->stream, [&] {
+            autodiff::launch_backward_all(
+                w->d_organisms, w->d_weights, w->d_eff_weights,
+                w->d_rd_coeffs, w->d_seed_grad,
+                w->d_checkpoints, w->d_grads,
+                w->bwd_workspace, RESIDUAL_ALPHA, POOL_SIZE, w->stream);
+        })) {
         return false;
     }
+    if (!phase_trace("backward", gen, w->stream)) return false;
 
-    // ---- GPU: CAME step ----
+    // ---- GPU: aggregate + CAME (phase graph, A-102) ----
     optimizer::CameState came_state;
     came_state.d_m = w->d_came_m;
     came_state.d_v = w->d_came_v;
@@ -1242,8 +1241,20 @@ bool step_generation(World* w) {
     came_state.d_prev_u = w->d_came_prev_u;
     came_state.d_mean_grad = w->d_mean_grad;
     came_state.step = gen;
-    optimizer::launch_came_step(w->d_weights, came_state,
-                                optimizer::CAME_DEFAULTS, w->stream);
+    if (!phase_run(&w->fg_optimizer, w->stream, [&] {
+            optimizer::launch_aggregate_gradients(w->d_grads, w->d_mean_grad,
+                                                  POOL_SIZE, w->stream);
+            optimizer::launch_came_step(w->d_weights, came_state,
+                                        optimizer::CAME_DEFAULTS, w->stream);
+        })) {
+        return false;
+    }
+
+    // ---- GPU: gradient norm via device-side reduction (section 8) ----
+    if (!optimizer::launch_grad_norm_reduce(w->d_mean_grad, w->d_grad_norm,
+                                            w->stream)) {
+        return false;
+    }
 
     // ---- GPU: numerical telemetry (A-501) ----
     // launch_telemetry_kernels zeroes the TelemetryScalars struct first, so
@@ -1408,12 +1419,12 @@ bool step_generation(World* w) {
         std::fflush(stdout);
     }
 
-    // ---- MONITOR: placeholder training (A-601, device kernel) ----
+    // ---- MONITOR: reference training (A-601, device kernel) ----
     // The replay buffer is host-only; sample a minibatch that never includes
     // held-out probe tuples, upload it, and run one AdamW step on the device.
-    if (w->replay_buffer.filled >= PH_TRAIN_MINIBATCH) {
+    if (w->replay_buffer.filled >= REF_TRAIN_MINIBATCH) {
         bool batch_ok = true;
-        for (int mb = 0; mb < PH_TRAIN_MINIBATCH && batch_ok; ++mb) {
+        for (int mb = 0; mb < REF_TRAIN_MINIBATCH && batch_ok; ++mb) {
             int idx = -1;
             for (int tries = 0; tries < 256 && idx < 0; ++tries) {
                 int cand = static_cast<int>(
@@ -1425,41 +1436,46 @@ bool step_generation(World* w) {
                 batch_ok = false;
                 break;
             }
-            std::memcpy(&w->h_ph_batch_input[mb * predictor::PH_INPUT],
+            std::memcpy(&w->h_ref_batch_input[mb * predictor::REF_INPUT],
                         &w->replay_buffer.bmap[idx * BMAP_DIM],
                         BMAP_DIM * sizeof(float));
-            std::memcpy(&w->h_ph_batch_input[mb * predictor::PH_INPUT + BMAP_DIM],
+            std::memcpy(&w->h_ref_batch_input[mb * predictor::REF_INPUT + BMAP_DIM],
                         &w->replay_buffer.task_emb[idx * TASK_EMBED_DIM],
                         TASK_EMBED_DIM * sizeof(float));
-            w->h_ph_batch_target[mb] = w->replay_buffer.fitness[idx];
+            w->h_ref_batch_target[mb] = w->replay_buffer.fitness[idx];
         }
         if (batch_ok) {
-            w->placeholder_reg.step++;
-            TRANSFER_ABORT(cudaMemcpyAsync(w->d_ph_batch_input,
-                            w->h_ph_batch_input,
-                            PH_TRAIN_MINIBATCH * predictor::PH_INPUT
+            w->reference_reg.step++;
+            TRANSFER_ABORT(cudaMemcpyAsync(w->d_ref_batch_input,
+                            w->h_ref_batch_input,
+                            REF_TRAIN_MINIBATCH * predictor::REF_INPUT
                                 * sizeof(float),
                             cudaMemcpyHostToDevice, w->stream),
-                           "upload placeholder batch input");
-            TRANSFER_ABORT(cudaMemcpyAsync(w->d_ph_batch_target,
-                            w->h_ph_batch_target,
-                            PH_TRAIN_MINIBATCH * sizeof(float),
+                           "upload reference batch input");
+            TRANSFER_ABORT(cudaMemcpyAsync(w->d_ref_batch_target,
+                            w->h_ref_batch_target,
+                            REF_TRAIN_MINIBATCH * sizeof(float),
                             cudaMemcpyHostToDevice, w->stream),
-                           "upload placeholder batch target");
-            if (!predictor::launch_placeholder_train(
-                    w->d_placeholder_reg, w->d_ph_batch_input,
-                    w->d_ph_batch_target, w->placeholder_reg.step,
-                    w->stream)) {
+                           "upload reference batch target");
+            TRANSFER_ABORT(cudaMemcpyAsync(w->d_ref_step,
+                            &w->reference_reg.step, sizeof(int),
+                            cudaMemcpyHostToDevice, w->stream),
+                           "upload reference step");
+            if (!phase_run(&w->fg_world_train, w->stream, [&] {
+                    predictor::launch_reference_train(
+                        w->d_reference_reg, w->d_ref_batch_input,
+                        w->d_ref_batch_target, w->d_ref_step, w->stream);
+                })) {
                 return false;
             }
         }
     }
 
     // ---- Surprise + CUSUM (A-601) ----
-    // Placeholder surprise on the signed probe set (ground truth probe
+    // Reference surprise on the signed probe set (ground truth probe
     // fitness is populated by the probe evaluation below).
-    float s_placeholder = evaluate_probe_placeholder(w);
-    if (s_placeholder < 0.f) return false;
+    float s_reference = evaluate_probe_reference(w);
+    if (s_reference < 0.f) return false;
 
     // Predictor ensemble surprise: variance across the top-K predictors (by
     // fitness) assigned to each stationary probe slot, on the frozen target.
@@ -1511,13 +1527,13 @@ bool step_generation(World* w) {
 
     // The correlation window and the r CUSUM start only when both signals
     // are live (post-bootstrap): before that r is undefined and only
-    // placeholder surprise is used.
+    // reference surprise is used.
     float r = 0.f;
-    float s_blended = s_placeholder;
+    float s_blended = s_reference;
     if (w->bootstrap_fired) {
         r = predictor::pearson_r_clipped(w->corr_window);
-        s_blended = predictor::blend_surprise(s_placeholder, s_predictor, r);
-        predictor::push_correlation(&w->corr_window, s_placeholder, s_predictor);
+        s_blended = predictor::blend_surprise(s_reference, s_predictor, r);
+        predictor::push_correlation(&w->corr_window, s_reference, s_predictor);
         safety::cusum_update(&w->cusum_r, r);
     }
     safety::cusum_update(&w->cusum_surprise, s_blended);
@@ -1527,7 +1543,7 @@ bool step_generation(World* w) {
             ? s_blended / w->s_target : 0.f;
         std::printf("         surprise s_ph=%.4e s_pr=%.4e r=%.4f "
                     "s_blend=%.4e rho=%.4f\n",
-                    s_placeholder, s_predictor, r, s_blended, rho);
+                    s_reference, s_predictor, r, s_blended, rho);
         std::fflush(stdout);
     }
 
@@ -1597,7 +1613,7 @@ bool step_generation(World* w) {
     // killed run resumes at the last generation instead of losing the run.
     {
         bool requested = w->operator_state.checkpoint_requested;
-        if (!sync_placeholder_from_device(w)) return false;
+        if (!sync_reference_from_device(w)) return false;
         if (!save_checkpoint(w, w->checkpoint_path)) {
             return false;
         }
@@ -1654,8 +1670,8 @@ void run(int n_generations, bool resume, const char* checkpoint_path) {
                     w->checkpoint_path, w->generation,
                     archive::archive_size(w->archive));
         std::fflush(stdout);
-        if (!sync_placeholder_to_device(w)) {
-            std::printf("=== RUN INVALIDATED: placeholder restore failed ===\n");
+        if (!sync_reference_to_device(w)) {
+            std::printf("=== RUN INVALIDATED: reference restore failed ===\n");
             std::fflush(stdout);
             free_gpu_buffers(w);
             delete w;

@@ -29,7 +29,7 @@ Headroom: ~5.8 GB.
 | DeltaWeights[88] | 2.8 MB | run |
 | Genomes[88] | 11.0 KB | run |
 | Archive (5000 entries + bins + RFF) | 2.0 MB | run |
-| PlaceholderRegressor + AdamW | 171.8 KB | run |
+| ReferenceRegressor + AdamW | 171.8 KB | run |
 | ReplayBuffer (5000 tuples) | 0.9 MB | run |
 | ClassifierBatch (16 × 64×64×3 FP16) | 384.1 KB | run |
 | Descriptors[64] (bmap_64 per org) | 8.0 KB | run |
@@ -104,7 +104,7 @@ These never touch the GPU:
 - `OrganismTable` metadata: Genome[], DeltaWeights[], lineage_id[],
   parent_id[], spawn_gen[], replica_tag[] (host-side copies; genomes
   are not needed on device)
-- `PlaceholderRegressor` host mirror: the live parameters and AdamW state
+- `ReferenceRegressor` host mirror: the live parameters and AdamW state
   are device-resident (§4.5-4.6); the host mirror exists only at
   initialization and around checkpoint I/O
 - `ReplayBuffer` (host-only; the training minibatch is uploaded per step)
@@ -159,15 +159,15 @@ cudaMemcpyAsync(h_weights, d_weights, ..., D2H, stream)
 Only needed when host code reads weights (e.g., for checkpoint writes).
 During normal generations this transfer is skipped.
 
-### T5: Placeholder (H→D and D→H, per generation)
+### T5: Reference (H→D and D→H, per generation)
 ```
-cudaMemcpyAsync(d_ph_batch_input, h_ph_batch_input, ..., H2D, stream)
-cudaMemcpyAsync(d_ph_batch_target, h_ph_batch_target, ..., H2D, stream)
-cudaMemcpyAsync(h_ph_surprise, d_ph_surprise, ..., D2H, stream)
+cudaMemcpyAsync(d_ref_batch_input, h_ref_batch_input, ..., H2D, stream)
+cudaMemcpyAsync(d_ref_batch_target, h_ref_batch_target, ..., H2D, stream)
+cudaMemcpyAsync(h_ref_surprise, d_ref_surprise, ..., D2H, stream)
 ```
 The replay buffer is host-only, so the sampled training minibatch is
-uploaded before `placeholder_train_kernel`. The probe batch is uploaded once
-at signing; each generation `placeholder_forward_kernel` recomputes the
+uploaded before `reference_train_kernel`. The probe batch is uploaded once
+at signing; each generation `reference_forward_kernel` recomputes the
 per-tuple surprises and the host reads back PROBE_BATCH floats.
 
 ---
@@ -398,22 +398,22 @@ confidence term damps the step when the update direction is unstable.
 **Purpose**: Copy final bmap_64 from OrganismState.bmap_traj into the flat
 d_descriptors buffer for bulk D→H transfer.
 
-### 4.5 placeholder_forward_kernel
+### 4.5 reference_forward_kernel
 
 **File**: `predictor/hybrid_surprise.cu`
 **Grid**: `<<<1, 256>>>`
-**Purpose**: 3-layer MLP forward for placeholder regressor on a minibatch.
+**Purpose**: 3-layer MLP forward for reference regressor on a minibatch.
 
 Input: bmap_64[BMAP_DIM] + task_emb[TASK_EMBED_DIM] = 48-d input.
 h1 = gelu(W1 * input + b1) — 128-d.
 h2 = gelu(W2 * h1 + b2) — 64-d.
 out = W3 * h2 + b3 — 2-d: (fitness_hat, log_uncertainty).
 
-### 4.6 placeholder_train_kernel
+### 4.6 reference_train_kernel
 
 **File**: `predictor/hybrid_surprise.cu`
 **Grid**: `<<<1, 256>>>`
-**Purpose**: One AdamW step on the placeholder regressor.
+**Purpose**: One AdamW step on the reference regressor.
 
 Loss = Gaussian NLL: `0.5 * (exp(-s) * (y - mu)^2 + s)`.
 Backprop through 3 layers. AdamW update on all 6 parameter groups
@@ -518,9 +518,9 @@ GENERATION LOOP:
 │         init_delta_from_prior. (Host-only; organism grid state
 │         will be overwritten on next forward.)
 │
-├─ [Host] Placeholder training:
+├─ [Host] Reference training:
 │         Push (bmap_64, task_emb, fitness) to replay buffer.
-│         [GPU] placeholder_train <<<1, 256>>>
+│         [GPU] reference_train <<<1, 256>>>
 │         [Sync]
 │
 ├─ [Host] Surprise + CUSUM
@@ -726,8 +726,8 @@ Phase graphs capture kernel launch sequences into CUDA graphs for replay.
 | Forward | forward_with_checkpoints + extract_descriptor + btraj_gather |
 | Backward | ~675 batched sub-kernels (bwd_zero, bwd_seed_*, bwd_reforward, bwd_weight_grad, bwd_stencil_gather) |
 | Optimizer | aggregate_gradients + came_step |
-| WorldPredict | placeholder_forward on probe set |
-| WorldTrain | placeholder_train |
+| WorldPredict | reference_forward on probe set |
+| WorldTrain | reference_train |
 | StressEval | forward_with_checkpoints on stress slots |
 
 Host-only phases (curriculum, scoring, archive, spawn, surprise, periodic)
@@ -845,7 +845,7 @@ Binary format. Write in order:
    parent_id, spawn_gen, replica_tag).
 5. OrganismState grids (D→H transfer of d_organisms grids, then write).
 6. Archive entries (all alive entries, host-resident).
-7. PlaceholderRegressor (D→H transfer into the host mirror first, then
+7. ReferenceRegressor (D→H transfer into the host mirror first, then
    write; on load, read then H→D transfer).
 8. ReplayBuffer (host-resident).
 9. CorrelationWindow (host-resident).

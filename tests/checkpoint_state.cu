@@ -136,8 +136,8 @@ int main() {
     CHECK(memeq(&a->cusum_surprise, &b->cusum_surprise, sizeof(a->cusum_surprise)) &&
           memeq(&a->cusum_r, &b->cusum_r, sizeof(a->cusum_r)),
           "CUSUM states identical");
-    CHECK(memeq(&a->placeholder_reg, &b->placeholder_reg, sizeof(a->placeholder_reg)),
-          "placeholder regressor identical");
+    CHECK(memeq(&a->reference_reg, &b->reference_reg, sizeof(a->reference_reg)),
+          "reference regressor identical");
     CHECK(memeq(&a->replay_buffer, &b->replay_buffer, sizeof(a->replay_buffer)),
           "replay buffer identical");
     CHECK(memeq(&a->corr_window, &b->corr_window, sizeof(a->corr_window)),

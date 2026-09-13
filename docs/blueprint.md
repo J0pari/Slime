@@ -6,7 +6,7 @@ Design Notes
 The world model is not an externally-designed component bolted onto a
 bottom-up substrate. Predictors are a *role* within the evolving population —
 same NCA substrate, same delta codec, same archive machinery, same optimizer.
-A hand-coded placeholder predictor is retained as a permanent sanity check, but
+A hand-coded reference predictor is retained as a permanent sanity check, but
 the dominant surprise signal is produced by an evolved predictor sub-population
 once it matures.
 
@@ -31,11 +31,11 @@ when archive occupancy first reaches 50% of MAX_ARCHIVE. This reuses the
 archive size already tracked for capacity management — no new monitor required.
 
 4. Hybrid surprise via correlation-weighted blending. Surprise =
-(1 − w) · s_placeholder + w · s_predictor, where w is the live Pearson
-correlation between s_placeholder and s_predictor on the probe set over a
+(1 − w) · s_reference + w · s_predictor, where w is the live Pearson
+correlation between s_reference and s_predictor on the probe set over a
 100-generation window, clipped to [0, 1]. When predictors are random
-(correlation near 0) the placeholder dominates; as the populations align
-(correlation toward 1) predictors take over. The placeholder is never fully
+(correlation near 0) the reference dominates; as the populations align
+(correlation toward 1) predictors take over. The reference is never fully
 deprecated — it persists as a continuous ground-truth check. No thresholds, no
 schedules.
 
@@ -175,7 +175,7 @@ Four interacting subsystems:
   predictor tasks.
 - Population (S) — classifiers and predictors share one active pool, one
   archive, one set of structural pressures.
-- Surprise (W) — produced by a placeholder regressor (always running) blended
+- Surprise (W) — produced by a reference regressor (always running) blended
   with an ensemble of predictor organisms (after maturity). The blending weight
   is the live correlation between the two signals.
 - Structural Pressures (P) — audit, sentinels, lineage runaway detection, plus
@@ -197,14 +197,14 @@ bmap_64 is the archive descriptor and audit input.
 4. For each classifier, fitness is task accuracy × SOT gate. For each
 predictor, fitness is prediction accuracy on its target batch × SOT gate.
 
-5. Surprise signal: placeholder regressor predicts classifier fitness from
+5. Surprise signal: reference regressor predicts classifier fitness from
 bmap_64. After bootstrap, predictor ensemble predicts bmap_64 from bmap_32;
 ensemble variance gives a second surprise signal. The two are blended (A-601).
 
 6. Archive insertion uses role-internal novelty (RFF KDE among same-role
 members) and role-balance fitness scaling driven by surprise (A-401).
 
-7. Substrate machinery: CAME step, world-model (placeholder + predictor)
+7. Substrate machinery: CAME step, world-model (reference + predictor)
 training, audit, sentinel evaluation, lineage stats, pruning decisions,
 telemetry flush.
 
@@ -218,7 +218,7 @@ Eight phase graphs replayed by host orchestration. Two notes:
 - The forward_phase captures BTRAJ samples at four CA steps, not just the final
   step. The additional managed-memory writes are small (4×32 FP32 × POOL_SIZE =
   24 KB).
-- The world_train_phase contains both placeholder-regressor training and the
+- The world_train_phase contains both reference-regressor training and the
   predictor-organisms' standard CAME path. Predictors train through the same
   backward/optimizer phases as classifiers; only their loss function differs.
 
@@ -335,7 +335,7 @@ The 4×32 BTRAJ is written to the Intent Registry slot for this organism.
 The final bmap_64 serves as:
 - archive descriptor (A-401)
 - audit input (S-003)
-- input to the placeholder regressor
+- input to the reference regressor
 
 The intermediate bmap_16, bmap_32 are used only as predictor inputs and
 ground-truth targets. The audit and archive geometry operate on bmap_64 only —
@@ -693,7 +693,7 @@ A-601: Predictor Role & Hybrid Surprise Signal
 
 @claim A601.trust-weight-composition capability
 S the hybrid blending weight is currently the clipped Pearson correlation
-  between placeholder and predictor surprise; correlation measures agreement,
+  between reference and predictor surprise; correlation measures agreement,
   not correctness, so two jointly miscalibrated signals can correlate at 1
   while both are unreliable. The weight is provisional until it composes
   correlation with calibration error, held-out prediction error, and
@@ -715,7 +715,7 @@ C unobserved
 
 Two surprise sources operate in parallel throughout the run.
 
-Placeholder regressor (always running). A small MLP (32 + 16 → 128 → 64 → 2,
+Reference regressor (always running). A small MLP (32 + 16 → 128 → 64 → 2,
 ~25k parameters) predicting (fitness_hat, log_uncertainty) for a classifier
 organism from its bmap_64 and task embedding. AdamW lr = 1e-4, trained from a
 rolling buffer of recent classifier-archive entries.
@@ -757,22 +757,22 @@ founders are spawned via role-flipping copies of high-novelty classifier parents
 thus inherit substrate dynamics already known to produce diverse behavior).
 Subsequent predictor reproduction follows normal spawn rules.
 
-Hybrid surprise blending. Let r be the Pearson correlation between s_placeholder
+Hybrid surprise blending. Let r be the Pearson correlation between s_reference
 and s_predictor evaluated on a fixed 64-batch probe set, computed over a rolling
 window of the last 100 generations. Clip r to [0, 1] (negative correlations
 treated as zero confidence). Blended surprise:
 
-    s_blended = (1 − r) · s_placeholder + r · s_predictor
+    s_blended = (1 − r) · s_reference + r · s_predictor
 
-Before bootstrap, r is undefined and treated as zero; only placeholder surprise
+Before bootstrap, r is undefined and treated as zero; only reference surprise
 contributes. After bootstrap, r grows as predictors learn to agree with
-placeholder on broad-strokes behavior, and the system smoothly transitions to
-ensemble-based surprise. The placeholder never disappears: even at r near 1, a
-meaningful weight (1 − r) remains, and the placeholder serves as a continuous
+reference on broad-strokes behavior, and the system smoothly transitions to
+ensemble-based surprise. The reference never disappears: even at r near 1, a
+meaningful weight (1 − r) remains, and the reference serves as a continuous
 out-of-distribution canary. A sudden drop in r flags either predictor population
-collapse or a discovery the placeholder misses; both warrant operator review.
+collapse or a discovery the reference misses; both warrant operator review.
 
-Gradient policy. The placeholder regressor trains via AdamW on its own loss,
+Gradient policy. The reference regressor trains via AdamW on its own loss,
 isolated from organism weights. Predictor organisms train via the standard CAME
 path on their MSE loss. Neither training pathway can modify the other role's
 weights — they are separate organisms sharing only the archive and substrate.
@@ -832,7 +832,7 @@ S-001: Monitoring, Checkpointing & Resilience
 
 Checkpoint state includes the role tags of all organisms, the calibrated
 s_target value, and the rolling correlation window state for hybrid blending,
-alongside the population, archive, optimizer state, and placeholder regressor.
+alongside the population, archive, optimizer state, and reference regressor.
 
 S-002: Safety & Alignment Architecture
 @claim S002.host-authority invariant
@@ -871,9 +871,9 @@ C observed
   architectural invariant holds: GPU-resident state does not influence the SOT
   or probe schedule or pruning commands.
 
-- The placeholder regressor's persistence is itself a safety property: a
+- The reference regressor's persistence is itself a safety property: a
   population of predictor organisms cannot, by collective drift, eliminate the
-  ground-truth check that the placeholder provides.
+  ground-truth check that the reference provides.
 
 - SOT reference forward allocation. The apply_sot_identity function requires
   temporary device buffers for un-permuted images, task embeddings,
@@ -1053,10 +1053,10 @@ Generation pseudocode:
         graph_decode.launch()                          # all roles, all mutation-rate replicas
         graph_forward.launch()                         # role-switched input, BTRAJ capture
         graph_archive.launch()                         # role-internal novelty, role-balance scaling
-        graph_world_predict.launch()                   # placeholder + predictor ensemble surprise
+        graph_world_predict.launch()                   # reference + predictor ensemble surprise
         graph_backward.launch()                        # CAME path, role-blind
         graph_optimizer.launch()
-        graph_world_train.launch()                     # placeholder regressor only (predictors train via main path)
+        graph_world_train.launch()                     # reference regressor only (predictors train via main path)
         graph_stress_eval.launch()                     # SOT-density ladder, sampled
         graph_housekeeping.launch()                    # sentinels, lineage stats, hybrid r update
 
@@ -1088,7 +1088,7 @@ Shared structures:
   recent stress evaluation results.
 - Archive: descriptors (final bmap_64), RFF projections, per-role μ_archive
   vectors, role-tagged bin assignments.
-- Placeholder regressor: weights + AdamW state + replay buffer (5000
+- Reference regressor: weights + AdamW state + replay buffer (5000
   most-recent classifier (bmap_64, task_emb, fitness) tuples).
 - Predictor selection cache: rolling fitness of top-K predictors for ensemble
   computation.
@@ -1116,7 +1116,7 @@ None is implemented; the construction plan gates every one of them behind
 the current inventory (I1-I9) and the experimental program.
 
 Descriptor separation. bmap_64 is deliberately overloaded here: task output,
-behavior descriptor, archive geometry, audit representation, and placeholder
+behavior descriptor, archive geometry, audit representation, and reference
 input are one vector. For richer tasks (control, planning, synthesis,
 system identification) those roles must separate into z_state, y_task, and
 d_behavior with related but distinct learned heads. The invariant that
@@ -1130,7 +1130,7 @@ S ecological novelty pressure is gated by task competence and stability:
   new competent behavior is rewarded, arbitrary unpredictability is not.
   Until the composition s_useful = s_epistemic * q_competence * q_stability
   is implemented, surprise influences selection only through the existing
-  task-fitness composition, stationary probes, placeholder comparison, and
+  task-fitness composition, stationary probes, reference comparison, and
   calibration
 M integration/host_main.cu::score_organisms
 M archive/soft_qd_archive.cu::classifier_mult
@@ -1183,7 +1183,7 @@ Unit and integration tests with role-aware coverage:
 - Unit tests: BTRAJ correctness (bmap at each sample step matches a reference
   forward pass); role-switched input pathway produces expected initial-grid
   state for both roles; role mutation occurs at intended rate; hybrid blending
-  degenerates correctly to placeholder when r = 0 and to ensemble when r = 1.
+  degenerates correctly to reference when r = 0 and to ensemble when r = 1.
 
 - Integration tests: a classifier-only run passes the baseline acceptance
   criteria; a bootstrap-trigger run shows successful predictor seeding and

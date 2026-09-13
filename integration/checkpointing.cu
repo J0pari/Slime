@@ -25,7 +25,7 @@
 //              s_blended_history[HYBRID_R_WINDOW], n_calibration_samples,
 //              calibration_samples[..], predictor_error_ema[POOL_SIZE]
 //     ClassifierBatch, PredictorBatch, ProbeSet (with signed tuples)
-//     PlaceholderRegressor, PlaceholderReplayBuffer (with held-out flags),
+//     ReferenceRegressor, ReferenceReplayBuffer (with held-out flags),
 //     CorrelationWindow, CusumState x2, MutationLadder
 //     OrganismTable arrays
 //     Archive
@@ -59,8 +59,8 @@ inline uint32_t checkpoint_schema_hash_v1() {
     mix(static_cast<uint32_t>(sizeof(curriculum::ClassifierBatch)));
     mix(static_cast<uint32_t>(sizeof(curriculum::PredictorBatch)));
     mix(static_cast<uint32_t>(sizeof(curriculum::ProbeSet)));
-    mix(static_cast<uint32_t>(sizeof(predictor::PlaceholderRegressor)));
-    mix(static_cast<uint32_t>(sizeof(predictor::PlaceholderReplayBuffer)));
+    mix(static_cast<uint32_t>(sizeof(predictor::ReferenceRegressor)));
+    mix(static_cast<uint32_t>(sizeof(predictor::ReferenceReplayBuffer)));
     mix(static_cast<uint32_t>(sizeof(predictor::CorrelationWindow)));
     mix(static_cast<uint32_t>(sizeof(safety::CusumState)));
     mix(static_cast<uint32_t>(sizeof(safety::pt::MutationLadder)));
@@ -145,7 +145,7 @@ inline void write_run_state(Buffer& b, const World* w) {
     b.put_pod(w->classifier_batch);
     b.put_pod(w->predictor_batch);
     b.put_pod(w->probe_set);
-    b.put_pod(w->placeholder_reg);
+    b.put_pod(w->reference_reg);
     b.put_pod(w->replay_buffer);
     b.put_pod(w->corr_window);
     b.put_pod(w->cusum_surprise);
@@ -223,7 +223,7 @@ inline bool read_run_state(Buffer& b, World* w) {
     b.get_pod(w->classifier_batch);
     b.get_pod(w->predictor_batch);
     b.get_pod(w->probe_set);
-    b.get_pod(w->placeholder_reg);
+    b.get_pod(w->reference_reg);
     b.get_pod(w->replay_buffer);
     b.get_pod(w->corr_window);
     b.get_pod(w->cusum_surprise);

@@ -42,7 +42,7 @@ struct CheckpointHeader {
 struct GenerationTelemetry {
     int   generation;
     float s_blended;
-    float s_placeholder;
+    float s_reference;
     float s_predictor;
     float r;                       // hybrid blending weight
     float rho;                     // s_avg / s_target
@@ -234,7 +234,7 @@ __host__ __device__ inline void cusum_update(CusumState* s, float x) {
 //   uint32_t version
 //   uint32_t schema_hash      // catches struct drift
 //   CheckpointHeader hdr
-//   ...subsystem blobs (population, archive, placeholder, sentinels)
+//   ...subsystem blobs (population, archive, reference, sentinels)
 //
 // write_checkpoint and load_checkpoint are host-side and operate on a single
 // open() call. Atomic-replace via temp-file + rename.
@@ -311,7 +311,7 @@ __host__ inline bool load_checkpoint_header(CheckpointHeader* hdr_out,
 //      (m, v, c, prev_u), because PT swaps assume momentum follows the organism.
 //   2. Archive: alive entries (descriptor, rff_proj, fitness, lineage, bin,
 //      role) + per-role mu_rff vectors + inv_var_ema + bin caps/counts.
-//   3. Placeholder regressor: all weights + AdamW moments + replay buffer.
+//   3. Reference regressor: all weights + AdamW moments + replay buffer.
 //   4. Correlation window, both CUSUM states, calibrated s_target + its frozen
 //      flag, mutation-ladder replica assignments + beta + accept EMA, stress
 //      ladder state, sentinel ensemble + history, generation counter, RNG seeds.

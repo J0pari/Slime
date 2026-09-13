@@ -91,7 +91,7 @@ cuda_engineering.md, and construction_plan.md.
   ordering. Recorded before implementing so the next step starts with the
   decision, not with a collision.
 - 2026-09-12: `cuda_engineering.md` was internally inconsistent about the
-  placeholder regressor: §2.3 and §14 listed it host-only while §4.5-4.6,
+  reference regressor: §2.3 and §14 listed it host-only while §4.5-4.6,
   §5, and the VRAM budget specified device kernels. Reconciled in favor of
   the kernels (the construction plan's I3 requires them): parameters and
   AdamW state are device-resident, the host struct is a checkpoint/init
@@ -114,7 +114,7 @@ cuda_engineering.md, and construction_plan.md.
   unserialized (surprise history, calibration samples, predictor error EMA,
   predictor batch, telemetry scalars — all now in the payload),
   `predictor_error_ema` did not move through PT (now swapped, annotated,
-  and registry-checked), probe tuples were not held out from placeholder
+  and registry-checked), probe tuples were not held out from reference
   training (now flagged and skipped), `surprise_ratio` silently returned 1.0
   when uncalibrated (now an explicit gated state logged once), and the
   archive bin cap/occupants sizing and predictor EMA rates were bare

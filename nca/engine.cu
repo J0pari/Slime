@@ -7,7 +7,7 @@
 //
 // BTRAJ samples (bmap_16, bmap_32, bmap_48, bmap_64) are written to the
 // Intent Registry. bmap_64 is the archive descriptor, the audit input, and the
-// placeholder regressor input.
+// reference regressor input.
 
 #ifndef COEVO_NCA_ENGINE_CU
 #define COEVO_NCA_ENGINE_CU

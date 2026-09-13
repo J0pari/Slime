@@ -31,10 +31,10 @@ items:
   I3:
     status: implemented
     mechanisms:
-      - predictor/hybrid_surprise.cu::placeholder_forward_kernel
-      - predictor/hybrid_surprise.cu::placeholder_train_kernel
+      - predictor/hybrid_surprise.cu::reference_forward_kernel
+      - predictor/hybrid_surprise.cu::reference_train_kernel
       - curriculum/problem_generator.cu::sign_probe_tuples
-      - integration/host_main.cu::evaluate_probe_placeholder
+      - integration/host_main.cu::evaluate_probe_reference
       - integration/host_main.cu::upload_probe_batch
   I4:
     status: implemented

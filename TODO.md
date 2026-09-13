@@ -18,7 +18,7 @@ or explicitly deferred with a recorded decision.
   (a predictor covers all K targets across K generations) with a
   per-predictor loss EMA feeding fitness; the EMA travels with organism
   identity through PT and checkpoints.
-- [x] C2 Surprise population identity: placeholder training and the surprise
+- [x] C2 Surprise population identity: reference training and the surprise
   computation (including the predictor ensemble) now precede the spawn wave;
   the `surprise_before_spawn` source gate pins the order.
 - [x] C3 Role-gradient PT identity: the alignment kernel groups by a
@@ -87,10 +87,10 @@ I9
   Regenerate the status until no claim reads `pass/stale`.
 - [ ] End-to-end predictor witnesses: bootstrap -> predictor evaluation ->
   predictor archive -> predictor parent -> predictor offspring.
-- [ ] Placeholder witness: device forward/train match a hand-computed
+- [ ] Reference witness: device forward/train match a hand-computed
   reference; probe surprise nonzero and varying; MSE decreases over
   generations.
-- [ ] Bound the placeholder's uncertainty output before surprise is treated
+- [ ] Bound the reference's uncertainty output before surprise is treated
   as a robust signal (`A601.trust-weight-composition`).
 - [ ] Execute the preregistered experiments (E1-E5) and record manifests;
   update each protocol's status in `architecture/experiments.yaml`.
