@@ -149,18 +149,33 @@ def status(env: dict | None = None) -> dict:
     return _run_cli(["status"], env=env)
 
 
-def submit(name: str, command: list[str], vram_mib: int,
+SCRATCH_JOB_KINDS = ("merge", "export", "scratch")
+
+
+def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
            priority: int = 0, max_minutes: float = 0.0, cwd: str = "",
            job_env: dict | None = None, telemetry_log: str = "",
            allow_ollama: bool = False, retries: int | None = None,
+           disk_mib: int | None = None, job_kind: str = "",
            env: dict | None = None) -> dict:
     """Submit a job; returns the SubmitAck {jobId, status}.
+
+    ramMib is declared on every submission; diskMib is declared on
+    merge/export/scratch jobs. The scheduler no longer infers either, so a
+    missing declaration is refused here rather than dispatched under an
+    inferred budget.
 
     The owner validates that command[0] is an absolute existing file or on
     PATH; relative paths are resolved against the job cwd (default: this
     repo root) so callers can pass build/foo.exe naturally."""
     if not command:
         raise ValueError("command must be non-empty")
+    if int(ram_mib) <= 0:
+        raise ValueError("every submission must declare ramMib > 0")
+    if job_kind in SCRATCH_JOB_KINDS and disk_mib is None:
+        raise ValueError(
+            f"job kind {job_kind!r} must declare diskMib; the scheduler no "
+            f"longer infers scratch space")
     work_dir = cwd or str(REPO_ROOT)
     first = command[0]
     if not os.path.isabs(first):
@@ -169,8 +184,11 @@ def submit(name: str, command: list[str], vram_mib: int,
         # against the owner's working directory, not the job's.
         command = [str((Path(work_dir) / first).resolve()), *command[1:]]
     args = ["submit", "--name", name, "--repo", "slime-evolution",
-            "--vram", str(int(vram_mib)), "--priority", str(int(priority)),
+            "--vram", str(int(vram_mib)), "--ram", str(int(ram_mib)),
+            "--priority", str(int(priority)),
             "--max-minutes", str(float(max_minutes))]
+    if disk_mib is not None:
+        args += ["--disk", str(int(disk_mib))]
     args += ["--cwd", work_dir]
     if telemetry_log:
         args += ["--telemetry-log", telemetry_log]
@@ -301,9 +319,15 @@ def _cmd_run(args) -> int:
         check_contract()
         if args.total > 0:
             command = wrap_progress_command(args.name, args.total, command)
-        ack = submit(args.name, command, args.vram, priority=args.priority,
+        if args.ram <= 0:
+            print("run: submissions must declare --ram (MiB > 0); the "
+                  "scheduler no longer infers it", file=sys.stderr)
+            return 2
+        ack = submit(args.name, command, args.vram, args.ram,
+                     priority=args.priority,
                      max_minutes=args.max_minutes, cwd=args.cwd,
-                     telemetry_log=args.telemetry_log)
+                     telemetry_log=args.telemetry_log,
+                     disk_mib=args.disk or None, job_kind=args.kind)
     except (SchedulerUnavailable, ContractMismatch) as exc:
         print(f"[gpu-client] scheduler unavailable: {exc}", file=sys.stderr)
         print("[gpu-client] re-run with --direct to execute locally, or set "
@@ -368,6 +392,15 @@ def main(argv=None) -> int:
     p_run = sub.add_parser("run", help="submit + wait (or --direct)")
     p_run.add_argument("--name", required=True)
     p_run.add_argument("--vram", type=int, required=True)
+    p_run.add_argument("--ram", type=int, default=0,
+                       help="declared free system RAM in MiB (required for "
+                            "submissions)")
+    p_run.add_argument("--disk", type=int, default=0,
+                       help="declared scratch disk in MiB (required for "
+                            "merge/export/scratch jobs)")
+    p_run.add_argument("--kind", default="",
+                       choices=("",) + SCRATCH_JOB_KINDS,
+                       help="job kind; scratch kinds require --disk")
     p_run.add_argument("--priority", type=int, default=0)
     p_run.add_argument("--max-minutes", type=float, default=0.0)
     p_run.add_argument("--cwd", default="")

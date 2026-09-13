@@ -26,7 +26,7 @@ import gpu_client  # noqa: E402
 import progress_wrap  # noqa: E402
 from architecture import evidence  # noqa: E402
 
-CANONICAL_FP = "2d30f643251e9bc51036676caaa27d7bff492c926a8a102342a7877019605b8e"
+CANONICAL_FP = "5d602cc2574cc3c26c8153d5bf4cfa09066f6ec902fb03aef0747792a509c690"
 
 FAKE_SCHEDULER = '''\
 import json, os, sys
@@ -152,8 +152,8 @@ class ClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             fake = FakeScheduler(td)
             ack = gpu_client.submit(
-                "slime-evolution-regression", ["build/evolution_test.exe"], 2048, priority=5,
-                max_minutes=30, env=fake.env())
+                "slime-evolution-regression", ["build/evolution_test.exe"],
+                2048, 4096, priority=5, max_minutes=30, env=fake.env())
             self.assertEqual(ack, {"jobId": "0123456789abcdef",
                                    "status": "queued"})
             argv = json.loads(fake.argv_path.read_text(encoding="utf-8"))
@@ -161,6 +161,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--name") + 1], "slime-evolution-regression")
             self.assertEqual(argv[argv.index("--repo") + 1], "slime-evolution")
             self.assertEqual(argv[argv.index("--vram") + 1], "2048")
+            self.assertEqual(argv[argv.index("--ram") + 1], "4096")
             self.assertEqual(argv[argv.index("--cwd") + 1], str(ROOT))
             cmd_idx = argv.index("--cmd")
             resolved = argv[cmd_idx + 1:]
@@ -169,6 +170,23 @@ class ClientTests(unittest.TestCase):
             # owner's absolute-executable validation
             self.assertTrue(os.path.isabs(resolved[0]))
             self.assertTrue(resolved[0].endswith("evolution_test.exe"))
+
+    def test_submit_requires_ram_and_scratch_disk(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeScheduler(td)
+            with self.assertRaises(ValueError):
+                gpu_client.submit("x", ["build/evolution_test.exe"],
+                                  2048, 0, env=fake.env())
+            with self.assertRaises(ValueError):
+                gpu_client.submit("x", ["build/evolution_test.exe"],
+                                  2048, 4096, job_kind="scratch",
+                                  env=fake.env())
+            ack = gpu_client.submit("x", ["build/evolution_test.exe"],
+                                    2048, 4096, job_kind="scratch",
+                                    disk_mib=8192, env=fake.env())
+            argv = json.loads(fake.argv_path.read_text(encoding="utf-8"))
+            self.assertEqual(argv[argv.index("--disk") + 1], "8192")
+            self.assertEqual(ack["status"], "queued")
 
     def test_wait_and_result_ledger_provenance(self):
         with tempfile.TemporaryDirectory() as td:
