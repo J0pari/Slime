@@ -18,18 +18,56 @@ R_RE = re.compile(r"\br=([0-9.]+)")
 CKPT_RE = re.compile(r"\(generation (\d+)\)")
 
 
-def run_chunk(binary: str, target_total: int, ckpt: str, resume: bool) -> str:
-    """Run one chunk up to the cumulative target generation, streaming the
-    child's output through so the progress/v1 wrapper sees the binary's
-    per-generation `gen N` lines. The binary's N argument is the total
-    generation to reach (it resumes from the checkpoint's generation), so
-    callers pass the running total, never the chunk size."""
-    # --profile makes the binary emit its per-generation phase trace
-    # ("gen N: ..."), which is the progress signal the daemon's watchdog
-    # needs; without it a long chunk looks stalled and gets killed.
+def chunk_command(binary: str, target_total: int, ckpt: str,
+                  resume: bool) -> list[str]:
+    """The chunk argv. The binary's N argument is the total generation to
+    reach (it resumes from the checkpoint's generation), so callers pass the
+    running total, never the chunk size. --profile makes the binary emit its
+    per-generation phase trace ("gen N: ..."), which is the progress signal
+    the daemon's watchdog needs; without it a long chunk looks stalled and
+    gets killed."""
     cmd = [binary, str(target_total), "--profile", "--ckpt", ckpt]
     if resume:
         cmd.append("--resume")
+    return cmd
+
+
+def parse_checkpoint_generation(out: str) -> int | None:
+    """The generation of the last checkpoint line in a chunk's output, or
+    None when no checkpoint line is present."""
+    gens = CKPT_RE.findall(out)
+    if not gens:
+        return None
+    return int(gens[-1])
+
+
+def flag_is_spontaneous(done: int, warmup: int, out: str) -> bool:
+    """A stress flag counts only from chunks that start at or after the
+    calibration warmup: the first chunk legitimately contains the gen-0
+    calibration flag."""
+    return done >= warmup and FLAG_RE.search(out) is not None
+
+
+def r_samples(out: str, floor: float) -> tuple[int, int]:
+    """(above floor, total) dashboard r samples in a chunk's output."""
+    ok = 0
+    total = 0
+    for line in out.splitlines():
+        if "[DASHBOARD]" not in line:
+            continue
+        m = R_RE.search(line)
+        if m is None:
+            continue
+        total += 1
+        if float(m.group(1)) > floor:
+            ok += 1
+    return ok, total
+
+
+def run_chunk(binary: str, target_total: int, ckpt: str, resume: bool) -> str:
+    """Run one chunk, streaming the child's output through so the
+    progress/v1 wrapper sees the binary's per-generation `gen N` lines."""
+    cmd = chunk_command(binary, target_total, ckpt, resume)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     lines = []
@@ -71,26 +109,23 @@ def main() -> int:
         chunk = min(args.chunk, args.gens - done)
         target = done + chunk
         out = run_chunk(args.binary, target, args.ckpt, resume)
-        m = CKPT_RE.search(out)
-        if m is None or int(m.group(1)) != target:
+        ckpt_gen = parse_checkpoint_generation(out)
+        if ckpt_gen != target:
             print(out[-2000:])
             raise SystemExit(
-                f"checkpoint generation "
-                f"{m.group(1) if m else '?'} != target {target}: the run "
-                f"did not advance as requested")
-        if done >= args.warmup and FLAG_RE.search(out):
+                f"checkpoint generation {ckpt_gen if ckpt_gen is not None else '?'}"
+                f" != target {target}: the run did not advance as requested")
+        if flag_is_spontaneous(done, args.warmup, out):
             print(out[-2000:])
             raise SystemExit(f"spontaneous stress flag after {done} generations")
         for line in out.splitlines():
             if "[DASHBOARD]" in line and NONFINITE_RE.search(line):
                 print(line)
                 raise SystemExit("nonfinite dashboard value")
-            if done >= args.r_warmup and "[DASHBOARD]" in line:
-                m = R_RE.search(line)
-                if m is not None:
-                    r_total += 1
-                    if float(m.group(1)) > args.r_floor:
-                        r_ok += 1
+        if done >= args.r_warmup:
+            ok, total = r_samples(out, args.r_floor)
+            r_ok += ok
+            r_total += total
         done += chunk
         resume = True
         print(f"chunk ok: {done}/{args.gens} generations")
