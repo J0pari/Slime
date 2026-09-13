@@ -42,6 +42,12 @@ Rules:
 - VERIFY opens with evidence closure: rerun every witness on current source,
   record fresh manifests, and regenerate the status until no claim reads
   stale, so the next session starts from a clean checkpoint.
+- Portability hardening (post-BUILD, before OPERATE): the build is currently
+  Windows/MSVC/CUDA-specific (`env.sh`, `.exe` outputs, a `/STACK` linker
+  flag, a default `sm_86` target, and CI that covers host/static checks but
+  not GPU execution). Cross-platform build paths, a configurable CUDA
+  architecture, and a GPU CI lane are separate work, not part of any
+  inventory item.
 
 ## Scope discipline and extension gate
 

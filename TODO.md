@@ -97,6 +97,9 @@ I9
 
 - [ ] Long runs with checkpoint/restart, reproducibility checks, and the
   dashboard surface.
+- [ ] Portability hardening: cross-platform build paths, configurable CUDA
+  architecture, and a GPU CI lane (the current build is Windows/MSVC/CUDA
+  specific and CI is host/static only).
 
 ## Carryover
 
