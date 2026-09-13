@@ -7,6 +7,20 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 backward work after the combined stress pass. Two measured
+  wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
+  addresses hammered by 4096 cells per organism) became per-thread register
+  partials with one deterministic tree reduction per block (main kernel
+  3.89 -> 3.40 s); (2) ptxas showed the same kernel at 128 registers with
+  3012/3116 bytes of spill stores/loads per thread, so perc/hidden/d_state/
+  d_pre_hidden now stage at their last-use points and d_hidden is fused into
+  d_pre_hidden — spills drop to 324/328 bytes and the main kernel to 2.38 s.
+  Current per-generation budget (BPROFILE, sync-instrumented): backward
+  5.58 s (reforward 0.75, weight-grad 3.60 [main 2.38, reduce_inter 0.93,
+  reduce_flow 0.29], stencil 1.15, rd 0.08), stress 0.84, forward 0.70,
+  SOT ~0.5. Target is 6 s; the remaining candidates are the reduce_inter
+  dpre re-reads (48 p-blocks per organism each read all 32 dpre rows) and
+  the stencil gather. evolution_regression 36/36 after both changes.
 - 2026-09-12: I8 combined stress pass landed: `evaluate_stress_all` replaces
   the six per-sub-population/per-role replays with one reference launch and
   one stress launch over all 24 slots (staged images, task embeddings, and
