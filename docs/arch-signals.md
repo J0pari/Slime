@@ -35,10 +35,24 @@ cuda_engineering.md, and construction_plan.md.
   the names-no-mechanisms check, and `gpu_client.scheduler_root` raises on an
   unset or empty root); the remaining `.get(key, default)` calls are
   display-only rendering, which is the deliberate presentation allowance.
-  Still open: interchangeable runtime id types (class 6, no strong typedefs
-  yet) — the only class without either a gate or an inspection result. Until
-  it has a failing witness of its own, the audit is incomplete; do not
-  describe it as closed.
+  Still open: interchangeable runtime id types (class 6) — the strong-type
+  conversion started in the entry below.
+- 2026-09-12: Strong-identifier conversion (class 6) started and the lineage
+  family is now end-to-end: `config/strong_ids.cuh` defines `StrongId<Tag,T>`
+  with explicit construction/extraction, comparison operators, and an
+  invalid default sentinel; `LineageId` is adopted by OrganismTable, the
+  stress ladder, sentinel history, lineage stats, the probe panel, the
+  predictor batch targets, the operator prune path, the PT swap context, the
+  archive brake API, and the checkpoint writer (templated, byte-compatible).
+  The claim `G100.strong-identifiers` is provisional with witness
+  `test_strong_ids_distinct` (compile-time non-convertibility plus runtime
+  sentinel/round-trip checks); host 4911/4911, evolution_regression 36/36.
+  Remaining for the class: `PoolSlot`, `GenomeSeed`, `ArchiveSlot`, and
+  `PtSlot` have types but no adopted seams; `OrganismTable::parent_id` is
+  still a raw lineage reference; index variables that are semantically slots
+  are still `int`. Each conversion is mechanical and can continue from this
+  state; the claim stays provisional until the families are adopted, and the
+  audit entry for class 6 should be updated as each lands.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register
