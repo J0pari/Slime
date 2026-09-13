@@ -73,7 +73,7 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/stale |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/stale |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS, enum_no_silent_default: PASS, no_masked_cuda_errors: PASS, no_unchecked_error_vars: PASS, no_value_ternary_string_default: PASS
 
 Claims: 30 total, 24 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->
