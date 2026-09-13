@@ -12,6 +12,7 @@
 // is implemented).
 
 #include "../autodiff/warp_tape.cu"
+#include "../config/gpu_authorization.cuh"
 
 #include <cmath>
 #include <cstdio>
@@ -119,6 +120,7 @@ static int check_task_conditioning() {
 }
 
 int main() {
+    slime::require_gpu_authorization("task_conditioning");
     std::printf("Task-conditioning witness (A201.task-conditioning-complete)\n");
     std::fflush(stdout);
     int rc = check_task_conditioning();

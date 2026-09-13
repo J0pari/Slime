@@ -198,6 +198,10 @@ def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
         args += ["--retries", str(int(retries))]
     for key, value in sorted((job_env or {}).items()):
         args += ["--env", f"{key}={value}"]
+    # The scheduler propagates the job environment to the wrapped command;
+    # the GPU binaries require this marker to start. This must precede
+    # --cmd, which the owner parses as REMAINDER.
+    args += ["--env", "COEVO_GPU_AUTHORIZED=1"]
     args += ["--cmd", *command]
     return _run_cli(args, env=env)
 
@@ -366,7 +370,9 @@ def _run_direct(command: list[str], args) -> int:
         print(f"[gpu-client] direct mode without gpu lock: {exc}",
               file=sys.stderr)
     try:
-        proc = subprocess.run(command, cwd=args.cwd or None)
+        child_env = dict(os.environ)
+        child_env["COEVO_GPU_AUTHORIZED"] = "1"
+        proc = subprocess.run(command, cwd=args.cwd or None, env=child_env)
         return proc.returncode
     finally:
         if held:

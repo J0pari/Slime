@@ -675,6 +675,40 @@ def gate_strong_ids_identity_fields(files: dict[str, list[str]],
                     "identity field declared uint32_t; use a strong id type"))
 
 
+# ---- Gate: GPU binaries require scheduler authorization --------------------
+# Every GPU binary's main calls require_gpu_authorization; the marker it
+# checks is set only by the scheduler client, so a bare launch refuses to
+# start instead of competing with a scheduled job.
+GPU_BINARY_SOURCES = (
+    "integration/host_main.cu",
+    "tests/evolution_regression.cu",
+    "tests/checkpoint_state.cu",
+    "tests/autodiff_acceptance.cu",
+    "tests/task_conditioning.cu",
+    "tests/forward_smoke.cu",
+)
+
+
+def gate_gpu_authorization(files: dict[str, list[str]],
+                           report: GateReport) -> None:
+    root = Path(__file__).resolve().parents[1]
+    for path in GPU_BINARY_SOURCES:
+        text = "\n".join(files.get(path, []))
+        if not text:
+            try:
+                text = (root / path).read_text(encoding="utf-8",
+                                               errors="replace")
+            except OSError:
+                report.findings.append(Finding(
+                    "gpu_authorization", path, 1,
+                    "GPU binary source is missing"))
+                continue
+        if "require_gpu_authorization(" not in text:
+            report.findings.append(Finding(
+                "gpu_authorization", path, 1,
+                "GPU binary does not require scheduler authorization"))
+
+
 ALL_GATES = [
     gate_no_ambient_rng,
     gate_no_managed_memory,
@@ -693,6 +727,7 @@ ALL_GATES = [
     gate_no_unchecked_error_vars,
     gate_no_value_ternary_string_default,
     gate_strong_ids_identity_fields,
+    gate_gpu_authorization,
 ]
 
 GATE_NAMES = [g.__name__.replace("gate_", "") for g in ALL_GATES]

@@ -5,6 +5,7 @@
 // every spawn is role-locked to classifier.
 
 #include "main_loop.cu"
+#include "../config/gpu_authorization.cuh"
 #include "../config/strong_ids.cuh"
 #include "../safety/alignment.cu"
 #include "checkpointing.cu"
@@ -1913,6 +1914,7 @@ void run(int n_generations, bool resume, const char* checkpoint_path) {
 
 #ifndef COEVO_NO_MAIN
 int main(int argc, char** argv) {
+    slime::require_gpu_authorization("coevo");
     int n_gen = 100;
     bool resume = false;
     const char* ckpt_path = nullptr;

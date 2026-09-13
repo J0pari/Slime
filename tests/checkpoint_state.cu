@@ -12,6 +12,7 @@
 
 #define COEVO_NO_MAIN
 #include "../integration/host_main.cu"
+#include "../config/gpu_authorization.cuh"
 
 #include <cstdio>
 #include <cstring>
@@ -83,6 +84,7 @@ static bool flip_byte_from_end(const char* path, long from_end) {
 }
 
 int main() {
+    slime::require_gpu_authorization("checkpoint_state");
     // [claim:S001.checkpoint-roundtrip]
     // [claim:S002.operator-command-effective]
     // [claim:S003.red-team-coverage]

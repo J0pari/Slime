@@ -22,6 +22,7 @@
 // genome-driven reaction matrix is left for later tests.
 
 #include "../nca/engine.cu"
+#include "../config/gpu_authorization.cuh"
 
 #include <cmath>
 #include <cstdint>
@@ -42,6 +43,7 @@ static void fill_weights(float* w, int n, uint32_t seed) {
 }
 
 int main() {
+    slime::require_gpu_authorization("forward_smoke");
     const int N = 1;
 
     OrganismState* org = nullptr;

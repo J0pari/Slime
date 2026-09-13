@@ -177,6 +177,20 @@ class GateTests(unittest.TestCase):
                         "spawn_wave(w);"}), report2)
         self.assertTrue(report2.ok)
 
+    def test_gate_gpu_authorization_catches_plant(self):
+        # A GPU binary that drops the startup guard must fail the gate.
+        report = source_gates.GateReport()
+        source_gates.gate_gpu_authorization(
+            files_from({"tests/forward_smoke.cu":
+                        "int main() { return 0; }"}), report)
+        self.assertFalse(report.ok, "missing GPU guard was not caught")
+        report2 = source_gates.GateReport()
+        files = {}
+        for path in source_gates.GPU_BINARY_SOURCES:
+            files[path] = "require_gpu_authorization(\"x\");"
+        source_gates.gate_gpu_authorization(files_from(files), report2)
+        self.assertTrue(report2.ok)
+
     def test_gate_mutation_cuda_check(self):
         # Mutation testing: removing a CUDA check (a bare cudaMalloc) must
         # make the checked-CUDA gate go red; the S001.cuda-errors-fatal

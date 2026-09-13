@@ -10,6 +10,7 @@
 // Build: make autodiff-test
 
 #include "../optimizer/came.cu"
+#include "../config/gpu_authorization.cuh"
 
 #include <cmath>
 #include <cstdio>
@@ -401,6 +402,7 @@ static int test_gradient_aggregation() {
 }
 
 int main() {
+    slime::require_gpu_authorization("autodiff_acceptance");
     std::printf("Autodiff acceptance test\n");
     std::printf("======================\n");
     std::fflush(stdout);

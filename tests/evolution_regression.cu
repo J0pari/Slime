@@ -14,6 +14,7 @@
 // Build: make evolution-test
 
 #include "../safety/parallel_tempering.cu"
+#include "../config/gpu_authorization.cuh"
 #include "../optimizer/came.cu"
 #include "../integration/phase_graph.cuh"
 
@@ -1395,6 +1396,7 @@ static int test_phase_graph_equivalence() {
 }
 
 int main() {
+    slime::require_gpu_authorization("evolution_regression");
     std::printf("Evolution regression suite (role locking, effective weights, "
                 "PT correspondence, finite differences)\n");
     std::printf("========================================\n");

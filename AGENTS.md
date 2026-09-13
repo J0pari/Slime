@@ -167,7 +167,11 @@ submission and refuses loudly on drift. `--direct` is the explicit escape
 hatch for machines where the scheduler is unreachable; it acquires the lock
 before running. Never launch a GPU process outside these two paths: a direct
 process competes with a scheduled job, can kill it, and corrupts both
-measurements. Scheduled commands are wrapped by
+measurements. This is enforced, not prose: every GPU binary calls
+`require_gpu_authorization` at startup and refuses to run without the
+marker the client sets (`config/gpu_authorization.cuh`), and
+`gate_gpu_authorization` fails any GPU binary that drops the guard.
+Scheduled commands are wrapped by
 `architecture/progress_wrap.py`, which emits `progress/v1` envelopes for the
 daemon. See README.md for the commands.
 

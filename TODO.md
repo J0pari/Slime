@@ -31,6 +31,17 @@ or explicitly deferred with a recorded decision.
   the shared base captured with the entry), with the stored-genome
   witness.
 
+## GPU authorization guard (landed, rebuild pending)
+
+- The startup guard and its source gate are in source; the canonical
+  build/*.exe binaries are NOT yet rebuilt with it because the queued jobs
+  (5000-gen and the three measurements) run the pre-guard binaries and their
+  submitted env predates the marker. Once the queue drains, rebuild
+  build/coevo.exe, build/evolution_regression.exe, build/checkpoint_state.exe,
+  build/autodiff_acceptance.exe, build/task_conditioning.exe, and
+  build/forward_smoke.exe, then confirm a bare launch refuses (exit 2) and a
+  client submission runs.
+
 ## Queued measurements (scheduler)
 
 - [ ] slime-i8-phases (b756631a6c3c6720): 1-generation backward phase budget
