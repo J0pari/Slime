@@ -317,6 +317,14 @@ static void kaiming_he_init(float* weights, Pcg32* host_rng) {
             weights[autodiff::OFF_BMAP + i] = box_muller_normal(&init_rng) * scale;
         }
     }
+
+    // W_ctx (A-203, I5): fan_in = CA_CHANNELS (16), linear -> sqrt(1/16).
+    if (GLOBAL_CONTEXT_ENABLED) {
+        for (int i = 0; i < autodiff::W_CTX_SIZE; ++i) {
+            weights[autodiff::OFF_CTX + i] =
+                box_muller_normal(&init_rng) * W_CTX_INIT_SCALE;
+        }
+    }
 }
 
 // ---- Initialization (section 15) --------------------------------------------

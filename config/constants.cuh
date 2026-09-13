@@ -75,6 +75,15 @@ constexpr int CH_IMG_LAST      = 13;
 constexpr int CH_AUX_FIRST     = 14;
 constexpr int CH_AUX_LAST      = 15;
 
+// ---- Global context channel (A-203, I5) ----------------------------------
+// Compile-time gate: when disabled, the weight space, kernels, and telemetry
+// banks are unchanged. W_ctx maps the 16-channel bmap summary to the two aux
+// channels, broadcast to every cell at sample steps.
+constexpr bool  GLOBAL_CONTEXT_ENABLED = false;
+constexpr int   W_CTX_COUNT = CA_CHANNELS * (CH_AUX_LAST - CH_AUX_FIRST + 1);  // 32
+constexpr float W_CTX_INIT_SCALE = 0.25f;  // sqrt(1/16), linear layer
+constexpr int   TELEMETRY_BANKS = GLOBAL_CONTEXT_ENABLED ? 5 : 4;
+
 // Perception (A-201): a learned bank of depthwise 3x3 filters (W_perc). Each
 // filter is convolved over every channel's neighborhood, so the perception
 // vector is N_PERC_FILTERS * CA_CHANNELS wide. Filters are shared across

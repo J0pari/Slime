@@ -167,7 +167,8 @@ struct DeltaWeights {
 constexpr int TOTAL_WEIGHT_SLOTS = W_PERC_SIZE
     + (N_PERC_FILTERS * CA_CHANNELS * 32)   // PERC_DIM * HIDDEN_DIM
     + (32 * CA_CHANNELS)                      // HIDDEN_DIM * CA_CHANNELS
-    + (CA_CHANNELS * BMAP_DIM);               // CA_CHANNELS * BMAP_DIM
+    + (CA_CHANNELS * BMAP_DIM)                // CA_CHANNELS * BMAP_DIM
+    + (GLOBAL_CONTEXT_ENABLED ? W_CTX_COUNT : 0);  // W_ctx (A-203, I5)
 
 // Offsets into the concatenated weight space.
 constexpr int DELTA_OFF_PERC  = 0;

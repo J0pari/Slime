@@ -204,11 +204,12 @@ inline bool launch_grad_norm_reduce(const float* d_mean_grad,
 
 // ---- Numerical telemetry kernels (A-501) ---------------------------------
 // Bank index for a flat weight index: 0 = W_perc, 1 = W_inter, 2 = W_flow,
-// 3 = W_bmap (offsets from autodiff/warp_tape.cu).
+// 3 = W_bmap, 4 = W_ctx (only when the global context channel is enabled).
 __host__ __device__ inline int telemetry_bank(int i) {
     if (i < OFF_INTER) return 0;
     if (i < OFF_FLOW)  return 1;
     if (i < OFF_BMAP)  return 2;
+    if (GLOBAL_CONTEXT_ENABLED && i >= autodiff::OFF_CTX) return 4;
     return 3;
 }
 

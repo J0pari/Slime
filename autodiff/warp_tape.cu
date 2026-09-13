@@ -22,7 +22,8 @@ using ::canonical_role;
 constexpr int W_INTER_SIZE = PERC_DIM * HIDDEN_DIM;       // 1536
 constexpr int W_FLOW_SIZE  = HIDDEN_DIM * CA_CHANNELS;    // 512
 constexpr int W_BMAP_SIZE  = CA_CHANNELS * BMAP_DIM;      // 512
-constexpr int TOTAL_WEIGHTS = W_PERC_SIZE + W_INTER_SIZE + W_FLOW_SIZE + W_BMAP_SIZE; // 2587
+constexpr int W_CTX_SIZE = GLOBAL_CONTEXT_ENABLED ? W_CTX_COUNT : 0;
+constexpr int TOTAL_WEIGHTS = W_PERC_SIZE + W_INTER_SIZE + W_FLOW_SIZE + W_BMAP_SIZE + W_CTX_SIZE; // 2587 or 2619
 
 static_assert(TOTAL_WEIGHTS == genome::TOTAL_WEIGHT_SLOTS,
               "autodiff and genome weight-space layouts must agree");
@@ -36,6 +37,7 @@ constexpr int OFF_PERC  = 0;
 constexpr int OFF_INTER = W_PERC_SIZE;
 constexpr int OFF_FLOW  = OFF_INTER + W_INTER_SIZE;
 constexpr int OFF_BMAP  = OFF_FLOW + W_FLOW_SIZE;
+constexpr int OFF_CTX   = OFF_BMAP + W_BMAP_SIZE;
 
 // Backward sub-kernel config.
 
@@ -69,9 +71,9 @@ struct BackwardWorkspace {
 // 0 = W_perc, 1 = W_inter, 2 = W_flow, 3 = W_bmap. Every field is written by
 // device kernels; the host copies this struct and logs/hard-fails on it.
 struct TelemetryScalars {
-    float grad_norm_sq[4];    // per-bank squared norm of the mean gradient
-    float weight_norm_sq[4];  // per-bank squared norm of the shared weights
-    float update_norm_sq[4];  // per-bank squared norm of the CAME prev_u
+    float grad_norm_sq[TELEMETRY_BANKS];    // per-bank squared norm of the mean gradient
+    float weight_norm_sq[TELEMETRY_BANKS];  // per-bank squared norm of the shared weights
+    float update_norm_sq[TELEMETRY_BANKS];  // per-bank squared norm of the CAME prev_u
     float c_mean;             // mean CAME instability accumulator
     float c_max;              // max CAME instability accumulator
     float conf_mean;          // mean confidence 1/(1+c)

@@ -52,7 +52,15 @@ items:
       - safety/alignment.cu::evaluate_stress_predictors
       - integration/host_main.cu::stress_cycle
   I5:
-    status: missing
+    status: partial
+    mechanisms:
+      - config/constants.cuh::GLOBAL_CONTEXT_ENABLED
+      - autodiff/warp_tape.cu::OFF_CTX
+      - integration/host_main.cu::kaiming_he_init
+    missing:
+      - forward broadcast of the bmap summary into channels 14-15 at sample steps
+      - backward context adjoint (d_ctx, dW_ctx, summary gradient)
+      - activation of GLOBAL_CONTEXT_ENABLED and the resulting witness suite
   I6:
     status: missing
   I7:
