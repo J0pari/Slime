@@ -1,0 +1,66 @@
+# Build-phase inventory status (construction_plan.md). Machine-checked.
+#
+# The construction plan's order of operations forbids GPU integration,
+# acceptance, and production runs until every item below is `implemented`.
+# compiler.py check validates:
+#   - every `### I<n>` heading in construction_plan.md has exactly one entry
+#     here and no entry exists without a heading;
+#   - status is one of missing | partial | implemented;
+#   - non-missing items name mechanisms that resolve to file::anchor;
+#   - missing items name no mechanisms;
+#   - the generated status file renders this table, so the build state has no
+#     hand-maintained prose to drift.
+#
+# Statuses are claims about the build, not about correctness; verification is
+# the VERIFY phase's job.
+
+items:
+  I1:
+    title: Checkpoint and resume
+    status: implemented
+    mechanisms:
+      - integration/checkpointing.cu::save_checkpoint
+      - integration/checkpointing.cu::load_checkpoint
+      - integration/host_main.cu::run
+  I2:
+    title: Predictor role activation
+    status: implemented
+    mechanisms:
+      - curriculum/problem_generator.cu::assemble_predictor_batch
+      - integration/host_main.cu::spawn_wave
+      - integration/host_main.cu::step_generation
+      - predictor/hybrid_surprise.cu::blend_surprise
+  I3:
+    title: Probe and placeholder completion
+    status: partial
+    mechanisms:
+      - predictor/hybrid_surprise.cu::placeholder_train_step
+    missing:
+      - GPU placeholder forward/training kernels per cuda_engineering sections 4.5-4.6
+  I4:
+    title: Structural pressures
+    status: partial
+    mechanisms:
+      - safety/structural.cu::run_audit_cycle
+      - safety/structural.cu::refresh_probe_panel
+      - safety/structural.cu::launch_sentinel_score
+      - safety/structural.cu::update_lineage_stats
+    missing:
+      - variance floor multiplier
+      - stress ladder
+      - wiring into fitness composition and archive insertion
+  I5:
+    title: Global context channel
+    status: missing
+  I6:
+    title: Reaction-diffusion activation
+    status: missing
+  I7:
+    title: Phase graphs
+    status: missing
+  I8:
+    title: Performance completion
+    status: missing
+  I9:
+    title: Long-run hardening
+    status: missing

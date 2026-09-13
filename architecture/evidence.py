@@ -12,7 +12,7 @@ A manifest can be created from a real run with:
         --cuda 13.0.48 --gpu "RTX 3060 Laptop" --seed default \
         --result A103.checkpoint-replay-equivalence=tests/autodiff_acceptance.cu::test_forward_match_and_backward:pass
 
-stdlib-only (plus the project's own claims module).
+Uses the project's claims module and PyYAML.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import yaml  # noqa: E402
 
 from architecture import claims as claims_mod  # noqa: E402
 from architecture.claims import claim_hash  # noqa: E402
@@ -233,6 +235,23 @@ def parse_and_validate_results(result_args: list[str], claims, binary: str,
     return results, errors
 
 
+def gpu_evidence_gate(build: dict) -> str:
+    """Return a refusal message when the build inventory is incomplete.
+
+    The construction plan's order of operations is binding: no GPU
+    integration, acceptance, or production evidence exists before every
+    inventory item is implemented. Empty string means the gate is open.
+    """
+    incomplete = [iid for iid, item in sorted(build.get("items", {}).items())
+                  if item.get("status") != "implemented"]
+    if incomplete:
+        return (f"REFUSED: BUILD phase incomplete ({', '.join(incomplete)}); "
+                f"no GPU acceptance evidence may be recorded until every "
+                f"inventory item in architecture/build_status.yaml is "
+                f"implemented.")
+    return ""
+
+
 def record(args) -> int:
     """CLI: record a manifest from a completed run.
 
@@ -254,6 +273,19 @@ def record(args) -> int:
         for e in verrors:
             print(e)
         return 2
+
+    # The construction plan's order of operations is binding: GPU acceptance
+    # evidence may not exist before the build inventory is complete. Host-side
+    # unit tests are build tools and pass --cuda n/a.
+    gpu_run = (args.cuda.strip().lower() not in ("n/a", "", "none")
+               or bool(getattr(args, "scheduler_job", "")))
+    if gpu_run:
+        build = yaml.safe_load(
+            (root / "architecture/build_status.yaml").read_text(encoding="utf-8"))
+        refusal = gpu_evidence_gate(build)
+        if refusal:
+            print(refusal)
+            return 2
 
     machine = json.loads((root / "architecture/machine.json").read_text(encoding="utf-8"))
     manifest = new_manifest(name=args.name, root=root, binary=args.binary,

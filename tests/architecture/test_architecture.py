@@ -214,6 +214,41 @@ class CompilerTests(unittest.TestCase):
         self.assertTrue(any("brand_new_buffer" in e for e in errors),
                         "undeclared organism buffer not caught")
 
+    def test_build_status_checked_against_plan_and_code(self):
+        _documents, transactions, _machine = compiler.load_configs(ROOT)
+        build = compiler.load_build_status()
+        errors: list[str] = []
+        compiler.check_build_status(ROOT, build, transactions, errors)
+        self.assertFalse(errors, f"real build inventory invalid: {errors}")
+
+        broken = {"items": {k: dict(v) for k, v in build["items"].items()}}
+        broken["items"]["I3"]["mechanisms"] = [
+            "predictor/hybrid_surprise.cu::no_such_symbol"]
+        errors = []
+        compiler.check_build_status(ROOT, broken, transactions, errors)
+        self.assertTrue(any("I3" in e for e in errors),
+                        "bogus build mechanism not caught")
+
+        del broken["items"]["I9"]
+        errors = []
+        compiler.check_build_status(ROOT, broken, transactions, errors)
+        self.assertTrue(any("I9" in e for e in errors),
+                        "inventory item with no build-status entry not caught")
+
+        broken["items"]["I5"]["mechanisms"] = [
+            "integration/host_main.cu::step_generation"]
+        errors = []
+        compiler.check_build_status(ROOT, broken, transactions, errors)
+        self.assertTrue(any("I5" in e and "missing" in e for e in errors),
+                        "missing item naming mechanisms not caught")
+
+    def test_gpu_evidence_refused_while_build_incomplete(self):
+        incomplete = {"items": {"I1": {"status": "implemented"},
+                                "I5": {"status": "missing"}}}
+        self.assertTrue(evidence.gpu_evidence_gate(incomplete))
+        complete = {"items": {"I1": {"status": "implemented"}}}
+        self.assertEqual(evidence.gpu_evidence_gate(complete), "")
+
     def test_crosses_annotation_completeness_both_directions(self):
         # A code field annotated [crosses:pt=rogue] that is missing from the
         # transaction registry must be caught — this is exactly how

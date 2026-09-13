@@ -1,54 +1,75 @@
 # Slime TODO
 
 Operational work queue in dependency order. Behavior is defined by the
-binding specifications and the claim registry; implementation status is
-generated from evidence manifests (`python architecture/compiler.py
-status`). This file lists what is being worked on, not a history.
+binding specifications and the claim registry; build status is
+machine-checked in `architecture/build_status.yaml` and rendered in
+`docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
+not a history.
 
-## P0 — Green baseline with current evidence
+## P0 — Finish the BUILD phase
 
-- [x] Fix the scheduler-client relative-path resolution: a relative
-  executable is always resolved against the job working directory (the
-  owner validates existence); `test_submit_builds_argv_and_parses_ack`
-  passes.
-- [ ] Rerun every witness on the current source and record fresh evidence:
-  host suite, autodiff acceptance, evolution regression, task-conditioning,
-  checkpoint state. Regenerate the status until no claim reads `pass/stale`.
-- [ ] Prove checkpoint/restart on hardware: GPU state roundtrip, a real
-  process restart with `--resume`, payload-checksum and schema rejection,
-  and a refused replacement leaving the previous checkpoint intact.
-- [ ] Run a 100-generation resumable classifier baseline: PT exchange at
-  generation 50, zero saturation and nonfinite values, archive invariants
-  intact, learning signal healthy, and restart continuity verified.
-- [ ] Commit no new evidence until
-  `python architecture/compiler.py check --golden --strict` passes on a
-  clean tree.
+No GPU integration, acceptance, or production run happens before this list
+is empty; `evidence.py record` refuses GPU manifests until then.
 
-## P0 — Close predictor causality
-
-- [x] Predictors enter the archive: `insert_into_archive` no longer filters
-  by role, so the predictor live list can parent predictor spawns.
-- [x] `PredictorBatch` carries pool-slot and lineage identity separately
-  (stationary probes use `pool_slot = -1`); the curriculum error EMA
-  updates the correct pool slot.
-- [ ] Add end-to-end witnesses: bootstrap -> predictor evaluation ->
-  predictor archive -> predictor parent -> predictor offspring.
-
-## P1 — Complete the placeholder per the binding design
-
+I3 — Probe and placeholder completion
 - [ ] GPU placeholder forward/train kernels per cuda_engineering 4.5/4.6.
 - [ ] Bound the uncertainty parameterization before surprise is treated as
   a robust signal.
 
-## P1 — Transfer and operator surface
+I4 — Structural pressures
+- [ ] Variance floor multiplier per organism.
+- [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
+  failure flagging.
+- [ ] Wire audit_mult and variance_mult into fitness composition; activate
+  the expanding-lineage brake in archive insertion.
+
+I5 — Global context channel
+- [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all
+  offsets, forward broadcast of the bmap summary into channels 14-15,
+  backward context adjoint.
+
+I6 — Reaction-diffusion activation
+- [ ] RD adjoint (replay reproduces residual + reaction + diffusion).
+- [ ] Neutral genome encoding for RD coefficients (zero bits mean zero).
+- [ ] Enable RD in the main loop with per-organism decoded coefficients.
+
+I7 — Phase graphs
+- [ ] Capture/replay of the capturable phases with a debug mode that
+  synchronizes and validates.
+
+I8 — Performance completion
+- [ ] Profile first (per-phase timing, then Nsight where available); the
+  shared-memory-atomic experiment is already measured and rejected.
+- [ ] Meet the 10-generation / 60-second gate with per-generation
+  checkpoint writes included.
+
+I9 — Long-run hardening
+- [ ] 5000-generation stability under all subsystems.
+- [ ] Red-team classes A-F with detection verification.
+- [ ] Dashboard surface: role fraction, r, rho, swap stats, stress failure
+  rates.
+
+## P1 — VERIFY (after BUILD)
+
+- [ ] Rerun every witness and record fresh evidence: host suite, autodiff
+  acceptance, evolution regression, task-conditioning, checkpoint state.
+  Regenerate the status until no claim reads `pass/stale`.
+- [ ] End-to-end predictor witnesses: bootstrap -> predictor evaluation ->
+  predictor archive -> predictor parent -> predictor offspring.
+
+## P2 — INTEGRATE (after VERIFY)
+
+- [ ] 100-generation resumable run: PT exchange at generation 50, zero
+  saturation and nonfinite values, archive invariants intact, learning
+  signal healthy, restart continuity verified.
+
+## P3 — OPERATE (after INTEGRATE)
+
+- [ ] Long runs with checkpoint/restart, reproducibility checks, and the
+  dashboard surface.
+
+## Carryover
 
 - [ ] Make every per-generation transfer conform to the four-point
   asynchronous transfer schedule.
 - [ ] Add the missing BOM document or remove the stale reference.
-
-## P2 — Performance (measurement first)
-
-- [ ] Profile the backward (launch structure and occupancy; the
-  shared-memory-atomic variant was measured and rejected).
-- [ ] Meet the 10-generation / 60-second gate with per-generation
-  checkpoint writes included.

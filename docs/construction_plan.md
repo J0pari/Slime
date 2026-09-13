@@ -219,12 +219,9 @@ correlation measures agreement, not correctness.
 
 ## Current implementation status
 
-The repository is in the BUILD phase. Implemented and compiling today:
-configuration/genome codec, NCA engine, reaction-diffusion forward (disabled),
-checkpointed backward + CAME, classifier-only integration loop, soft-QD
-archive, PT machinery, SOT, operator pause/prune, task conditioning, residual
-timestep, numerical telemetry, architecture tooling, scheduler coupling.
-
-Not yet implemented (the inventory above): I1 (in progress), I2, I3, I4, I5,
-I6, I7, I8, I9. Until the build is complete, no integration, acceptance, or
-production GPU runs are permitted.
+The build inventory status is machine-checked in
+`architecture/build_status.yaml` and rendered in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md). It is not maintained as
+prose here. Until every inventory item is `implemented`, no integration,
+acceptance, or production GPU run is permitted, and `evidence.py record`
+refuses GPU manifests.

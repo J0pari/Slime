@@ -140,6 +140,9 @@ the daemon. See README.md for the commands.
 - Do not create a new "architecture" or "plan" markdown document; if the
   architecture is wrong, change the specs. If a note is worth keeping, use
   `docs/arch-signals.md`.
+- Do not record GPU evidence while `architecture/build_status.yaml` has any
+  item that is not `implemented`; `evidence.py record` refuses, and the
+  construction plan's order of operations is binding.
 - Do not add a PRNG, `cudaMallocManaged`, an unchecked CUDA call, a bare
   numeric tunable at a live seam, or non-null RD coefficients; the source
   gates fail the build.

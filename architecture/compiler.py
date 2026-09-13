@@ -38,6 +38,10 @@ from architecture import source_gates as gates  # noqa: E402
 STATUS_DOC = "docs/IMPLEMENTATION_STATUS.md"
 STATUS_START = "<!-- architecture-status:start -->"
 STATUS_END = "<!-- architecture-status:end -->"
+BUILD_STATUS_FILE = "architecture/build_status.yaml"
+PLAN_DOC = "docs/construction_plan.md"
+INVENTORY_RE = re.compile(r"^### (I\d+)\b", re.MULTILINE)
+BUILD_STATES = ("missing", "partial", "implemented")
 
 # Source annotations in integration/main_loop.cu (see its OrganismTable/World
 # comments). The compiler enforces registry completeness in BOTH directions:
@@ -109,6 +113,52 @@ def load_configs(root: Path) -> tuple[dict, dict, dict]:
     transactions = yaml.safe_load((ARCH / "transactions.yaml").read_text(encoding="utf-8"))
     machine = json.loads((ARCH / "machine.json").read_text(encoding="utf-8"))
     return documents, transactions, machine
+
+
+def load_build_status() -> dict:
+    return yaml.safe_load((ARCH / "build_status.yaml").read_text(encoding="utf-8"))
+
+
+def build_incomplete(build: dict) -> list[str]:
+    return [iid for iid, item in sorted(build.get("items", {}).items())
+            if item.get("status") != "implemented"]
+
+
+def check_build_status(root: Path, build: dict, transactions: dict,
+                       errors: list[str]) -> None:
+    """Validate the build inventory against the plan and the code.
+
+    The plan's order of operations is binding: the inventory here is the
+    machine-readable truth the GPU acceptance gate reads, so it may not
+    reference mechanisms that do not exist and may not silently omit an
+    inventory item.
+    """
+    plan = (root / PLAN_DOC).read_text(encoding="utf-8")
+    planned = set(INVENTORY_RE.findall(plan))
+    items = build.get("items", {})
+    for missing in sorted(planned - set(items)):
+        errors.append(f"{PLAN_DOC}: {missing} has no {BUILD_STATUS_FILE} entry")
+    for extra in sorted(set(items) - planned):
+        errors.append(f"{BUILD_STATUS_FILE}: {extra} is not an inventory "
+                      f"item in {PLAN_DOC}")
+    for iid, item in sorted(items.items()):
+        status = item.get("status")
+        if status not in BUILD_STATES:
+            errors.append(f"{BUILD_STATUS_FILE}: {iid} status {status!r} "
+                          f"is not one of {BUILD_STATES}")
+            continue
+        mechanisms = item.get("mechanisms", [])
+        if status != "missing" and not mechanisms:
+            errors.append(f"{BUILD_STATUS_FILE}: {iid} is {status} but names "
+                          f"no mechanisms")
+        if status == "missing" and mechanisms:
+            errors.append(f"{BUILD_STATUS_FILE}: {iid} is missing but names "
+                          f"mechanisms")
+        for mechanism in mechanisms:
+            ok, why = resolve_mechanism(mechanism, root, transactions)
+            if not ok:
+                errors.append(f"{BUILD_STATUS_FILE}: {iid} mechanism "
+                              f"{mechanism}: {why}")
 
 
 def check_claims(claims: list[Claim], root: Path, transactions: dict,
@@ -300,9 +350,34 @@ def render_status(claims: list[Claim], root: Path, manifests: list[dict],
     return "\n".join(lines)
 
 
+def render_build_status(build: dict) -> str:
+    rows = []
+    for iid, item in sorted(build.get("items", {}).items()):
+        rows.append(f"| {iid} | {item.get('title', '')} | "
+                    f"{item.get('status', '')} |")
+    lines = [
+        "| Item | Feature | Build status |",
+        "| :--- | :------ | :----------- |",
+    ] + rows
+    return "\n".join(lines)
+
+
 def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
-                      transactions: dict, gates_report: gates.GateReport) -> str:
+                      transactions: dict, gates_report: gates.GateReport,
+                      build: dict) -> str:
     table = render_status(claims, root, manifests, transactions)
+    inventory = render_build_status(build)
+    n_items = len(build.get("items", {}))
+    incomplete = build_incomplete(build)
+    if incomplete:
+        build_gate = (
+            f"BUILD phase incomplete: {len(incomplete)} of {n_items} inventory "
+            f"items are not implemented ({', '.join(incomplete)}). No GPU "
+            f"integration, acceptance, or production run is permitted, and "
+            f"`evidence.py record` refuses GPU manifests.")
+    else:
+        build_gate = ("BUILD phase complete: every inventory item is "
+                      "implemented; VERIFY and INTEGRATE may proceed.")
     gate_summary = gate_summary_line(gates_report)
     return (
         "# Implementation Status\n"
@@ -315,6 +390,14 @@ def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
         "[construction_plan.md](construction_plan.md).\n"
         "\n"
         f"{STATUS_START}\n"
+        "## Build inventory\n"
+        "\n"
+        f"{inventory}\n"
+        "\n"
+        f"{build_gate}\n"
+        "\n"
+        "## Claims\n"
+        "\n"
         f"{table}\n"
         "\n"
         f"Source gates: {gate_summary}\n"
@@ -333,12 +416,14 @@ def check(args) -> int:
     warnings: list[str] = []
 
     documents, transactions, _machine = load_configs(root)
+    build = load_build_status()
     claims, parse_errors = load_registry(SPEC_DOCS)
     errors.extend(parse_errors)
     check_claims(claims, root, transactions, errors, warnings)
     check_documents(root, documents, errors)
     check_capability_drift(root, documents, errors)
     check_phase_and_transactions(root, transactions, errors)
+    check_build_status(root, build, transactions, errors)
 
     gates_report = gates.run_gates(root, strict=getattr(args, "strict", False))
     errors.extend(str(f) for f in gates_report.errors)
@@ -346,7 +431,8 @@ def check(args) -> int:
 
     if args.golden:
         manifests = evidence_mod.load_manifests(root / "evidence")
-        expected = build_status_file(claims, root, manifests, transactions, gates_report)
+        expected = build_status_file(claims, root, manifests, transactions,
+                                     gates_report, build)
         status_path = root / STATUS_DOC
         if not status_path.exists():
             errors.append(f"{STATUS_DOC} missing; run `python architecture/compiler.py status`")
@@ -371,14 +457,21 @@ def check(args) -> int:
 def status(args) -> int:
     root = ROOT
     _documents, transactions, _machine = load_configs(root)
+    build = load_build_status()
     claims, errors = load_registry(SPEC_DOCS)
+    if errors:
+        for e in errors:
+            print(f"ERROR: {e}")
+        return 1
+    check_build_status(root, build, transactions, errors)
     if errors:
         for e in errors:
             print(f"ERROR: {e}")
         return 1
     manifests = evidence_mod.load_manifests(root / "evidence")
     gates_report = gates.run_gates(root)
-    content = build_status_file(claims, root, manifests, transactions, gates_report)
+    content = build_status_file(claims, root, manifests, transactions,
+                                gates_report, build)
     (root / STATUS_DOC).write_text(content, encoding="utf-8")
     print(f"wrote {STATUS_DOC} ({len(claims)} claims, {len(manifests)} evidence manifests)")
     return 0
