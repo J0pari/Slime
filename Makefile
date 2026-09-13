@@ -128,4 +128,4 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 stability-run: $(BIN)
-	$(PYTHON) tests/long_run_check.py --binary $(BIN) --gens 20 --chunk 5
+	python tests/long_run_check.py --binary $(BIN) --gens 20 --chunk 5
