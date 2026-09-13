@@ -523,6 +523,17 @@ __global__ void bwd_weight_grad_kernel(
     const float* dA = &d_state_A[org * GRID_ELEMS];
     float* my_d_perc = &d_perc_buf[org * PERC_ELEMS];
 
+    // Weight gradients accumulate in shared memory and flush once per block
+    // (I8): the per-cell global atomicAdds were ~2,075 per cell x 262k cells
+    // x 64 steps per generation. Each organism's gradient buffer is owned by
+    // exactly one block, so the flush is a plain add with no contention.
+    // The three banks are contiguous in the flat gradient buffer.
+    constexpr int GRAD_BANK_SIZE =
+        W_PERC_SIZE + W_INTER_SIZE + W_FLOW_SIZE;
+    __shared__ float s_grad[GRAD_BANK_SIZE];
+    for (int i = tid; i < GRAD_BANK_SIZE; i += BWD_THREADS) s_grad[i] = 0.f;
+    __syncthreads();
+
     // Context-broadcast adjoint (A-203, I5). The forward overwrote the aux
     // channels at this step, so their direct gradient is zero; the summary
     // that produced them depends on every pre-broadcast channel, so its
@@ -648,10 +659,11 @@ __global__ void bwd_weight_grad_kernel(
         }
 
         // dW_flow
-        float* dW_flow = &grads[org].dW[OFF_FLOW];
         for (int h = 0; h < HIDDEN_DIM; ++h) {
             for (int c = 0; c < CA_CHANNELS; ++c) {
-                atomicAdd(&dW_flow[h * CA_CHANNELS + c], hidden[h] * d_state[c]);
+                atomicAdd(&s_grad[W_PERC_SIZE + W_INTER_SIZE
+                                  + h * CA_CHANNELS + c],
+                          hidden[h] * d_state[c]);
             }
         }
 
@@ -671,10 +683,10 @@ __global__ void bwd_weight_grad_kernel(
         }
 
         // dW_inter
-        float* dW_inter = &grads[org].dW[OFF_INTER];
         for (int p = 0; p < PERC_DIM; ++p) {
             for (int h = 0; h < HIDDEN_DIM; ++h) {
-                atomicAdd(&dW_inter[p * HIDDEN_DIM + h], perc[p] * d_pre_hidden[h]);
+                atomicAdd(&s_grad[W_PERC_SIZE + p * HIDDEN_DIM + h],
+                          perc[p] * d_pre_hidden[h]);
             }
         }
 
@@ -689,7 +701,6 @@ __global__ void bwd_weight_grad_kernel(
         }
 
         // dW_perc
-        float* dW_perc = &grads[org].dW[OFF_PERC];
         for (int f = 0; f < N_PERC_FILTERS; ++f) {
             for (int k = 0; k < 9; ++k) {
                 int ky = (k / 3) - 1;
@@ -701,7 +712,7 @@ __global__ void bwd_weight_grad_kernel(
                     acc += d_perc_local[f * CA_CHANNELS + c] *
                            __half2float(rc[grid_idx(ny, nx, c)]);
                 }
-                atomicAdd(&dW_perc[f * 9 + k], acc);
+                atomicAdd(&s_grad[f * 9 + k], acc);
             }
         }
 
@@ -709,6 +720,12 @@ __global__ void bwd_weight_grad_kernel(
         for (int p = 0; p < PERC_DIM; ++p) {
             my_d_perc[cell * PERC_DIM + p] = d_perc_local[p];
         }
+    }
+
+    // Flush the block's gradient accumulation into the organism's buffer.
+    __syncthreads();
+    for (int i = tid; i < GRAD_BANK_SIZE; i += BWD_THREADS) {
+        grads[org].dW[OFF_PERC + i] += s_grad[i];
     }
 }
 
