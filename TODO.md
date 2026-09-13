@@ -31,6 +31,18 @@ or explicitly deferred with a recorded decision.
   the shared base captured with the entry), with the stored-genome
   witness.
 
+## Queued measurements (scheduler)
+
+- [ ] slime-i8-phases (b756631a6c3c6720): 1-generation backward phase budget
+  via tests/measure_run.py --backward-profile.
+- [ ] slime-i8-wall (8e1d50739dc8250d): 10-generation wall clock with
+  --profile (the soft-target measurement).
+- [ ] slime-regress-verify (8d7a97da45cbc63a): evolution_regression re-run
+  for fresh VERIFY evidence.
+All queued behind slime-5000gen (90f2447f11941fd2) and the Trader job; the
+scheduler dispatches them in turn. No direct GPU process runs while any of
+these are pending.
+
 ## P0 — Finish the BUILD phase
 
 No GPU integration, acceptance, or production run happens before this list
