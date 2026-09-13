@@ -1,0 +1,84 @@
+# Cross-repo bridge admission record (non-normative; the specs and the
+# extension gate in docs/construction_plan.md remain sovereign).
+#
+# Records the LLM-Trader adaptive-ecology/v1 handoff, the admission rules it
+# would exercise, the coherence questions that must be resolved upstream, and
+# the narrowest future architecture. No bridge code, claims, or inventory
+# items exist; compiler.py check fails if the gate state contradicts the
+# build inventory or if the record is malformed.
+
+external_contract: "adaptive-ecology/v1"
+contract_owner: "LLM-Trader"
+declared_fingerprint: "dc9130f4680f673ca16ce20687e6fe67fd72a55bbf78f6aca2002350c47a15db"
+fingerprint_recomputed: false
+handoff_record: "contracts/adaptive-ecology-v1.handoff.json"
+gate: "CLOSED"
+
+gate_reasons:
+  - "I8 (performance completion) is missing"
+  - "I9 (long-run hardening) is missing"
+  - "the experimental program (E1-E5) has produced no evidence"
+
+rules_exercised:
+  - "extension gate: all inventory items implemented and experimental evidence produced before any extension begins"
+  - "extension admission: a new inventory item in the construction plan and build_status before any code"
+  - "role admission: a new role only via input wiring and objective semantics on the shared substrate; a dataset alone admits no role"
+  - "descriptor separation: z_state / y_task / d_behavior; bmap_64 is already overloaded and the raw external vector must never become the archive descriptor"
+  - "topology claim: v1 persists no spatial or temporal view, so no adjacency is treated as geometry; global conditioning only"
+  - "competence-gated novelty (A601.competence-gated-novelty): external surprise stays telemetry, never an ungated evolutionary reward"
+  - "host authority (S002): the host owns probe schedules, planted perturbations, holdout boundaries, and sentinel evaluation"
+  - "checkpoint and PT coverage: stream cursor, partition state, contract fingerprint, task-family identity, sentinel identities, adaptation windows; organism-bound buffers annotated and registered in both lists"
+  - "evidence discipline: no GPU acceptance evidence while the build is incomplete; C001 evidence currency"
+  - "no stubs or dormant wrappers (AGENTS.md non-negotiables)"
+  - "pin-don't-trust: content-recomputed fingerprint; the gpu-scheduler pin is the precedent"
+
+coherence_questions:
+  - "the join key is named proposal_id in sample_identity but sample_id in outcome_join and the consumer brief; an alias must be declared or the field defined"
+  - "two literal feature names contain spaces inside the fingerprinted ordered list; confirm they are identity, not display names"
+  - "the three percentile-rank intermediates are not enumerated; the normalization-refusal check needs the exact set"
+  - "the contract descriptor lives in LLM-Trader, so the content-recomputed fingerprint check cannot be performed from this repository"
+  - "the evaluation record's fields (world, planted, labels) should be confirmed as fields, not record types"
+
+preconditions:
+  - "the extension gate opens (I1-I9 implemented and E1-E5 evidence recorded)"
+  - "the upstream coherence questions are answered and the handoff revised"
+  - "the descriptor content (or its canonical hash) is delivered so Slime can recompute the fingerprint"
+  - "a new inventory item is admitted spec-first with claims, witnesses, and a build_status entry"
+
+future_architecture:
+  task_source: "one host-side external task source that validates and packs the pinned contract into a Slime-owned typed form; no Trader code, no JSON in the CUDA core, no runtime fetch, no second protocol"
+  representation: "the 15-d context vector as global conditioning; no topology claim; a future spatial or temporal view requires a contract version and its own topology claim and witness"
+  descriptor_separation: "z_state / y_task / d_behavior as the prerequisite architectural item, with backward, checkpoint, optimizer, telemetry, and witness coverage; d_behavior is Slime-owned"
+  task_semantics: "outcome-sign/refusal classification and within-episode candidate ranking (outcome_ordinal, outcome_label, comparable_outcome)"
+  predictor_semantics: "p(z_future | z_past, context) - ordinary future prediction, never called causal modeling"
+  frozen_sentinels: "host-owned versioned effective-phenotype snapshots as an evaluation population for the L00/L01/L10/L11 measurement decomposition (environment drift, learner drift, interaction residual), with no exact causal claim"
+  plastic_population: "the existing pool with evolving deltas on shared weights"
+  coupling: "shadow only; no Slime to Trader control path; a future advice contract is deferred until shadow evidence exists and both architecture gates authorize it"
+
+witness_plan:
+  - "content-recomputed contract pin; wrong-major, stale-fingerprint, and reordered-feature refusals"
+  - "missing-field, non-finite, observation-with-outcome, interior-corruption (loud), and torn-tail (tolerated) conformance tests mirrored from the upstream negative fixtures"
+  - "deterministic external-record packing"
+  - "observation/outcome separation; no future or evaluation data reaching a forward input"
+  - "task assignment across replay; checkpoint/restart equality with the external cursor and partition state; held-out partition immutability"
+  - "frozen sentinels remain frozen; the plastic population changes"
+  - "forced external distribution shift moves the intended telemetry; a null-channel shift does not"
+  - "every organism-bound buffer participates in PT transaction completeness"
+  - "no external state can schedule or suppress its own host probes"
+
+forbidden_shortcuts:
+  - "Trader structs in CUDA headers; a networking stack; a database"
+  - "hard-coded repository paths; environment variables as hidden semantics"
+  - "a bridge mode of if/else branches through core code"
+  - "duplicate classifier/predictor model classes"
+  - "arbitrary columns mapped to image pixels without a stated topology"
+  - "uncertainty calibration claimed from raw variance"
+  - "regime detection claimed from training-set fit"
+  - "evaluation labels entering training"
+  - "changing I1-I9 status or skipping the experimental program to make room"
+
+blockers:
+  - "I8 and I9 missing"
+  - "E1-E5 evidence absent"
+  - "C4-C7 VERIFY witnesses and the C8 archive-attribution decision outstanding"
+  - "the upstream coherence questions and the fingerprint-recomputation precondition"

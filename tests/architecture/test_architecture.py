@@ -14,6 +14,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent.parent
@@ -90,6 +91,35 @@ class GateTests(unittest.TestCase):
                         "rd_step(rc, rn, coeffs[org]); "
                         "bwd_rd_gather_kernel; d_rd_g"}), report2)
         self.assertTrue(report2.ok)
+
+    def test_gate_no_bridge_code(self):
+        report = source_gates.GateReport()
+        source_gates.gate_no_bridge_code(
+            files_from({"integration/host_main.cu":
+                        "// consumes adaptive-ecology/v1 records"}), report)
+        self.assertFalse(report.ok, "bridge code before admission not caught")
+        report2 = source_gates.GateReport()
+        source_gates.gate_no_bridge_code(
+            files_from({"integration/host_main.cu":
+                        "// ordinary host code"}), report2)
+        self.assertTrue(report2.ok)
+
+    def test_bridge_gate_contradiction_caught(self):
+        _documents, _transactions, _machine = compiler.load_configs(ROOT)
+        build = compiler.load_build_status()
+        errors: list[str] = []
+        compiler.check_bridge(ROOT, build, errors)
+        self.assertFalse(errors, f"bridge record invalid: {errors}")
+        # An OPEN gate while the build is incomplete must fail.
+        real = compiler.load_bridge()
+        broken = dict(real)
+        broken["gate"] = "OPEN"
+        with mock.patch.object(compiler, "load_bridge",
+                               return_value=broken):
+            errors = []
+            compiler.check_bridge(ROOT, build, errors)
+            self.assertTrue(any("OPEN" in e for e in errors),
+                            "OPEN gate with incomplete build not caught")
 
     def test_gate_host_authority_catches_plant(self):
         # [claim:S002.host-authority]

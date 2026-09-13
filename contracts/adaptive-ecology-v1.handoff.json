@@ -1,0 +1,101 @@
+{
+  "schema": "slime-external-handoff/v1",
+  "received": "2026-09-12",
+  "source": "LLM-Trader coding agent (external evidence, not authority over this repository)",
+  "status": "GO",
+  "contract_owner": "LLM-Trader",
+  "contract_id": "adaptive-ecology",
+  "contract_major": 1,
+  "declared_fingerprint": "dc9130f4680f673ca16ce20687e6fe67fd72a55bbf78f6aca2002350c47a15db",
+  "fingerprint_verified_by_slime": false,
+  "fingerprint_verification_note": "The descriptor lives in LLM-Trader (contracts/adaptive-ecology-v1.json). Slime's pin discipline requires recomputing the descriptor hash from its own content and comparing to the declared and pinned values; that check is an admission precondition and cannot be performed from this repository.",
+  "canonical_schema_authority": "signalcore/schemas/ecology.py",
+  "contract_descriptor": "contracts/adaptive-ecology-v1.json",
+  "positive_fixture": "tests/fixtures/ecology/ecology.ndjson (with rows.jsonl, split.json, ecology_manifest.json)",
+  "negative_fixtures": [
+    "tests/fixtures/ecology/negative/descriptor_wrong_major.json",
+    "tests/fixtures/ecology/negative/descriptor_reordered_features.json",
+    "tests/fixtures/ecology/negative/observation_with_outcome.json",
+    "tests/fixtures/ecology/negative/observation_nonfinite.json",
+    "tests/fixtures/ecology/negative/corrupt_interior.ndjson",
+    "tests/fixtures/ecology/negative/corrupt_torn_tail.ndjson"
+  ],
+  "producer_entrypoint": "research/validation/run_ecology_export.py",
+  "projection_entrypoint": "runtime/ecology.py::project",
+  "record_types": ["observation", "outcome", "evaluation"],
+  "feature_views": {
+    "context_vector/v1": "present",
+    "causal_time_frequency": "absent - not persisted",
+    "option_surface": "absent - not persisted"
+  },
+  "primary_feature_view": "context_vector/v1",
+  "ordered_feature_names": [
+    "pc1_zscore",
+    "trend_up",
+    "trend_down",
+    "phase_turning",
+    "coherence",
+    "volatility_regime",
+    "regime_gate_effective",
+    "volatility_rank",
+    "cycle_period_rank",
+    "inst_freq_rank",
+    "sentiment_bullish",
+    "sentiment_bearish",
+    "sentiment_strongly bullish",
+    "sentiment_strongly bearish",
+    "sentiment_neutral"
+  ],
+  "ordered_feature_names_note": "Two literal names contain spaces ('sentiment_strongly bullish', 'sentiment_strongly bearish'). The ordered names are part of the fingerprint; exact strings matter.",
+  "normalization_semantics": "unit-invariant decision values/flags/one-hots; the three intermediates are percentile ranks (CDF, ties included) in [0,1] against the frozen basis",
+  "normalization_set_note": "The handoff does not enumerate which three names are the percentile-rank intermediates; the refusal condition on normalization needs the exact set.",
+  "normalization_basis_semantics": "fit_context_basis on the hashsplit's train side only; the basis hash rides the export manifest; held-out/live values never move a feature",
+  "causal_boundary": "observations carry only decision-boundary information (the bar's decision decomposition and card snapshot); outcomes are separate later records; evaluation labels are never input",
+  "sample_identity": "proposal_id = instrument|decision_ts|context_hash|horizon|model|attempt (content-derived, reorder-stable)",
+  "episode_identity": "episode_id = instrument|decision_ts|context_hash|horizon - several candidates (models, seeds, the deterministic baseline) share it; candidate ranking groups by it",
+  "outcome_join": "the outcome record's sample_id equals the observation's; comparable_outcome is the repository's canonical definition (realized/capital, else counterfactual/qty)",
+  "join_key_note": "sample_identity names the identity proposal_id; outcome_join and the consumer brief use sample_id. Either an alias must be declared or the field defined.",
+  "logging_policy_semantics": "the logged action distribution (propensity) recorded at the decision; null when the source stated none",
+  "evaluation_only_fields": "the evaluation record type (world, planted, labels) - never model input",
+  "natural_2d_views_available": "none",
+  "surrogate_worlds_verified": "regime_transition (labels joined per sample; the other mechanisms are that world's nulls - None); the registry holds nine deterministic worlds via research/validation/surrogates.py",
+  "surrogate_worlds_list": [
+    "regime_transition",
+    "volatility_jump",
+    "delayed_signal",
+    "liquidity_shock",
+    "exact_greeks_mispricing",
+    "controlled_slippage",
+    "regime_liquidity",
+    "signal_volatility",
+    "regime_liquidity_jump"
+  ],
+  "baseline_consumers": [
+    "the selector (the canonical vector source)",
+    "the LinUCB bandit (reuses the same primitive)",
+    "the deterministic baseline candidate rows (the same-episode bar)"
+  ],
+  "commands_run": "scripts/guard.ps1 (exit 0); the fixture generation; the focused tests; the full suite",
+  "tests_run": "1097 passed, 0 failed, 0 errors",
+  "known_limitations": [
+    "the 2-D views are not persisted (absent, not fabricated)",
+    "the capture-on-surrogate-world path does not exist yet (the evaluation join is verified with fixture rows on the world timeline)",
+    "the manifest's module_file_hash changes with code edits (consumers pin the fingerprint, not the file hash)",
+    "no feedback path by design"
+  ],
+  "open_questions": [
+    "whether the consumer wants categorical/action as side metadata (v1) or in the vector",
+    "the streaming cadence",
+    "per-view horizon menus"
+  ],
+  "recommended_slime_representation": "consume the 15-d vector per sample as a frozen reference space plus the delayed outcomes as supervision and the evaluation labels as a separate ground-truth stream; never recompute features; keep its own latent state/archive",
+  "recommended_slime_first_experiment": "regime_transition with its null channels - detection delay and null false-positive rate against the persistence baseline and the logistic selector, then volatility_jump and liquidity_shock",
+  "slime_must_not_assume": [
+    "that it may recompute or re-derive features",
+    "that outcomes ride observations",
+    "that evaluation labels are inputs",
+    "that the fingerprint is optional",
+    "that any feedback path exists",
+    "that file paths are identity"
+  ]
+}

@@ -230,6 +230,25 @@ def gate_rd_adjoint_present(files: dict[str, list[str]],
                         f"missing {marker}"))
 
 
+# ---- Gate: no cross-repo bridge code before admission ----------------------
+# The extension gate in construction_plan.md is closed until every inventory
+# item is implemented and the experimental program has evidence. Until an
+# admitted inventory item exists, no production source may reference the
+# external contract; documentation and configuration records are separate
+# files and are not scanned here.
+BRIDGE_TOKENS = ("adaptive-ecology", "adaptive_ecology", "ecology.ndjson")
+
+
+def gate_no_bridge_code(files: dict[str, list[str]],
+                        report: GateReport) -> None:
+    for path, lines in files.items():
+        for i, line in enumerate(lines, 1):
+            for token in BRIDGE_TOKENS:
+                if token in line:
+                    report.findings.append(
+                        Finding("no_bridge_code", path, i, line))
+
+
 # ---- Gate: host authority polls the off-switch in the run loop ------------
 def gate_host_authority(files: dict[str, list[str]], report: GateReport) -> None:
     text = "\n".join(files.get("integration/host_main.cu", []))
@@ -546,6 +565,7 @@ ALL_GATES = [
     gate_checked_cuda_calls,
     gate_named_tunables,
     gate_rd_adjoint_present,
+    gate_no_bridge_code,
     gate_host_authority,
     gate_operator_polling,
     gate_replay_before_spawn,

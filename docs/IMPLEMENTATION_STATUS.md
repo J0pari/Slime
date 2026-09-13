@@ -29,6 +29,15 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | E4 | Ensemble disagreement tracks held-out error | planned | A601.ensemble-epistemic-uncertainty, A601.trust-weight-composition |
 | E5 | CAME versus AdamW | planned | A501.came-production-equation |
 
+## Bridge admission
+
+- External contract: `adaptive-ecology/v1` (owner: LLM-Trader)
+- Declared fingerprint: `dc9130f4680f673ca16ce20687e6fe67fd72a55bbf78f6aca2002350c47a15db` (recomputed by Slime: no)
+- Admission gate: **CLOSED**
+  - I8 (performance completion) is missing
+  - I9 (long-run hardening) is missing
+  - the experimental program (E1-E5) has produced no evidence
+
 ## Claims
 
 | Claim | Kind | Lifecycle | Mechanisms | Strong witness | Latest evidence |
@@ -64,7 +73,7 @@ BUILD phase incomplete: 2 of 9 inventory items are not implemented (I8, I9). No 
 | S002.operator-command-effective | contract | established | ✅ | ✅ | pass/stale |
 | S004.pt-swap-transaction | invariant | established | ✅ | ✅ | pass/stale |
 
-Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
+Source gates: no_ambient_rng: PASS, no_managed_memory: PASS, checked_cuda_calls: PASS, named_tunables: PASS, rd_adjoint_present: PASS, no_bridge_code: PASS, host_authority: PASS, operator_polling: PASS, replay_before_spawn: PASS, surprise_before_spawn: PASS, schedule_host_only: PASS, numeric_policy: PASS
 
 Claims: 30 total, 24 established, 4 provisional, 2 planned.
 <!-- architecture-status:end -->

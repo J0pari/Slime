@@ -41,6 +41,9 @@ STATUS_DOC = "docs/IMPLEMENTATION_STATUS.md"
 STATUS_START = "<!-- architecture-status:start -->"
 STATUS_END = "<!-- architecture-status:end -->"
 BUILD_STATUS_FILE = "architecture/build_status.yaml"
+BRIDGE_FILE = "architecture/bridge.yaml"
+BRIDGE_STATES = ("OPEN", "CLOSED")
+FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 PLAN_DOC = "docs/construction_plan.md"
 INVENTORY_RE = re.compile(r"^### (I\d+)\b", re.MULTILINE)
 PLAN_HEADING_RE = re.compile(r"^### (I\d+) \u2014 (.+?)\s*$", re.MULTILINE)
@@ -144,6 +147,55 @@ def load_configs(root: Path) -> tuple[dict, dict, dict]:
 
 def load_build_status() -> dict:
     return yaml.safe_load((ARCH / "build_status.yaml").read_text(encoding="utf-8"))
+
+
+def load_bridge() -> dict:
+    return yaml.safe_load((ARCH / "bridge.yaml").read_text(encoding="utf-8"))
+
+
+def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
+    """Validate the cross-repo bridge admission record.
+
+    The record is non-normative, but its gate state is a claim about the
+    build: it may not say OPEN while an inventory item is unimplemented, and
+    a CLOSED gate must carry the reasons and the open coherence questions.
+    """
+    bridge = load_bridge()
+    fp = str(bridge.get("declared_fingerprint", ""))
+    if not FINGERPRINT_RE.match(fp):
+        errors.append(f"{BRIDGE_FILE}: declared_fingerprint is not 64 hex chars")
+    gate = bridge.get("gate")
+    if gate not in BRIDGE_STATES:
+        errors.append(f"{BRIDGE_FILE}: gate {gate!r} is not one of {BRIDGE_STATES}")
+    incomplete = [iid for iid, item in sorted(build.get("items", {}).items())
+                  if item.get("status") != "implemented"]
+    if gate == "OPEN" and incomplete:
+        errors.append(f"{BRIDGE_FILE}: gate is OPEN while build items "
+                      f"{', '.join(incomplete)} are not implemented")
+    if gate == "CLOSED":
+        if not bridge.get("gate_reasons"):
+            errors.append(f"{BRIDGE_FILE}: CLOSED gate must list reasons")
+        if not bridge.get("coherence_questions"):
+            errors.append(f"{BRIDGE_FILE}: CLOSED gate must list the open "
+                          f"coherence questions")
+    record = bridge.get("handoff_record")
+    if not record or not (root / record).exists():
+        errors.append(f"{BRIDGE_FILE}: handoff_record {record!r} missing")
+
+
+def render_bridge() -> str:
+    bridge = load_bridge()
+    lines = [
+        f"- External contract: `{bridge.get('external_contract', '')}` "
+        f"(owner: {bridge.get('contract_owner', '')})",
+        f"- Declared fingerprint: `{bridge.get('declared_fingerprint', '')}` "
+        f"(recomputed by Slime: "
+        f"{'yes' if bridge.get('fingerprint_recomputed') else 'no'})",
+        f"- Admission gate: **{bridge.get('gate', '')}**",
+    ]
+    for reason in bridge.get("gate_reasons", []):
+        lines.append(f"  - {reason}")
+    return "\n".join(lines)
 
 
 def build_incomplete(build: dict) -> list[str]:
@@ -571,6 +623,10 @@ def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
         "\n"
         f"{render_experiments()}\n"
         "\n"
+        "## Bridge admission\n"
+        "\n"
+        f"{render_bridge()}\n"
+        "\n"
         "## Claims\n"
         "\n"
         f"{table}\n"
@@ -599,6 +655,7 @@ def check(args) -> int:
     check_capability_drift(root, documents, errors)
     check_phase_and_transactions(root, transactions, errors)
     check_build_status(root, build, transactions, errors)
+    check_bridge(root, build, errors)
     check_prose_citations(root, claims, build, errors)
     check_claim_grammar_doc(root, errors)
     check_canonical_doc_list(root, documents, errors)
