@@ -14,12 +14,18 @@ cuda_engineering.md, and construction_plan.md.
   4.44 -> 0.84 s/generation (2-generation profile: 1676.64 ms / 2, 5.3x);
   total generation ~9.3 s before the backward work. Observable output is
   identical to the previous build on the same 3-generation run (every
-  [STRESS]/[DASHBOARD]/checkpoint line matches); the two builds' checkpoint
-  hashes differ in low-order float bytes, and a same-binary rerun also
-  produced a different hash, so checkpoint hashing is not currently a
-  determinism witness — the run-to-run difference needs attribution (the
-  printed state is identical, so it is below reporting precision). The
-  combined pass shares `d_sot_fwd_inputs`/`d_sot_descriptors`/`d_sot_bank_of`
+  [STRESS]/[DASHBOARD]/checkpoint line matches). Checkpoint hashes are not a
+  determinism witness here: the previous build run twice also produced
+  different hashes (and a different `Occupied PCA bins` line), so fresh runs
+  already drift run-to-run. The pinned PCG32 seed rules out ambient RNG (no
+  entropy seeding exists), and the prime candidate is the documented float
+  atomicAdd weight-grad accumulation (order varies in L2), whose low-bit
+  differences cross archive thresholds. No claim asserts bit-reproducibility
+  of the trajectory (G100.deterministic-seed is about the PCG32 draw
+  sequence; A101.sot-schedule-independent is about the host-side schedule),
+  so this is a reproducibility observation, not a violated contract; it does
+  mean equivalence evidence between builds must compare observable output,
+  not checkpoint bytes. The combined pass shares `d_sot_fwd_inputs`/`d_sot_descriptors`/`d_sot_bank_of`
   with the SOT path, so those scratch buffers are now allocated for
   STRESS_POOL_SIZE (24) slots; the 16-slot allocation was the cause of the
   first launch's `invalid argument` + illegal access. The backward reduce
