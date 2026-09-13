@@ -825,7 +825,12 @@ PT operations:
     accepted swap, amortized over 50 generations.
 - `refresh_stress_slots`: host copies genomes into stress organism slots,
   then the next forward pass (on stress slots) overwrites their grids.
-- `evaluate_stress`: forward_with_checkpoints on stress slot range.
+- `evaluate_stress`: per sub-population, assemble the elevated-density
+  classifier batch, materialize the stress slots' effective weights, and
+  evaluate with per-organism references. Classifier slots use the
+  un-permuted-image reference; predictor slots use the nominal-target
+  reference with the pi^-1 permuted response (blueprint S-003, "Predictor
+  stress gate"). Per-slot f_sot is read back to the host.
 - `flag_stress_failures`: host scan of stress SOT gate results.
 
 ---

@@ -898,6 +898,18 @@ runaway detector are role-aware:
   lineage via role mutation) are tracked but do not aggregate into a single
   share count — each role's archive share is computed separately.
 
+Predictor stress gate. The image SOT mechanism transforms irrelevant image
+content; the predictor analogue transforms the predictor's target
+descriptor. The host draws a reversible permutation pi of the target
+bmap_32 dimensions from the SOT key and evaluates the predictor stress
+representative twice with its own effective weights: once on the nominal
+target and once on pi(target). The nominal response is the reference; the
+response to the permuted target must be equivariant, so the gate compares
+the nominal response against pi^-1 applied to the permuted response with
+the same cosine gate as the image path. As with images, the host owns the
+permutation and the schedule; GPU-resident state never chooses its own
+test.
+
 S-004: Parallel Tempering Ladders
 @claim S004.pt-swap-transaction invariant
 S an accepted PT swap moves every organism-associated rollout state together:

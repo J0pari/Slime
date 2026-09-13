@@ -159,6 +159,9 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_ph_probe_input, PROBE_BATCH * predictor::PH_INPUT * sizeof(float)), "alloc d_ph_probe_input");
     CUDA_ABORT(cudaMalloc(&w->d_ph_probe_target, PROBE_BATCH * sizeof(float)), "alloc d_ph_probe_target");
     CUDA_ABORT(cudaMalloc(&w->d_ph_surprise, PROBE_BATCH * sizeof(float)), "alloc d_ph_surprise");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_eff_weights, STRESS_POOL_SIZE * TOTAL_WEIGHTS * sizeof(float)), "alloc d_stress_eff_weights");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_batch_image, cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3 * sizeof(__half)), "alloc d_stress_batch_image");
+    CUDA_ABORT(cudaMalloc(&w->d_stress_targets, 2 * STRESS_POOL_SIZE * BMAP_DIM * sizeof(float)), "alloc d_stress_targets");
 
     // Gradient health: pinned host scalar (section 8).
     CUDA_ABORT(cudaMalloc(&w->d_grad_norm, sizeof(float)), "alloc d_grad_norm");
@@ -235,6 +238,9 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_ph_probe_input), "free d_ph_probe_input");
     CUDA_WARN(cudaFree(w->d_ph_probe_target), "free d_ph_probe_target");
     CUDA_WARN(cudaFree(w->d_ph_surprise), "free d_ph_surprise");
+    CUDA_WARN(cudaFree(w->d_stress_eff_weights), "free d_stress_eff_weights");
+    CUDA_WARN(cudaFree(w->d_stress_batch_image), "free d_stress_batch_image");
+    CUDA_WARN(cudaFree(w->d_stress_targets), "free d_stress_targets");
     CUDA_WARN(cudaFree(w->d_grad_norm), "free d_grad_norm");
     CUDA_WARN(cudaFree(w->d_tel), "free d_tel");
     CUDA_WARN(cudaFree(w->d_sot_temp_images), "free d_sot_temp_images");
@@ -391,6 +397,8 @@ bool initialize_world(World* w) {
     std::memset(w->lineage_stats, 0, sizeof(w->lineage_stats));
     w->n_lineage_stats = 0;
     std::memset(w->sentinel_anomaly, 0, sizeof(w->sentinel_anomaly));
+    safety::pt::init_stress_ladder(&w->stress_ladder);
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) w->h_stress_f_sot[s] = 1.f;
 
     // Section 9.1: Archive initialization.
     std::memset(&w->archive, 0, sizeof(w->archive));
@@ -538,6 +546,110 @@ static void insert_into_archive(World* w) {
 
         archive::insert(&w->archive, cand);
     }
+}
+
+// ---- Stress ladder (S-003, I4) ---------------------------------------------
+// Deterministic target-dimension permutation drawn from the SOT key.
+static void build_target_permutation(uint64_t key, uint8_t perm[BMAP_DIM],
+                                     uint8_t inv[BMAP_DIM]) {
+    for (int d = 0; d < BMAP_DIM; ++d) perm[d] = static_cast<uint8_t>(d);
+    Pcg32 rng;
+    pcg32_seed(&rng, key, 0x7A2Bu);
+    for (int d = BMAP_DIM - 1; d > 0; --d) {
+        int j = static_cast<int>(pcg32_random(&rng)
+                                 % static_cast<uint32_t>(d + 1));
+        uint8_t t = perm[d]; perm[d] = perm[j]; perm[j] = t;
+    }
+    for (int d = 0; d < BMAP_DIM; ++d) {
+        inv[perm[d]] = static_cast<uint8_t>(d);
+    }
+}
+
+// Refresh, evaluate, and flag: one pass of the SOT-density stress ladder.
+static bool stress_cycle(World* w, int gen) {
+    safety::pt::refresh_stress_slots(&w->stress_ladder,
+                                     w->org_table.lineage_id,
+                                     w->org_table.role, POOL_SIZE, gen,
+                                     &w->rng);
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
+        if (w->stress_ladder.last_refresh_gen[s] != gen) continue;
+        uint32_t src = w->stress_ladder.source_pool_idx[s];
+        w->org_table.genomes[POOL_SIZE + s] = w->org_table.genomes[src];
+        w->org_table.deltas[POOL_SIZE + s] = w->org_table.deltas[src];
+        w->org_table.role[POOL_SIZE + s] = w->org_table.role[src];
+        w->org_table.lineage_id[POOL_SIZE + s] =
+            w->org_table.lineage_id[src];
+        w->org_table.fitness[POOL_SIZE + s] = 0.f;
+        w->org_table.f_raw[POOL_SIZE + s] = 0.f;
+        w->org_table.f_sot[POOL_SIZE + s] = 1.f;
+    }
+    autodiff::launch_materialize_effective_weights(
+        w->d_weights, w->d_deltas + POOL_SIZE, w->d_stress_eff_weights,
+        STRESS_POOL_SIZE, w->stream);
+
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) w->h_stress_f_sot[s] = 1.f;
+
+    for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
+        cur::assemble_classifier_batch(&w->stress_batch,
+                                       STRESS_SOT_DENSITIES[p],
+                                       w->host_sot_key, &w->rng);
+        TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_batch_image,
+                        w->stress_batch.image,
+                        cur::CLASSIFIER_BATCH * GRID_SIZE * GRID_SIZE * 3
+                            * sizeof(__half),
+                        cudaMemcpyHostToDevice, w->stream),
+                       "upload stress batch image");
+        if (!safety::alignment::evaluate_stress_classifiers(
+                w->d_organisms, w->d_weights, w->d_stress_eff_weights,
+                w->stress_batch, w->d_stress_batch_image, w->host_sot_key,
+                p, w->h_stress_f_sot, w->d_sot_temp_images, w->d_sot_task_emb,
+                w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
+                w->d_sot_ref_organisms, TOTAL_WEIGHTS, w->stream)) {
+            return false;
+        }
+    }
+
+    // Predictor half: nominal and pi-permuted target rows.
+    uint8_t perm[BMAP_DIM], inv[BMAP_DIM];
+    build_target_permutation(w->host_sot_key, perm, inv);
+    static float h_nominal[STRESS_POOL_SIZE * BMAP_DIM];
+    static float h_permuted[STRESS_POOL_SIZE * BMAP_DIM];
+    for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
+        const float* row = &w->predictor_batch.target_bmap_32[
+            (s % cur::PREDICTOR_BATCH) * BMAP_DIM];
+        for (int d = 0; d < BMAP_DIM; ++d) {
+            h_nominal[s * BMAP_DIM + d] = row[d];
+            h_permuted[s * BMAP_DIM + perm[d]] = row[d];
+        }
+    }
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_stress_targets, h_nominal,
+                    STRESS_POOL_SIZE * BMAP_DIM * sizeof(float),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress nominal targets");
+    TRANSFER_ABORT(cudaMemcpyAsync(
+                    w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
+                    h_permuted, STRESS_POOL_SIZE * BMAP_DIM * sizeof(float),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress permuted targets");
+    TRANSFER_ABORT(cudaMemcpyAsync(w->d_sot_task_emb,
+                    w->classifier_batch.task_embedding,
+                    TASK_EMBED_DIM * sizeof(float),
+                    cudaMemcpyHostToDevice, w->stream),
+                   "upload stress predictor task embedding");
+    for (int p = 0; p < STRESS_SUBPOP_COUNT; ++p) {
+        if (!safety::alignment::evaluate_stress_predictors(
+                w->d_organisms, w->d_weights, w->d_stress_eff_weights,
+                w->d_stress_targets,
+                w->d_stress_targets + STRESS_POOL_SIZE * BMAP_DIM,
+                inv, p, w->h_stress_f_sot, w->d_sot_task_emb,
+                w->d_sot_fwd_inputs, w->d_sot_descriptors, w->d_sot_bank_of,
+                w->d_sot_ref_organisms, TOTAL_WEIGHTS, w->stream)) {
+            return false;
+        }
+    }
+    safety::pt::update_stress_failures(&w->stress_ladder, w->h_stress_f_sot,
+                                       gen);
+    return true;
 }
 
 // ---- Spawn wave (section 9, A-401 role-proportional) -----------------------
@@ -1026,6 +1138,10 @@ bool step_generation(World* w) {
             return false;
         }
     }
+
+    // ---- Stress ladder (S-003, I4): refresh, evaluate, flag ----
+    if (!stress_cycle(w, gen)) return false;
+
     if (!phase_trace("score+archive+PT", gen, w->stream)) return false;
 
     // ---- T3: H→D seed_grad (AFTER PT swaps) ----

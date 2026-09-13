@@ -131,6 +131,15 @@ struct World {
     safety::pt::MutationLadder mutation_ladder;
     safety::pt::StressLadder   stress_ladder;
 
+    // Stress-ladder device state (S-003): per-slot effective weights, one
+    // elevated-density batch image buffer, nominal+permuted predictor target
+    // rows, and the per-slot SOT readback.
+    float* d_stress_eff_weights;   // [STRESS_POOL_SIZE * TOTAL_WEIGHTS]
+    __half* d_stress_batch_image;  // [CLASSIFIER_BATCH * GRID*GRID*3]
+    float* d_stress_targets;       // [2 * STRESS_POOL_SIZE * BMAP_DIM]
+    float  h_stress_f_sot[STRESS_POOL_SIZE];
+    curriculum::ClassifierBatch stress_batch;
+
     // Structural pressures (S-003, I4): audit regressors, interpretability
     // probe panel, sentinel ensemble and pruning history, per-role lineage
     // share tracking, and the per-organism sentinel anomaly scores.

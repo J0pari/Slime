@@ -37,7 +37,7 @@ items:
       - integration/host_main.cu::evaluate_probe_placeholder
       - integration/host_main.cu::upload_probe_batch
   I4:
-    status: partial
+    status: implemented
     mechanisms:
       - safety/structural.cu::run_audit_cycle
       - safety/structural.cu::refresh_probe_panel
@@ -48,11 +48,9 @@ items:
       - integration/host_main.cu::score_organisms
       - safety/stress_ladder.cuh::refresh_stress_slots
       - safety/stress_ladder.cuh::update_stress_failures
-    missing:
-      - stress-ladder device evaluation for classifier slots (elevated-SOT
-        forward with per-organism references and per-slot f_sot readback)
-      - predictor stress-gate semantics (unspecified; needs a spec change in
-        A-201/A-601 before implementation)
+      - safety/alignment.cu::evaluate_stress_classifiers
+      - safety/alignment.cu::evaluate_stress_predictors
+      - integration/host_main.cu::stress_cycle
   I5:
     status: missing
   I6:

@@ -22,8 +22,9 @@ I4
 - [x] Stress ladder host core: lineage-biased refresh policy (one classifier
   and one predictor per sub-population per generation) and per-lineage
   rolling-window failure flagging.
-- [ ] Stress ladder device evaluation: elevated-SOT forward on the stress
-  slots and per-slot f_sot readback into `update_stress_failures`.
+- [x] Stress ladder device evaluation: elevated-SOT classifier forwards and
+  pi-permuted predictor forwards on the stress slots, per-slot f_sot
+  readback, wired into the generation loop.
 
 I5
 - [ ] `GLOBAL_CONTEXT_ENABLED` gate, W_ctx in the flat weight space and all
