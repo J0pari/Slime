@@ -1,0 +1,98 @@
+# Experiment registry (construction_plan.md experimental program).
+#
+# Declarative protocols for the empirical claims: a hypothesis is decided by
+# a preregistered comparison against controls, over a fixed seed set, by a
+# stated decision rule. `compiler.py check` validates that every `### E<n>`
+# heading in the construction plan has exactly one entry here and vice versa,
+# that referenced claims exist, and that every protocol field is present.
+# Results are recorded as evidence manifests, not by editing this file's
+# status by hand alone.
+
+schema: slime-experiment/v1
+
+experiments:
+  E1:
+    title: Endogenous prediction pressure
+    hypothesis: under identical compute budgets, the co-evolving predictor
+      ecology keeps the archive behavioral-expansion rate higher than both
+      controls without reducing external competence
+    intervention: evolved predictor ecology active (role-proportional
+      spawning, hybrid surprise, predictor curriculum)
+    controls:
+      - classifier-only QD
+      - QD plus fixed placeholder predictor
+    metrics:
+      - archive expansion rate
+      - behavioral novelty rate
+      - external competence (mean task accuracy)
+      - predictor error on the frozen probes
+      - lineage diversity
+    seeds: [1, 2, 3]
+    decision: the evolved condition's novelty rate exceeds both controls
+      across the seed set with disjoint confidence intervals, and competence
+      does not fall below the control band
+    status: planned
+    claims:
+      - A601.ensemble-epistemic-uncertainty
+      - A601.competence-gated-novelty
+
+  E2:
+    title: Shared-substrate transfer versus interference
+    hypothesis: H0 is E[cos(g_C, g_P)] <= 0; the operational alternative is
+      E[cos] > 0 in late development, and the shared substrate outperforms
+      separate role substrates when alignment grows
+    intervention: shared substrate with role-conditioned deltas
+    controls:
+      - separate classifier and predictor substrates
+    metrics:
+      - cosine of the mean role gradients per generation
+      - per-role final competence
+      - alignment trend across developmental phases
+    seeds: [1, 2, 3]
+    decision: reject H0 at the preregistered phase over the seed set; the
+      shared substrate wins on competence while alignment is positive and
+      increasing
+    status: planned
+    claims:
+      - A501.role-gradient-alignment
+
+  E3:
+    title: Surprise homeostasis and role dynamics
+    hypothesis: rho_t = s_t / s_target settles near 1 with rising novelty,
+      or the system exhibits persistent limit cycles in (C, P, S); role
+      extinction is a failure mode
+    intervention: surprise homeostasis active (calibrated s_target, role
+      balance multipliers)
+    controls:
+      - s_target frozen at the calibration median with role balance disabled
+    metrics:
+      - rho series
+      - classifier and predictor population fractions
+      - novelty series
+      - cross-correlation and phase relations of (S, C, P, N)
+    seeds: [1, 2, 3]
+    decision: rho stays inside a preregistered band with no role extinction;
+      cycles, if present, are characterized by phase relations rather than
+      treated as failure
+    status: planned
+    claims:
+      - A601.trust-weight-composition
+
+  E4:
+    title: Ensemble disagreement tracks held-out error
+    hypothesis: the ensemble variance across predictor outputs is positively
+      rank-correlated with squared held-out error on the frozen probes
+    intervention: predictor ensemble surprise active
+    controls:
+      - single-predictor variance proxy
+    metrics:
+      - rank correlation of ensemble variance with squared held-out error
+      - calibration error
+      - ensemble diversity
+    seeds: [1, 2, 3]
+    decision: positive rank correlation across the seed set with calibration
+      error below the preregistered bound
+    status: planned
+    claims:
+      - A601.ensemble-epistemic-uncertainty
+      - A601.trust-weight-composition

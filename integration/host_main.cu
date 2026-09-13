@@ -172,6 +172,7 @@ static bool alloc_gpu_buffers(World* w) {
     CUDA_ABORT(cudaMalloc(&w->d_sot_fwd_inputs,  cur::SOT_MAX_REFS * sizeof(ForwardInputs)), "alloc d_sot_fwd_inputs");
     CUDA_ABORT(cudaMalloc(&w->d_sot_descriptors, cur::SOT_MAX_REFS * BMAP_DIM * sizeof(float)), "alloc d_sot_descriptors");
     CUDA_ABORT(cudaMalloc(&w->d_sot_bank_of,     cur::SOT_MAX_REFS * sizeof(int)), "alloc d_sot_bank_of");
+    CUDA_ABORT(cudaMalloc(&w->d_sot_ref_organisms, cur::SOT_MAX_REFS * sizeof(OrganismState)), "alloc d_sot_ref_organisms");
 
     // PT swap temp buffers (section 13): one organism's worth each.
     CUDA_ABORT(cudaMalloc(&w->d_pt_swap_org,  sizeof(OrganismState)), "alloc d_pt_swap_org");
@@ -241,6 +242,7 @@ static void free_gpu_buffers(World* w) {
     CUDA_WARN(cudaFree(w->d_sot_fwd_inputs), "free d_sot_fwd_inputs");
     CUDA_WARN(cudaFree(w->d_sot_descriptors), "free d_sot_descriptors");
     CUDA_WARN(cudaFree(w->d_sot_bank_of), "free d_sot_bank_of");
+    CUDA_WARN(cudaFree(w->d_sot_ref_organisms), "free d_sot_ref_organisms");
     CUDA_WARN(cudaFree(w->d_pt_swap_org), "free d_pt_swap_org");
     CUDA_WARN(cudaFree(w->d_pt_swap_ckpt), "free d_pt_swap_ckpt");
     CUDA_WARN(cudaFree(w->d_pt_swap_grad), "free d_pt_swap_grad");
@@ -897,8 +899,8 @@ bool step_generation(World* w) {
             w->org_table.f_sot,
             w->d_sot_temp_images, w->d_sot_task_emb,
             w->d_sot_fwd_inputs, w->d_sot_descriptors,
-            w->d_sot_bank_of, TOTAL_WEIGHTS,
-            w->stream)) {
+            w->d_sot_bank_of, w->d_sot_ref_organisms,
+            TOTAL_WEIGHTS, w->stream)) {
         return false;
     }
     if (!phase_trace("SOT", gen, w->stream)) return false;

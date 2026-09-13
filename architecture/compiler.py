@@ -45,6 +45,12 @@ PLAN_DOC = "docs/construction_plan.md"
 INVENTORY_RE = re.compile(r"^### (I\d+)\b", re.MULTILINE)
 PLAN_HEADING_RE = re.compile(r"^### (I\d+) \u2014 (.+?)\s*$", re.MULTILINE)
 BUILD_STATES = ("missing", "partial", "implemented")
+EXPERIMENTS_FILE = "architecture/experiments.yaml"
+EXPERIMENT_HEADING_RE = re.compile(r"^### (E\d+) \u2014 (.+?)\s*$", re.MULTILINE)
+EXPERIMENT_STATES = ("planned", "running", "concluded")
+EXPERIMENT_REQUIRED_FIELDS = ("hypothesis", "intervention", "controls",
+                              "metrics", "seeds", "decision", "status",
+                              "claims")
 
 # ---- Prose citation guards ------------------------------------------------
 # Operational docs may not restate derivable facts: they cite paths, make
@@ -260,14 +266,16 @@ def check_documents(root: Path, documents: dict, errors: list[str]) -> None:
             kinds[f] = spec.get("kind", "operational")
             if spec.get("kind") == "generated":
                 generated.append(f)
-    for p in sorted((root / "docs").glob("*.md")):
-        rel = f"docs/{p.name}"
-        if rel not in declared_files:
-            errors.append(f"undeclared document: {rel} (add it to architecture/documents.yaml)")
-    for p in sorted(root.glob("*.md")):
-        if p.name not in declared_files:
+    for p in sorted(root.rglob("*")):
+        if p.suffix not in (".md", ".mdc"):
+            continue
+        rel = p.relative_to(root)
+        if rel.parts[0] in ("build", ".git"):
+            continue
+        rel_str = str(rel).replace("\\", "/")
+        if rel_str not in declared_files:
             errors.append(
-                f"undeclared document: {p.name} (add it to "
+                f"undeclared document: {rel_str} (add it to "
                 f"architecture/documents.yaml)")
     for f in declared_files:
         if not (root / f).exists():
@@ -433,6 +441,56 @@ def check_canonical_doc_list(root: Path, documents: dict,
         errors.append(f"AGENTS.md: mentions undeclared document {path}")
 
 
+def load_experiments() -> dict:
+    return yaml.safe_load((ARCH / "experiments.yaml").read_text(encoding="utf-8"))
+
+
+def check_experiments(root: Path, claims: list[Claim],
+                      errors: list[str]) -> None:
+    """Validate the experiment registry against the plan and the claims.
+
+    Every `### E<n>` heading in the construction plan needs exactly one
+    protocol, every protocol needs the full preregistration fields, and every
+    referenced claim must exist.
+    """
+    plan = (root / PLAN_DOC).read_text(encoding="utf-8")
+    planned = {m.group(1) for m in EXPERIMENT_HEADING_RE.finditer(plan)}
+    experiments = load_experiments().get("experiments", {})
+    for missing in sorted(planned - set(experiments)):
+        errors.append(f"{PLAN_DOC}: {missing} has no {EXPERIMENTS_FILE} entry")
+    for extra in sorted(set(experiments) - planned):
+        errors.append(f"{EXPERIMENTS_FILE}: {extra} is not an experiment in "
+                      f"{PLAN_DOC}")
+    claim_ids = {c.id for c in claims}
+    for eid, e in sorted(experiments.items()):
+        for field in EXPERIMENT_REQUIRED_FIELDS:
+            if field not in e or not e[field]:
+                errors.append(f"{EXPERIMENTS_FILE}: {eid} missing field "
+                              f"{field}")
+        if e.get("status") not in EXPERIMENT_STATES:
+            errors.append(f"{EXPERIMENTS_FILE}: {eid} status "
+                          f"{e.get('status')!r} is not one of "
+                          f"{EXPERIMENT_STATES}")
+        for cid in e.get("claims", []):
+            if cid not in claim_ids:
+                errors.append(f"{EXPERIMENTS_FILE}: {eid} references unknown "
+                              f"claim {cid}")
+
+
+def render_experiments() -> str:
+    experiments = load_experiments().get("experiments", {})
+    rows = []
+    for eid, e in sorted(experiments.items()):
+        rows.append(f"| {eid} | {e.get('title', '')} | "
+                    f"{e.get('status', '')} | "
+                    f"{', '.join(e.get('claims', []))} |")
+    lines = [
+        "| Experiment | Title | Status | Claims |",
+        "| :--------- | :---- | :----- | :----- |",
+    ] + rows
+    return "\n".join(lines)
+
+
 def gate_summary_line(gates_report: gates.GateReport) -> str:
     parts = []
     for g in gates.GATE_NAMES:
@@ -509,6 +567,10 @@ def build_status_file(claims: list[Claim], root: Path, manifests: list[dict],
         "\n"
         f"{build_gate}\n"
         "\n"
+        "## Experiment registry\n"
+        "\n"
+        f"{render_experiments()}\n"
+        "\n"
         "## Claims\n"
         "\n"
         f"{table}\n"
@@ -540,6 +602,7 @@ def check(args) -> int:
     check_prose_citations(root, claims, build, errors)
     check_claim_grammar_doc(root, errors)
     check_canonical_doc_list(root, documents, errors)
+    check_experiments(root, claims, errors)
 
     gates_report = gates.run_gates(root, strict=getattr(args, "strict", False))
     errors.extend(str(f) for f in gates_report.errors)

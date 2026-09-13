@@ -52,8 +52,9 @@ inline float cosine_similarity(const float* a, const float* b) {
 // between the organism's bmap_64 and its reference.
 // For non-SOT organisms, f_sot = 1.0.
 //
-// Reference forward passes use temporary organism slots in the stress range
-// (index >= POOL_SIZE). Reuses forward kernels, not the checkpointed version.
+// Reference forward passes use the dedicated SOT reference scratch buffer
+// (d_sot_ref_organisms), not the stress sub-population slots. Reuses forward
+// kernels, not the checkpointed version.
 //
 // Parameters:
 //   d_organisms       - device pointer to all organism states
@@ -84,6 +85,7 @@ inline bool apply_sot_identity(nca::OrganismState* d_organisms,
                                nca::ForwardInputs* d_sot_fwd_inputs,
                                float* d_sot_descriptors,
                                int* d_sot_bank_of,
+                               nca::OrganismState* d_sot_ref_organisms,
                                int weight_stride,
                                cudaStream_t stream) {
     namespace cur = slime::curriculum;
@@ -144,8 +146,9 @@ inline bool apply_sot_identity(nca::OrganismState* d_organisms,
         return false;
     }
 
-    // Use stress organism slots for the reference forward.
-    nca::OrganismState* d_ref_organisms = d_organisms + POOL_SIZE;
+    // Dedicated reference scratch: the stress sub-populations own the tail
+    // organism slots, so references never share storage with them.
+    nca::OrganismState* d_ref_organisms = d_sot_ref_organisms;
 
     if (d_eff_weights != nullptr) {
         // Per-organism references: one roll-out per pool organism assigned to

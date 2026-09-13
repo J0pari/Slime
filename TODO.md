@@ -17,6 +17,8 @@ I4
 - [x] Probe panel (four probes, L_role collapse alarm).
 - [x] Sentinel scoring and pruning-history training.
 - [x] Per-role lineage stats and the non-mutating expanding-lineage brake.
+- [x] SOT reference scratch separated from the stress slots (dedicated
+  `d_sot_ref_organisms` buffer).
 - [ ] Stress ladder: refresh from the main pool, elevated-SOT evaluation,
   failure flagging.
 
@@ -58,6 +60,8 @@ I9
   generations.
 - [ ] Bound the placeholder's uncertainty output before surprise is treated
   as a robust signal (`A601.trust-weight-composition`).
+- [ ] Execute the preregistered experiments (E1-E4) and record manifests;
+  update each protocol's status in `architecture/experiments.yaml`.
 
 ## P2 — INTEGRATE (after VERIFY)
 

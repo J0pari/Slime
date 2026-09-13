@@ -75,8 +75,10 @@ These live on the GPU and are accessed only by kernels:
 | `d_grad_norm` | float[] | 1 | pinned host scalar for grad norm |
 | `d_sot_temp_images` | __half[] | SOT_SUBBATCH×GRID²×3 | SOT reference images |
 | `d_sot_task_emb` | float[] | TASK_EMBED_DIM | SOT reference task emb |
-| `d_sot_fwd_inputs` | ForwardInputs[] | SOT_SUBBATCH | SOT reference inputs |
-| `d_sot_descriptors` | float[] | SOT_SUBBATCH×BMAP_DIM | SOT reference bmap_64 |
+| `d_sot_fwd_inputs` | ForwardInputs[] | SOT_MAX_REFS | SOT reference inputs |
+| `d_sot_descriptors` | float[] | SOT_MAX_REFS×BMAP_DIM | SOT reference bmap_64 |
+| `d_sot_bank_of` | int[] | SOT_MAX_REFS | effective-weight bank per reference |
+| `d_sot_ref_organisms` | OrganismState[] | SOT_MAX_REFS | SOT reference rollout scratch (distinct from the stress slots) |
 | `d_pt_swap_org` | OrganismState | 1 | PT swap temp buffer |
 | `d_pt_swap_ckpt` | CheckpointBuffer | 1 | PT swap temp buffer |
 | `d_pt_swap_grad` | GradBuffers | 1 | PT swap temp buffer |

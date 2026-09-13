@@ -1,6 +1,0 @@
-{
-    "ollacoder.agent.autoApprove": {
-        "list_directory": true,
-        "read_file": true
-    }
-}

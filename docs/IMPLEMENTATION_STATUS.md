@@ -19,6 +19,15 @@ GENERATED FILE. Do not edit by hand; run `python architecture/compiler.py status
 
 BUILD phase incomplete: 6 of 9 inventory items are not implemented (I4, I5, I6, I7, I8, I9). No GPU integration, acceptance, or production run is permitted, and `evidence.py record` refuses GPU manifests.
 
+## Experiment registry
+
+| Experiment | Title | Status | Claims |
+| :--------- | :---- | :----- | :----- |
+| E1 | Endogenous prediction pressure | planned | A601.ensemble-epistemic-uncertainty, A601.competence-gated-novelty |
+| E2 | Shared-substrate transfer versus interference | planned | A501.role-gradient-alignment |
+| E3 | Surprise homeostasis and role dynamics | planned | A601.trust-weight-composition |
+| E4 | Ensemble disagreement tracks held-out error | planned | A601.ensemble-epistemic-uncertainty, A601.trust-weight-composition |
+
 ## Claims
 
 | Claim | Kind | Lifecycle | Mechanisms | Strong witness | Latest evidence |

@@ -337,6 +337,22 @@ class CompilerTests(unittest.TestCase):
             self.assertTrue(any("docs/undeclared.md" in e for e in errors),
                             "undeclared document mention not caught")
 
+    def test_experiment_registry_checked(self):
+        claims, _errors = load_registry(compiler.SPEC_DOCS)
+        errors: list[str] = []
+        compiler.check_experiments(ROOT, claims, errors)
+        self.assertFalse(errors, f"experiment registry invalid: {errors}")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "docs").mkdir()
+            (root / "docs/construction_plan.md").write_text(
+                "### E1 \u2014 Endogenous prediction pressure\n",
+                encoding="utf-8")
+            errors = []
+            compiler.check_experiments(root, claims, errors)
+            self.assertTrue(any("E2" in e for e in errors),
+                            "registry entry absent from the plan not caught")
+
     def test_undeclared_root_document_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

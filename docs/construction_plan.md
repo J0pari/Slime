@@ -30,6 +30,19 @@ Rules:
   blueprint.md or cuda_engineering.md. If the architecture is wrong, change
   the specs first.
 
+## Where continuous and experimental work sits
+
+- CI (`.github/workflows/architecture.yml`) runs the CPU/static gates on
+  every push and pull request: `make check`, the golden architecture check,
+  the strict source gates, and the guards' own negative tests. GPU witnesses
+  stay scheduler-submitted and are not part of CI.
+- The experiment registry (`architecture/experiments.yaml`) is preregistered
+  now but executed in VERIFY/OPERATE; each execution records evidence
+  manifests and updates the protocol status.
+- VERIFY opens with evidence closure: rerun every witness on current source,
+  record fresh manifests, and regenerate the status until no claim reads
+  stale, so the next session starts from a clean checkpoint.
+
 ## Scope discipline and extension gate
 
 The extension axes in blueprint.md are documented so the current seams stay
@@ -204,27 +217,37 @@ Component and property tests, per subsystem:
 
 ## Experimental program (after INTEGRATE passes)
 
-The co-evolutionary claims are empirical, not guaranteed by construction.
-These are the experiments that decide whether the coupled system contains
-something real; they run on the telemetry series, not new subsystems.
+The co-evolutionary claims are empirical. Protocols are declared in
+`architecture/experiments.yaml` — hypothesis, intervention, controls,
+metrics, seed set, decision rule — and rendered in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md); results are recorded
+as evidence manifests, not as prose. The program:
 
-- E1 — Endogenous prediction pressure. Compare classifier-only, classifier
-  + fixed placeholder, and classifier + evolved predictor ecology. Measure
-  rates of behavioral novelty and archive expansion, not final accuracy:
-  the hypothesis is that d(novelty)/dt stays higher under co-evolution
-  rather than merely oscillating.
-- E2 — Shared-substrate transfer versus interference. Track the cosine
-  similarity of the mean classifier and predictor gradients
-  (`A501.role-gradient-alignment`) over time and compare the shared-W
-  system against completely separate substrates. Positive alignment that
-  grows while the shared system wins is evidence for an emergent common
-  representation; persistent negative alignment is interference.
-- E3 — Surprise homeostasis. Track rho_t = s_t / s_target, the classifier
-  and predictor populations, and novelty over time; analyze
-  cross-correlations and phase relationships. A stable fixed point
-  (rho_t -> 1 with rising novelty) and persistent limit cycles
-  (C -> S -> P -> S -> C) are both scientifically interesting; role
-  extinction is a failure mode to detect.
+### E1 — Endogenous prediction pressure
+
+Does co-evolving prediction change search dynamics? Classifier-only,
+fixed-placeholder, and evolved-predictor conditions under identical compute
+budgets, measuring rates of behavioral novelty and archive expansion rather
+than final accuracy.
+
+### E2 — Shared-substrate transfer versus interference
+
+Does the shared substrate create transferable structure or interference?
+Track the cosine similarity of the mean classifier and predictor gradients
+across developmental phases and seeds, against completely separate
+substrates.
+
+### E3 — Surprise homeostasis and role dynamics
+
+Does surprise homeostasis stabilize complexity? Characterize the
+(surprise, classifier, predictor, novelty) series: fixed point, oscillation,
+hysteresis, boom/bust cycles, role extinction.
+
+### E4 — Ensemble disagreement tracks held-out error
+
+Is ensemble variance a usable epistemic signal? Rank-correlate it with
+squared held-out error on the frozen probes, with calibration and diversity
+bounds.
 
 Dynamics questions the series should answer: stable fixed point,
 oscillation, hysteresis, boom/bust cycles, role extinction, and

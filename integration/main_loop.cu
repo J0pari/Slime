@@ -105,7 +105,8 @@ struct World {
     float*            d_sot_task_emb;     // [TASK_EMBED_DIM]
     ForwardInputs*    d_sot_fwd_inputs;   // [SOT_MAX_REFS]
     float*            d_sot_descriptors;  // [SOT_MAX_REFS * BMAP_DIM]
-    int*              d_sot_bank_of;      // [SOT_MAX_REFS] weight bank per reference
+    int*              d_sot_bank_of;      // [SOT_MAX_REFS]
+    nca::OrganismState* d_sot_ref_organisms;  // [SOT_MAX_REFS] reference scratch weight bank per reference
 
     // PT swap temp buffers (section 13): pre-allocated for full data swap.
     OrganismState*    d_pt_swap_org;      // [1]
