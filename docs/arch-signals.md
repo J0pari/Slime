@@ -7,6 +7,17 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I8 measured rejection (fifth of its kind) with a new effect
+  worth naming: the warp-shuffle reduce_inter (no shared memory, high
+  occupancy) measured 12-15% faster on its own kernel (1120 -> 980 ms) but
+  the *unchanged* weight-grad kernel immediately before it in the step
+  measured ~800 ms slower (2.1-2.4 -> 2.8-3.2 s) across four interleaved
+  A/B pairs, with the unchanged reduce_flow control flat. Net ~0.65 s/gen
+  loss; reverted. Either the higher-occupancy kernel leaves the SM in a
+  lower clock state for the next kernel, or the phase timer attributes
+  residual occupancy from the previous kernel; both readings make adjacent
+  kernel occupancy a first-class I8 variable, not just per-kernel time.
+  FD suite passed 37/37 on the variant, so this is purely a timing effect.
 - 2026-09-12: I8 measured rejection (fourth of its kind), with interleaved
   A/B runs to defeat session drift: raising the launch bound to three
   blocks/SM on the reforward, weight-grad, and stencil kernels cut the

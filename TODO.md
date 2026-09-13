@@ -94,7 +94,12 @@ I8
   for the stencil gather. Also rejected with interleaved A/B runs:
   __launch_bounds__(256, 3) on the reforward/weight-grad/stencil kernels
   (weight-grad 2.07-2.14 -> 3.60-3.61 s, reforward 0.79-0.80 -> 1.10-1.12 s;
-  the 85-register budget spills; stencil neutral).
+  the 85-register budget spills; stencil neutral). Also rejected: warp-shuffle
+  reduce_inter (no shared, high occupancy) measured 12-15% faster on its own
+  kernel but throttled the next compute-heavy kernel by ~800 ms (four
+  interleaved pairs, unchanged control flat), a net ~0.65 s/generation loss;
+  reverted. The occupancy/power coupling between adjacent backward kernels is
+  now itself a measured effect.
 
 I9
 - [x] Dashboard surface: role fraction, r, rho, swap stats, stress-failure
