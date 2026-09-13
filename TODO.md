@@ -43,6 +43,13 @@ or explicitly deferred with a recorded decision.
 
 ## Queued measurements (scheduler)
 
+- [x] slime-i8-phases (b756631a6c3c6720): done. Backward ~4.57 s/gen
+  (wg_main 1959, reduce_inter 726, reduce_flow 245, stencil 967, reforward
+  608, rd 67 ms); WALL 6.6 s for 1 generation.
+- [x] slime-i8-wall (8e1d50739dc8250d): done. WALL 60.4 s for 10
+  generations (6.04 s/gen) — the soft target is met on the wall-clock
+  measure (backward 45.6 s, stress 5.6, forward 5.4).
+- [x] slime-regress-verify (8d7a97da45cbc63a): done, exit 0.
 - [ ] slime-i8-phases (b756631a6c3c6720): 1-generation backward phase budget
   via tests/measure_run.py --backward-profile.
 - [ ] slime-i8-wall (8e1d50739dc8250d): 10-generation wall clock with
@@ -137,14 +144,14 @@ I9
   production path runs on hardware); the claim stays provisional until
   F has a production-path witness.
 - [ ] 5000-generation stability verification (checkpoint/restart
-  -- RUN IN FLIGHT: scheduler job 17f6be1c8143f710 (slime-5000gen,
-  50-generation chunks, ~10 h), attempt 1 queued for retry; the harness it
-  reads now streams --profile output so the watchdog sees per-generation
-  progress. The previous submissions failed: the first under GPU contention
-  from a direct run, the second on the harness warmup bug, the third on the
-  missing progress signal (watchdog killed it at 103 s); all three causes
-  are fixed. History: 233fc0ed8322d3ee (contention),
-  90f2447f11941fd2 (warmup bug), 17f6be1c8143f710 attempt 0 (watchdog),
+  -- INVALID RESULT, RESUBMITTED: job 17f6be1c8143f710 reported
+  done/PASS 5000/5000 in 443 s, but its log shows every chunk after the
+  first resumed at generation 50 and ran zero generations: the harness
+  passed the chunk size where the binary's N is the total target, and the
+  harness never verified the checkpoint. Both are fixed (cumulative target
+  + checkpoint-generation check); the resubmission is the authoritative
+  run. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
   resubmission raced an owner edit of gpu_scheduler.py and the client
