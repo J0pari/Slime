@@ -613,6 +613,7 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
     for (int cell = tid; cell < CELLS; cell += BWD_THREADS) {
         int y, x;
         cell_yx(cell, y, x);
+        float* stage = &cell_stage[static_cast<size_t>(org) * STAGE_STRIDE];
 
         float perc[PERC_DIM];
         nca::sample_neighborhood(rc, W_perc, y, x, perc);
@@ -627,6 +628,11 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
             }
             pre_hidden[h] = acc;
             hidden[h] = nca::gelu_approx(acc);
+        }
+        // perc is final here: stage it now so it can die before the RD block
+        // (the register pressure here was spilling 3 KB per thread).
+        for (int p = 0; p < PERC_DIM; ++p) {
+            stage[p * CELLS + cell] = perc[p];
         }
 
         // RD clamp mask and clamp-aware d_next per chemical channel (I6).
@@ -672,6 +678,10 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
                 rd_direct[c] = g;
             }
         }
+        // hidden's last read was the RD flow term above; stage it now.
+        for (int h = 0; h < HIDDEN_DIM; ++h) {
+            stage[(PERC_DIM + HIDDEN_DIM + h) * CELLS + cell] = hidden[h];
+        }
 
         float d_state[CA_CHANNELS];
         for (int c = 0; c < CA_CHANNELS; ++c) {
@@ -691,35 +701,22 @@ __global__ void __launch_bounds__(BWD_THREADS, 2) bwd_weight_grad_kernel(
             // channel, and RD's clamp zeroes saturated chemical channels.
             dA[cell * CA_CHANNELS + c] = direct + s_mean[c];
         }
+        for (int c = 0; c < CA_CHANNELS; ++c) {
+            stage[(PERC_DIM + 2 * HIDDEN_DIM + c) * CELLS + cell] = d_state[c];
+        }
 
-        // d_hidden = W_flow^T * d_state
-        float d_hidden[HIDDEN_DIM];
+        // d_pre_hidden = (W_flow^T * d_state) * gelu'(pre_hidden), fused so
+        // the d_hidden array never exists.
+        float d_pre_hidden[HIDDEN_DIM];
         for (int h = 0; h < HIDDEN_DIM; ++h) {
             float acc = 0.f;
             for (int c = 0; c < CA_CHANNELS; ++c) {
                 acc += W_flow[h * CA_CHANNELS + c] * d_state[c];
             }
-            d_hidden[h] = acc;
+            d_pre_hidden[h] = acc * gelu_derivative(pre_hidden[h]);
         }
-
-        float d_pre_hidden[HIDDEN_DIM];
         for (int h = 0; h < HIDDEN_DIM; ++h) {
-            d_pre_hidden[h] = d_hidden[h] * gelu_derivative(pre_hidden[h]);
-        }
-
-        // Stage per-cell vectors for the deterministic reductions below.
-        {
-            float* stage = &cell_stage[static_cast<size_t>(org) * STAGE_STRIDE];
-            for (int p = 0; p < PERC_DIM; ++p) {
-                stage[p * CELLS + cell] = perc[p];
-            }
-            for (int h = 0; h < HIDDEN_DIM; ++h) {
-                stage[(PERC_DIM + h) * CELLS + cell] = d_pre_hidden[h];
-                stage[(PERC_DIM + HIDDEN_DIM + h) * CELLS + cell] = hidden[h];
-            }
-            for (int c = 0; c < CA_CHANNELS; ++c) {
-                stage[(PERC_DIM + 2 * HIDDEN_DIM + c) * CELLS + cell] = d_state[c];
-            }
+            stage[(PERC_DIM + h) * CELLS + cell] = d_pre_hidden[h];
         }
 
         // d_perc = W_inter^T * d_pre_hidden
@@ -1040,10 +1037,9 @@ __global__ void residual_magnitude_kernel(
         const __half* st = states[m];
         float F2 = 0.f, x2 = 0.f, ratio_max = 0.f;
         for (int cell = tid; cell < CELLS; cell += blockDim.x) {
-            int y, x;
-            cell_yx(cell, y, x);
-
-            float perc[PERC_DIM];
+        int y, x;
+        cell_yx(cell, y, x);
+        float perc[PERC_DIM];
             nca::sample_neighborhood(st, W_perc, y, x, perc);
 
             float hidden[HIDDEN_DIM];
