@@ -120,6 +120,21 @@ P maintainability
 T established
 C observed
 
+@claim G100.strong-identifiers policy
+S identifier families (lineage, pool slot, genome seed, archive slot, PT
+  slot) are distinct types: construction and extraction are explicit, a
+  default-constructed id holds the invalid sentinel rather than a fabricated
+  real id, and no implicit conversion exists between a family and its raw
+  integer or another family
+M config/strong_ids.cuh::StrongId
+M config/strong_ids.cuh::LineageId
+M archive/soft_qd_archive.cu::prune_lineage
+M archive/soft_qd_archive.cu::set_lineage_brake
+W+ tests/host_unit_tests.cpp::test_strong_ids_distinct
+P correctness
+T provisional
+C observed
+
 
 Conventions: FP16 forward, FP32 master weights, FP32 autodiff, captured-graph
 execution mode as primary.

@@ -18,6 +18,7 @@
 #define COEVO_ARCHIVE_SOFT_QD_ARCHIVE_CU
 
 #include "../config/constants.cuh"
+#include "../config/strong_ids.cuh"
 #include "../genome/codec.cu"
 
 #include <cstdint>
@@ -31,7 +32,7 @@ struct ArchiveEntry {
     float    fitness;                 // composed (see below)
     float    f_raw;
     float    f_sot;
-    uint32_t lineage_id;
+    LineageId lineage_id;
     uint32_t parent_id;
     uint32_t bin_x;
     uint32_t bin_y;
@@ -83,7 +84,7 @@ struct Archive {
     // mutated, so applying a brake is idempotent.
     struct LineageBrake {
         Role     role;
-        uint32_t lineage_id;
+        LineageId lineage_id;
         float    factor;
     };
     LineageBrake lineage_brakes[LINEAGE_BRAKE_MAX];
@@ -301,7 +302,7 @@ __host__ inline void live_list_remove(Archive* a, int idx, Role role) {
 // declared statistics (live lists, counts, bin occupancies, RFF means) so
 // the archive remains exactly consistent afterwards. Pruned lineages cannot
 // become parents: parent selection draws from the live lists only.
-inline void prune_lineage(Archive* a, uint32_t lineage) {
+inline void prune_lineage(Archive* a, LineageId lineage) {
     bool changed = false;
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
         ArchiveEntry& e = a->entries[i];
@@ -481,7 +482,7 @@ __host__ inline bool archive_read_file(Archive& a, FILE* f) {
 // brake is stored separately from entry fitness so repeated application is
 // idempotent and the stored values remain the organisms' real fitness.
 __host__ inline float lineage_brake_factor(const Archive& a, Role role,
-                                           uint32_t lineage_id) {
+                                           LineageId lineage_id) {
     for (int i = 0; i < a.n_lineage_brakes; ++i) {
         if (a.lineage_brakes[i].role == role &&
             a.lineage_brakes[i].lineage_id == lineage_id) {
@@ -492,7 +493,7 @@ __host__ inline float lineage_brake_factor(const Archive& a, Role role,
 }
 
 __host__ inline void set_lineage_brake(Archive* a, Role role,
-                                       uint32_t lineage_id,
+                                       LineageId lineage_id,
                                        float share_fraction, float threshold) {
     float factor = 1.0f;
     if (share_fraction > threshold) {

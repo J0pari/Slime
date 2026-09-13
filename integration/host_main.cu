@@ -593,7 +593,7 @@ static void insert_into_archive(World* w) {
         cand.fitness = w->org_table.fitness[org];
         cand.f_raw = w->org_table.f_raw[org];
         cand.f_sot = w->org_table.f_sot[org];
-        cand.lineage_id = w->org_table.lineage_id[org];
+        cand.lineage_id = LineageId(w->org_table.lineage_id[org]);
         cand.parent_id = w->org_table.parent_id[org];
         cand.generation = w->generation;
         cand.role = w->org_table.role[org];
@@ -794,7 +794,7 @@ static void spawn_role_wave(World* w, Role target_role, int n_spawns,
 
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = genome::runtime_role(child);
-        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id;
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive_idx].lineage_id.value();
         w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive_idx);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
@@ -902,7 +902,7 @@ static bool inject_predictor_founders(World* w) {
 
         w->org_table.genomes[slot] = child;
         w->org_table.role[slot] = Role::Predictor;
-        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id;
+        w->org_table.lineage_id[slot] = w->archive.entries[parent_archive].lineage_id.value();
         w->org_table.parent_id[slot] = static_cast<uint32_t>(parent_archive);
         w->org_table.spawn_gen[slot] = w->generation;
         w->org_table.fitness[slot] = 0.f;
@@ -1240,7 +1240,7 @@ bool step_generation(World* w) {
         }
         if (best >= 0) {
             archive::set_lineage_brake(&w->archive, role,
-                                       w->lineage_stats[best].lineage_id,
+                                       LineageId(w->lineage_stats[best].lineage_id),
                                        w->lineage_stats[best].archive_share,
                                        LINEAGE_RUNAWAY_THRESHOLD);
         }
@@ -1774,7 +1774,7 @@ static void poll_operator_commands(World* w) {
     }
     for (int p = 0; p < w->operator_state.n_pruned; ++p) {
         archive::prune_lineage(&w->archive,
-                               w->operator_state.pruned_lineages[p]);
+                               LineageId(w->operator_state.pruned_lineages[p]));
         safety::sentinel_history_mark_pruned(&w->sentinel_history,
                                              w->operator_state.pruned_lineages[p],
                                              w->generation);

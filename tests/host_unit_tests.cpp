@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -608,7 +609,7 @@ static int insert_test_entry(arch::Archive* a, float d0, float d1,
     cand.fitness = fitness;
     cand.f_raw = fitness;
     cand.f_sot = 1.0f;
-    cand.lineage_id = lineage;
+    cand.lineage_id = slime::LineageId(lineage);
     cand.role = role;
     cand.alive = true;
     arch::assign_bin(*a, cand.descriptor, cand.bin_x, cand.bin_y);
@@ -757,11 +758,11 @@ static void test_archive_weighted_metric_active() {
     int n_fillers_alive = 0;
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
         if (!a->entries[i].alive) continue;
-        if (a->entries[i].lineage_id == 11) a_alive = true;
-        if (a->entries[i].lineage_id == 22) b_alive = true;
-        if (a->entries[i].lineage_id == 33) c_alive = true;
-        if (a->entries[i].lineage_id >= 1002 &&
-            a->entries[i].lineage_id <= 1012) n_fillers_alive++;
+        if (a->entries[i].lineage_id == slime::LineageId(11)) a_alive = true;
+        if (a->entries[i].lineage_id == slime::LineageId(22)) b_alive = true;
+        if (a->entries[i].lineage_id == slime::LineageId(33)) c_alive = true;
+        if (a->entries[i].lineage_id >= slime::LineageId(1002) &&
+            a->entries[i].lineage_id <= slime::LineageId(1012)) n_fillers_alive++;
     }
     EXPECT_TRUE(!a_alive);
     EXPECT_TRUE(b_alive);
@@ -914,14 +915,14 @@ static void test_archive_prune_lineage() {
     }
     EXPECT_TRUE(a->count_classifier == 9);
 
-    arch::prune_lineage(a, 2u);
+    arch::prune_lineage(a, slime::LineageId(2u));
 
     char err[256];
     EXPECT_TRUE(arch::archive_check_invariants(*a, err, sizeof(err)));
     EXPECT_TRUE(a->count_classifier == 5);
     int lineage2_alive = 0;
     for (int i = 0; i < MAX_ARCHIVE; ++i) {
-        if (a->entries[i].alive && a->entries[i].lineage_id == 2u) {
+        if (a->entries[i].alive && a->entries[i].lineage_id == slime::LineageId(2u)) {
             lineage2_alive++;
         }
     }
@@ -1135,12 +1136,45 @@ static void test_lineage_stats_and_brake() {
 
     static slime::archive::Archive arch;
     std::memset(&arch, 0, sizeof(arch));
-    slime::archive::set_lineage_brake(&arch, Role::Classifier, 7, 0.75f,
+    slime::archive::set_lineage_brake(&arch, Role::Classifier,
+                               slime::LineageId(7), 0.75f,
                                LINEAGE_RUNAWAY_THRESHOLD);
-    float factor = slime::archive::lineage_brake_factor(arch, Role::Classifier, 7);
+    float factor = slime::archive::lineage_brake_factor(
+        arch, Role::Classifier, slime::LineageId(7));
     EXPECT_TRUE(factor < 1.f && factor >= LAMBDA_AUDIT);
-    EXPECT_TRUE(slime::archive::lineage_brake_factor(arch, Role::Predictor, 7) == 1.f);
-    EXPECT_TRUE(slime::archive::lineage_brake_factor(arch, Role::Classifier, 9) == 1.f);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(
+        arch, Role::Predictor, slime::LineageId(7)) == 1.f);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(
+        arch, Role::Classifier, slime::LineageId(9)) == 1.f);
+}
+
+// [claim:G100.strong-identifiers]
+static void test_strong_ids_distinct() {
+    static_assert(!std::is_convertible_v<slime::LineageId, std::uint32_t>,
+                  "a lineage id must not decay to a raw integer");
+    static_assert(!std::is_convertible_v<std::uint32_t, slime::LineageId>,
+                  "a raw integer must not silently become a lineage id");
+    static_assert(!std::is_convertible_v<slime::PoolSlot, slime::LineageId>,
+                  "slots and lineages must not interchange");
+    static_assert(!std::is_convertible_v<slime::GenomeSeed, slime::LineageId>,
+                  "seeds and lineages must not interchange");
+    // Default construction is the invalid sentinel, not a fabricated id.
+    EXPECT_TRUE(!slime::LineageId().valid());
+    EXPECT_TRUE(!slime::PoolSlot().valid());
+    EXPECT_TRUE(slime::LineageId(0u).valid());
+    EXPECT_TRUE(slime::LineageId(7u).value() == 7u);
+    EXPECT_TRUE(slime::LineageId(7u) == slime::LineageId(7u));
+    EXPECT_TRUE(slime::LineageId(7u) != slime::LineageId(8u));
+    EXPECT_TRUE(slime::PoolSlot(3).valid());
+    // The archive brake path accepts only the strong type.
+    static slime::archive::Archive arch;
+    std::memset(&arch, 0, sizeof(arch));
+    slime::archive::set_lineage_brake(&arch, Role::Classifier,
+                                      slime::LineageId(11), 0.5f, 0.25f);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(
+                    arch, Role::Classifier, slime::LineageId(11)) < 1.f);
+    EXPECT_TRUE(slime::archive::lineage_brake_factor(
+                    arch, Role::Classifier, slime::LineageId(12)) == 1.f);
 }
 
 // The L_role probe separates a linearly shifted role encoding.
@@ -1590,6 +1624,7 @@ int main() {
     test_archive_randomized_property();
     test_operator_command_parse();
     test_archive_prune_lineage();
+    test_strong_ids_distinct();
     test_sot_batch_determinism();
     test_archive_file_roundtrip();
     test_audit_r2_and_multiplier();
