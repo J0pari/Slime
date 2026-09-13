@@ -7,6 +7,16 @@ cuda_engineering.md, and construction_plan.md.
 
 ## Signals
 
+- 2026-09-12: I5 forward broadcast landed; the backward context adjoint needs
+  care about which sample steps have a downstream path. `project_bmap` runs
+  at steps {16, 32, 48, 64} and the context write happens after the bmap
+  projection at each. At step 64 the loop ends, so that broadcast cannot
+  reach any later bmap sample: only the broadcasts at 16, 32, and 48 can
+  influence the loss, and the adjoint must accumulate d_ctx where the
+  backward replays those steps. The step-64 write still mutates the stored
+  final grid (telemetry/audit see it), which is why the forward and the
+  adjoint cannot share one naive per-sample treatment. The adjoint lands in
+  the state backward's sample-step replay, not in bwd_seed_scatter_kernel.
 - 2026-09-12: C1a fixed the predictor-target contract: `assemble_predictor_batch`
   now draws classifier-only targets, carries real lineage ids (the host passed
   pool indices), and propagates the target's SOT status; the typed witness
