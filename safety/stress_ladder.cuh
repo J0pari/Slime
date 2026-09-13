@@ -58,7 +58,7 @@ __host__ __device__ inline Role stress_slot_role(int slot) {
 }
 
 __host__ inline void init_stress_ladder(StressLadder* l) {
-    std::memset(l, 0, sizeof(*l));
+    *l = StressLadder{};
     for (int s = 0; s < STRESS_POOL_SIZE; ++s) {
         l->role[s] = stress_slot_role(s);
         l->subpop[s] = static_cast<uint8_t>(s / STRESS_SUBPOP_SIZE);
@@ -80,7 +80,7 @@ __host__ inline StressLineageRecord* stress_lineage_record(StressLadder* l,
     }
     if (!create || l->n_lineages >= STRESS_LINEAGE_MAX) return nullptr;
     StressLineageRecord* r = &l->lineages[l->n_lineages++];
-    std::memset(r, 0, sizeof(*r));
+    *r = StressLineageRecord{};
     r->lineage_id = lineage_id;
     r->last_stress_gen = -1;
     return r;

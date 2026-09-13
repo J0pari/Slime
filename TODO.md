@@ -6,6 +6,27 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history.
 
+## Review 2026-09-13 scope (Slime)
+
+- [x] Strong-ID initialization migration: ID-bearing structs are
+  value-initialized (World via new World(), StressLadder/StressLineageRecord
+  via {}), the bytewise clears of World/Archive/SentinelHistory/LineageStats
+  and the test-side Archive/ArchiveEntry memsets are gone; the printf
+  strong-id call already used .value(). Verification note: the host-only
+  build here uses nvcc/cl, not g++ -Werror, so the -Wclass-memaccess class
+  was fixed by inspection; a g++ CI run should confirm.
+- [x] Cross-platform e2e fixture: the fake binary is a .cmd on Windows and
+  an executable shell script on POSIX, so the architecture suite no longer
+  fails on Linux.
+- [ ] Control-plane drift: bridge blockers are free text (gate_reasons);
+  represent them structurally as requires_build: [I9] and
+  requires_experiments: [E1..E5] in bridge.yaml, derive the gate and the
+  prose from that graph in check_bridge, and delete the stale ~27-second
+  I8 language from the inventory text.
+- [x] Surprise blending reliability: the trust-weight composition
+  (calibration, held-out, diversity, correlation) is implemented and
+  provisional.
+
 ## P0 — Semantic correctness (gates further BUILD)
 
 Mechanism presence is not contract fulfillment. C1-C3 close defects in

@@ -589,7 +589,6 @@ static void test_pt_ring_endpoints() {
 namespace arch = slime::archive;
 
 static void init_test_archive(arch::Archive* a) {
-    std::memset(a, 0, sizeof(*a));
     for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
         a->bins[b].cap_classifier = ARCHIVE_BIN_CAP;
         a->bins[b].cap_predictor  = ARCHIVE_BIN_CAP;
@@ -601,8 +600,7 @@ static void init_test_archive(arch::Archive* a) {
 
 static int insert_test_entry(arch::Archive* a, float d0, float d1,
                              float fitness, Role role, uint32_t lineage) {
-    arch::ArchiveEntry cand;
-    std::memset(&cand, 0, sizeof(cand));
+    arch::ArchiveEntry cand{};
     cand.descriptor[0] = d0;
     cand.descriptor[1] = d1;
     for (int d = 2; d < BMAP_DIM; ++d) cand.descriptor[d] = 0.01f * d;
@@ -619,7 +617,7 @@ static int insert_test_entry(arch::Archive* a, float d0, float d1,
 
 static void test_archive_bin_capacity_after_rebin() {
     // [claim:A401.bin-capacity]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
 
     // Fixed pre-rebin binning: pc = (e0, e1) with the mean set at the data
@@ -689,7 +687,7 @@ static void test_archive_bin_capacity_after_rebin() {
 
 static void test_archive_invariant_checker() {
     // [claim:A401.live-statistics-exact]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
     EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.5f, 0.4f, Role::Classifier, 1) >= 0);
     EXPECT_TRUE(insert_test_entry(a, 0.9f, 0.9f, 0.6f, Role::Classifier, 2) >= 0);
@@ -729,7 +727,7 @@ static void test_archive_invariant_checker() {
 
 static void test_archive_weighted_metric_active() {
     // [claim:A401.weighted-metric-active]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
 
     // Two distinguished occupants in bin (0,0): A at (0.5,0.5), B at (0.9,0.9).
@@ -777,7 +775,7 @@ static void test_archive_weighted_metric_active() {
 
 static void test_archive_rff_mean_exact_after_replacement() {
     // [claim:A401.live-statistics-exact]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
     EXPECT_TRUE(insert_test_entry(a, 0.5f, 0.5f, 0.5f, Role::Classifier, 1) >= 0);
     EXPECT_TRUE(insert_test_entry(a, 0.9f, 0.9f, 0.9f, Role::Classifier, 2) >= 0);
@@ -803,7 +801,7 @@ static void test_archive_rff_mean_exact_after_replacement() {
 static void test_archive_randomized_property() {
     // [claim:A401.live-statistics-exact]
     // [claim:A401.bin-capacity]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
 
     Pcg32 rng;
@@ -846,7 +844,7 @@ static void test_archive_randomized_property() {
 
 static void test_archive_file_roundtrip() {
     // [claim:S001.checkpoint-roundtrip]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
     for (int i = 0; i < 20; ++i) {
         Role role = (i % 3 == 0) ? Role::Predictor : Role::Classifier;
@@ -860,7 +858,7 @@ static void test_archive_file_roundtrip() {
     EXPECT_TRUE(f != nullptr);
     EXPECT_TRUE(arch::archive_write_file(*a, f));
     std::rewind(f);
-    arch::Archive* b = new arch::Archive;
+    arch::Archive* b = new arch::Archive();
     EXPECT_TRUE(arch::archive_read_file(*b, f));
     EXPECT_TRUE(std::memcmp(a, b, sizeof(arch::Archive)) == 0);
 
@@ -904,7 +902,7 @@ static void test_operator_command_parse() {
 
 static void test_archive_prune_lineage() {
     // [claim:S002.operator-command-effective]
-    arch::Archive* a = new arch::Archive;
+    arch::Archive* a = new arch::Archive();
     init_test_archive(a);
     for (int i = 0; i < 5; ++i) {
         EXPECT_TRUE(insert_test_entry(a, 0.5f + 0.001f * i, 0.5f,
@@ -1138,8 +1136,7 @@ static void test_lineage_stats_and_brake() {
     EXPECT_TRUE(!slime::safety::runaway_detected(stats[idx7],
                                           LINEAGE_RUNAWAY_THRESHOLD));
 
-    static slime::archive::Archive arch;
-    std::memset(&arch, 0, sizeof(arch));
+    static slime::archive::Archive arch{};
     slime::archive::set_lineage_brake(&arch, Role::Classifier,
                                slime::LineageId(7), 0.75f,
                                LINEAGE_RUNAWAY_THRESHOLD);
@@ -1171,8 +1168,7 @@ static void test_strong_ids_distinct() {
     EXPECT_TRUE(slime::LineageId(7u) != slime::LineageId(8u));
     EXPECT_TRUE(slime::PoolSlot(3).valid());
     // The archive brake path accepts only the strong type.
-    static slime::archive::Archive arch;
-    std::memset(&arch, 0, sizeof(arch));
+    static slime::archive::Archive arch{};
     slime::archive::set_lineage_brake(&arch, Role::Classifier,
                                       slime::LineageId(11), 0.5f, 0.25f);
     EXPECT_TRUE(slime::archive::lineage_brake_factor(
@@ -1215,8 +1211,7 @@ static void test_red_team_host_detectors() {
 
     // Class B: archive poisoning. A tampered occupancy count must fail the
     // invariant checker that a clean archive passes.
-    static slime::archive::Archive a;
-    std::memset(&a, 0, sizeof(a));
+    static slime::archive::Archive a{};
     init_test_archive(&a);
     EXPECT_TRUE(insert_test_entry(&a, 0.5f, 0.5f, 0.5f, Role::Classifier,
                                   1u) >= 0);
@@ -1247,11 +1242,9 @@ static void test_genome_fieldwise_perturbation() {
 // Historical attribution: the archive keeps the genome that produced the
 // entry, even after the live source organism mutates.
 static void test_archive_historical_attribution() {
-    static slime::archive::Archive a;
-    std::memset(&a, 0, sizeof(a));
+    static slime::archive::Archive a{};
     init_test_archive(&a);
-    slime::archive::ArchiveEntry cand;
-    std::memset(&cand, 0, sizeof(cand));
+    slime::archive::ArchiveEntry cand{};
     for (int d = 0; d < BMAP_DIM; ++d) {
         cand.descriptor[d] = 0.5f + 0.001f * static_cast<float>(d);
     }

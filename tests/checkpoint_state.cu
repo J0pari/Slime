@@ -99,7 +99,7 @@ int main() {
     std::remove(ckpt_bad);
     std::remove(ckpt_schema);
 
-    World* a = new World;
+    World* a = new World();
     if (!initialize_world(a)) { std::printf("init A failed\n"); return 1; }
     a->checkpoint_path = ckpt;
 
@@ -125,7 +125,7 @@ int main() {
     a->last_max_abs_logit = 0.75f;
     CHECK(save_checkpoint(a, ckpt), "explicit save succeeds");
 
-    World* b = new World;
+    World* b = new World();
     if (!initialize_world(b)) { std::printf("init B failed\n"); return 1; }
     CHECK(load_checkpoint(b, ckpt), "checkpoint loads");
 
@@ -223,7 +223,7 @@ int main() {
     // ---- Corruption rejection ----
     CHECK(copy_file(ckpt, ckpt_bad), "copy checkpoint for corruption test");
     CHECK(flip_byte_from_end(ckpt_bad, 40), "flip a payload byte");
-    World* c = new World;
+    World* c = new World();
     if (!initialize_world(c)) { std::printf("init C failed\n"); return 1; }
     CHECK(!load_checkpoint(c, ckpt_bad),
           "payload corruption is rejected (checksum)");
@@ -244,7 +244,7 @@ int main() {
         bool saved = save_checkpoint(a, ckpt);
         CHECK(!saved, "save refused while the target is exclusively held");
         if (hold != INVALID_HANDLE_VALUE) CloseHandle(hold);
-        World* d = new World;
+        World* d = new World();
         if (!initialize_world(d)) { std::printf("init D failed\n"); return 1; }
         CHECK(load_checkpoint(d, ckpt),
               "previous checkpoint intact after a refused replacement");

@@ -381,7 +381,6 @@ static void kaiming_he_init(float* weights, Pcg32* host_rng) {
 // ---- Initialization (section 15) --------------------------------------------
 
 bool initialize_world(World* w) {
-    std::memset(w, 0, sizeof(World));
     if (!alloc_gpu_buffers(w)) {
         std::printf("[FATAL] buffer allocation failed; experiment aborted\n");
         std::fflush(stdout);
@@ -454,8 +453,6 @@ bool initialize_world(World* w) {
     w->probe_panel_l_role_baseline = 0.f;
     w->probe_panel_baseline_set = false;
     std::memset(&w->sentinel_ens, 0, sizeof(w->sentinel_ens));
-    std::memset(&w->sentinel_history, 0, sizeof(w->sentinel_history));
-    std::memset(w->lineage_stats, 0, sizeof(w->lineage_stats));
     w->n_lineage_stats = 0;
     std::memset(w->sentinel_anomaly, 0, sizeof(w->sentinel_anomaly));
     safety::pt::init_stress_ladder(&w->stress_ladder);
@@ -466,7 +463,6 @@ bool initialize_world(World* w) {
     }
 
     // Section 9.1: Archive initialization.
-    std::memset(&w->archive, 0, sizeof(w->archive));
     for (int b = 0; b < ARCHIVE_BINS_X * ARCHIVE_BINS_Y; ++b) {
         w->archive.bins[b].cap_classifier = ARCHIVE_BIN_CAP;
         w->archive.bins[b].cap_predictor  = ARCHIVE_BIN_CAP;
@@ -1828,7 +1824,10 @@ static void poll_operator_commands(World* w) {
 }
 
 void run(int n_generations, bool resume, const char* checkpoint_path) {
-    World* w = new World;
+    // Value-initialization: the strong-ID members' default constructors
+    // must run (the invalid sentinel), which a bytewise clear would
+    // bypass with a numeric zero.
+    World* w = new World();
     if (!initialize_world(w)) {
         delete w;
         std::printf("=== RUN INVALIDATED: initialization failed ===\n");
