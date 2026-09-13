@@ -154,15 +154,22 @@ ledger (status, exit code, duration, log file, pinned contract fingerprint).
 
 ## GPU scheduling
 
-GPU work goes through the training-architecture scheduler
-(`gpu-scheduler/v1`), never ad hoc. `TRAINING_ARCH_ROOT` locates the
-scheduler (environment only — no path is hardcoded); the client validates
-the pinned contract fingerprint before submission and refuses loudly on
-drift. Scheduled jobs are covered by the scheduler's GPU lock; manual
-launches must go through `python architecture/gpu_client.py run --direct`,
-which acquires the lock. Scheduled commands are wrapped by
-`architecture/progress_wrap.py`, which emits `progress/v1` envelopes for
-the daemon. See README.md for the commands.
+Every GPU task — training, verification, profiling, and timing measurement —
+is submitted to the training-architecture scheduler (`gpu-scheduler/v1`) and
+queued. The scheduler owns serialization and the GPU lock. There is no "wait
+for a free GPU" step and no such state to wait for: submit the job
+(detached), poll `inspect`, and it runs when its turn comes. If the GPU is
+busy, the job queues; that is the normal path, not a blocker.
+
+`TRAINING_ARCH_ROOT` locates the scheduler (environment only — no path is
+hardcoded); the client validates the pinned contract fingerprint before
+submission and refuses loudly on drift. `--direct` is the explicit escape
+hatch for machines where the scheduler is unreachable; it acquires the lock
+before running. Never launch a GPU process outside these two paths: a direct
+process competes with a scheduled job, can kill it, and corrupts both
+measurements. Scheduled commands are wrapped by
+`architecture/progress_wrap.py`, which emits `progress/v1` envelopes for the
+daemon. See README.md for the commands.
 
 ## What not to do
 
