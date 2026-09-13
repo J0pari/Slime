@@ -47,12 +47,14 @@ cuda_engineering.md, and construction_plan.md.
   The claim `G100.strong-identifiers` is provisional with witness
   `test_strong_ids_distinct` (compile-time non-convertibility plus runtime
   sentinel/round-trip checks); host 4911/4911, evolution_regression 36/36.
-  Remaining for the class: `PoolSlot`, `GenomeSeed`, `ArchiveSlot`, and
-  `PtSlot` have types but no adopted seams; `OrganismTable::parent_id` is
-  still a raw lineage reference; index variables that are semantically slots
-  are still `int`. Each conversion is mechanical and can continue from this
-  state; the claim stays provisional until the families are adopted, and the
-  audit entry for class 6 should be updated as each lands.
+  Remaining for the class: `PoolSlot`, `GenomeSeed`, and `PtSlot` have types
+  but no adopted seams, and index variables that are semantically slots are
+  still `int`. `parent_id` turned out to hold an archive index, not a
+  lineage, and is now `ArchiveSlot` end-to-end — the name/value mismatch the
+  family split exists to catch. Each remaining conversion is mechanical and
+  can continue from this state; the claim stays provisional until the
+  families are adopted, and the audit entry for class 6 should be updated as
+  each lands.
 - 2026-09-12: I8 backward work after the combined stress pass. Two measured
   wins: (1) the weight-grad kernel's per-cell dW_perc global atomics (27
   addresses hammered by 4096 cells per organism) became per-thread register
