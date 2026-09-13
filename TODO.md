@@ -149,8 +149,13 @@ I9
   first resumed at generation 50 and ran zero generations: the harness
   passed the chunk size where the binary's N is the total target, and the
   harness never verified the checkpoint. Both are fixed (cumulative target
-  + checkpoint-generation check); the authoritative run is job
-  9a77a4933f1a353c (fresh checkpoint, 100 chunks of 50, ~10 h). History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
+  + checkpoint-generation check). The authoritative resubmission is job
+  f0a2cf3602d1b74b (fresh checkpoint, 100 chunks of 50, ~10 h, max 900 min,
+  3 retries); 9a77a4933f1a353c was cancelled by the operator resource
+  floor. slime-run55 was killed at its declared 60-minute max and is
+  resubmitted as job 56a6b1511c6bfcd0 (chunked, max 240 min, 3 retries).
+  Resilience is enforced: the client refuses bare multi-generation runs,
+  the harness resumes on start and fails only on sustained flags. History: 233fc0ed8322d3ee (contention), 90f2447f11941fd2 (warmup),
   17f6be1c8143f710 attempt 0 (watchdog), attempt 1 (invalid PASS),
   50-generation chunks, ~10 h). The first submission (233fc0ed8322d3ee)
   failed after 583 s while a competing direct run held the GPU; the
