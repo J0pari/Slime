@@ -49,7 +49,7 @@ __host__ __device__ inline int grid_idx(int y, int x, int c) {
 
 // Forward declaration: forward_kernel calls project_bmap, which is defined
 // after it (the definition needs no forward refs of its own).
-__device__ inline void project_bmap(const __half* state,
+__device__ inline void project_bmap(__half* state,
                                     const float* W_bmap,
                                     float* bmap_out_32);
 
@@ -370,7 +370,7 @@ __global__ void forward_effective_kernel(OrganismState* organisms,
 // No atomicAdd — guarantees identical bit patterns for the same thread layout
 // across kernel launches. Required because BTRAJ feeds scoring, archive, and
 // loss (see cuda_engineering.md section 4.1).
-__device__ inline void project_bmap(const __half* state,
+__device__ inline void project_bmap(__half* state,
                                     const float* W_bmap,
                                     float* bmap_out_32) {
     // 256 threads (16x16 block), CA_CHANNELS = 16.
@@ -434,6 +434,33 @@ __device__ inline void project_bmap(const __half* state,
             acc += W_bmap[c * BMAP_DIM + d] * summary[c];
         }
         bmap_out_32[d] = acc;
+    }
+    __syncthreads();
+
+    // Phase 3b (A-203, I5): broadcast the global context into channels 14-15.
+    // W_ctx follows W_bmap in the flat layout, so it is derived from the same
+    // bank pointer and needs no extra kernel argument.
+    if (GLOBAL_CONTEXT_ENABLED) {
+        const float* W_ctx = W_bmap + CA_CHANNELS * BMAP_DIM;
+        __shared__ float ctx[CH_AUX_LAST - CH_AUX_FIRST + 1];
+        if (tid < CH_AUX_LAST - CH_AUX_FIRST + 1) {
+            float acc = 0.f;
+            for (int c = 0; c < CA_CHANNELS; ++c) {
+                acc += W_ctx[c * (CH_AUX_LAST - CH_AUX_FIRST + 1) + tid]
+                     * summary[c];
+            }
+            ctx[tid] = acc;
+        }
+        __syncthreads();
+        for (int idx = tid; idx < GRID_SIZE * GRID_SIZE; idx += nthreads) {
+            int y = idx / GRID_SIZE;
+            int x = idx % GRID_SIZE;
+            #pragma unroll
+            for (int k = 0; k < CH_AUX_LAST - CH_AUX_FIRST + 1; ++k) {
+                state[grid_idx(y, x, CH_AUX_FIRST + k)] =
+                    __float2half(ctx[k]);
+            }
+        }
     }
     __syncthreads();
 }

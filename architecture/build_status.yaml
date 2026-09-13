@@ -58,7 +58,6 @@ items:
       - autodiff/warp_tape.cu::OFF_CTX
       - integration/host_main.cu::kaiming_he_init
     missing:
-      - forward broadcast of the bmap summary into channels 14-15 at sample steps
       - backward context adjoint (d_ctx, dW_ctx, summary gradient)
       - activation of GLOBAL_CONTEXT_ENABLED and the resulting witness suite
   I6:
