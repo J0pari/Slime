@@ -137,4 +137,4 @@ rebuild-gpu:
 	python tests/rebuild_binaries.py
 
 host-tests-clang:
-	clang++ -Itests/stubs -I. -std=c++17 -Wall -Wextra -Werror -Wno-unknown-warning-option -Wnontrivial-memcall -D_CRT_SECURE_NO_WARNINGS  -o build/host_tests_clang.exe
+	clang++ -Itests/stubs -I. -std=c++17 -Wall -Wextra -Werror -Wno-unknown-warning-option -Wnontrivial-memcall -D_CRT_SECURE_NO_WARNINGS $(HOST_SRC) -o build/host_tests_clang.exe
