@@ -6,6 +6,29 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history; the failure history lives in `docs/arch-signals.md`.
 
+## Work order compliance (directive 64d0820993d2, 2026-09-14)
+
+- §25 item 4 / §11.1 (strong-ID/memset build failures): done. Value
+  initialization throughout, the two GCC-only memsets (PredictorBatch,
+  ProbeSet) and the second strong-ID printf fixed; g++ 15.2 via WSL with
+  -Wall -Wextra -Werror compiles clean and host 4940/4940 passes; clang
+  -Wnontrivial-memcall is recorded as `make host-tests-clang`. No toolchain
+  warnings were weakened.
+- §25 item 16 / §11.3 (blocker prose drifting from machine state): done.
+  bridge.yaml declares requires_build, requires_experiments,
+  requires_contracts, and requires_evidence; derive_bridge computes the gate
+  and the reasons; check_bridge fails on any declared/derived mismatch; the
+  compiler rejects implemented items that list missing reasons.
+- §11.2 (cross-platform architecture tests): done. The fixture is a .cmd on
+  Windows and an executable shell script on POSIX; the Linux architecture
+  suite passes 71 tests via WSL.
+- §11.4 (keep the Trader bridge closed until prerequisites pass): done. The
+  gate is derived CLOSED from the four requirement lists; schema
+  compatibility alone opens nothing.
+- §11.5 (surprise blending): implemented (trust-weight composition:
+  calibration, held-out over-bound, diversity, correlation); GPU validation
+  queued; regime-based reliability remains future work.
+
 ## In flight
 
 - 5000-generation stability run (I9): scheduler job 65a5d0ea88b24ce9,

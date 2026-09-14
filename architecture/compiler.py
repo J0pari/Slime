@@ -186,10 +186,11 @@ def check_bridge(root: Path, build: dict, errors: list[str]) -> None:
     gate = bridge.get("gate")
     if gate not in BRIDGE_STATES:
         errors.append(f"{BRIDGE_FILE}: gate {gate!r} is not one of {BRIDGE_STATES}")
-    expected, missing_build, missing_exp = derive_bridge(
-        bridge, build, load_experiments())
+    expected, missing_build, missing_exp, missing_contracts, missing_ev = \
+        derive_bridge(bridge, build, load_experiments())
     if gate != expected:
-        reasons = ", ".join(missing_build + missing_exp) or "none"
+        reasons = ", ".join(missing_build + missing_exp + missing_contracts
+                            + missing_ev) or "none"
         errors.append(f"{BRIDGE_FILE}: gate is {gate} but the requirements "
                       f"derive {expected} (unmet: {reasons})")
     if gate == "CLOSED":
@@ -223,14 +224,21 @@ def derive_bridge(bridge: dict, build: dict, experiments: dict):
             missing_exp.append(f"{eid} (unknown experiment)")
         elif e.get("status") != "done":
             missing_exp.append(f"{eid} ({e.get('status')})")
-    expected = "CLOSED" if (missing_build or missing_exp) else "OPEN"
-    return expected, missing_build, missing_exp
+    # Contracts and evidence are declared obligations with no registry to
+    # resolve against yet: an entry exists until the condition is met and the
+    # entry is removed in a reviewed change.
+    missing_contracts = list(bridge.get("requires_contracts", []))
+    missing_evidence = list(bridge.get("requires_evidence", []))
+    expected = "CLOSED" if (missing_build or missing_exp or missing_contracts
+                            or missing_evidence) else "OPEN"
+    return (expected, missing_build, missing_exp, missing_contracts,
+            missing_evidence)
 
 
 def render_bridge() -> str:
     bridge = load_bridge()
-    expected, missing_build, missing_exp = derive_bridge(
-        bridge, load_build_status(), load_experiments())
+    expected, missing_build, missing_exp, missing_contracts, missing_ev = \
+        derive_bridge(bridge, load_build_status(), load_experiments())
     lines = [
         f"- External contract: `{bridge.get('external_contract', '')}` "
         f"(owner: `{bridge.get('contract_owner', '')}`)",
@@ -243,7 +251,11 @@ def render_bridge() -> str:
         lines.append(f"  - build: {reason}")
     for reason in missing_exp:
         lines.append(f"  - experiment: {reason}")
-    if not missing_build and not missing_exp:
+    for reason in missing_contracts:
+        lines.append(f"  - contract: {reason}")
+    for reason in missing_ev:
+        lines.append(f"  - evidence: {reason}")
+    if not (missing_build or missing_exp or missing_contracts or missing_ev):
         lines.append("  - all requirements met")
     return "\n".join(lines)
 

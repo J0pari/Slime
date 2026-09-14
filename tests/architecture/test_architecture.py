@@ -220,16 +220,18 @@ class GateTests(unittest.TestCase):
         bridge = {"requires_build": ["I9"], "requires_experiments": ["E1"]}
         build = {"items": {"I9": {"status": "partial"}}}
         exps = {"experiments": {"E1": {"status": "planned"}}}
-        expected, mb, me = compiler.derive_bridge(bridge, build, exps)
+        expected, mb, me, mc, mev = compiler.derive_bridge(
+            bridge, build, exps)
         self.assertEqual(expected, "CLOSED")
         self.assertTrue(mb and me)
         build_ok = {"items": {"I9": {"status": "implemented"}}}
         exps_ok = {"experiments": {"E1": {"status": "done"}}}
-        expected2, mb2, me2 = compiler.derive_bridge(bridge, build_ok, exps_ok)
+        expected2, mb2, me2, _, _ = compiler.derive_bridge(
+            bridge, build_ok, exps_ok)
         self.assertEqual(expected2, "OPEN")
         self.assertFalse(mb2 or me2)
         # Unknown requirements are unmet, not ignored.
-        expected3, mb3, _ = compiler.derive_bridge(
+        expected3, mb3, _, _, _ = compiler.derive_bridge(
             {"requires_build": ["NOPE"], "requires_experiments": []},
             build_ok, exps_ok)
         self.assertEqual(expected3, "CLOSED")

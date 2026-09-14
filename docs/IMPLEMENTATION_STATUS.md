@@ -40,6 +40,8 @@ BUILD phase incomplete: 1 of 9 inventory items are not implemented (I9). No GPU 
   - experiment: E3 (planned)
   - experiment: E4 (planned)
   - experiment: E5 (planned)
+  - contract: adaptive-ecology/v1 descriptor content delivered so Slime can recompute the fingerprint itself (the declared value is independently recomputed by the 2026-09-13 review; Slime's own recomputation is still pending)
+  - evidence: E1-E5 manifests recorded after the build closes
 
 ## Claims
 

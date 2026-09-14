@@ -19,6 +19,10 @@ handoff_record: "contracts/adaptive-ecology-v1.handoff.json"
 gate: "CLOSED"
 requires_build: [I9]
 requires_experiments: [E1, E2, E3, E4, E5]
+requires_contracts:
+  - "adaptive-ecology/v1 descriptor content delivered so Slime can recompute the fingerprint itself (the declared value is independently recomputed by the 2026-09-13 review; Slime's own recomputation is still pending)"
+requires_evidence:
+  - "E1-E5 manifests recorded after the build closes"
 
 rules_exercised:
   - "extension gate: all inventory items implemented and experimental evidence produced before any extension begins"
