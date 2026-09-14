@@ -176,7 +176,7 @@ __host__ inline int update_stress_failures(StressLadder* l,
                 std::printf("[STRESS] lineage %u flagged: %.0f%% SOT-gate "
                             "failures over the last %d stress evaluations "
                             "(operator review; no automatic pruning)\n",
-                            rec->lineage_id, rate * 100.f,
+                            rec->lineage_id.value(), rate * 100.f,
                             STRESS_HISTORY_WINDOW);
                 std::fflush(stdout);
             }

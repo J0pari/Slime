@@ -12,9 +12,12 @@ not a history.
   value-initialized (World via new World(), StressLadder/StressLineageRecord
   via {}), the bytewise clears of World/Archive/SentinelHistory/LineageStats
   and the test-side Archive/ArchiveEntry memsets are gone; the printf
-  strong-id call already used .value(). Verification note: the host-only
-  build here uses nvcc/cl, not g++ -Werror, so the -Wclass-memaccess class
-  was fixed by inspection; a g++ CI run should confirm.
+  strong-id call already used .value(). Verified with clang++
+  -Wall -Wextra -Werror -Wnontrivial-memcall (the local stand-in for the
+  g++ CI warning class, since g++ is not installed): clean compile and
+  4940/4940 passing. That check also caught a second strong-ID printf
+  (stress_ladder.cuh's [STRESS] flag line), now .value(). A g++ CI run
+  remains the final confirmation.
 - [x] Cross-platform e2e fixture: the fake binary is a .cmd on Windows and
   an executable shell script on POSIX, so the architecture suite no longer
   fails on Linux.
