@@ -1410,8 +1410,7 @@ static void test_stress_failure_flagging() {
 // indices); the target's SOT status and both descriptor rows travel with the
 // target.
 static void test_predictor_batch_contract() {
-    static slime::curriculum::ProbeSet probes;
-    std::memset(&probes, 0, sizeof(probes));
+    static slime::curriculum::ProbeSet probes{};
     probes.predictor_probes_signed = false;
 
     const int N = POOL_SIZE;

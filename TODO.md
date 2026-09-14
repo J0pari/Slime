@@ -34,8 +34,13 @@ not a history; the failure history lives in `docs/arch-signals.md`.
 - [x] Strong-ID initialization migration (value initialization; no bytewise
   clearing of ID-bearing structs) and the second strong-ID printf. Verified
   with clang++ -Wall -Wextra -Werror -Wnontrivial-memcall: clean compile,
-  host 4940/4940; `make host-tests-clang` records the check. A g++ CI run
-  remains the final cross-check.
+  host 4940/4940; `make host-tests-clang` records the check. The g++
+  cross-check is now done locally via WSL Ubuntu: g++ 15.2 with
+  -Wall -Wextra -Werror compiles the host suite clean and it passes
+  4940/4940 (this caught two more memsets gcc alone flags:
+  PredictorBatch in problem_generator.cu and ProbeSet in the host tests,
+  both now value-initialized), and the Linux architecture suite passes
+  71 tests (the POSIX fixture is exercised for real).
 - [x] Cross-platform e2e fixture (.cmd on Windows, executable shell script
   on POSIX).
 - [x] Control-plane drift: bridge.yaml declares requires_build [I9] and

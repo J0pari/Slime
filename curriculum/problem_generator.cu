@@ -307,7 +307,7 @@ inline void assemble_predictor_batch(PredictorBatch* out,
                                      const Role* pool_roles,     // [POOL_SIZE]
                                      const bool* pool_was_sot,   // [POOL_SIZE]
                                      Pcg32* rng) {
-    std::memset(out, 0, sizeof(*out));
+    *out = PredictorBatch{};
 
     // Stationary probe slots.
     int slot = 0;

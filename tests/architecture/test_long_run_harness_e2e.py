@@ -20,11 +20,20 @@ FAKE_PY = ROOT / "tests" / "fake_evolution_binary.py"
 
 
 def make_fake_binary(td: Path) -> Path:
-    """A .cmd wrapper so the harness can spawn it like a real executable."""
-    cmd = td / "fake_evo.cmd"
-    cmd.write_text(f'@echo off\n"{sys.executable}" "{FAKE_PY}" %*\n',
-                   encoding="utf-8")
-    return cmd
+    """An executable wrapper so the harness can spawn it like a real binary
+    on both platforms: a .cmd on Windows, a POSIX shell script with the
+    execute bit elsewhere."""
+    if os.name == "nt":
+        cmd = td / "fake_evo.cmd"
+        cmd.write_text(f'@echo off\n"{sys.executable}" "{FAKE_PY}" %*\n',
+                       encoding="utf-8")
+        return cmd
+    script = td / "fake_evo"
+    script.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_PY}" "$@"\n',
+        encoding="utf-8")
+    script.chmod(0o755)
+    return script
 
 
 class HarnessEndToEndTests(unittest.TestCase):
