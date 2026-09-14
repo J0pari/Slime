@@ -87,6 +87,16 @@ is empty; `evidence.py record` refuses GPU manifests until then.
   (bounded, zero before bootstrap, nonzero after) over a run.
 - [ ] Execute the preregistered experiments (E1-E5) and record manifests;
   update each protocol's status in `architecture/experiments.yaml`.
+  PREREQUISITE (found while checking turnkey readiness): every experiment's
+  controls need a controlled variant the binary cannot currently select —
+  classifier-only QD and a fixed reference predictor (E1), separate role
+  substrates (E2), frozen s_target with role balance disabled (E3), the
+  single-predictor variance proxy (E4), AdamW instead of CAME (E5). The
+  protocols are preregistered and the decision rules are stated, but the
+  control configurations must be admitted spec-first (a claim-bearing
+  configuration surface, or per-experiment builds recorded in the
+  manifests) before any experiment can execute. Do not treat E1-E5 as
+  turnkey until that mechanism is decided and built.
 - [ ] Property witnesses: C4/C5/C6/C7 are written and run in VERIFY.
 - [x] Gate mutation testing (transaction move, CUDA check, role
   canonicalization via tests/mutation_check.py).
