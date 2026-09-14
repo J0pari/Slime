@@ -102,8 +102,11 @@ is empty; `evidence.py record` refuses GPU manifests until then.
 
 ## Carryover
 
-- [ ] Make every per-generation transfer conform to the four-point
-  asynchronous transfer schedule (cuda_engineering section 3, T1-T5): audit
-  `step_generation`'s per-generation transfers against the declared points
-  and move or remove any that sit outside them. CPU-side audit and fixes;
-  the timing effect is measured in a scheduled run.
+- [x] Four-point transfer schedule audited against cuda_engineering section
+  3: the core path maps cleanly (T1 forward inputs/batch/deltas/predictor
+  targets, T2 descriptors/btraj, T3 roles/seed grads after PT, T5 reference
+  minibatch and surprise readback, T4 weights only at the per-generation
+  checkpoint write, which is the case the spec names). The stress-block
+  uploads/readbacks are governed by section 11's StressEval capture rule
+  (stable staging), not section 3, so they are not violations. No changes
+  needed.
