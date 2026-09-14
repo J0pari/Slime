@@ -6,6 +6,20 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history.
 
+## Incident 2026-09-13 (scheduler, relay to owner)
+
+- The 5000-generation run (fe7866b303882f47) was killed silently at ~19:07
+  local (~generation 1721): no coevo process remained, the GPU was idle, and
+  the log stopped mid-generation with no error. The daemon still reported the
+  job running and blocked the queue for ~89 minutes until an explicit
+  stop --job cleared it. Two scheduler gaps to relay: (a) the resource
+  manager's RAM reclaim excludes the running job's tree, but the job tree is
+  python (wrapper) -> python (harness) -> coevo (grandchild); if the
+  exclusion only covers direct children, the reclaim would kill the actual
+  GPU process, and (b) there is no liveness check for a running job whose
+  process tree has died. Stopped the stale job and resubmitted as
+  65a5d0ea88b24ce9 (resumes from the checkpoint at ~1721).
+
 ## Review 2026-09-13 scope (Slime)
 
 - [x] Strong-ID initialization migration: ID-bearing structs are
