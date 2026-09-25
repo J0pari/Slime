@@ -90,8 +90,9 @@ def source_lines(root: Path) -> dict[str, list[str]]:
         p = root / rel
         try:
             out[str(rel).replace("\\", "/")] = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
+        except OSError as exc:
+            raise ValueError(
+                f"source gate cannot read {rel}: {exc}") from exc
     return out
 
 

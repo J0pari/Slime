@@ -98,8 +98,9 @@ def reverse_witness_index(root: Path) -> tuple[dict[str, list[str]], list[str]]:
             continue
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+        except OSError as exc:
+            raise ValueError(
+                f"marker scan cannot read {rel}: {exc}") from exc
         for m in marker_re.finditer(text):
             key = str(rel).replace("\\", "/")
             index.setdefault(key, []).append(m.group(1))
