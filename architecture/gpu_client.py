@@ -155,7 +155,35 @@ def check_contract(env: dict | None = None) -> dict:
     return manifest
 
 
+def _control_api(env: dict | None = None):
+    """The commons control API client (control-api/v1) when the home ships
+    one; None for a home without it, where the CLI remains the surface.
+
+    Adoption (work order 2026-09-25): read operations go through the API;
+    submit idempotency and the inbox/ack message path follow. The address is
+    discovered by the client from the scheduler state's `api` field, never
+    hardcoded."""
+    root = scheduler_root(env)
+    if not (root / "control" / "client.py").is_file():
+        return None
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        import importlib
+        return importlib.import_module("control.client")
+    except Exception as exc:
+        raise SchedulerUnavailable(
+            f"control API client at {root} failed to import: {exc}") from exc
+
+
 def status(env: dict | None = None) -> dict:
+    api = _control_api(env)
+    if api is not None:
+        try:
+            return api.status()
+        except Exception as exc:
+            print(f"[gpu-client] control API status failed ({exc}); using the "
+                  f"CLI for this call (migration window)", file=sys.stderr)
     return _run_cli(["status"], env=env)
 
 
@@ -248,6 +276,13 @@ def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
 
 
 def inspect(job_id: str, env: dict | None = None) -> dict:
+    api = _control_api(env)
+    if api is not None:
+        try:
+            return api.inspect(job_id)
+        except Exception as exc:
+            print(f"[gpu-client] control API inspect failed ({exc}); using the "
+                  f"CLI for this call (migration window)", file=sys.stderr)
     return _run_cli(["inspect", "--job", job_id], env=env)
 
 

@@ -13,6 +13,16 @@ leased at-least-once; ack only after acting, so the unacked leases return to
 the next session).
 
 - [ ] Adopt the control API (`control-api/v1`) as Slime's scheduler interface
+  -- IN PROGRESS: `status` and `inspect` now route through
+  `control/client.py` when the home ships it (with a loud CLI fallback for
+  the migration window), tested against the commons home. Blocker found:
+  `GET /v1/status` returns HTTP 500 (`KeyError: status`) from the live
+  daemon, and `POST /v1/messages` also failed when Slime tried to file the
+  bug through the API itself; the CLI surfaces work. The handler bug is
+  commons-side and must be relayed (Slime does not edit another
+  repository); until it is fixed, the fallback is exercised on every call.
+  Remaining adoption work: idempotent `POST /v1/jobs` submit and the
+  inbox/ack message path.
   (message 367d79c78a809570; directive 2026-09-25): use
   `commons/control/client.py` (REST over loopback, import it or call the
   CLI), not per-operation CLI spawns or file parsing. Submit with
