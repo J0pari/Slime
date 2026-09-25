@@ -6,6 +6,40 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history; the failure history lives in `docs/arch-signals.md`.
 
+## New work orders (2026-09-25)
+
+Read from commons `workorders/slime.md` and the control-API inbox (messages are
+leased at-least-once; ack only after acting, so the unacked leases return to
+the next session).
+
+- [ ] Adopt the control API (`control-api/v1`) as Slime's scheduler interface
+  (message 367d79c78a809570; directive 2026-09-25): use
+  `commons/control/client.py` (REST over loopback, import it or call the
+  CLI), not per-operation CLI spawns or file parsing. Submit with
+  `POST /v1/jobs` (202 + Location; send an `Idempotency-Key`; a replay
+  returns the same job, a different declaration under the key is 409);
+  results via `GET /v1/jobs?repo=&status=` and `GET /v1/status` (ETag /
+  `If-None-Match`); cancel via `DELETE /v1/jobs/{id}`; messages via
+  `POST /v1/messages`, `GET /v1/repos/{repo}/inbox` (bounded long-poll,
+  cursor `after`, lease then ack), `POST /v1/messages/{id}/ack`. Discover
+  the address from the scheduler state's `api` field — never hardcode a
+  port; refusals are RFC 9457 problem+json.
+- [ ] Commons Addendum (directive 2cbd1300b555) sections routed to slime:
+  §5 cross-domain transfer experiments (design a small initial transfer
+  matrix; Slime's contribution is C — train from Slime predictor/trajectory
+  evidence, evaluate proof-state or market-state forecasting, looking for
+  domain-independent primitives: search, uncertainty, pruning, prediction,
+  self-correction, temporal credit assignment, tool selection, stopping);
+  §6 calibration as a cross-repo capability (standardize confidence-bearing
+  outputs; measure P(success | reported confidence ~= c) against c; Slime
+  predictors where probabilistic confidence exists — ties into
+  `A601.trust-weight-composition`); §7 Slime as a generator of search
+  policies, adversaries, and curricula; §8 adversarial weakness-mining
+  loops; §16 counterfactual policy evaluation across repos; §20
+  complementary failure modes of the four repos; §21 representation versus
+  search research questions; §24 work-order generation priority (generate a
+  small matrix, not a benchmark explosion).
+
 ## Commons control-plane adoption (registry outstanding items)
 
 - [x] Re-pin and smoke through the new home: the pin records adoption against
