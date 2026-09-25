@@ -13,16 +13,20 @@ leased at-least-once; ack only after acting, so the unacked leases return to
 the next session).
 
 - [ ] Adopt the control API (`control-api/v1`) as Slime's scheduler interface
-  -- IN PROGRESS: `status` and `inspect` now route through
-  `control/client.py` when the home ships it (with a loud CLI fallback for
-  the migration window), tested against the commons home. Blocker found:
-  `GET /v1/status` returns HTTP 500 (`KeyError: status`) from the live
-  daemon, and `POST /v1/messages` also failed when Slime tried to file the
-  bug through the API itself; the CLI surfaces work. The handler bug is
-  commons-side and must be relayed (Slime does not edit another
-  repository); until it is fixed, the fallback is exercised on every call.
-  Remaining adoption work: idempotent `POST /v1/jobs` submit and the
-  inbox/ack message path.
+  -- single path, no fallback (fallbacks are forbidden; there is no second
+  inferior system). `status` and `inspect` route through
+  `commons/control/client.py` unconditionally; a home without it refuses
+  loudly. The entrypoint, lock module, and fingerprint each have exactly one
+  implementation (commons layout; the documented ABI scope recomputed
+  in-client). `--direct` now requires the GPU lock or refuses -- it never
+  runs unlocked. The test fixture was migrated to the one home with a fake
+  API client delegating to the fake CLI; the contract tests pin the computed
+  fingerprint. HARD BLOCKER (commons side, to relay): `GET /v1/status`
+  returns HTTP 500 (`KeyError: status`) from the live daemon, and
+  `POST /v1/messages` failed when Slime tried to file the bug through the
+  API. With no fallback, Slime's `status`/`inspect` fail loudly until the
+  handler is fixed -- that is the correct state. Remaining adoption work:
+  idempotent `POST /v1/jobs` submit and the inbox/ack path.
   (message 367d79c78a809570; directive 2026-09-25): use
   `commons/control/client.py` (REST over loopback, import it or call the
   CLI), not per-operation CLI spawns or file parsing. Submit with

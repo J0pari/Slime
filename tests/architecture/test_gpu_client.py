@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent.parent
@@ -75,19 +76,44 @@ def release():
 '''
 
 
+FAKE_CLIENT = '''\
+import json
+import os
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _cli(*args):
+    out = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "control", "gpu_scheduler.py"),
+         *args], capture_output=True, text=True)
+    return json.loads(out.stdout)
+
+
+def status():
+    return _cli("status")
+
+
+def inspect(job_id=None):
+    return _cli("inspect", "--job", job_id)
+'''
+
+
 class FakeScheduler:
     """A temp training-architecture root with a stub scheduler."""
 
     def __init__(self, td: str):
         self.root = Path(td)
-        (self.root / "src").mkdir(parents=True)
-        (self.root / "src" / "gpu_scheduler.py").write_text(
+        (self.root / "control").mkdir(parents=True)
+        (self.root / "control" / "gpu_scheduler.py").write_text(
             FAKE_SCHEDULER, encoding="utf-8")
-        (self.root / "src" / "handoff.py").write_text(FAKE_HANDOFF,
-                                                      encoding="utf-8")
-        (self.root / "src" / "gpu_lock.py").write_text(FAKE_LOCK,
-                                                       encoding="utf-8")
-        (self.root / "src" / "__init__.py").write_text("", encoding="utf-8")
+        (self.root / "control" / "client.py").write_text(
+            FAKE_CLIENT, encoding="utf-8")
+        (self.root / "control" / "gpu_lock.py").write_text(
+            FAKE_LOCK, encoding="utf-8")
+        (self.root / "control" / "__init__.py").write_text("", encoding="utf-8")
         self.sched_dir = self.root / "artifacts" / "gpu-scheduler"
         (self.sched_dir / "results").mkdir(parents=True)
         self.state_path = self.root / "job-state.txt"
@@ -101,6 +127,10 @@ class FakeScheduler:
         env["FAKE_SCHED_STATE"] = str(self.state_path)
         env["FAKE_ARGV_PATH"] = str(self.argv_path)
         env.update(extra or {})
+        # The control API client resolves the daemon from process state, so
+        # the fixture publishes the same values for in-process clients and
+        # their children.
+        os.environ.update(env)
         return env
 
     def set_job_state(self, status):
@@ -140,13 +170,23 @@ class ClientTests(unittest.TestCase):
     def test_contract_check_ok_and_fingerprint_mismatch(self):
         with tempfile.TemporaryDirectory() as td:
             fake = FakeScheduler(td)
-            manifest = gpu_client.check_contract(env=fake.env())
-            self.assertEqual(manifest["schema"], "gpu-scheduler/v1")
-            # A drifted contract must refuse loudly.
-            (fake.root / "src" / "fake_fp.txt").write_text(
-                "0" * 64, encoding="utf-8")
-            with self.assertRaises(gpu_client.ContractMismatch):
-                gpu_client.check_contract(env=fake.env())
+            manifest = gpu_client.contract_manifest(env=fake.env())
+            observed = gpu_client._fingerprint(manifest)
+            with unittest.mock.patch.object(
+                    gpu_client, "load_pin",
+                    return_value={"schema": "gpu-scheduler/v1",
+                                  "fingerprint": observed,
+                                  "capabilities": ["submit"]}):
+                checked = gpu_client.check_contract(env=fake.env())
+            self.assertEqual(checked["schema"], "gpu-scheduler/v1")
+            # A drifted pin must refuse loudly.
+            with unittest.mock.patch.object(
+                    gpu_client, "load_pin",
+                    return_value={"schema": "gpu-scheduler/v1",
+                                  "fingerprint": "0" * 64,
+                                  "capabilities": ["submit"]}):
+                with self.assertRaises(gpu_client.ContractMismatch):
+                    gpu_client.check_contract(env=fake.env())
 
     def test_submit_builds_argv_and_parses_ack(self):
         with tempfile.TemporaryDirectory() as td:

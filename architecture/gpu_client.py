@@ -63,17 +63,13 @@ def scheduler_root(env: dict | None = None) -> Path:
 
 
 def scheduler_script(env: dict | None = None) -> Path:
-    """The scheduler entrypoint at the owner's home. The control plane moved
-    to commons (control/gpu_scheduler.py); the training home used src/. The
-    resolver accepts both layouts so a consumer does not need to know which
-    home is authoritative."""
-    root = scheduler_root(env)
-    for rel in ("control/gpu_scheduler.py", "src/gpu_scheduler.py"):
-        script = root / rel
-        if script.is_file():
-            return script
-    raise SchedulerUnavailable(
-        f"scheduler script missing under {root} (looked in control/ and src/)")
+    """The scheduler entrypoint at its one home: commons owns the control
+    plane, so `control/gpu_scheduler.py` under the root is the path."""
+    script = scheduler_root(env) / "control" / "gpu_scheduler.py"
+    if not script.is_file():
+        raise SchedulerUnavailable(
+            f"control plane missing: {script} (commons owns it)")
+    return script
 
 
 def sched_dir(env: dict | None = None) -> Path:
@@ -117,23 +113,13 @@ def contract_manifest(env: dict | None = None) -> dict:
 
 
 def _fingerprint(manifest: dict, env: dict | None = None) -> str:
-    """The owner's canonical fingerprint algorithm.
-
-    The owner may ship it as an importable module (`src/handoff.py` at the
-    training home). The commons home documents the same algorithm as the ABI
-    key scope; when the module is absent, recompute that documented scope
-    rather than inventing a different algorithm."""
-    root = scheduler_root(env)
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    try:
-        from src.handoff import fingerprint  # type: ignore
-    except Exception:
-        abi = {k: manifest.get(k) for k in ABI_FINGERPRINT_KEYS
-               if k in manifest}
-        canonical = json.dumps(abi, sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return fingerprint(manifest)
+    """The contract's ABI fingerprint: sha256 of the canonical JSON of the
+    ABI-key subset. This is the owner's documented algorithm (the commons
+    test recomputes the same way); there is no second implementation and no
+    import of the owner's private module."""
+    abi = {k: manifest[k] for k in ABI_FINGERPRINT_KEYS if k in manifest}
+    canonical = json.dumps(abi, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def check_contract(env: dict | None = None) -> dict:
@@ -156,16 +142,14 @@ def check_contract(env: dict | None = None) -> dict:
 
 
 def _control_api(env: dict | None = None):
-    """The commons control API client (control-api/v1) when the home ships
-    one; None for a home without it, where the CLI remains the surface.
-
-    Adoption (work order 2026-09-25): read operations go through the API;
-    submit idempotency and the inbox/ack message path follow. The address is
-    discovered by the client from the scheduler state's `api` field, never
-    hardcoded."""
+    """The commons control API client (control-api/v1): the one scheduler
+    interface. A home without it is not a supported home — refuse loudly
+    rather than substituting a second interface."""
     root = scheduler_root(env)
-    if not (root / "control" / "client.py").is_file():
-        return None
+    client_path = root / "control" / "client.py"
+    if not client_path.is_file():
+        raise SchedulerUnavailable(
+            f"control API client missing: {client_path} (commons owns it)")
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     try:
@@ -177,14 +161,7 @@ def _control_api(env: dict | None = None):
 
 
 def status(env: dict | None = None) -> dict:
-    api = _control_api(env)
-    if api is not None:
-        try:
-            return api.status()
-        except Exception as exc:
-            print(f"[gpu-client] control API status failed ({exc}); using the "
-                  f"CLI for this call (migration window)", file=sys.stderr)
-    return _run_cli(["status"], env=env)
+    return _control_api(env).status()
 
 
 SCRATCH_JOB_KINDS = ("merge", "export", "scratch")
@@ -276,14 +253,7 @@ def submit(name: str, command: list[str], vram_mib: int, ram_mib: int,
 
 
 def inspect(job_id: str, env: dict | None = None) -> dict:
-    api = _control_api(env)
-    if api is not None:
-        try:
-            return api.inspect(job_id)
-        except Exception as exc:
-            print(f"[gpu-client] control API inspect failed ({exc}); using the "
-                  f"CLI for this call (migration window)", file=sys.stderr)
-    return _run_cli(["inspect", "--job", job_id], env=env)
+    return _control_api(env).inspect(job_id=job_id)
 
 
 def wait(job_id: str, poll_seconds: float = 10.0, timeout: float = 0.0,
@@ -343,7 +313,7 @@ def _gpu_lock_module(env: dict | None = None):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     try:
-        from src import gpu_lock  # type: ignore
+        from control import gpu_lock  # type: ignore
     except Exception as exc:
         raise SchedulerUnavailable(
             f"cannot import the owner gpu-lock module from {root}: {exc}"
@@ -443,27 +413,18 @@ def _cmd_run(args) -> int:
 
 
 def _run_direct(command: list[str], args) -> int:
-    """Direct execution (explicit opt-in): manual GPU launches acquire the
-    lock when the owner module is reachable; a refusal is loud."""
-    held = False
+    """Direct execution (the explicit escape hatch): the machine-wide GPU
+    lock is mandatory. Acquire it or refuse — a manual process without the
+    lock competes with a scheduled job and can kill it."""
+    acquire_gpu_lock(role="slime-direct", env=None)
+    print("[gpu-client] direct mode: gpu lock acquired")
+    child_env = dict(os.environ)
+    child_env["COEVO_GPU_AUTHORIZED"] = "1"
     try:
-        acquire_gpu_lock(role="slime-direct", env=None)
-        held = True
-        print("[gpu-client] direct mode: gpu lock acquired")
-    except (SchedulerUnavailable, ContractMismatch) as exc:
-        print(f"[gpu-client] direct mode without gpu lock: {exc}",
-              file=sys.stderr)
-    try:
-        child_env = dict(os.environ)
-        child_env["COEVO_GPU_AUTHORIZED"] = "1"
         proc = subprocess.run(command, cwd=args.cwd or None, env=child_env)
         return proc.returncode
     finally:
-        if held:
-            try:
-                release_gpu_lock()
-            except Exception:
-                pass
+        release_gpu_lock()
 
 
 def main(argv=None) -> int:
