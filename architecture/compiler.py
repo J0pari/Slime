@@ -170,7 +170,9 @@ def load_build_status() -> dict:
 def load_bridge() -> dict:
     return _require_keys(
         yaml.safe_load((ARCH / "bridge.yaml").read_text(encoding="utf-8")),
-        ("declared_fingerprint", "gate", "external_contract"), "bridge.yaml")
+        ("declared_fingerprint", "gate", "external_contract",
+         "requires_build", "requires_experiments", "requires_contracts",
+         "requires_evidence"), "bridge.yaml")
 
 
 def check_bridge(root: Path, build: dict, errors: list[str]) -> None:

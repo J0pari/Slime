@@ -71,8 +71,8 @@ constexpr const char* CHECKPOINT_DEFAULT_PATH = "checkpoints/slime-ckpt.bin";
 // (bmap_64, task_embedding, fitness) tuples snapshotted from the replay
 // buffer at bootstrap. Returns the mean surprise, or -1 on launch failure.
 static float evaluate_probe_reference(World* w) {
-    if (!cur::verify_probe_set(w->probe_set, w->host_sot_key)) return 0.f;
-    if (!w->probe_set.probe_tuples_signed) return 0.f;
+    if (!cur::verify_probe_set(w->probe_set, w->host_sot_key)) return -1.f;
+    if (!w->probe_set.probe_tuples_signed) return -1.f;
     if (!phase_run(&w->fg_world_predict, w->stream, [&] {
             predictor::launch_reference_forward(
                 w->d_reference_reg, w->d_ref_probe_input, PROBE_BATCH,

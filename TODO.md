@@ -6,6 +6,24 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history; the failure history lives in `docs/arch-signals.md`.
 
+## Fallback sweep (2026-09-25, repo-wide)
+
+- Swept production C++/CUDA and the Python tooling for substitution patterns:
+  default arguments (none), error paths returning valid-looking values, silent
+  skips, dual paths, and `.get`/`or` defaults. Fixed: `evaluate_probe_reference`
+  returned `0.f` (a fabricated surprise) for an invalid or unsigned probe set
+  instead of the documented `-1.f` failure that the caller refuses on;
+  `select_spawn_victims` returned an empty selection for an out-of-range
+  pool size (a caller defect) and now aborts loudly; `derive_bridge` used to
+  default the four requirement lists to `[]`, so a bridge.yaml missing them
+  would derive OPEN -- `load_bridge` now requires all four.
+- Classified as specified behavior, not fallbacks: cosine/Pearson degenerate
+  guards returning 0 (defined clipping semantics), progress_wrap's post-
+  validation field defaults, `load_result`'s None (defined absence API),
+  display-only `.get` in the renderers, and empty-to-None boundary
+  substitutions (`job_id or None`). The gates now refuse unreadable sources
+  instead of skipping them.
+
 ## New work orders (2026-09-25)
 
 Read from commons `workorders/slime.md` and the control-API inbox (messages are

@@ -65,8 +65,13 @@ __host__ inline int select_spawn_victims(const Role* roles,
                                          Role target_role,
                                          int n_victims,
                                          int* victims_out) {
-    // pool_size is bounded by TOTAL_ORG.
-    if (pool_size < 0 || pool_size > TOTAL_ORG) return 0;
+    // pool_size is bounded by TOTAL_ORG; an out-of-range value is a caller
+    // defect, not an empty selection.
+    if (pool_size < 0 || pool_size > TOTAL_ORG) {
+        std::printf("[FATAL] select_spawn_victims: pool_size %d out of range\n",
+                    pool_size);
+        std::abort();
+    }
     bool selected[TOTAL_ORG];
     for (int i = 0; i < pool_size; ++i) selected[i] = false;
 
