@@ -6,6 +6,23 @@ machine-checked in `architecture/build_status.yaml` and rendered in
 `docs/IMPLEMENTATION_STATUS.md`. This file lists what is being worked on,
 not a history; the failure history lives in `docs/arch-signals.md`.
 
+## Commons control-plane adoption (registry outstanding items)
+
+- [x] Re-pin and smoke through the new home: the pin records adoption against
+  the commons-owned gpu-scheduler/v1 contract (ABI fingerprint unchanged
+  `5d602cc2...`, owner registration is outside the pin scope); the client
+  resolves the entrypoint at either home (`control/gpu_scheduler.py` or
+  `src/gpu_scheduler.py`) and recomputes the documented ABI scope when the
+  owner's handoff module is absent; `gpu_client.py contract` validates
+  against the commons home (`validated: true`). Smoke:
+  `slime-commons-smoke`, job 85cc848697739010, queued through commons.
+- [ ] Re-declare the long runs through commons (run55 and the
+  5000-generation run): the reclaim fix is live, but the current
+  5000-generation run is mid-flight on the old home, and the migration
+  allows exactly one writer during the compatibility window. Re-declare
+  after the current attempt completes or the machine-local cutover lands,
+  never in parallel, to avoid two writers and a duplicate run.
+
 ## Work order compliance (directive 64d0820993d2, 2026-09-14)
 
 - §25 item 4 / §11.1 (strong-ID/memset build failures): done. Value

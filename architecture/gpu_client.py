@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -62,10 +63,17 @@ def scheduler_root(env: dict | None = None) -> Path:
 
 
 def scheduler_script(env: dict | None = None) -> Path:
-    script = scheduler_root(env) / "src" / "gpu_scheduler.py"
-    if not script.is_file():
-        raise SchedulerUnavailable(f"scheduler script missing: {script}")
-    return script
+    """The scheduler entrypoint at the owner's home. The control plane moved
+    to commons (control/gpu_scheduler.py); the training home used src/. The
+    resolver accepts both layouts so a consumer does not need to know which
+    home is authoritative."""
+    root = scheduler_root(env)
+    for rel in ("control/gpu_scheduler.py", "src/gpu_scheduler.py"):
+        script = root / rel
+        if script.is_file():
+            return script
+    raise SchedulerUnavailable(
+        f"scheduler script missing under {root} (looked in control/ and src/)")
 
 
 def sched_dir(env: dict | None = None) -> Path:
@@ -109,20 +117,22 @@ def contract_manifest(env: dict | None = None) -> dict:
 
 
 def _fingerprint(manifest: dict, env: dict | None = None) -> str:
-    """The owner's canonical fingerprint algorithm (src/handoff.py).
+    """The owner's canonical fingerprint algorithm.
 
-    Recomputing it from the returned manifest is the contract's own
-    instruction; the algorithm has exactly one authority and we import it
-    rather than duplicating it."""
+    The owner may ship it as an importable module (`src/handoff.py` at the
+    training home). The commons home documents the same algorithm as the ABI
+    key scope; when the module is absent, recompute that documented scope
+    rather than inventing a different algorithm."""
     root = scheduler_root(env)
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     try:
         from src.handoff import fingerprint  # type: ignore
-    except Exception as exc:  # pragma: no cover - only on a broken owner
-        raise ContractMismatch(
-            f"cannot import the owner fingerprint algorithm from {root}: {exc}"
-        ) from exc
+    except Exception:
+        abi = {k: manifest.get(k) for k in ABI_FINGERPRINT_KEYS
+               if k in manifest}
+        canonical = json.dumps(abi, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return fingerprint(manifest)
 
 
@@ -150,6 +160,12 @@ def status(env: dict | None = None) -> dict:
 
 
 SCRATCH_JOB_KINDS = ("merge", "export", "scratch")
+
+# The contract's ABI fingerprint scope (gpu-scheduler/v1 consumer_pin):
+# administrative sections are outside it, so registering a consumer or
+# editing migration prose never forces a re-pin.
+ABI_FINGERPRINT_KEYS = ("schema", "contractVersion", "compatibility", "public",
+                        "types", "endpoints", "gpu_lock")
 
 # Multi-generation runs must go through the chunked, resumable harness: a
 # bare binary launch is killed at its declared duration and restarts from
